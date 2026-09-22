@@ -17,3 +17,6 @@ __pycache__/
 
 # Qualcomm-header-derived reference data: kept local pending license review
 lib/qairt-2.46/
+
+# private: competitive tracking, not for publication
+docs/SCOREBOARD.md
