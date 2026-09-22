@@ -83,6 +83,8 @@ $newTensor = {
         [int]$DataType,
         [int[]]$Shape,
         [byte[]]$Data
+        ,
+        [object]$Quantize = $null
     )
 
     $tensorPointer = & $allocate $Arena ([int]$Abi.Layout.TensorBytes)
@@ -115,12 +117,67 @@ $newTensor = {
     [Runtime.InteropServices.Marshal]::WriteInt32(
         $tensorPointer, [int]$offset.DataType, $DataType
     )
-    [Runtime.InteropServices.Marshal]::WriteInt32(
-        $tensorPointer, [int]$offset.QuantDef, [int]$Abi.Enum.QuantUndefined
-    )
-    [Runtime.InteropServices.Marshal]::WriteInt32(
-        $tensorPointer, [int]$offset.QuantEncoding, [int]$Abi.Enum.QuantUndefined
-    )
+    # Quantization. $Quantize is $null for float tensors (the historical behaviour), or
+    # @{ Encoding='ScaleOffset'; Scale=<float>; Offset=<int> }
+    # @{ Encoding='AxisScaleOffset'; Axis=<int>; ScaleOffsets=@(@(<float>,<int>), ...) }
+    if ($null -eq $Quantize) {
+        [Runtime.InteropServices.Marshal]::WriteInt32(
+            $tensorPointer, [int]$offset.QuantDef, [int]$Abi.Enum.QuantUndefined
+        )
+        [Runtime.InteropServices.Marshal]::WriteInt32(
+            $tensorPointer, [int]$offset.QuantEncoding, [int]$Abi.Enum.QuantUndefined
+        )
+    }
+    else {
+        [int]$unionBase = [int]$offset.QuantUnion
+        [Runtime.InteropServices.Marshal]::WriteInt32(
+            $tensorPointer, [int]$offset.QuantDef, [int]$Abi.Enum.DefinitionDefined
+        )
+        [string]$encoding = [string]$Quantize.Encoding
+        if ($encoding -eq 'ScaleOffset') {
+            $so = $Abi.Layout.ScaleOffset
+            [Runtime.InteropServices.Marshal]::WriteInt32(
+                $tensorPointer, [int]$offset.QuantEncoding, [int]$Abi.Enum.QuantScaleOffset
+            )
+            [Runtime.InteropServices.Marshal]::WriteInt32(
+                $tensorPointer, $unionBase + [int]$so.Scale,
+                [BitConverter]::SingleToInt32Bits([float]$Quantize.Scale)
+            )
+            [Runtime.InteropServices.Marshal]::WriteInt32(
+                $tensorPointer, $unionBase + [int]$so.Offset, [int]$Quantize.Offset
+            )
+        }
+        elseif ($encoding -eq 'AxisScaleOffset') {
+            $aso = $Abi.Layout.AxisScaleOffset
+            $so = $Abi.Layout.ScaleOffset
+            [object[]]$pairs = $Quantize.ScaleOffsets
+            [int]$count = $pairs.Length
+            $pairsPointer = & $allocate $Arena ($count * [int]$so.SizeBytes)
+            for ([int]$i = 0; $i -lt $count; $i++) {
+                [int]$base = $i * [int]$so.SizeBytes
+                [Runtime.InteropServices.Marshal]::WriteInt32(
+                    $pairsPointer, $base + [int]$so.Scale,
+                    [BitConverter]::SingleToInt32Bits([float]$pairs[$i][0])
+                )
+                [Runtime.InteropServices.Marshal]::WriteInt32(
+                    $pairsPointer, $base + [int]$so.Offset, [int]$pairs[$i][1]
+                )
+            }
+            [Runtime.InteropServices.Marshal]::WriteInt32(
+                $tensorPointer, [int]$offset.QuantEncoding, [int]$Abi.Enum.QuantAxisScaleOffset
+            )
+            [Runtime.InteropServices.Marshal]::WriteInt32(
+                $tensorPointer, $unionBase + [int]$aso.Axis, [int]$Quantize.Axis
+            )
+            [Runtime.InteropServices.Marshal]::WriteInt32(
+                $tensorPointer, $unionBase + [int]$aso.Count, $count
+            )
+            [Runtime.InteropServices.Marshal]::WriteIntPtr(
+                $tensorPointer, $unionBase + [int]$aso.Pointer, $pairsPointer
+            )
+        }
+        else { throw "unsupported quantization encoding '$encoding'" }
+    }
     [Runtime.InteropServices.Marshal]::WriteInt32(
         $tensorPointer, [int]$offset.Rank, $Shape.Length
     )

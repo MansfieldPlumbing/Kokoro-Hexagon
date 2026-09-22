@@ -19,6 +19,7 @@ $layout = [ordered]@{
         DataType     = 32
         QuantDef     = 40
         QuantEncoding = 44
+        QuantUnion    = 48
         Rank         = 80
         Dimensions   = 88
         MemType      = 96
@@ -30,6 +31,21 @@ $layout = [ordered]@{
         Type  = 0
         Name  = 8
         Value = 16
+    }
+
+    # Qnn_QuantizeParams_t is 40 bytes: encodingDefinition@0, quantizationEncoding@4, union@8.
+    # Inside Qnn_TensorV1_t that places the union at byte 48, ending at 79 where Rank begins.
+    ScaleOffset = [ordered]@{
+        SizeBytes = 8
+        Scale     = 0
+        Offset    = 4
+    }
+
+    AxisScaleOffset = [ordered]@{
+        SizeBytes = 16
+        Axis      = 0
+        Count     = 4
+        Pointer   = 8
     }
 }
 
@@ -68,6 +84,37 @@ $enum = [ordered]@{
     TensorMemTypeUndefined = 0x7FFFFFFF
 
     QuantUndefined = 0x7FFFFFFF
+    # Widened from qnn/authority/QAIRT-2.46.0.260424 Enums.psd1. The projection previously
+    # carried only Float32/UInt32/Bool8; every fixed-point path needs the rest.
+    Float16 = 0x0216
+    Int8    = 8
+    Int16   = 22
+    Int32   = 50
+    UInt8   = 264
+    UInt16  = 278
+    SFixed2  = 770
+    SFixed4  = 772
+    SFixed8  = 776
+    SFixed16 = 790
+    SFixed32 = 818
+    UFixed2  = 1026
+    UFixed4  = 1028
+    UFixed8  = 1032
+    UFixed16 = 1046
+    UFixed32 = 1074
+
+    DefinitionImplGenerated = 0
+    DefinitionDefined       = 1
+    DefinitionUndefined     = 0x7FFFFFFF
+
+    QuantScaleOffset        = 0
+    QuantAxisScaleOffset    = 1
+    QuantBwScaleOffset      = 2
+    QuantBwAxisScaleOffset  = 3
+    QuantBlock              = 4
+    QuantBlockwiseExpansion = 5
+    QuantVector             = 6
+    QuantFloatBlock         = 7
     ParamScalar = 0
     ParamTensor = 1
 }
