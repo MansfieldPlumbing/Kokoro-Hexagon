@@ -1,0 +1,19 @@
+# Build output lives in ..\Build\Kokoro-QNN (next to the repository), never here.
+*.onnx
+*.onnx.data
+*.bin
+*.qnn
+*.QNN
+*.so
+*.whl
+*.pth
+*.pt
+*.f32
+*.npy
+*.npz
+*.wav
+*.log
+__pycache__/
+
+# Qualcomm-header-derived reference data: kept local pending license review
+lib/qairt-2.46/

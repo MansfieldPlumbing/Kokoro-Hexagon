@@ -1,0 +1,76 @@
+{
+  "model": {
+    "source": "huggingface.co/hexgrad/Kokoro-82M",
+    "revision": "f3ff3571791e39611d31c381e3a41a3af07b4987",
+    "license": "Apache-2.0",
+    "files": [
+      {
+        "path": "kokoro-v1_0.pth",
+        "bytes": 327212226,
+        "sha256": "496DBA118D1A58F5F3DB2EFC88DBDC216E0483FC89FE6E47EE1F2C53F18AD1E4"
+      },
+      {
+        "path": "config.json",
+        "bytes": 2351,
+        "sha256": "5ABB01E2403B072BF03D04FDE160443E209D7A0DAD49A423BE15196B9B43C17F"
+      },
+      {
+        "path": "voices\\af_heart.pt",
+        "bytes": 523425,
+        "sha256": "0AB5709B8FFAB19BFD849CD11D98F75B60AF7733253AD0D67B12382A102CB4FF"
+      }
+    ]
+  },
+  "kokoroSource": {
+    "repo": "https://github.com/hexgrad/kokoro",
+    "commit": "dfb907a02bba8152ca444717ca5d78747ccb4bec",
+    "version": "0.9.4",
+    "path": ".vendor/kokoro (local pin)"
+  },
+  "hostCompiler": {
+    "package": "onnxruntime-qnn",
+    "version": "2.2.0",
+    "qairt": "2.46.0.260424",
+    "wheel": {
+      "path": "onnxruntime_qnn-2.2.0 wheel",
+      "bytes": 190440071,
+      "sha256": "CACCCAEFEA820D07473C67F42AB11F1CAC98CD40A712C547ABCFEEAD4D469B28"
+    }
+  },
+  "deviceRuntime": {
+    "qairt": "2.46.0.260424",
+    "note": "Qualcomm proprietary; fetched from the QAIRT SDK, never committed (AI Stack License s1(iv))",
+    "files": [
+      {
+        "path": "libQnnHtp.so",
+        "bytes": 3495096,
+        "sha256": "50E27CC07662BD6A0787DC71ED77EEFB7D4965504AB7652D52F7CE0920BD82F6"
+      },
+      {
+        "path": "libQnnHtpPrepare.so",
+        "bytes": 90431072,
+        "sha256": "885F160587DC8AC93C72577935AB8B32914211FF3FE098A824F209C897D87A8F"
+      },
+      {
+        "path": "libQnnHtpV73Stub.so",
+        "bytes": 736288,
+        "sha256": "5C0290A6E8E47DF90DD7D6C3A76D07EB0CA665854FFEB9C14022FA370668559C"
+      },
+      {
+        "path": "libQnnHtpV73Skel.so",
+        "bytes": 11060472,
+        "sha256": "384C84293673B53C165733D44F8167BC29823688564E6455EAEA554C4AFEAD4F"
+      }
+    ]
+  },
+  "pythonEnv": {
+    "prefix": "any Python 3.14 env (see README)",
+    "python": "3.14.7",
+    "torch": "2.14.0+cpu"
+  },
+  "quickPsNative": {
+    "path": "QuickPS/src/Native.ps1",
+    "bytes": 6113,
+    "sha256": "04C3C2F76027AFB5BE411E8B87EA3348743B839BC9673F5CC4C41CE358872B67"
+  }
+}
