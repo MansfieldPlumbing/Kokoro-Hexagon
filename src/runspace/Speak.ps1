@@ -29,6 +29,9 @@ try {
         $arena = & $graph.NewArena
         try {
             $ins = foreach ($t in $Stage.Inputs) {
+                if (-not $Bytes.ContainsKey($t.Name)) { throw "missing input stage=$($Stage.Name) name=$($t.Name)" }
+                [long]$expected = 4; foreach ($dim in $t.Shape) { $expected *= $dim }
+                if ($Bytes[$t.Name].Length -ne $expected) { throw "input byte count stage=$($Stage.Name) name=$($t.Name) actual=$($Bytes[$t.Name].Length) expected=$expected" }
                 $d = & $ctx.BindTensor $arena $t.Id $t.Name ([int]$abi.Enum.AppWrite) ([int]$abi.Enum.Float32) $t.Shape
                 & $graph.NewExecTensor $arena $d $Bytes[$t.Name]
             }
@@ -100,12 +103,55 @@ try {
     $bw.Write([Text.Encoding]::ASCII.GetBytes('data')); $bw.Write([int](2 * $count)); foreach ($x in $s16) { $bw.Write($x) }; $bw.Flush()
     [IO.File]::WriteAllBytes([IO.Path]::Combine($root, 'kokoro_htp.wav'), $ms.ToArray())
     $track = [Android.Media.AudioTrack]::new([Android.Media.Stream]::Music, 24000, [Android.Media.ChannelOut]::Mono, [Android.Media.Encoding]::Pcm16bit, 2 * $count, [Android.Media.AudioTrackMode]::Static)
-    [void]$track.Write($s16, 0, $count)
-    $track.Play()
-    [Threading.Thread]::Sleep([int](1000 * $count / 24000) + 300)
-    $lines.Add("PlayState=$($track.PlayState) Played=True")
-    $track.Release()
-    $lines.Add("Passed=$($bad -eq 0 -and $snr -ge $job.MinSnrDb)")
+    try {
+        [int]$written = $track.Write($s16, 0, $count)
+        if ($written -ne $count) { throw "AudioTrack.Write frames=$written expected=$count" }
+        $track.Play()
+        [Threading.Thread]::Sleep([int](1000 * $count / 24000) + 300)
+        [uint32]$playedFrames = $track.PlaybackHeadPosition
+        $playbackComplete = $playedFrames -ge [uint32]$count
+        $lines.Add("PlayState=$($track.PlayState) WrittenFrames=$written PlaybackFrames=$playedFrames PlaybackComplete=$playbackComplete")
+    }
+    finally { $track.Release() }
+
+    # Repeated warm timing: context loaded and tensors bound once, one warm-up, then N timed executes.
+    $benchStage = {
+        param([object]$Stage, [hashtable]$Bytes, [int]$N)
+        $trial = & $ctx.LoadContext ([IO.Path]::Combine($root, $Stage.Context)) $Stage.GraphName
+        $arena = & $graph.NewArena
+        try {
+            $ins = foreach ($t in $Stage.Inputs) {
+                if (-not $Bytes.ContainsKey($t.Name)) { throw "missing input bench=$($Stage.Name) name=$($t.Name)" }
+                [long]$expected = 4; foreach ($dim in $t.Shape) { $expected *= $dim }
+                if ($Bytes[$t.Name].Length -ne $expected) { throw "input byte count bench=$($Stage.Name) name=$($t.Name) actual=$($Bytes[$t.Name].Length) expected=$expected" }
+                $d = & $ctx.BindTensor $arena $t.Id $t.Name ([int]$abi.Enum.AppWrite) ([int]$abi.Enum.Float32) $t.Shape
+                & $graph.NewExecTensor $arena $d $Bytes[$t.Name]
+            }
+            $o = $Stage.Output
+            $od = & $ctx.BindTensor $arena $o.Id $o.Name ([int]$abi.Enum.AppRead) ([int]$abi.Enum.Float32) $o.Shape
+            $eo = & $graph.NewExecTensor $arena $od ([byte[]]::new($o.Bytes))
+            [uint64]$warmRc = & $graph.Execute $trial $arena ([object[]]@($ins)) ([object[]]@($eo))
+            if ($warmRc -ne 0) { throw "graphExecute rc=$warmRc warmup=$($Stage.Name)" }
+            [double[]]$ms = [double[]]::new($N)
+            for ($i = 0; $i -lt $N; $i++) {
+                $sw = [Diagnostics.Stopwatch]::StartNew()
+                [uint64]$rc = & $graph.Execute $trial $arena ([object[]]@($ins)) ([object[]]@($eo))
+                $ms[$i] = $sw.Elapsed.TotalMilliseconds
+                if ($rc -ne 0) { throw "graphExecute rc=$rc bench=$($Stage.Name)" }
+            }
+            [Array]::Sort($ms)
+            [double]$sum = 0; foreach ($v in $ms) { $sum += $v }
+            [pscustomobject]@{ N = $N; Mean = $sum / $N; P50 = $ms[[int][Math]::Floor(0.50 * ($N - 1))]; P95 = $ms[[int][Math]::Floor(0.95 * ($N - 1))]; Max = $ms[$N - 1]; Min = $ms[0] }
+        }
+        finally { [void](& $native.CloseTrial $trial); & $graph.FreeArena $arena }
+    }
+    if ($job.Repeat -gt 0) {
+        foreach ($pair in @(@('Front', $job.Front), @('Gen', $job.Gen))) {
+            $b = & $benchStage $pair[1] $bytes ([int]$job.Repeat)
+            $lines.Add(('Bench{0} N={1} MeanMs={2:F1} P50Ms={3:F1} P95Ms={4:F1} MinMs={5:F1} MaxMs={6:F1}' -f $pair[0], $b.N, $b.Mean, $b.P50, $b.P95, $b.Min, $b.Max))
+        }
+    }
+    $lines.Add("Passed=$($bad -eq 0 -and $snr -ge $job.MinSnrDb -and $playbackComplete)")
 }
 catch { $lines.Add('Passed=False'); $lines.Add("Error=$($_.Exception.Message)"); $lines.Add("At=$($_.InvocationInfo.PositionMessage -replace '\s+', ' ')") }
 [IO.File]::WriteAllLines([IO.Path]::Combine($root, 'receipt.txt'), $lines)

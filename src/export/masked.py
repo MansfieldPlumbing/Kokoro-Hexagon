@@ -1,5 +1,5 @@
 # Fixed-capacity decoder with length-masked InstanceNorm; exactness check against the full-length run.
-import sys, math, numpy as np, torch, torch.nn.functional as F
+import sys, os, math, numpy as np, torch, torch.nn.functional as F
 src = open(sys.argv[1], encoding='utf-8').read().split('# Real decoder inputs')[0]
 ARGS = list(sys.argv); g = {'__name__': 'masked'}; sys.argv = ['x', ARGS[2]]; exec(src, g)
 import kokoro.istftnet as ist
@@ -73,9 +73,10 @@ class Cap(torch.nn.Module):
         return s.c(asr * mask, F0_curve, N, style, har_source)
 
 # Reference: unmasked full-length (restore original forward temporarily).
-ph = 'həlˈoʊ wˈɜɹld. ðɪs ɪz kˈoʊkəɹoʊ ɑn hɛksəɡˌɑn.'
+ph = os.environ.get('KOKORO_QNN_PHONEMES', 'həlˈoʊ wˈɜɹld. ðɪs ɪz kˈoʊkəɹoʊ ɑn hɛksəɡˌɑn.')
+voice = os.environ.get('KOKORO_QNN_VOICE', 'af_heart')
 cfg = g['cfg']; ids = [0] + [cfg['vocab'][c] for c in ph if c in cfg['vocab']] + [0]
-ref_s = torch.load(g['M'] / 'voices' / 'af_heart.pt', weights_only=True)[len(ids) - 2]
+ref_s = torch.load(g['M'] / 'voices' / f'{voice}.pt', weights_only=True)[len(ids) - 2]
 cap = {}; km.decoder.register_forward_hook(lambda m, a, o: cap.update(asr=a[0], F0=a[1], N=a[2], s=a[3]))
 orig = masked_adain
 def plain(self, x, s):
@@ -96,6 +97,8 @@ def logmel_db(r, p):
     return (S(r) - S(p)).abs().mean().item()
 
 W = int(ARGS[3]) if len(ARGS) > 3 else 256
+if L > W:
+    raise ValueError(f'phrase requires {L} frames but capacity is {W}')
 def pad(t, r):   # replicate tail to capacity (content beyond L is masked anyway)
     return F.pad(t.reshape(1, -1, t.shape[-1]), (0, (W - L) * r), mode='replicate').reshape(*t.shape[:-1], -1)
 mask = torch.zeros(1, 1, W); mask[..., :L] = 1

@@ -7,6 +7,7 @@ param(
     [Parameter(Mandatory)][string] $PhraseDir,        # in_*.f32, oracle_audio.f32
     [int] $ValidFrameCount,                            # asr frames L
     [double] $MinSnrDb = 20,
+    [ValidateRange(0, 1000)][int] $Repeat = 0,
     [string] $StageRoot = (Join-Path $PSScriptRoot '..\..\Build\Kokoro-QNN\stage'),
     [string] $Serial = $env:KOKORO_QNN_SERIAL,
     [string] $Package = 'dev.mansfieldplumbing.androidsma.preview'
@@ -34,7 +35,7 @@ $files = foreach ($n in ($f.Names + $g.Names | Where-Object { $_ -ne 'x0' } | So
     Copy-Item (Join-Path $PhraseDir "in_$n.f32") $st -Force; "'$n'='in_$n.f32'"
 }
 Copy-Item (Join-Path $PhraseDir 'oracle_audio.f32') $st -Force
-$job = "[pscustomobject]@{ Name='kokoro-speak'; MinSnrDb=$MinSnrDb; ValidFrames=$($ValidFrameCount * 120 + 4); ValidSamples=$($ValidFrameCount * 600); Oracle='oracle_audio.f32'$nl" +
+$job = "[pscustomobject]@{ Name='kokoro-speak'; MinSnrDb=$MinSnrDb; Repeat=$Repeat; ValidFrames=$($ValidFrameCount * 120 + 4); ValidSamples=$($ValidFrameCount * 600); Oracle='oracle_audio.f32'$nl" +
        "    Files=@{ " + ($files -join '; ') + " }$nl    Front=$($f.Text)$nl    Gen=$($g.Text) }"
 Set-Content (Join-Path $st 'speak-job.ps1') $job
 Copy-Item (Join-Path $PSScriptRoot '..\src\runspace\Speak.ps1') $st -Force

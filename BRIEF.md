@@ -22,7 +22,7 @@ generation older: Galaxy S23 (SM8550, Hexagon V73).
   phone plays the audio. Audio SNR is 24.0 dB against the full-length PyTorch
   decoder, equal to the fp32 CPU run of the same design (24.2 dB), so HTP adds
   no measurable error.
-- **Speed.** Generator 4.69 s → 1.34 s for a 3.27 s phrase (RTF 0.41, fp16),
+- **Speed.** Generator 4.69 s → 1.373 s warm mean over 20 runs for a 3.27 s phrase (RTF 0.419, fp16),
   from a burst performance vote, 8 MB VTCM, the iSTFT in the graph, native
   InstanceNorm and precomputed per-voice gamma/beta.
 - **Still on the host CPU:** text → phonemes, ALBERT, the text encoder,
@@ -108,7 +108,6 @@ layers) chosen by a hill climber scored on the device.
 
 ```
 lib/manifest.json   pinned inputs (SHA-256)
-lib/qairt-2.46/     QAIRT 2.46 ABI reference data
 src/export/         host-side export, passes, gate, compile, quantization
 src/runspace/       device-side PowerShell (QNN ABI, context loading, runner)
 tools/              host drivers (context metadata, device jobs, speak)
