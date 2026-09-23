@@ -1,79 +1,114 @@
 #requires -Version 7.4
-# Breath groups from a phoneme string, using SMA's own tokenizer.
+# Breath groups from a phoneme stream.
 #
-# The phoneme stream is not PowerShell, but it does not need to be: the tokenizer splits on
-# the same punctuation that delimits prosody, tolerates the parse errors that result, and
-# hands back exact character offsets. Token kind carries boundary strength - Comma and Semi
-# are intonational-phrase boundaries, while terminal punctuation lands as Generic.
+# Scans literal spans: phoneme runs, whitespace, and punctuation, each with exact character
+# offsets. Boundary strength is a separate classifier keyed on the punctuation character
+# itself, and is a hypothesis to be validated against measured duration - not something the
+# scanner asserts.
+#
+# An earlier version used PowerShell's own tokenizer and read boundary strength off token
+# kinds. That was wrong: Identifier and Generic are incidental classifications of an IPA
+# stream under PowerShell's lexical rules, not a prosodic ontology, and they correlated only
+# by accident on the strings it was tried against. Offsets are what a parser is good for;
+# semantics have to be tested independently.
 [CmdletBinding()]
 param(
     [Parameter(Mandatory, ValueFromPipeline)][string] $Phonemes,
     [int] $MaxFrames = 0,          # optional cap; 0 leaves groups at their prosodic length
-    [double] $FramesPerChar = 1.0  # crude length estimate until the duration predictor is on device
+    [double] $FramesPerChar = 1.0  # placeholder until the duration predictor runs on device
 )
 $ErrorActionPreference = 'Stop'
 
-$tokens = $null; $errors = $null
-[void][System.Management.Automation.Language.Parser]::ParseInput($Phonemes, [ref]$tokens, [ref]$errors)
+# Punctuation that carries a pause, with a provisional strength. These are hypotheses:
+# 'breath' is a full stop, 'phrase' an intonational-phrase boundary. Validate against
+# measured pause duration before treating either as ground truth.
+$strength = @{
+    '.' = 'breath'; '!' = 'breath'; '?' = 'breath'; '…' = 'breath'
+    ';' = 'phrase'; ':' = 'phrase'; ',' = 'phrase'
+    '—' = 'phrase'; '–' = 'phrase'
+}
 
-$major = 'Generic'                       # terminal punctuation: . ? ! and dashes
-$minor = @('Comma', 'Semi', 'Colon')     # intonational-phrase boundaries
+$spans = [Collections.Generic.List[object]]::new()
+[int]$i = 0
+[int]$n = $Phonemes.Length
+while ($i -lt $n) {
+    [char]$c = $Phonemes[$i]
+    if ([char]::IsWhiteSpace($c)) {
+        [int]$s = $i
+        while ($i -lt $n -and [char]::IsWhiteSpace($Phonemes[$i])) { $i++ }
+        $spans.Add([pscustomobject]@{ Kind = 'space'; Start = $s; End = $i; Text = $Phonemes.Substring($s, $i - $s); Strength = $null })
+        continue
+    }
+    if ($strength.ContainsKey([string]$c)) {
+        [int]$s = $i
+        [string]$best = $strength[[string]$c]
+        while ($i -lt $n -and $strength.ContainsKey([string]$Phonemes[$i])) {
+            if ($strength[[string]$Phonemes[$i]] -eq 'breath') { $best = 'breath' }
+            $i++
+        }
+        $spans.Add([pscustomobject]@{ Kind = 'pause'; Start = $s; End = $i; Text = $Phonemes.Substring($s, $i - $s); Strength = $best })
+        continue
+    }
+    [int]$s = $i
+    while ($i -lt $n -and -not [char]::IsWhiteSpace($Phonemes[$i]) -and -not $strength.ContainsKey([string]$Phonemes[$i])) { $i++ }
+    $spans.Add([pscustomobject]@{ Kind = 'phonemes'; Start = $s; End = $i; Text = $Phonemes.Substring($s, $i - $s); Strength = $null })
+}
 
+# Groups run up to and including each pause span.
 $groups = [Collections.Generic.List[object]]::new()
 [int]$start = 0
-[string]$pending = 'none'
-foreach ($tok in $tokens) {
-    if ($tok.Kind -eq 'EndOfInput') { break }
-    [bool]$isMajor = ($tok.Kind -eq $major)
-    [bool]$isMinor = ($minor -contains [string]$tok.Kind)
-    if (-not ($isMajor -or $isMinor)) { continue }
-    [int]$end = $tok.Extent.EndOffset
-    $text = $Phonemes.Substring($start, $end - $start).Trim()
-    if ($text) {
-        $groups.Add([pscustomobject]@{
-            Start = $start; End = $end; Text = $text
-            Boundary = if ($isMajor) { 'breath' } else { 'phrase' }
-            EstFrames = [int][Math]::Ceiling($text.Length * $FramesPerChar)
-        })
-    }
-    $start = $end
-    $pending = if ($isMajor) { 'breath' } else { 'phrase' }
+[bool]$hasContent = $false
+foreach ($sp in $spans) {
+    if ($sp.Kind -eq 'phonemes') { $hasContent = $true; continue }
+    if ($sp.Kind -ne 'pause') { continue }
+    if (-not $hasContent) { continue }
+    $text = $Phonemes.Substring($start, $sp.End - $start).Trim()
+    $groups.Add([pscustomobject]@{
+        Start = $start; End = $sp.End; Text = $text
+        Boundary = $sp.Strength; Pause = $sp.Text
+        EstFrames = [int][Math]::Ceiling($text.Length * $FramesPerChar)
+    })
+    $start = $sp.End
+    $hasContent = $false
 }
-if ($start -lt $Phonemes.Length) {
+if ($hasContent) {
     $text = $Phonemes.Substring($start).Trim()
     if ($text) {
         $groups.Add([pscustomobject]@{
-            Start = $start; End = $Phonemes.Length; Text = $text
-            Boundary = 'end'; EstFrames = [int][Math]::Ceiling($text.Length * $FramesPerChar)
+            Start = $start; End = $n; Text = $text
+            Boundary = 'end'; Pause = ''
+            EstFrames = [int][Math]::Ceiling($text.Length * $FramesPerChar)
         })
     }
 }
-if ($groups.Count -eq 0) {
-    $groups.Add([pscustomobject]@{ Start = 0; End = $Phonemes.Length; Text = $Phonemes.Trim(); Boundary = 'end'; EstFrames = [int][Math]::Ceiling($Phonemes.Length * $FramesPerChar) })
-}
 
-# A group longer than the cap gets split at its widest internal gap, so the cut still lands
-# between words rather than inside one.
+# A group over the cap is split at a whitespace span, so a cut never lands inside a phoneme
+# run. Spans already give the legal cut points.
 if ($MaxFrames -gt 0) {
     $split = [Collections.Generic.List[object]]::new()
     foreach ($g in $groups) {
         if ($g.EstFrames -le $MaxFrames) { $split.Add($g); continue }
-        [int]$parts = [int][Math]::Ceiling($g.EstFrames / $MaxFrames)
-        [int]$approx = [int][Math]::Ceiling($g.Text.Length / $parts)
-        [int]$off = 0
-        while ($off -lt $g.Text.Length) {
-            [int]$take = [Math]::Min($approx, $g.Text.Length - $off)
-            [int]$cut = $g.Text.LastIndexOf(' ', [Math]::Min($off + $take, $g.Text.Length - 1))
-            if ($cut -le $off) { $cut = [Math]::Min($off + $take, $g.Text.Length) }
-            $piece = $g.Text.Substring($off, $cut - $off).Trim()
+        $cuts = @($spans | Where-Object { $_.Kind -eq 'space' -and $_.Start -gt $g.Start -and $_.End -lt $g.End } | ForEach-Object { $_.Start })
+        [int]$from = $g.Start
+        [int]$budget = [int][Math]::Ceiling($MaxFrames / $FramesPerChar)
+        while ($from -lt $g.End) {
+            [int]$limit = $from + $budget
+            if ($limit -ge $g.End) { $limit = $g.End }
+            else {
+                $candidate = @($cuts | Where-Object { $_ -gt $from -and $_ -le $limit })
+                if ($candidate.Count) { $limit = $candidate[-1] }
+            }
+            $piece = $Phonemes.Substring($from, $limit - $from).Trim()
             if ($piece) {
                 $split.Add([pscustomobject]@{
-                    Start = $g.Start + $off; End = $g.Start + $cut; Text = $piece
-                    Boundary = if ($cut -ge $g.Text.Length) { $g.Boundary } else { 'split' }
+                    Start = $from; End = $limit; Text = $piece
+                    Boundary = if ($limit -ge $g.End) { $g.Boundary } else { 'split' }
+                    Pause = if ($limit -ge $g.End) { $g.Pause } else { '' }
                     EstFrames = [int][Math]::Ceiling($piece.Length * $FramesPerChar)
                 })
             }
-            $off = $cut + 1
+            $from = $limit
+            while ($from -lt $g.End -and [char]::IsWhiteSpace($Phonemes[$from])) { $from++ }
         }
     }
     $groups = $split
