@@ -4,26 +4,35 @@ Device: SM8550 / Hexagon V73. QAIRT 2.46.0.260424. All graphs built through the 
 from PowerShell on device. Error names resolved from the generated authority pack
 (`QAIRT-2.46.0.260424/Enums.psd1`).
 
-## 4-bit weights are refused at op config, not at the tensor
+## 4-bit tensors cannot be created at all
 
-`MatMul`, 256x256 static weight against uint8 activations, per-tensor ScaleOffset:
+Corrected 2026-09-23. The first version of this section claimed the tensor was accepted and
+`MatMul` refused it at op config. That was wrong: the probe discarded the registration
+return code, so the `6005 INVALID_OP_CONFIG` it reported was a downstream consequence of an
+op referencing a tensor with `id=0`. Re-run with every code checked
+(`src/runspace/Fixed4.ps1`):
 
 ```
-Case=w8         weightBytes=65536  addRc=0     finalizeRc=0     contextBytes=110592
-Case=w4packed   weightBytes=32768  addRc=6005  finalizeRc=6022  contextBytes=-1
-Case=w4unpacked weightBytes=65536  addRc=6005  finalizeRc=6022  contextBytes=-1
+MatMul w8      regW.rc=0    id=2   addRc=0  finRc=0
+MatMul w4pack  regW.rc=7004 id=0   (never reached addNode)
+MatMul w4full  regW.rc=7004 id=0
+Conv2d w8      regW.rc=0    id=9   addRc=0  finRc=0
+Conv2d w4pack  regW.rc=7004 id=0
+Conv2d w4full  regW.rc=7004 id=0
 ```
 
-`6005 = QNN_GRAPH_ERROR_INVALID_OP_CONFIG`, `6022 = QNN_GRAPH_ERROR_FINALIZE_FAILED`.
+`7004 = QNN_TENSOR_ERROR_INVALID_TENSOR_PARAM`. `tensorCreateGraphTensor` refuses a
+`UFIXED_POINT_4` tensor outright, for both ops and for both nibble packings. This is not
+op coverage: no vendor op can receive a 4-bit tensor on this part, because the tensor
+cannot be constructed. 4-bit is reachable only inside our own kernels, where we own the
+storage and the unpack.
 
-Three things follow. `tensorCreateGraphTensor` accepted a `UFIXED_POINT_4` tensor in both
-cases without error, so the datatype exists and the tensor is constructible; the failure is
-`MatMul` refusing to consume it. Packed (two nibbles per byte) and unpacked (one per byte)
-fail identically, so this is not a container-convention mismatch. `QNN_DATATYPE_SFIXED_POINT_2/4`
-and `UFIXED_POINT_2/4` are present in the core `Qnn_DataType_t` enum, but no `int4`, `4BIT`,
-`FIXED_POINT_4` or nibble reference appears anywhere in the extracted HTP headers.
+`QNN_DATATYPE_SFIXED_POINT_2/4` and `UFIXED_POINT_2/4` are present in the core
+`Qnn_DataType_t` enum, and no `int4`, `4BIT`, `FIXED_POINT_4` or nibble reference appears
+anywhere in the extracted HTP headers.
 
-4-bit on this part is therefore reachable only through our own kernel, not through vendor ops.
+Conv2d accepts uint8 weights and finalizes, which is the case that matters: int8 is open on
+the op the generator spends its time in.
 
 ## fp32 declarations were already executing and storing as fp16
 
@@ -53,7 +62,7 @@ activations need ranges, which requires running a reference.
 
 ## Reproducing
 
-`src/runspace/W4A8.ps1` for the first table. The second is `src/runspace/R009.ps1` against
+`src/runspace/Fixed4.ps1` for the first table (`W4A8.ps1` is the earlier version that discarded registration codes). The second is `src/runspace/R009.ps1` against
 `Kokoro.F0NSecondPairPolyphaseR009.psm1`, once as committed and once with four edits:
 `Float32` -> `Float16` on the datatype binding; a half-converting wrapper around the
 specimen slice used for statics and exec inputs; output buffers 133,120 -> 66,560; and the
