@@ -139,7 +139,11 @@ $initialize = {
 }.GetNewClosure()
 
 $newTrial = {
-    param([string]$GraphName)
+    # $Configs: HTP graph custom configs as @{ Option = <QNN_HTP_GRAPH_CONFIG_OPTION_*>; Value = <uint32> }.
+    # graphCreate takes a NULL-terminated array of QnnGraph_Config_t*, each wrapping a
+    # QnnHtpGraph_CustomConfig_t. Without this the backend picks its own defaults, which the
+    # emitted context records as plain text (vtcm_mb=4, and so on).
+    param([string]$GraphName, [object[]]$Configs = @())
 
     if (-not $state.Initialized) {
         throw 'Qnn.Native must be initialized before opening a trial.'
@@ -164,8 +168,31 @@ $newTrial = {
             'GraphCreate' ([uint64]) ([Type[]]@(
                 [IntPtr], [IntPtr], [IntPtr], ([IntPtr]).MakeByRefType()
             ))
+        [IntPtr]$configArray = [IntPtr]::Zero
+        $configBlocks = [Collections.Generic.List[IntPtr]]::new()
+        if ($null -ne $Configs -and $Configs.Count -gt 0) {
+            $M = [Runtime.InteropServices.Marshal]
+            [int]$customBytes = [int]$Abi.Layout.HtpCustomConfig.SizeBytes
+            [int]$configBytes = [int]$Abi.Layout.GraphConfig.SizeBytes
+            $configArray = $M::AllocHGlobal([IntPtr]::Size * ($Configs.Count + 1))
+            [void]$configBlocks.Add($configArray)
+            for ([int]$ci = 0; $ci -lt $Configs.Count; $ci++) {
+                $custom = $M::AllocHGlobal($customBytes)
+                [void]$configBlocks.Add($custom)
+                for ([int]$bi = 0; $bi -lt $customBytes; $bi++) { $M::WriteByte($custom, $bi, 0) }
+                $M::WriteInt32($custom, [int]$Abi.Layout.HtpCustomConfig.Option, [int]$Configs[$ci].Option)
+                $M::WriteInt32($custom, [int]$Abi.Layout.HtpCustomConfig.Union, [int]$Configs[$ci].Value)
+                $cfg = $M::AllocHGlobal($configBytes)
+                [void]$configBlocks.Add($cfg)
+                for ([int]$bi = 0; $bi -lt $configBytes; $bi++) { $M::WriteByte($cfg, $bi, 0) }
+                $M::WriteInt32($cfg, [int]$Abi.Layout.GraphConfig.Option, [int]$Abi.Enum.GraphConfigCustom)
+                $M::WriteIntPtr($cfg, [int]$Abi.Layout.GraphConfig.Union, $custom)
+                $M::WriteIntPtr($configArray, [IntPtr]::Size * $ci, $cfg)
+            }
+            $M::WriteIntPtr($configArray, [IntPtr]::Size * $Configs.Count, [IntPtr]::Zero)
+        }
         $graphArgs = [object[]]@(
-            $context, $namePointer, [IntPtr]::Zero, [IntPtr]::Zero
+            $context, $namePointer, $configArray, [IntPtr]::Zero
         )
         $graphRc = [uint64]$graphCreate.DynamicInvoke($graphArgs)
         $graph = [IntPtr]$graphArgs[3]
@@ -181,6 +208,7 @@ $newTrial = {
     }
     finally {
         [Runtime.InteropServices.Marshal]::FreeHGlobal($namePointer)
+        foreach ($blk in $configBlocks) { [Runtime.InteropServices.Marshal]::FreeHGlobal($blk) }
     }
 
     [pscustomobject]@{

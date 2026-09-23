@@ -47,6 +47,19 @@ $layout = [ordered]@{
         Count     = 4
         Pointer   = 8
     }
+    # graphCreate's config list. QnnGraph_Config_t is 16 bytes (option@0, union@8 holding a
+    # QnnHtpGraph_CustomConfig_t*), and that custom config is 56 bytes (option@0, union@8).
+    GraphConfig = [ordered]@{
+        SizeBytes = 16
+        Option    = 0
+        Union     = 8
+    }
+
+    HtpCustomConfig = [ordered]@{
+        SizeBytes = 56
+        Option    = 0
+        Union     = 8
+    }
 }
 
 $slot = [ordered]@{
@@ -115,6 +128,15 @@ $enum = [ordered]@{
     QuantBlockwiseExpansion = 5
     QuantVector             = 6
     QuantFloatBlock         = 7
+    GraphConfigCustom       = 0
+    HtpOptimization         = 1
+    HtpPrecision            = 2
+    HtpVtcmSizeMb           = 3
+    HtpNumHvxThreads        = 6
+    HtpVtcmSizeBytes        = 10
+    HtpWeightsPacking       = 12
+    PrecisionFloat32        = 0
+    PrecisionFloat16        = 1
     ParamScalar = 0
     ParamTensor = 1
 }
