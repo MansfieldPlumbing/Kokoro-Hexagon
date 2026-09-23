@@ -1,0 +1,7 @@
+#include "AEEStdDef.idl"
+#include "remote.idl"
+// Kokoro-QNN DSP kernels. noop measures the FastRPC boundary; stats is the norm statistics pass.
+interface kqnn : remote_handle64 {
+  long noop(in sequence<int16> x, rout uint64 dspTicks);
+  long stats(in sequence<int16> x, in int32 channels, rout sequence<int64> sums, rout uint64 dspTicks);
+};

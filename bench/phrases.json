@@ -1,0 +1,20 @@
+[
+  {
+    "id": "hello",
+    "phonemes": "həlˈoʊ.",
+    "voice": "af_heart",
+    "capacity": 64
+  },
+  {
+    "id": "hexagon",
+    "phonemes": "ðɪs ɪz kˈoʊkəɹoʊ ɑn hɛksəɡˌɑn.",
+    "voice": "af_heart",
+    "capacity": 96
+  },
+  {
+    "id": "baseline",
+    "phonemes": "həlˈoʊ wˈɜɹld. ðɪs ɪz kˈoʊkəɹoʊ ɑn hɛksəɡˌɑn.",
+    "voice": "af_heart",
+    "capacity": 160
+  }
+]

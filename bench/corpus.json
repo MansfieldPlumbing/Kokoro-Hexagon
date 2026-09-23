@@ -1,0 +1,12 @@
+[
+  { "id": "p01", "text": "hello.",                                  "phonemes": "həlˈoʊ.",                                             "voice": "af_heart" },
+  { "id": "p02", "text": "yes, exactly.",                           "phonemes": "jˈɛs, ɪɡzˈæktli.",                                    "voice": "af_heart" },
+  { "id": "p03", "text": "the benchmark is running.",               "phonemes": "ðə bˈɛnʧmɑɹk ɪz ɹˈʌnɪŋ.",                             "voice": "af_heart" },
+  { "id": "p04", "text": "this is kokoro on hexagon.",              "phonemes": "ðɪs ɪz kˈoʊkəɹoʊ ɑn hɛksəɡˌɑn.",                      "voice": "af_heart" },
+  { "id": "p05", "text": "the decoder runs on the neural engine.",  "phonemes": "ðə dɪkˈoʊdəɹ ɹˈʌnz ɑn ðə nˈʊɹəl ˈɛnʤɪn.",             "voice": "af_heart" },
+  { "id": "p06", "text": "hello world. this is kokoro on hexagon.", "phonemes": "həlˈoʊ wˈɜɹld. ðɪs ɪz kˈoʊkəɹoʊ ɑn hɛksəɡˌɑn.",        "voice": "af_heart" },
+  { "id": "p07", "text": "speech synthesis without the cloud.",     "phonemes": "spˈiʧ sˈɪnθəsɪs wɪðˈaʊt ðə klˈaʊd.",                   "voice": "af_heart" },
+  { "id": "p08", "text": "every phrase is measured on the phone.",  "phonemes": "ˈɛvɹi fɹˈeɪz ɪz mˈɛʒəɹd ɑn ðə fˈoʊn.",                 "voice": "af_heart" },
+  { "id": "p09", "text": "the quick brown fox jumps over the lazy dog.", "phonemes": "ðə kwˈɪk bɹˈaʊn fˈɑks ʤˈʌmps ˈoʊvəɹ ðə lˈeɪzi dˈɔɡ.", "voice": "af_heart" },
+  { "id": "p10", "text": "it speaks its own benchmark result out loud.", "phonemes": "ɪt spˈiks ɪts ˈoʊn bˈɛnʧmɑɹk ɹɪzˈʌlt ˈaʊt lˈaʊd.",   "voice": "af_heart" }
+]
