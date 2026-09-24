@@ -103,12 +103,18 @@ try {
     $stream = & $audio.Open 24000 1
     $lines.Add("AAudioOpenMs=$($audioOpen.Elapsed.TotalMilliseconds.ToString('F1'))")
     try {
-        [int]$written = & $audio.Write $stream $pcm $total
-        if ($written -ne $count) { throw "AAudio frames=$written expected=$count" }
+        [int]$playbackRepeat = if ($job.PSObject.Properties['PlaybackRepeat']) { $job.PlaybackRepeat } else { 1 }
+        if ($playbackRepeat -lt 1 -or $playbackRepeat -gt 100) { throw 'PlaybackRepeat is outside the accepted range.' }
+        [long]$written = 0
+        for ($playbackIndex = 0; $playbackIndex -lt $playbackRepeat; $playbackIndex++) {
+            $chunkWritten = & $audio.Write $stream $pcm $total
+            if ($chunkWritten -ne $count) { throw "AAudio frames=$chunkWritten expected=$count chunk=$playbackIndex" }
+            $written += $chunkWritten
+        }
         $lines.Add("PreparedToPlaybackStartMs=$($stream.PlaybackStartMs.ToString('F1'))")
-        $drain = & $audio.Drain $stream ([Math]::Max(10000, [int](2000 * $count / 24000)))
+        $drain = & $audio.Drain $stream ([Math]::Max(10000, [int](2000 * $count * $playbackRepeat / 24000)))
         $playbackComplete = $drain.Complete
-        $lines.Add("AAudioRate=$($stream.SampleRate) Channels=$($stream.Channels) Format=$($stream.Format) CapacityFrames=$($stream.CapacityFrames) BurstFrames=$($stream.FramesPerBurst) WrittenFrames=$($drain.FramesWritten) PlaybackFrames=$($drain.FramesRead) XRunCount=$($drain.XRunCount) PlaybackComplete=$playbackComplete")
+        $lines.Add("AAudioRate=$($stream.SampleRate) Channels=$($stream.Channels) Format=$($stream.Format) CapacityFrames=$($stream.CapacityFrames) BurstFrames=$($stream.FramesPerBurst) Chunks=$playbackRepeat WrittenFrames=$($drain.FramesWritten) PlaybackFrames=$($drain.FramesRead) XRunCount=$($drain.XRunCount) PlaybackComplete=$playbackComplete")
 
         # Quality measurement and diagnostic WAV creation remain outside the
         # first-audio path.
