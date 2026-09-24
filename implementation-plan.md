@@ -12,7 +12,8 @@ audio backends:
 
 ```text
 admitted text
-  -> normalization, phonemes, stress and chunk state
+  -> thin text adapter or admitted Kokoro phonemes
+  -> phoneme validation, stress and chunk state
   -> model controls and specialization selection
   -> Kokoro-Hexagon.dll
        -> Windows reference backend -> WASAPI
@@ -34,9 +35,9 @@ runtime remains a platform dependency. No executable payload is fetched or
 generated during ordinary inference.
 
 The ordinary user path is turnkey: with PowerShell 7, obtain a verified release,
-load one model DLL, select a compute backend and audio sink, and stream text.
-The Windows reference backend must eventually make this possible without a
-phone; the Windows-controlled phone is the primary accelerated demonstration.
+load one model DLL, select the connected phone's Hexagon backend and an audio
+sink, and stream text. Windows acts as the controller; Windows-only inference
+is a later feature campaign, not an MVP gate.
 The APK is a minimal resident backend. A source user must be able to reproduce
 a variant with one documented `setup-kokoro.ps1` command. The script reuses the
 proven `C:\Dev\pwsh\setup.ps1` facade and write-plan discipline where
@@ -47,11 +48,18 @@ ordinary managed IL and PowerShell-emitted DSP payloads. Developer JIT is an
 opt-in source-build/test workflow over that IL, not a separate runtime artifact
 format.
 
-The model variants are separate artifacts, not one process-resident collection:
-FP32 is the numerical reference; FP16 and INT8 are admitted only after
-per-layer, speech-quality, memory, and end-to-end timing gates. Each variant
-has its own embedded weight hash and release identity. Load one variant at a
-time on a memory-constrained device.
+The model variants are separate DLL artifacts in the adjacent, Git-ignored
+Build directory, not one process-resident collection. FP32 is the numerical
+reference; FP16, INT8, and W4A8 candidates require per-layer, speech-quality,
+memory, and end-to-end timing gates before release. W4A8 may apply only to
+eligible blocks, so record the actual precision of every block instead of
+labeling a mixed graph as wholly W4A8. Each artifact has its own embedded
+weight hash and release identity. Load one variant at a time on a
+memory-constrained device.
+
+The existing Subsystem `agent.obp` WebView and Gemma runtime are a possible
+separate demonstration package (TBD). They are not prerequisites for the model
+DLL or its first speech release.
 
 ### Build methodology
 
@@ -95,55 +103,78 @@ verification, and the applicable physical-device ratchet. Beating one LLVM
 kernel is a compiler result for that specialization, not a claim about LLVM in
 general or complete speech synthesis.
 
-## Gate 1: text and phoneme admission
+## Gate 1: phoneme admission and thin text adapter
 
-This is the current gate. The DLL currently begins at acoustic tensors; it is
-not yet a complete text-to-speech model surface.
+The model's native language is a bounded Kokoro phoneme string. The canonical
+MVP API accepts that string directly, validates every code point against the
+pinned 114-entry model vocabulary, adds the boundary IDs, and rejects inputs
+over the model limit. This path must work before arbitrary text admission.
 
-SMA is the parser and compiler front end for authored PowerShell pronunciation
-rules, not a pronunciation oracle for arbitrary prose. The speech input is
-tokenized as data. Only a bounded, validated rule AST may be lowered into the
-DLL; user text is never parsed or executed as PowerShell. Reuse JS2PS's
-separation of syntax admission from semantic conformance, ChangeModel's
-measured mismatch/held-out representation tests, and Pwsh's persisted managed
-assembly emission patterns. Each borrowed pattern needs a Kokoro-specific gate.
+Kokoro's pinned source delegates text-to-phoneme conversion and token-aware
+chunking to Misaki; it does not ask the acoustic model or PowerShell to infer
+pronunciation. Preserve that separation. SMA is limited to authored cue cards,
+explicit pronunciation overrides, source-span preservation, and continuation
+state. It is not a general natural-language parser or pronunciation engine.
+Only bounded validated data reaches the DLL; user text is never parsed or
+executed as PowerShell.
+
+The text adapter is replaceable and is tested against pinned reference output.
+It may use a compiled lexicon/rule table or another admitted implementation,
+but its output contract is always the same Kokoro phoneme alphabet. The pinned
+host phonemizer remains an oracle during development, not an APK dependency.
+Evaluate the Apache-2.0 `MisakiSharp` English implementation at commit
+`beb91a9f06ebe5e25e595b5a3c990ee616ad75e5` as a behavior and corpus reference.
+Its English path is managed code with compressed lexicon, tokenizer, and tagger
+tables. Re-author the admitted rules in PowerShell, validate their SMA AST, and
+lower them into deterministic scanners, tries, and lookup tables. Do not carry
+regular-expression execution into the released adapter or parse user prose as
+PowerShell syntax.
 
 ### Work
 
-1. Define a versioned text contract covering Unicode normalization, numbers,
+1. Define `SynthesizePhonemes` as the stable primitive: admitted phoneme
+   alphabet, boundary IDs, maximum length, voice/style selection, speed, and
+   source identity. Expose phoneme-to-ID conversion from the DLL on Windows so
+   Muse and the differential harness can test model variants without a G2P
+   dependency.
+2. Define a versioned text adapter contract covering Unicode normalization, numbers,
    abbreviations, punctuation, quotations, cue cards, language selection,
    speaker/voice turns, and explicit pronunciation overrides.
-2. Pin three independent references:
+3. Pin three independent references:
    - the exact Kokoro source revision and vocabulary used by the model;
    - the existing pinned host phonemizer as the pronunciation oracle;
    - the supplied TypeScript parser as a second implementation reference,
-     after source review rather than direct adoption.
+      after source review rather than direct adoption.
+   - the pinned `MisakiSharp` English fixtures as a managed-port differential
+     reference, after provenance and license review.
    Use the pinned Kokoro vocabulary to test emitted IDs, not SMA parse success
    as a proxy for pronunciation correctness.
-3. Build a machine-readable differential corpus from:
+4. Build a machine-readable differential corpus from:
    - narrative excerpts for continuity and dialogue;
    - technical prose for numbers, symbols, abbreviations, and code-adjacent
      language;
    - lyrics for meter, contractions, repetition, and line boundaries.
    Source text remains outside generated artifacts unless its inclusion is
    explicitly intended and licensed.
-4. Implement the admitted normalizer and phoneme/ID pipeline in portable
+5. Implement the admitted normalizer and phoneme/ID pipeline in portable
    managed logic. Preserve source spans and distinguish authored text, spoken
    text, phonemes, model IDs, and nonverbal cue cards.
-5. Carry bounded continuation state between chunks: unfinished punctuation,
+6. Carry bounded continuation state between chunks: unfinished punctuation,
    quotation/dialogue state, speaker/voice, pronunciation override scope, and
    boundary strength. A cut may not occur inside a normalized token or phoneme.
-6. Differentially test every corpus case. Store expected outputs and compact
+7. Differentially test every corpus case. Store expected outputs and compact
    mismatch categories, not an opaque pass/fail total. Add held-out heteronym,
    morphology, and chunk-boundary pairs before admitting a new context feature.
-7. Persist the validated methods and their contract/version hashes into
+8. Persist the validated methods and their contract/version hashes into
    `Kokoro-Hexagon.dll`. Loading the DLL on Windows must be sufficient to
    normalize, phonemize, produce IDs, and plan chunks without Android, a model
    framework, or a network connection.
 
 ### Exit gate
 
-- All admitted corpus cases match the pinned oracle or carry an explicit,
+- Direct phoneme input maps exactly to the pinned model vocabulary and rejects
+  unknown code points, malformed boundaries, and over-limit input.
+- All admitted text-adapter corpus cases match the pinned oracle or carry an explicit,
   reviewed model-specific exception.
 - Re-running a chunked passage produces the same normalized text and phoneme ID
   stream as an unchunked pass, except for declared boundary events.
@@ -359,19 +390,25 @@ prebuilt-assembly paths return equivalent outputs on the same backend.
 Do not run these tracks as competing prototypes. The order is:
 
 1. Phoneme differential corpus and portable text pipeline.
-2. Persist text/phoneme methods into the DLL and prove them on Windows.
-3. Embed and validate one weight variant; measure DLL load and memory on both
-   platforms before multiplying variants.
-4. Minimal DLL driver plus QuickPS WASAPI playback.
-5. Feed those plans into the existing warm Android pipeline and obtain a
+2. Build a weight-bearing FP32 reference DLL and verify its embedded tensor
+   index and bytes in a clean Windows PowerShell process. Keep candidate DLLs
+   in the adjacent Build directory and never commit them.
+3. Produce FP16, INT8, and eligible W4A8 candidate DLLs from the same pinned
+   tensor source. Differentially check each against FP32, then measure speech
+   quality, device memory, and full-path latency before admitting a release
+   variant.
+4. Persist text/phoneme methods into the DLL and prove them on Windows.
+5. Minimal DLL driver controlling the resident phone Hexagon backend and
+   returning PCM to a Windows audio sink. Native Windows inference is deferred.
+6. Feed those plans into the existing warm Android pipeline and obtain a
    long-form speaker receipt.
-6. Generalize the successful HVX scheduler and lower the next expensive model
+7. Generalize the successful HVX scheduler and lower the next expensive model
    blocks, using physical A/B gates after each promotion.
-7. Reduce appliance/runtime payload and harden lifecycle behavior.
-8. Prove the Windows-controlled phone path with framed requests and inclusive
+8. Reduce appliance/runtime payload and harden lifecycle behavior.
+9. Prove the Windows-controlled phone path with framed requests and inclusive
    transport, compute, and audio timing; do not claim remote general compute
    before that round trip exists.
-9. Package and publish the reproducible variants and source-build instructions.
+10. Package and publish the reproducible variants and source-build instructions.
 
 ## Change discipline
 
@@ -388,8 +425,8 @@ Do not run these tracks as competing prototypes. The order is:
 
 ## Immediate deliverable
 
-Build the phoneme differential corpus and a portable PowerShell/managed text
-pipeline whose normalized text, phonemes, model IDs, source spans, and chunk
-continuation state can be persisted into and reproduced from
-`Kokoro-Hexagon.dll` on Windows. This is the only active product gate until its
-admission tests pass.
+Build and verify the first weight-bearing DLL on Windows, then use it as the
+stable test target for the phoneme differential corpus and portable
+PowerShell/managed text pipeline. The Windows proof checks model identity and
+weight access; speech inference runs through the phone's Hexagon until a
+separate Windows backend is admitted.
