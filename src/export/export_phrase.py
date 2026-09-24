@@ -46,6 +46,52 @@ core, cap, har = scope['core'], scope['cap'], scope['har']
 pad, mask, frames = scope['pad'], scope['mask'], int(scope['L'])
 gen = core.d.generator
 
+# Optional acoustic probe controls. These operate on the decoder's native
+# F0/noise/source inputs; they are not text aliases for non-speech sounds.
+acoustics = spec.get('acoustics')
+variable_length_snr_db = None
+if acoustics is not None:
+    if not isinstance(acoustics, dict):
+        raise ValueError('acoustics must be an object')
+    allowed = {'f0Scale', 'nScale', 'sourceGain', 'envelopePower', 'seed'}
+    unknown = set(acoustics).difference(allowed)
+    if unknown:
+        raise ValueError(f'unknown acoustics fields: {sorted(unknown)}')
+    f0_scale = float(acoustics.get('f0Scale', 1.0))
+    n_scale = float(acoustics.get('nScale', 1.0))
+    source_gain = float(acoustics.get('sourceGain', 1.0))
+    envelope_power = float(acoustics.get('envelopePower', 0.0))
+    seed = int(acoustics.get('seed', 0))
+    if not 0.0 <= f0_scale <= 2.0:
+        raise ValueError('acoustics.f0Scale must be in [0, 2]')
+    if not 0.0 <= n_scale <= 2.0:
+        raise ValueError('acoustics.nScale must be in [0, 2]')
+    if not 0.0 <= source_gain <= 4.0:
+        raise ValueError('acoustics.sourceGain must be in [0, 4]')
+    if not 0.0 <= envelope_power <= 4.0:
+        raise ValueError('acoustics.envelopePower must be in [0, 4]')
+    with torch.no_grad():
+        cap['F0'] = cap['F0'] * f0_scale
+        cap['N'] = cap['N'] * n_scale
+        torch.manual_seed(seed)
+        f0_up = gen.f0_upsamp(cap['F0'][:, None]).transpose(1, 2)
+        har = gen.m_source(f0_up)[0].transpose(1, 2).squeeze(1)
+        if envelope_power > 0:
+            phase = torch.linspace(0, torch.pi, har.shape[-1], dtype=har.dtype, device=har.device)
+            har = har * torch.sin(phase).clamp_min(0).pow(envelope_power)
+        har = har * source_gain
+        variable = core(cap['asr'], cap['F0'], cap['N'], cap['s'], har).reshape(-1)[:frames * scope['U']]
+        fixed = scope['m'](
+            pad(cap['asr'], 1), pad(cap['F0'], 2), pad(cap['N'], 2), cap['s'],
+            pad(har, scope['U']), mask).reshape(-1)[:frames * scope['U']]
+        error = fixed - variable
+        variable_length_snr_db = 10.0 * torch.log10(
+            variable.square().sum() / error.square().sum().clamp_min(1e-20)).item()
+        # The phone executes this exact fixed-capacity graph, so its execution
+        # oracle must be the fixed-capacity output. The manifest separately
+        # records its agreement with the variable-length Kokoro decoder.
+        scope['full'] = fixed.numpy()
+
 def write_f32(name, tensor):
     path = out / f'in_{name}.f32'
     np.ascontiguousarray(tensor.detach().numpy(), dtype='<f4').tofile(path)
@@ -91,5 +137,8 @@ manifest = {
         for p in files
     ],
 }
+if acoustics is not None:
+    manifest['acoustics'] = acoustics
+    manifest['variableLengthSnrDb'] = round(variable_length_snr_db, 3)
 (out / 'phrase.json').write_text(json.dumps(manifest, indent=2) + '\n', encoding='utf-8')
 print(json.dumps(manifest, indent=2))
