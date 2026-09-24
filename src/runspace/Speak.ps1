@@ -87,27 +87,51 @@ try {
     }
     $lines.Add("TotalMs=$($total.Elapsed.TotalMilliseconds.ToString('F1')) Samples=$count Seconds=$(($count / 24000.0).ToString('F2'))")
 
-    # Compare with the PyTorch full-length waveform.
-    [float[]]$ref = & $toF (& $read $job.Oracle)
-    [double]$se = 0; [double]$sr = 0; [int]$bad = 0
-    for ($i = 0; $i -lt $count; $i++) { if (-not [float]::IsFinite($pcm[$i])) { $bad++; continue }; $e = [double]$pcm[$i] - $ref[$i]; $se += $e * $e; $sr += [double]$ref[$i] * $ref[$i] }
-    $snr = 10 * [Math]::Log10($sr / [Math]::Max($se, 1e-30))
-    $lines.Add("NonFinite=$bad AudioSnrDb=$($snr.ToString('F2'))")
+    # Enumerable extrema execute in the runtime rather than one PowerShell
+    # invocation per sample. They reject non-finite audio before playback.
+    [float]$pcmMin = [Linq.Enumerable]::Min($pcm)
+    [float]$pcmMax = [Linq.Enumerable]::Max($pcm)
+    if (-not [float]::IsFinite($pcmMin) -or -not [float]::IsFinite($pcmMax)) { throw 'Generated audio contains a non-finite sample.' }
+    if ($pcmMin -lt -1.0 -or $pcmMax -gt 1.0) {
+        for ($i = 0; $i -lt $count; $i++) { $pcm[$i] = [float][Math]::Max(-1.0, [Math]::Min(1.0, [double]$pcm[$i])) }
+    }
 
-    # 16-bit PCM: WAV file and the phone speaker.
-    [short[]]$s16 = [short[]]::new($count)
-    for ($i = 0; $i -lt $count; $i++) { $v = [Math]::Max(-1.0, [Math]::Min(1.0, [double]$pcm[$i])); $s16[$i] = [short][Math]::Round($v * 32767) }
-    $ms = [IO.MemoryStream]::new(); $bw = [IO.BinaryWriter]::new($ms)
-    $bw.Write([Text.Encoding]::ASCII.GetBytes('RIFF')); $bw.Write([int](36 + 2 * $count)); $bw.Write([Text.Encoding]::ASCII.GetBytes('WAVEfmt '))
-    $bw.Write([int]16); $bw.Write([short]1); $bw.Write([short]1); $bw.Write([int]24000); $bw.Write([int]48000); $bw.Write([short]2); $bw.Write([short]16)
-    $bw.Write([Text.Encoding]::ASCII.GetBytes('data')); $bw.Write([int](2 * $count)); foreach ($x in $s16) { $bw.Write($x) }; $bw.Flush()
-    [IO.File]::WriteAllBytes([IO.Path]::Combine($root, 'kokoro_htp.wav'), $ms.ToArray())
-    $track = [Android.Media.AudioTrack]::new([Android.Media.Stream]::Music, 24000, [Android.Media.ChannelOut]::Mono, [Android.Media.Encoding]::Pcm16bit, 2 * $count, [Android.Media.AudioTrackMode]::Static)
+    # Float PCM goes directly to the speaker. The 16-bit diagnostic WAV is
+    # derived only after playback starts, outside the first-audio path.
+    $track = [Android.Media.AudioTrack]::new([Android.Media.Stream]::Music, 24000, [Android.Media.ChannelOut]::Mono, [Android.Media.Encoding]::PcmFloat, 4 * $count, [Android.Media.AudioTrackMode]::Static)
     try {
-        [int]$written = $track.Write($s16, 0, $count)
+        [int]$written = $track.Write($pcm, 0, $count, [Android.Media.WriteMode]::Blocking)
         if ($written -ne $count) { throw "AudioTrack.Write frames=$written expected=$count" }
+        $playback = [Diagnostics.Stopwatch]::StartNew()
         $track.Play()
-        [Threading.Thread]::Sleep([int](1000 * $count / 24000) + 300)
+        $playback.Restart()
+        $lines.Add("PreparedToPlaybackStartMs=$($total.Elapsed.TotalMilliseconds.ToString('F1'))")
+
+        # Quality measurement and diagnostic WAV creation happen while the static
+        # audio buffer is already playing, outside the first-audio path.
+        [float[]]$ref = & $toF (& $read $job.Oracle)
+        [double]$se = 0; [double]$sr = 0; [int]$bad = 0
+        [short[]]$s16 = [short[]]::new($count)
+        for ($i = 0; $i -lt $count; $i++) {
+            $v = [double]$pcm[$i]; $e = $v - $ref[$i]
+            $se += $e * $e; $sr += [double]$ref[$i] * $ref[$i]
+            $s16[$i] = [short][Math]::Round($v * 32767)
+        }
+        $snr = 10 * [Math]::Log10($sr / [Math]::Max($se, 1e-30))
+        $lines.Add("NonFinite=$bad AudioSnrDb=$($snr.ToString('F2'))")
+
+        # Bulk-copying PCM avoids one BinaryWriter call per sample.
+        [byte[]]$wav = [byte[]]::new(44 + 2 * $count)
+        $header = [IO.MemoryStream]::new($wav, 0, 44, $true, $true)
+        $bw = [IO.BinaryWriter]::new($header)
+        $bw.Write([Text.Encoding]::ASCII.GetBytes('RIFF')); $bw.Write([int](36 + 2 * $count)); $bw.Write([Text.Encoding]::ASCII.GetBytes('WAVEfmt '))
+        $bw.Write([int]16); $bw.Write([short]1); $bw.Write([short]1); $bw.Write([int]24000); $bw.Write([int]48000); $bw.Write([short]2); $bw.Write([short]16)
+        $bw.Write([Text.Encoding]::ASCII.GetBytes('data')); $bw.Write([int](2 * $count)); $bw.Flush(); $bw.Dispose(); $header.Dispose()
+        [Buffer]::BlockCopy($s16, 0, $wav, 44, 2 * $count)
+        [IO.File]::WriteAllBytes([IO.Path]::Combine($root, 'kokoro_htp.wav'), $wav)
+
+        [int]$remainingMs = [Math]::Max(0, [int][Math]::Ceiling((1000.0 * $count / 24000.0) + 300 - $playback.Elapsed.TotalMilliseconds))
+        [Threading.Thread]::Sleep($remainingMs)
         [uint32]$playedFrames = $track.PlaybackHeadPosition
         $playbackComplete = $playedFrames -ge [uint32]$count
         $lines.Add("PlayState=$($track.PlayState) WrittenFrames=$written PlaybackFrames=$playedFrames PlaybackComplete=$playbackComplete")

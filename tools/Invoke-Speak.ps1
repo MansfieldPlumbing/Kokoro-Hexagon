@@ -10,16 +10,21 @@ param(
     [ValidateRange(0, 1000)][int] $Repeat = 0,
     [string] $StageRoot = (Join-Path $PSScriptRoot '..\..\Build\Kokoro-QNN\stage'),
     [string] $Serial = $env:KOKORO_QNN_SERIAL,
+    [string] $QnnSystem = $env:KOKORO_QNN_SYSTEM_LIB,
     [string] $Package = 'dev.mansfieldplumbing.androidsma.preview'
 )
 $ErrorActionPreference = 'Stop'
+if (-not $Serial) { throw 'A device serial is required through -Serial or KOKORO_QNN_SERIAL.' }
+if (-not $QnnSystem -or -not (Test-Path -LiteralPath $QnnSystem -PathType Leaf)) {
+    throw 'A readable QnnSystem library is required through -QnnSystem or KOKORO_QNN_SYSTEM_LIB.'
+}
 $adb = if ($env:KOKORO_QNN_ADB) { $env:KOKORO_QNN_ADB } else { 'adb' }; $nl = [Environment]::NewLine
 $st = Join-Path $StageRoot 'job-speak'; [void](New-Item -ItemType Directory -Force $st)
 Copy-Item $Front (Join-Path $st 'front.bin') -Force; Copy-Item $Gen (Join-Path $st 'gen.bin') -Force
 $reader = Join-Path $PSScriptRoot 'Read-QnnContextInfo.ps1'
 $describe = {
     param([string]$Name, [string]$Bin, [string]$FirstInput)
-    $m = & $reader -QnnSystem $env:KOKORO_QNN_SYSTEM_LIB -ContextPath (Join-Path $st $Bin)
+    $m = & $reader -QnnSystem $QnnSystem -ContextPath (Join-Path $st $Bin)
     $in = @($m.Tensors | Where-Object Dir -eq 'in' | Sort-Object { if ($_.Name -eq $FirstInput) { 0 } else { 1 } })
     $o = $m.Tensors | Where-Object Dir -eq 'out'
     [long]$b = 4; foreach ($x in $o.Dims) { $b *= $x }

@@ -35,6 +35,11 @@
       "path": "onnxruntime_qnn-2.2.0 wheel",
       "bytes": 190440071,
       "sha256": "CACCCAEFEA820D07473C67F42AB11F1CAC98CD40A712C547ABCFEEAD4D469B28"
+    },
+    "qnnSystem": {
+      "path": "onnxruntime_qnn/libs/amd64/QnnSystem.dll",
+      "bytes": 3318464,
+      "sha256": "1DCEC81313373763EEA7D2FA02BB5494AC3D3FDFECD692EA785EA973AD963066"
     }
   },
   "deviceRuntime": {
