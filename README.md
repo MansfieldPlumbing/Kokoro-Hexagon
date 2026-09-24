@@ -36,6 +36,7 @@ Not yet done, stated plainly:
 lib/manifest.json   pinned inputs (SHA-256): weights, Kokoro source, host compiler, device runtime
 lib/qairt-2.46/     QAIRT 2.46 ABI reference data (constants, enums, layouts, functions)
 src/export/         one-time Python: static decoder export, QNN passes, gate, compile
+src/appliance/      source and release gates for the downloadable demo APK
 src/runspace/       device-side PowerShell: QNN ABI, native, graph, context, Speak runner
 tools/              host PowerShell: context metadata reader, device job and speak drivers
 docs/               design, HTP findings, receipts
