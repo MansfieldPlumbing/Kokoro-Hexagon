@@ -1043,9 +1043,9 @@ function Get-KokoroApplianceDispatch {
     $source = [IO.File]::ReadAllText($path, [Text.UTF8Encoding]::new($false, $true))
     $tokens = $null
     $parseErrors = $null
-    [void][Management.Automation.Language.Parser]::ParseInput($source, [ref]$tokens, [ref]$parseErrors)
+    $ast = [Management.Automation.Language.Parser]::ParseInput($source, [ref]$tokens, [ref]$parseErrors)
     if ($parseErrors.Count -ne 0) { throw "Kokoro appliance expression has $($parseErrors.Count) parse error(s)." }
-    $capability = [scriptblock]::Create($source).InvokeReturnAsIs()
+    $capability = $ast.GetScriptBlock().InvokeReturnAsIs()
     $receipt = & $capability.Verify
     if (-not $receipt.Passed) { throw 'Kokoro appliance expression verification failed.' }
     $lambda = & $capability.Build
@@ -1053,6 +1053,28 @@ function Get-KokoroApplianceDispatch {
         throw 'Kokoro appliance dispatcher must have the signature int DispatchOperation(string).'
     }
     [pscustomobject]@{ Lambda = $lambda; Receipt = $receipt }
+}
+
+function Get-KokoroModelContract {
+    $path = Join-Path $script:RepositoryRoot 'model.ps1'
+    $tokens = $null
+    $parseErrors = $null
+    $ast = [Management.Automation.Language.Parser]::ParseFile($path, [ref]$tokens, [ref]$parseErrors)
+    if ($parseErrors.Count -ne 0) { throw "Kokoro model contract has $($parseErrors.Count) parse error(s)." }
+    $nodes = @(& (Join-Path $script:RepositoryRoot 'src/lower/Lower-Model.ps1') -Model $ast.GetScriptBlock())
+    $expected = @(
+        'KokoroFront|@asr,@F0_curve,@N,@style,@mask,@capacity',
+        'KokoroGenerator|%0,@gb,@har8,@mask,@mask8,@capacity'
+    )
+    $actual = @($nodes | ForEach-Object { $_.Op + '|' + ($_.Inputs -join ',') })
+    if (($actual -join "`n") -cne ($expected -join "`n")) { throw 'Kokoro model graph contract changed unexpectedly.' }
+    $json = $nodes | ConvertTo-Json -Depth 6 -Compress
+    $hash = [Convert]::ToHexString([Security.Cryptography.SHA256]::HashData([Text.Encoding]::UTF8.GetBytes($json)))
+    [pscustomobject]@{
+        GraphSHA256 = $hash
+        Controls = 'asr,F0_curve,N,style,gb,har8,mask,mask8,capacity'
+        Nodes = $nodes.Count
+    }
 }
 
 # Application identity. The activity class is the type emitted into Pwsh.dll.
@@ -3649,11 +3671,19 @@ function New-PwshActivityAssemblyBytes {
             $nativeHostType = $module.DefineType('Dev.MansfieldPlumbing.Pwsh.NativeHost',
                 [Reflection.TypeAttributes]'Public,Abstract,Sealed,BeforeFieldInit')
             $kokoroDispatch = Get-KokoroApplianceDispatch
+            $kokoroModel = Get-KokoroModelContract
             $kokoroDispatchMethod = Add-PersistedMethod $nativeHostType 'DispatchOperation' `
                 ([Reflection.MethodAttributes]'Public,Static,HideBySig') ([int]) @([string]) `
                 ([Func[string,int]]) ([Linq.Expressions.ParameterExpression[]]@($kokoroDispatch.Lambda.Parameters)) `
                 $kokoroDispatch.Lambda.Body
             $script:KokoroDispatchReceipt = $kokoroDispatch.Receipt
+            [void](Add-PersistedMethod $nativeHostType 'ModelGraphSHA256' `
+                ([Reflection.MethodAttributes]'Public,Static,HideBySig') ([string]) @() `
+                ([Func[string]]) @() ([Linq.Expressions.Expression]::Constant($kokoroModel.GraphSHA256, [string])))
+            [void](Add-PersistedMethod $nativeHostType 'ModelControls' `
+                ([Reflection.MethodAttributes]'Public,Static,HideBySig') ([string]) @() `
+                ([Func[string]]) @() ([Linq.Expressions.Expression]::Constant($kokoroModel.Controls, [string])))
+            $script:KokoroModelReceipt = $kokoroModel
             $concat = Get-ExactMethod ([string]) 'Concat' @([string], [string])
             $hexText = { param($value) New-ClrCall $value (Get-ExactMethod ([int]) 'ToString' @([string])) @((New-ClrConstant 'x8' ([string]))) }
             $try = New-ClrBlock @() @(
@@ -3710,6 +3740,8 @@ function New-PwshActivityAssemblyBytes {
         if ($Admission -eq 'NativeActivity') {
             Write-Host ('[PASS] Kokoro-Hexagon.dll: DispatchOperation(string) persisted for {0} admitted operations; unknown input returns {1}.' -f
                 $script:KokoroDispatchReceipt.Operations.Count, $script:KokoroDispatchReceipt.UnknownCode) -ForegroundColor Green
+            Write-Host ('[PASS] Kokoro-Hexagon.dll: model graph {0} persisted with {1} nodes and its control schema.' -f
+                $script:KokoroModelReceipt.GraphSHA256, $script:KokoroModelReceipt.Nodes) -ForegroundColor Green
         }
 
         $stream = [IO.MemoryStream]::new()

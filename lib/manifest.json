@@ -83,6 +83,12 @@
     "bytes": 6113,
     "sha256": "04C3C2F76027AFB5BE411E8B87EA3348743B839BC9673F5CC4C41CE358872B67"
   },
+  "quickPsWasapi": {
+    "path": "QuickPS/src/Wasapi.Windows.ps1",
+    "bytes": 18866,
+    "sha256": "33185FF24A9DFF34450C473924DBE59DF5E570829F8BFF4EAE2DA661D49ADDE6",
+    "role": "Pinned Windows audio binding donor for the model assembly reference backend"
+  },
   "androidAaudioApi": {
     "repo": "https://android.googlesource.com/platform/frameworks/av",
     "commit": "9e7dd63dfff0cc967f025ea9e27a299aaa99fd69",
