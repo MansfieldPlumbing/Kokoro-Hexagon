@@ -18,6 +18,7 @@ try {
     $native = & $load 'Qnn.Native.psm1' @($abi)
     $graph = & $load 'Qnn.Graph.psm1' @($abi, $native)
     $ctx = & $load 'Qnn.Context.psm1' @($abi, $native, $graph)
+    $audio = & $load 'Audio.AAudio.psm1' @($abi)
     [void](& $native.Initialize ([pscustomobject]@{ DataRoot = $qnn; NativeLibraryDirectory = $dsp }))
     if ($native.State.DeviceCreateRc -ne 0) { throw "deviceCreate rc=$($native.State.DeviceCreateRc)" }
     $mode = if ($null -ne $job.PerfMode) { $job.PerfMode } else { 'burst' }; $vote = & $ctx.SetPerformance $mode; $lines.Add("Perf=$($vote.Mode) PowerConfigId=$($vote.PowerConfigId) SetRc=$($vote.SetRc)")
@@ -96,19 +97,21 @@ try {
         for ($i = 0; $i -lt $count; $i++) { $pcm[$i] = [float][Math]::Max(-1.0, [Math]::Min(1.0, [double]$pcm[$i])) }
     }
 
-    # Float PCM goes directly to the speaker. The 16-bit diagnostic WAV is
-    # derived only after playback starts, outside the first-audio path.
-    $track = [Android.Media.AudioTrack]::new([Android.Media.Stream]::Music, 24000, [Android.Media.ChannelOut]::Mono, [Android.Media.Encoding]::PcmFloat, 4 * $count, [Android.Media.AudioTrackMode]::Static)
+    # Float PCM goes directly through the Android NDK AAudio C API. The 16-bit
+    # diagnostic WAV is derived only after playback has completed.
+    $audioOpen = [Diagnostics.Stopwatch]::StartNew()
+    $stream = & $audio.Open 24000 1
+    $lines.Add("AAudioOpenMs=$($audioOpen.Elapsed.TotalMilliseconds.ToString('F1'))")
     try {
-        [int]$written = $track.Write($pcm, 0, $count, [Android.Media.WriteMode]::Blocking)
-        if ($written -ne $count) { throw "AudioTrack.Write frames=$written expected=$count" }
-        $playback = [Diagnostics.Stopwatch]::StartNew()
-        $track.Play()
-        $playback.Restart()
-        $lines.Add("PreparedToPlaybackStartMs=$($total.Elapsed.TotalMilliseconds.ToString('F1'))")
+        [int]$written = & $audio.Write $stream $pcm $total
+        if ($written -ne $count) { throw "AAudio frames=$written expected=$count" }
+        $lines.Add("PreparedToPlaybackStartMs=$($stream.PlaybackStartMs.ToString('F1'))")
+        $drain = & $audio.Drain $stream ([Math]::Max(10000, [int](2000 * $count / 24000)))
+        $playbackComplete = $drain.Complete
+        $lines.Add("AAudioRate=$($stream.SampleRate) Channels=$($stream.Channels) Format=$($stream.Format) CapacityFrames=$($stream.CapacityFrames) BurstFrames=$($stream.FramesPerBurst) WrittenFrames=$($drain.FramesWritten) PlaybackFrames=$($drain.FramesRead) XRunCount=$($drain.XRunCount) PlaybackComplete=$playbackComplete")
 
-        # Quality measurement and diagnostic WAV creation happen while the static
-        # audio buffer is already playing, outside the first-audio path.
+        # Quality measurement and diagnostic WAV creation remain outside the
+        # first-audio path.
         [float[]]$ref = & $toF (& $read $job.Oracle)
         [double]$se = 0; [double]$sr = 0; [int]$bad = 0
         [short[]]$s16 = [short[]]::new($count)
@@ -130,13 +133,11 @@ try {
         [Buffer]::BlockCopy($s16, 0, $wav, 44, 2 * $count)
         [IO.File]::WriteAllBytes([IO.Path]::Combine($root, 'kokoro_htp.wav'), $wav)
 
-        [int]$remainingMs = [Math]::Max(0, [int][Math]::Ceiling((1000.0 * $count / 24000.0) + 300 - $playback.Elapsed.TotalMilliseconds))
-        [Threading.Thread]::Sleep($remainingMs)
-        [uint32]$playedFrames = $track.PlaybackHeadPosition
-        $playbackComplete = $playedFrames -ge [uint32]$count
-        $lines.Add("PlayState=$($track.PlayState) WrittenFrames=$written PlaybackFrames=$playedFrames PlaybackComplete=$playbackComplete")
     }
-    finally { $track.Release() }
+    finally {
+        $audioCloseRc = & $audio.Close $stream
+        $lines.Add("AAudioCloseRc=$audioCloseRc")
+    }
 
     # Repeated warm timing: context loaded and tensors bound once, one warm-up, then N timed executes.
     $benchStage = {

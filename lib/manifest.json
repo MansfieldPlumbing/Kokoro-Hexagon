@@ -77,5 +77,11 @@
     "path": "QuickPS/src/Native.ps1",
     "bytes": 6113,
     "sha256": "04C3C2F76027AFB5BE411E8B87EA3348743B839BC9673F5CC4C41CE358872B67"
+  },
+  "androidAaudioApi": {
+    "repo": "https://android.googlesource.com/platform/frameworks/av",
+    "commit": "9e7dd63dfff0cc967f025ea9e27a299aaa99fd69",
+    "path": "media/libaaudio/include/aaudio/AAudio.h",
+    "blob": "25ad5f8ef976c33b8670e4217d3f984c13096829"
   }
 }
