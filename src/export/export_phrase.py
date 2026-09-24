@@ -19,6 +19,9 @@ if missing:
     raise ValueError(f'missing phrase spec fields: {sorted(missing)}')
 if not isinstance(spec['capacity'], int) or spec['capacity'] <= 0:
     raise ValueError('capacity must be a positive integer')
+speaker = spec.get('speaker', 'narrator')
+if not isinstance(speaker, str) or not speaker or len(speaker) > 64:
+    raise ValueError('speaker must be a non-empty string of at most 64 characters')
 
 old_phonemes = os.environ.get('KOKORO_QNN_PHONEMES')
 old_voice = os.environ.get('KOKORO_QNN_VOICE')
@@ -78,6 +81,7 @@ manifest = {
     'id': spec['id'],
     'phonemes': spec['phonemes'],
     'voice': spec['voice'],
+    'speaker': speaker,
     'capacity': spec['capacity'],
     'validFrames': frames,
     'validSamples': frames * 600,

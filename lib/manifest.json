@@ -18,6 +18,11 @@
         "path": "voices\\af_heart.pt",
         "bytes": 523425,
         "sha256": "0AB5709B8FFAB19BFD849CD11D98F75B60AF7733253AD0D67B12382A102CB4FF"
+      },
+      {
+        "path": "voices\\am_michael.pt",
+        "bytes": 523435,
+        "sha256": "9A443B79A4B22489A5B0AB7C651A0BCD1A30BEF675C28333F06971ABBD47BD37"
       }
     ]
   },
@@ -83,5 +88,19 @@
     "commit": "9e7dd63dfff0cc967f025ea9e27a299aaa99fd69",
     "path": "media/libaaudio/include/aaudio/AAudio.h",
     "blob": "25ad5f8ef976c33b8670e4217d3f984c13096829"
+  },
+  "usbAoaDonor": {
+    "path": "AndroidSMA/src/UsbAoa.ps1",
+    "role": "Locally proven Windows AOA negotiation mechanism adapted by tools/UsbAoa.ps1",
+    "sha256": "B6E44EDEF20FC787F21586DD3184AE7A739824A84FE4E2BD2B4D3BBB4B2C0EDF"
+  },
+  "speechFrontEnd": {
+    "package": "phonemizer",
+    "version": "1.2.1",
+    "source": "https://registry.npmjs.org/phonemizer/-/phonemizer-1.2.1.tgz",
+    "license": "Apache-2.0",
+    "npmIntegrity": "sha512-v0KJ4mi2T4Q7eJQ0W15Xd4G9k4kICSXE8bpDeJ8jisL4RyJhNWsweKTOi88QXFc4r4LZlz5jVL5lCHhkpdT71A==",
+    "sha256": "12F9F3582F8B5D557A0577180D83FF0458A4A5C15B2EFB625EE71C3EBBEE22E9",
+    "role": "Pinned host-side pronunciation oracle; never an APK dependency."
   }
 }

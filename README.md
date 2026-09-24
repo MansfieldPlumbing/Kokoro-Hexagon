@@ -16,7 +16,7 @@ from the AndroidSMA runspace. See [docs/FIRST-LIGHT.md](docs/FIRST-LIGHT.md).
 | Harmonic source (`SineGen`) + forward STFT | host CPU (PyTorch) |
 | Decoder front (`encode`, `decode`, `F0/N_conv`) | **HTP** |
 | Generator (upsamplers, resblocks, `conv_post`) + iSTFT | **HTP** |
-| Playback | Android `AudioTrack` from PowerShell |
+| Playback | persistent Android AAudio stream from PowerShell |
 
 Measured on the S23 (fp16, burst vote, 8 MB VTCM, 160-frame capacity, one
 phrase of 3.27 s): front 32 ms, generator + iSTFT 1.57 s, audio SNR 24.0 dB
@@ -28,7 +28,9 @@ Not yet done, stated plainly:
 - The front end and harmonic source still run on the host.
 - The generator is not yet real-time. Integer (w8a16) compilation does not
   finalize yet; the fp16 path is the one that runs.
-- No streaming scheduler, energy measurement, or multi-SoC builds yet.
+- The overlap scheduler is proven for a bounded three-chunk passage, but the
+  arbitrary-text AOA service, energy measurement, and multi-SoC builds are not
+  yet complete.
 
 ## Layout
 
@@ -41,6 +43,9 @@ src/runspace/       device-side PowerShell: QNN ABI, native, graph, context, Spe
 tools/              host PowerShell: context metadata reader, device job and speak drivers
 docs/               design, HTP findings, receipts
 ```
+
+The Windows compute-node design and its ADB-free AOA admission boundary are in
+[docs/WINDOWS-COMPUTE-NODE.md](docs/WINDOWS-COMPUTE-NODE.md).
 
 Build output is never written into the repository. Compiled contexts and staged
 device jobs go to `..\Build\Kokoro-QNN (next to the repository)`.

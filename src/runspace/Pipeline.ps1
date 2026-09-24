@@ -161,7 +161,7 @@ try {
         $enqueueMs = $enqueue.Elapsed.TotalMilliseconds
         $queuedMs=$pipeline.Elapsed.TotalMilliseconds
         if ($index -eq 0) { $lines.Add("FirstAudioQueuedMs=$($queuedMs.ToString('F1'))") }
-        $lines.Add("Phrase=$($phrase.Id) Capacity=$($phrase.Capacity) Samples=$count FrontMs=$($front.Ms.ToString('F1')) GenMs=$($gen.Ms.ToString('F1')) ReadyMs=$($readyMs.ToString('F1')) QueuedMs=$($queuedMs.ToString('F1')) EnqueueWaitMs=$($enqueueMs.ToString('F1')) SnrDb=$($snr.ToString('F2')) NonFinite=$bad")
+        $lines.Add("Phrase=$($phrase.Id) Speaker=$($phrase.Speaker) Voice=$($phrase.Voice) Capacity=$($phrase.Capacity) Samples=$count FrontMs=$($front.Ms.ToString('F1')) GenMs=$($gen.Ms.ToString('F1')) ReadyMs=$($readyMs.ToString('F1')) QueuedMs=$($queuedMs.ToString('F1')) EnqueueWaitMs=$($enqueueMs.ToString('F1')) SnrDb=$($snr.ToString('F2')) NonFinite=$bad")
     }
     $audioQueue.CompleteAdding()
     [void]$audioPowerShell.EndInvoke($audioAsync)

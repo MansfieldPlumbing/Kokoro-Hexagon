@@ -29,6 +29,8 @@ checks on the physical target:
 6. Cold time to first audio, warm time to first audio, sustained synthesis
    rate, peak resident memory, and transport/compute timing are recorded.
 7. Application startup and device state are restored after the test.
+8. The Windows compute-node demo accepts framed requests over AOA without an
+   adb process in the command or data path.
 
 The first release target is ARM64 on the Samsung Galaxy S23. Additional SoCs
 and ABIs require their own device receipts; compatibility is not inferred from
@@ -36,8 +38,10 @@ the V73 result.
 
 ## Android platform surface
 
-The release uses `android.app.NativeActivity`. Its manifest retains only the
-declarative `MAIN` and `LAUNCHER` filter required to launch the application.
+The release uses `android.app.NativeActivity`. Its manifest retains the
+declarative `MAIN` and `LAUNCHER` filter and, for the Windows compute-node
+mode, the standard USB accessory attachment filter for the pinned Kokoro AOA
+identity.
 The runtime does not depend on managed `Intent`, `ContentResolver`, activity
 result, Xamarin, Mono.Android, Java.Interop, application DEX, or provider
 types.
@@ -49,8 +53,18 @@ Platform operations use the narrowest owned boundary:
 - diagnostics use liblog;
 - DSP access uses the pinned native transport ABI;
 - audio output uses a pinned native Android audio API after a hardware gate;
-- JNI is added only for a capability that has no adequate native API.
+- JNI is added only for a capability that has no adequate native API. AOA is
+  one such boundary: the host obtains the granted accessory descriptor through
+  `UsbManager.openAccessory`, then ordinary bounded reads and writes own the
+  established pipe.
 
 The diagnostic scripts in `src/runspace` still target the older host and may
 reference `$Activity` or `Android.*` types. They are evidence tools, not
 dependencies of the release appliance.
+
+`src/runspace/Aoa.Appliance.ps1` is the diagnostic managed-host endpoint. The
+release port preserves its framed protocol and allowlist, but obtains the file
+descriptor from the NativeActivity/JNI boundary rather than Xamarin types.
+The exact accessory identity and activity declarations live under
+`src/appliance/aoa`; the build merges the fragment into its NativeActivity and
+packages the XML filter unchanged.

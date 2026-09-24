@@ -36,6 +36,10 @@ $phraseText=[Collections.Generic.List[string]]::new()
 foreach($dir in $PhraseDirs){
     $manifest=Get-Content -Raw -LiteralPath (Join-Path $dir 'phrase.json')|ConvertFrom-Json
     if($manifest.id -notmatch '^[A-Za-z0-9_-]+$'){throw "unsafe phrase id '$($manifest.id)'"}
+    $speaker=if($manifest.PSObject.Properties.Name -contains 'speaker'){$manifest.speaker}else{'narrator'}
+    $voice=if($manifest.PSObject.Properties.Name -contains 'voice'){$manifest.voice}else{'unknown'}
+    if($speaker -notmatch '^[\p{L}\p{N}][\p{L}\p{N}_.-]{0,63}$'){throw "unsafe speaker id '$speaker'"}
+    if($voice -notmatch '^[a-z][a-z0-9_]{0,63}$'){throw "unsafe voice id '$voice'"}
     if(-not $Buckets.ContainsKey([int]$manifest.capacity) -and -not $Buckets.ContainsKey([string]$manifest.capacity)){throw "no bucket for phrase capacity $($manifest.capacity)"}
     $files=[Collections.Generic.List[string]]::new()
     foreach($name in $bucketInputs[[string]$manifest.capacity]){
@@ -43,7 +47,7 @@ foreach($dir in $PhraseDirs){
         $dest="p-$($manifest.id)-in_$name.f32"; Copy-Item -LiteralPath $source -Destination (Join-Path $st $dest) -Force; $files.Add("'$name'='$dest'")
     }
     $oracle="p-$($manifest.id)-oracle.f32"; Copy-Item -LiteralPath (Join-Path $dir 'oracle_audio.f32') -Destination (Join-Path $st $oracle) -Force
-    $phraseText.Add("[pscustomobject]@{Id='$($manifest.id)';Capacity=$($manifest.capacity);ValidSamples=$($manifest.validSamples);Oracle='$oracle';Files=@{$($files -join ';')}}")
+    $phraseText.Add("[pscustomobject]@{Id='$($manifest.id)';Speaker='$speaker';Voice='$voice';Capacity=$($manifest.capacity);ValidSamples=$($manifest.validSamples);Oracle='$oracle';Files=@{$($files -join ';')}}")
 }
 $job="[pscustomobject]@{MinSnrDb=$MinSnrDb;Buckets=@($($bucketText -join ','));Phrases=@($($phraseText -join ','))}"
 Set-Content -LiteralPath (Join-Path $st 'pipeline-job.ps1') -Value $job
