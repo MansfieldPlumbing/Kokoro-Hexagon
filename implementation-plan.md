@@ -6,8 +6,9 @@ the evidence required to advance them.
 
 ## Product
 
-Kokoro-Hexagon is a portable, ahead-of-time-lowered speech model with two
-backends:
+Kokoro-Hexagon is a portable, PowerShell-lowered speech model delivered as a
+literal weight-bearing managed assembly, with platform-specific execution and
+audio backends:
 
 ```text
 admitted text
@@ -16,20 +17,54 @@ admitted text
   -> Kokoro-Hexagon.dll
        -> Windows reference backend -> WASAPI
        -> Android appliance backend -> HTP/Hexagon -> AAudio
+       -> Windows controller -> resident Android compute backend -> WASAPI or AAudio
 ```
 
-`model.ps1` is the auditable model and control source. The build parses and
-lowers it ahead of time. `Kokoro-Hexagon.dll` is the portable typed model
-surface: it carries the admitted text pipeline, graph identity, control schema,
-specialization map, and integrity metadata. Fixed weights, QNN contexts, and
-native/DSP libraries are hash-pinned release resources. They are not generated
-or downloaded as executable code at runtime.
+`model.ps1` is the auditable model and control source. PowerShell parses,
+validates, and lowers it before release. Each `Kokoro-Hexagon.dll` variant
+contains its own serialized, indexed weight blob, admitted text pipeline,
+typed streaming API, graph identity, control schema, specialization map, and
+integrity metadata. The pinned checkpoint is converted once into a safe,
+versioned tensor source pack; routine PowerShell builds consume that pack, not
+the checkpoint serializer. PowerShell emits both the managed model assembly and
+our target-specific DSP ELF binaries. Independent assemblers and existing graph
+runtimes may verify or temporarily execute blocks that have not passed direct
+lowering; they are not the production emitter. The phone's required system
+runtime remains a platform dependency. No executable payload is fetched or
+generated during ordinary inference.
 
-The ordinary user path must be smaller than the development path: obtain a
-signed release bundle, load the assembly, select a backend, and stream text. A
-source user must be able to reproduce the assembly with one documented build
-command. Python is allowed only in host-side export work when weights or graph
-shapes change; it is not an appliance dependency.
+The ordinary user path is turnkey: with PowerShell 7, obtain a verified release,
+load one model DLL, select a compute backend and audio sink, and stream text.
+The Windows reference backend must eventually make this possible without a
+phone; the Windows-controlled phone is the primary accelerated demonstration.
+The APK is a minimal resident backend. A source user must be able to reproduce
+a variant with one documented `setup-kokoro.ps1` command. The script reuses the
+proven `C:\Dev\pwsh\setup.ps1` facade and write-plan discipline where
+applicable, but exposes only Kokoro's required steps. Routine source builds and
+the appliance require PowerShell 7, pinned inputs, and the declared platform
+runtime; they do not require a separate model compiler. The release contains
+ordinary managed IL and PowerShell-emitted DSP payloads. Developer JIT is an
+opt-in source-build/test workflow over that IL, not a separate runtime artifact
+format.
+
+The model variants are separate artifacts, not one process-resident collection:
+FP32 is the numerical reference; FP16 and INT8 are admitted only after
+per-layer, speech-quality, memory, and end-to-end timing gates. Each variant
+has its own embedded weight hash and release identity. Load one variant at a
+time on a memory-constrained device.
+
+### Build methodology
+
+The maintainer first admits a pinned tensor source pack against the original
+checkpoint and independent numerical/audio references. That conversion is a
+separate, recorded provenance step, not a requirement for a release user or a
+routine source rebuild. Thereafter `setup-kokoro.ps1` uses PowerShell 7 and
+pinned source data to validate the model AST, specialize and lower its graph,
+pack the selected weights into the managed assembly, emit required DSP ELF
+code, and run differential gates. The documented clean build must not require
+a model framework or separate language toolchain. Validated text processing,
+control, scheduling, and kernel dispatch move into the assembly rather than
+remaining interpreted work on the speech hot path.
 
 ## Permanent ratchets
 
@@ -65,6 +100,14 @@ general or complete speech synthesis.
 This is the current gate. The DLL currently begins at acoustic tensors; it is
 not yet a complete text-to-speech model surface.
 
+SMA is the parser and compiler front end for authored PowerShell pronunciation
+rules, not a pronunciation oracle for arbitrary prose. The speech input is
+tokenized as data. Only a bounded, validated rule AST may be lowered into the
+DLL; user text is never parsed or executed as PowerShell. Reuse JS2PS's
+separation of syntax admission from semantic conformance, ChangeModel's
+measured mismatch/held-out representation tests, and Pwsh's persisted managed
+assembly emission patterns. Each borrowed pattern needs a Kokoro-specific gate.
+
 ### Work
 
 1. Define a versioned text contract covering Unicode normalization, numbers,
@@ -75,6 +118,8 @@ not yet a complete text-to-speech model surface.
    - the existing pinned host phonemizer as the pronunciation oracle;
    - the supplied TypeScript parser as a second implementation reference,
      after source review rather than direct adoption.
+   Use the pinned Kokoro vocabulary to test emitted IDs, not SMA parse success
+   as a proxy for pronunciation correctness.
 3. Build a machine-readable differential corpus from:
    - narrative excerpts for continuity and dialogue;
    - technical prose for numbers, symbols, abbreviations, and code-adjacent
@@ -89,11 +134,12 @@ not yet a complete text-to-speech model surface.
    quotation/dialogue state, speaker/voice, pronunciation override scope, and
    boundary strength. A cut may not occur inside a normalized token or phoneme.
 6. Differentially test every corpus case. Store expected outputs and compact
-   mismatch categories, not an opaque pass/fail total.
+   mismatch categories, not an opaque pass/fail total. Add held-out heteronym,
+   morphology, and chunk-boundary pairs before admitting a new context feature.
 7. Persist the validated methods and their contract/version hashes into
    `Kokoro-Hexagon.dll`. Loading the DLL on Windows must be sufficient to
-   normalize, phonemize, produce IDs, and plan chunks without Android, Python,
-   Node, or a network connection.
+   normalize, phonemize, produce IDs, and plan chunks without Android, a model
+   framework, or a network connection.
 
 ### Exit gate
 
@@ -112,9 +158,9 @@ Define one small public surface; platform details stay behind backend bindings.
 The target shape is conceptually:
 
 ```text
-Load(manifest) -> model
+Load(dll, variant) -> model
 Plan(text, voice, controls, continuation) -> chunks
-Open(backend) -> session
+Open(computeBackend, audioSink) -> session
 session.Write(chunk) -> timing and quality receipt
 session.Complete()
 ```
@@ -122,15 +168,24 @@ session.Complete()
 ### Work
 
 1. Persist typed request, chunk, continuation, control, and receipt shapes in the
-   assembly. Do not expose internal QNN tensor names as the stable user API.
-2. Bind the pinned QuickPS WASAPI mechanism as the Windows audio sink. Preserve
+   assembly. Do not expose internal graph tensor names as the stable user API.
+2. Pack the pinned tensor source into a deterministic blob with explicit
+   tensor names, shapes, dtypes, offsets, alignment, and hashes. Embed that blob
+   in the variant DLL; verify every range and hash before use. Measure assembly
+   load, blob access, and peak memory so the embedding does not silently create
+   a second full-weight copy. The released path never opens the source checkpoint.
+3. Keep compute and audio selection independent: Windows reference or resident
+   phone compute; WASAPI, AAudio, or caller-owned PCM output. Unsupported
+   combinations fail explicitly. The transport is an adapter, not model logic.
+4. Bind the pinned QuickPS WASAPI mechanism as the Windows audio sink. Preserve
    its COM ownership, buffer, format, and deterministic disposal contracts.
-3. Provide a Windows reference execution mode for correctness and listening.
+5. Provide a Windows reference execution mode for correctness and listening.
    It may be slower than Android, but it must consume the same plan and return
    the same control and artifact identities.
-4. Add a minimal `Speak-Kokoro.ps1` driver that loads the assembly, selects a
-   voice and backend, streams text, and prints a compact receipt.
-5. Keep model load, text planning, synthesis, queuing, presentation, and drain
+6. Add a minimal `Speak-Kokoro.ps1` driver that loads the assembly, selects a
+   variant, voice, compute backend, and audio sink, streams text, and prints a
+   compact receipt.
+7. Keep model load, text planning, synthesis, queuing, presentation, and drain
    timings separate.
 
 ### Exit gate
@@ -140,6 +195,8 @@ session.Complete()
 - The same input plan is accepted without translation by the Android backend.
 - Repeated calls reuse the model session; no per-chunk runspace or model reload
   is permitted.
+- The source checkpoint is absent from the runtime environment. The embedded
+  blob matches its build manifest and loads within a measured memory budget.
 
 ## Gate 3: real long-form Android stream
 
@@ -251,10 +308,12 @@ identity and not the user's scripting environment.
 3. Treat FastRPC as the measured supported CDSP boundary unless pinned source,
    specification, or a documented probe proves a safe lower route. Keep its
    setup out of per-chunk timing by maintaining a resident session.
-4. Map weights and contexts without a second full-model copy. Record proportional
-   set size and peak resident memory during cold load and long-form use.
-5. Do not require Xamarin, application DEX, runtime C# compilation, or runtime
-   native/DSP code emission.
+4. Read embedded weights without a second full-model copy. Record proportional
+   set size and peak resident memory during cold load and long-form use. Any
+   temporary prepared context remains separately measured until its graph is
+   replaced by a validated PowerShell-emitted DSP implementation.
+5. Keep the appliance a fixed native host with a typed managed entry point;
+   do not compile managed or DSP code during ordinary inference.
 
 Exit: the signed APK installs, accepts the typed model protocol, speaks a warm
 stream, survives repeated sessions and cancellation, restores/cleans temporary
@@ -262,13 +321,14 @@ state, and reports its exact component hashes.
 
 ## Gate 7: release exemplar
 
-Publish one reproducible release bundle suitable for Hugging Face and GitHub:
+Publish reproducible, separately selectable model variants suitable for Hugging
+Face and GitHub:
 
-- `Kokoro-Hexagon.dll`;
-- pinned model/data resources and target-specific native payloads;
+- one weight-bearing `Kokoro-Hexagon.dll` per admitted precision;
+- PowerShell-emitted DSP ELF payloads for the admitted Android specializations;
 - manifest with source revisions, licenses, sizes, and SHA-256 values;
 - minimal Windows and Android/AOA drivers;
-- one-command source build and verification instructions;
+- PowerShell 7 quick start and one-command source build/verification instructions;
 - counterbalanced performance and speaker receipts with narrow claim language;
 - an SBOM and signed release artifacts.
 
@@ -276,19 +336,42 @@ The release page must distinguish the stock pinned Kokoro weights from any
 future trained, FiLM-modified, or quantized checkpoint. A separate model identity
 is created only when weights or architecture actually change.
 
+### Developer source/JIT path
+
+`setup-kokoro.ps1` is the single documented entry point for source users. It
+reuses the existing PowerShell setup facade's pinned-input, preview/write-plan,
+and resumable-step patterns, while retaining only steps required by this model.
+The documented developer command must validate `model.ps1` and the pinned
+tensor source pack, lower the selected graph and weight precision through
+PowerShell, emit ordinary managed IL and target DSP ELF, run independent
+numerical and corpus checks, and
+either test that IL under the installed PowerShell 7 runtime or persist the
+same release-shaped DLL. Developer JIT does not alter model semantics or bypass
+admission gates. The default user command does none of this build work.
+
+Exit: a clean PowerShell 7 user can invoke a verified variant with a short
+documented command; a developer can rebuild it with one setup command and
+reproduce its graph, weight, and corpus identities. The source-run and
+prebuilt-assembly paths return equivalent outputs on the same backend.
+
 ## Work order
 
 Do not run these tracks as competing prototypes. The order is:
 
 1. Phoneme differential corpus and portable text pipeline.
 2. Persist text/phoneme methods into the DLL and prove them on Windows.
-3. Minimal DLL driver plus QuickPS WASAPI playback.
-4. Feed those plans into the existing warm Android pipeline and obtain a
+3. Embed and validate one weight variant; measure DLL load and memory on both
+   platforms before multiplying variants.
+4. Minimal DLL driver plus QuickPS WASAPI playback.
+5. Feed those plans into the existing warm Android pipeline and obtain a
    long-form speaker receipt.
-5. Generalize the successful HVX scheduler and lower the next expensive model
+6. Generalize the successful HVX scheduler and lower the next expensive model
    blocks, using physical A/B gates after each promotion.
-6. Reduce appliance/runtime payload and harden lifecycle behavior.
-7. Package and publish the reproducible exemplar.
+7. Reduce appliance/runtime payload and harden lifecycle behavior.
+8. Prove the Windows-controlled phone path with framed requests and inclusive
+   transport, compute, and audio timing; do not claim remote general compute
+   before that round trip exists.
+9. Package and publish the reproducible variants and source-build instructions.
 
 ## Change discipline
 
