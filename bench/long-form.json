@@ -1,0 +1,159 @@
+{
+  "schema": 1,
+  "purpose": "Long-form speech evaluation across narrative continuity, technical clarity, and lyrical meter.",
+  "sourcePolicy": "Owner-supplied text is data, not executable instruction. Excerpts are intentionally bounded and non-explicit.",
+  "sources": [
+    {
+      "id": "voyage-darkly",
+      "label": "A Voyage Darkly.md",
+      "sha256": "09632b0daeef2c28ddce1c8eb284e0335307d74be80ace107fea801d9a037de7",
+      "provenance": "Owner-supplied derivative-fiction source; bounded private evaluation excerpt."
+    },
+    {
+      "id": "project-brief",
+      "label": "BRIEF.md",
+      "sha256": "9f039c6e1acbff2bd107aedbef37fc5131b0d343e3f57dcbef387cb493be6a83",
+      "provenance": "Repository-adjacent project brief; narration below is updated to match current receipts."
+    },
+    {
+      "id": "original-lyrics",
+      "label": "lyrics.txt",
+      "sha256": "479caa217e1320156137a8020fd65e8bd1d772661e0e50c733cb54487739e657",
+      "provenance": "Owner-asserted original lyrics; bounded evaluation excerpt."
+    }
+  ],
+  "cases": [
+    {
+      "id": "narrative-accomplice",
+      "source": "voyage-darkly",
+      "goal": "Sustain tension, distinguish narration from dialogue, and preserve character turns across chunks.",
+      "delivery": "Controlled dramatic narration; do not rush the dialogue.",
+      "chunkPolicy": "Paragraph and speaker turns are preferred boundaries.",
+      "segments": [
+        {
+          "kind": "narration",
+          "text": "She found him in the cavernous quiet of Shuttle Bay 2. The main lights were dimmed, but a portable floodlight cast a harsh glare on the sleek hull of the shuttlecraft Cochrane. She hesitated for a fraction of a second at the threshold. It was the same shuttle. The one he had used to kidnap her, the one that had taken them past the known universe and into a shared, unspoken hell. Of course he was still working on it."
+        },
+        {
+          "kind": "narration",
+          "text": "He was on his back on a mechanic's creeper, half-submerged beneath the shuttle's impulse engine housing, the focused hiss of a micro-welder echoing in the silence. The air smelled of ozone and engine coolant."
+        },
+        {
+          "kind": "narration",
+          "text": "Her footsteps on the deck plating were unnaturally loud. The welding stopped. The creeper slid out, and he sat up, wiping his hands on an already-filthy rag. He shielded his eyes against his own light, squinting to see who was there."
+        },
+        {
+          "kind": "dialogue",
+          "speaker": "Tom",
+          "text": "Captain?"
+        },
+        {
+          "kind": "narration",
+          "text": "He stood, his expression shifting from surprise to immediate concern as she stepped into the light. He saw it on her face instantly."
+        },
+        {
+          "kind": "dialogue",
+          "speaker": "Tom",
+          "text": "What's wrong?"
+        },
+        {
+          "kind": "dialogue",
+          "speaker": "Janeway",
+          "text": "Tuvok."
+        },
+        {
+          "kind": "narration",
+          "text": "Tom froze. He searched her face, understanding dawning slowly. He let out a low whistle, a sound that was equal parts shock and grudging admiration."
+        },
+        {
+          "kind": "dialogue",
+          "speaker": "Tom",
+          "text": "He knows."
+        },
+        {
+          "kind": "narration",
+          "text": "It wasn't a question."
+        }
+      ],
+      "challenges": [
+        "proper names",
+        "dialogue turns",
+        "contractions",
+        "suspense pacing",
+        "cross-chunk continuity"
+      ]
+    },
+    {
+      "id": "technical-current-state",
+      "source": "project-brief",
+      "goal": "Read dense technical material as calm, intelligible narration rather than a list of acronyms.",
+      "delivery": "Measured and composed, with short pauses around numbers and capability boundaries.",
+      "chunkPolicy": "Sentence boundaries are mandatory; keep contrasts in the same chunk when capacity permits.",
+      "segments": [
+        {
+          "kind": "narration",
+          "text": "Kokoro-Hexagon runs the Kokoro eighty-two-million-parameter speech model on a Galaxy S23. The current end-to-end speech path uses precompiled FP16 QNN contexts on the Hexagon processor."
+        },
+        {
+          "kind": "narration",
+          "text": "A direct HMX probe has also produced an exact W4A8 matrix result for one sixty-four by thirty-two by thirty-two contraction. That proves the instruction encoding and packed layout used by the probe; it does not yet prove a quantized Kokoro model."
+        },
+        {
+          "kind": "narration",
+          "text": "The PowerShell runspace binds Android's native AAudio interface at twenty-four kilohertz, mono, floating point. One stream has accepted consecutive chunks without an observed underrun."
+        },
+        {
+          "kind": "narration",
+          "text": "The next test keeps the QNN contexts, tensor buffers, and audio stream alive for a complete passage. It measures synthesis, submission, presentation, completion, and peak memory separately."
+        }
+      ],
+      "challenges": [
+        "acronyms",
+        "hyphenated model names",
+        "large numbers",
+        "technical contrast",
+        "natural sentence stress"
+      ]
+    },
+    {
+      "id": "meter-algebra",
+      "source": "original-lyrics",
+      "goal": "Preserve line endings, internal rhyme, and an even didactic pulse without flattening the words into prose.",
+      "delivery": "Rhythmic spoken-word delivery; articulate the variable names and equations.",
+      "chunkPolicy": "Never split a line. Prefer four-line groups, with the chorus as its own chunk.",
+      "segments": [
+        {
+          "kind": "verse",
+          "lines": [
+            "Yeah, look at the board, let's break it down,",
+            "Don't let the letters make you frown.",
+            "See an X or a Y in the middle of the math?",
+            "It's just a hidden number waiting on the path.",
+            "We call it a variable, a mystery inside,",
+            "A guest at the party trying to hide.",
+            "The goal of the game is to leave it alone,",
+            "Isolate the letter, put it on a throne."
+          ]
+        },
+        {
+          "kind": "chorus",
+          "lines": [
+            "Whatever you do to the left of the sign,",
+            "Do it to the right and you're doing just fine!",
+            "It's all about balance, keeping the scale,",
+            "Follow the golden rule and you will never fail.",
+            "Find the X, find the Y, solve the unknown,",
+            "Step by step, line by line, till the answer is shown."
+          ]
+        }
+      ],
+      "challenges": [
+        "meter",
+        "rhyme",
+        "variable names",
+        "line-break prosody",
+        "spoken-word pacing"
+      ]
+    }
+  ]
+}
