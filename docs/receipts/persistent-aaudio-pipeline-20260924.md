@@ -1,11 +1,11 @@
 # Persistent QNN and AAudio pipeline receipt
 
-Date: 2026-09-24  
-Target: Samsung Galaxy S23, SM8550 / Hexagon V73  
-Runtime: QAIRT 2.46.0.260424  
-Voice: `af_heart`  
-Capacity: 64 frames  
-Audio format: 24 kHz, mono, float
+- Date: 2026-09-24
+- Target: Samsung Galaxy S23, SM8550 / Hexagon V73
+- Runtime: QAIRT 2.46.0.260424
+- Voice: `af_heart`
+- Capacity: 64 frames
+- Audio format: 24 kHz, mono, float
 
 ## Question
 
