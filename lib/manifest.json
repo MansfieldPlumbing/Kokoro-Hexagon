@@ -94,6 +94,16 @@
     "role": "Locally proven Windows AOA negotiation mechanism adapted by tools/UsbAoa.ps1",
     "sha256": "B6E44EDEF20FC787F21586DD3184AE7A739824A84FE4E2BD2B4D3BBB4B2C0EDF"
   },
+  "pwshBuildDonor": {
+    "role": "Pinned Xamarin-free NativeActivity/CoreCLR APK build graph forked as setup-kokoro.ps1",
+    "bytes": 592110,
+    "sha256": "44432CB738EDB13FB7B2AEA999C265A94F5EEAC867DC4E4E39C1503E0E813D62"
+  },
+  "pwshBuildManifestDonor": {
+    "role": "Pinned package and specification provenance consumed only by setup-kokoro.ps1",
+    "bytes": 11694,
+    "sha256": "C2B3C6D044EACBACAD7E7B1C58F18EA8AE6FB836B421B5EC3788D009E57CEDC4"
+  },
   "speechFrontEnd": {
     "package": "phonemizer",
     "version": "1.2.1",

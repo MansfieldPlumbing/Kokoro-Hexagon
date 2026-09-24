@@ -14,6 +14,9 @@
 *.wav
 *.log
 __pycache__/
+**/*.csproj.nuget.*
+**/project.assets.json
+**/project.nuget.cache
 
 # Qualcomm-header-derived reference data: kept local pending license review
 lib/qairt-2.46/

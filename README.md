@@ -47,6 +47,24 @@ docs/               design, HTP findings, receipts
 The Windows compute-node design and its ADB-free AOA admission boundary are in
 [docs/WINDOWS-COMPUTE-NODE.md](docs/WINDOWS-COMPUTE-NODE.md).
 
+## Android appliance build
+
+`setup-kokoro.ps1` is the single, self-verifying build graph for the downloadable
+Android appliance. It is forked from the pinned Pwsh builder and defaults to the
+DEX-free NativeActivity/CoreCLR admission path; this product fork does not admit
+the Xamarin/Mono packaging path.
+
+```powershell
+pwsh -NoProfile -File .\setup-kokoro.ps1 -Headless -Step 11
+```
+
+The normal user path is a signed release APK. The script is the reproducible
+builder path and prints its complete write plan before creating anything. Build
+output and signing material remain outside the repository.
+
+The resident provider architecture, current host control measurement, and
+remaining Android gates are in [docs/APPLIANCE.md](docs/APPLIANCE.md).
+
 Build output is never written into the repository. Compiled contexts and staged
 device jobs go to `..\Build\Kokoro-QNN (next to the repository)`.
 
