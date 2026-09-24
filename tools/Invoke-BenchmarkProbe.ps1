@@ -5,7 +5,8 @@
 param(
     [string]$Serial = $env:KOKORO_QNN_SERIAL,
     [string]$BuildDirectory = 'C:\Dev\Antigravity\Build\Kokoro-QNN',
-    [string]$Package = 'dev.mansfieldplumbing.androidsma.preview'
+    [string]$Package = 'dev.mansfieldplumbing.androidsma.preview',
+    [switch]$LLVMFirst
 )
 $ErrorActionPreference = 'Stop'
 
@@ -37,6 +38,8 @@ $libraryPSHash = (Get-FileHash $libraryPS).Hash
 $libraryLLVM = Join-Path $BuildDirectory 'benchmark-llvm\libkokoro_r0sub0_llvm_skel.so'
 if (-not (Test-Path $libraryLLVM)) { throw "LLVM compiled library not found: $libraryLLVM" }
 $libraryLLVMHash = (Get-FileHash $libraryLLVM).Hash
+$orderFile = Join-Path $BuildDirectory 'benchmark-llvm\benchmark-order.txt'
+[IO.File]::WriteAllText($orderFile, $(if ($LLVMFirst) { 'LLVM,PS' } else { 'PS,LLVM' }))
 
 $id = [Guid]::NewGuid().ToString('N')
 $temp = "/data/local/tmp/kokoro-bench-$id"
@@ -50,6 +53,7 @@ $changed = $false
 try {
     $files = @(
         @($harness, 'KokoroBenchmarkProbe.ps1'),
+        @($orderFile, 'order.txt'),
         @($libraryPS, 'libkokoro_r0sub0_skel.so'),
         @($libraryLLVM, 'libkokoro_r0sub0_llvm_skel.so')
     )

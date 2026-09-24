@@ -101,12 +101,17 @@ if(-not $m.Success) { throw 'Missing Hexagon dynamic version tag' }
 $elf.DT_HEXAGON_VER=[Convert]::ToUInt32($m.Groups[1].Value.Substring(2),16)
 $script:Target=[pscustomobject]@{ElfClass=32;Machine='EM_HEXAGON';ElfFlags=@('EF_HEXAGON_ISA_V73');RelocationForm='RELA'}
 if($Kernel -eq 'KokoroR0Sub0') {
+    $modelPath=Join-Path $PSScriptRoot '..\src\models\Kokoro.R0Sub0.ps1'
+    $modelAst=[Management.Automation.Language.Parser]::ParseFile($modelPath,[ref]$tokens,[ref]$errors)
+    if($errors.Count) { throw 'R0Sub0 model does not parse' }
+    $nodes=@(& (Join-Path $PSScriptRoot '..\src\lower\Lower-Model.ps1') -Model $modelAst.GetScriptBlock())
     $weights=Get-Content $WeightManifest -Raw | ConvertFrom-Json
     $weightPath=Join-Path (Split-Path $WeightManifest) 'r0_static.bin'
     if((Get-FileHash $weightPath).Hash -ne $weights.Sha256 -or (Get-Item $weightPath).Length -ne $weights.Bytes) { throw 'Existing weights fail their manifest' }
     . (Join-Path $PSScriptRoot '..\src\emit\Kokoro.R0Sub0.ps1')
-    $steps=@(New-KokoroR0Sub0Steps -Frames 7681 -Channels $weights.Channels -WeightBytes $weights.Bytes -Weights $weights.Values)
+    $steps=@(New-KokoroR0Sub0Steps -Nodes $nodes -Frames 7681 -Channels $weights.Channels -WeightBytes $weights.Bytes -Weights $weights.Values)
     $symbol='kokoro_r0sub0_skel_handle_invoke'; $soname='libkokoro_r0sub0_skel.so'
+    Write-NewOrIdenticalFile (Join-Path $OutputDirectory 'lowered.json') ([Text.Encoding]::UTF8.GetBytes(($nodes | ConvertTo-Json -Depth 6))) -AllowOverwrite:$Force
 } elseif($Kernel -in 'KokoroAffine','KokoroConvTile') {
     $modelName=if($Kernel -eq 'KokoroAffine'){'Kokoro.Affine.ps1'}else{'Kokoro.ConvTile.ps1'}
     $modelPath=Join-Path $PSScriptRoot "..\src\models\$modelName"

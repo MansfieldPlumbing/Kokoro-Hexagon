@@ -151,99 +151,67 @@ try {
     # Method 2: 5 in, 2 out -> 0x02050200 (pra[5] workspace and pra[6] output returned to host)
     $methodId = [uint32]0x02050200
 
-    # =========================================================================
-    # COMPETITOR A: Pure PowerShell Direct Emitted Hexagon V73 Kernel
-    # =========================================================================
-    $lines.Add('--- Starting Competitor A: PowerShell Emitted V73 ---')
-    $uriPS = [Text.Encoding]::UTF8.GetBytes('file:///libkokoro_r0sub0_skel.so?kokoro_r0sub0_skel_handle_invoke&_modver=1.0&_dom=cdsp' + [char]0)
-    $uriPSPtr = & $pin $uriPS
-    $oaPS = [object[]]@($uriPSPtr, [uint64]0)
-    $rc = [int]$open.DynamicInvoke($oaPS)
-    $lines.Add("OpenPS_Rc=$rc")
-    if ($rc -ne 0) { throw "PowerShell emitted library open failed: rc=$rc" }
-    $handlePS = [uint64]$oaPS[1]
+    $competitors = @{
+        PS = [pscustomobject]@{
+            Label = 'PowerShell Emitted V73'; Uri = 'file:///libkokoro_r0sub0_skel.so?kokoro_r0sub0_skel_handle_invoke&_modver=1.0&_dom=cdsp'
+            Args = $argsPSPtr; Output = $outputPS
+        }
+        LLVM = [pscustomobject]@{
+            Label = 'LLVM Clang 19.0.04 V73'; Uri = 'file:///libkokoro_r0sub0_llvm_skel.so?kokoro_r0sub0_skel_handle_invoke&_modver=1.0&_dom=cdsp'
+            Args = $argsLLVMPtr; Output = $outputLLVM
+        }
+    }
+    $orderPath = [IO.Path]::Combine($dir, 'order.txt')
+    $order = if ([IO.File]::Exists($orderPath)) { [IO.File]::ReadAllText($orderPath).Trim().Split(',') } else { @('PS','LLVM') }
+    if (($order -join ',') -notin @('PS,LLVM','LLVM,PS')) { throw 'Invalid benchmark order' }
+    $lines.Add("ExecutionOrder=$($order -join ',')")
 
-    # Cold invoke:
-    [Array]::Clear($workspace, 0, $workspace.Length)
-    [Array]::Clear($outputPS, 0, $outputPS.Length)
-    $invArgsPS = [object[]]@($handlePS, $methodId, $argsPSPtr)
+    $runCompetitor = {
+        param([string]$Name)
+        $spec = $competitors[$Name]
+        [void]$lines.Add("--- Starting $Name`: $($spec.Label) ---")
+        $uriBytes = [Text.Encoding]::UTF8.GetBytes($spec.Uri + [char]0)
+        $uriPtr = & $pin $uriBytes
+        $openArgs = [object[]]@($uriPtr, [uint64]0)
+        $rc = [int]$open.DynamicInvoke($openArgs)
+        [void]$lines.Add("Open$($Name)_Rc=$rc")
+        if ($rc -ne 0) { throw "$Name library open failed: rc=$rc" }
+        $handle = [uint64]$openArgs[1]
 
-    $coldPS = [Diagnostics.Stopwatch]::StartNew()
-    $rc = [int]$invoke.DynamicInvoke($invArgsPS)
-    $coldPS.Stop()
-    $lines.Add("ColdInvokePS_Rc=$rc ColdInvokePS_Ms=$($coldPS.Elapsed.TotalMilliseconds.ToString('F3', [Globalization.CultureInfo]::InvariantCulture))")
-    if ($rc -ne 0) { throw "PowerShell cold invoke failed: rc=$rc" }
-
-    $outHashPS = & $hash $outputPS
-    $lines.Add("OutSHA256_PS=$outHashPS")
-    & $save
-
-    # 12 Warm iterations for Competitor A:
-    $timingsPS_Ms = [double[]]::new(12)
-    $cyclesPS = [ulong[]]::new(12)
-    for ($iter = 0; $iter -lt 12; $iter++) {
-        [Array]::Clear($workspace, 0, 16)
-        $sw = [Diagnostics.Stopwatch]::StartNew()
-        $rc = [int]$invoke.DynamicInvoke($invArgsPS)
-        $sw.Stop()
-        if ($rc -ne 0) { throw "PowerShell warm invoke failed at iter $($iter): rc=$rc" }
-        $timingsPS_Ms[$iter] = $sw.Elapsed.TotalMilliseconds
-        $t0 = [BitConverter]::ToUInt64($workspace, 0)
-        $t1 = [BitConverter]::ToUInt64($workspace, 8)
-        $cyclesPS[$iter] = $t1 - $t0
-        $lines.Add(("Iter={0} PS_Cycles={1} PS_Ms={2:F3}" -f $iter, $cyclesPS[$iter], $timingsPS_Ms[$iter]))
+        [Array]::Clear($workspace, 0, $workspace.Length)
+        [Array]::Clear($spec.Output, 0, $spec.Output.Length)
+        $invokeArgs = [object[]]@($handle, $methodId, $spec.Args)
+        $cold = [Diagnostics.Stopwatch]::StartNew()
+        $rc = [int]$invoke.DynamicInvoke($invokeArgs)
+        $cold.Stop()
+        [void]$lines.Add("ColdInvoke$($Name)_Rc=$rc ColdInvoke$($Name)_Ms=$($cold.Elapsed.TotalMilliseconds.ToString('F3', [Globalization.CultureInfo]::InvariantCulture))")
+        if ($rc -ne 0) { throw "$Name cold invoke failed: rc=$rc" }
+        $outputHash = & $hash $spec.Output
+        [void]$lines.Add("OutSHA256_$Name=$outputHash")
         & $save
+
+        $timings = [double[]]::new(12)
+        $cycles = [ulong[]]::new(12)
+        for ($iter = 0; $iter -lt 12; $iter++) {
+            [Array]::Clear($workspace, 0, 16)
+            $sw = [Diagnostics.Stopwatch]::StartNew()
+            $rc = [int]$invoke.DynamicInvoke($invokeArgs)
+            $sw.Stop()
+            if ($rc -ne 0) { throw "$Name warm invoke failed at iter $($iter): rc=$rc" }
+            $timings[$iter] = $sw.Elapsed.TotalMilliseconds
+            $cycles[$iter] = [BitConverter]::ToUInt64($workspace, 8) - [BitConverter]::ToUInt64($workspace, 0)
+            [void]$lines.Add(("Iter={0} {1}_Cycles={2} {1}_Ms={3:F3}" -f $iter, $Name, $cycles[$iter], $timings[$iter]))
+            & $save
+        }
+        $closeRc = [int]$close.DynamicInvoke([object[]]@($handle))
+        [void]$lines.Add("Close$($Name)_Rc=$closeRc")
+        [pscustomobject]@{ Hash = $outputHash; Timings = $timings; Cycles = $cycles }
     }
 
-    $closeRc = [int]$close.DynamicInvoke([object[]]@($handlePS))
-    $lines.Add("ClosePS_Rc=$closeRc")
-
-    # =========================================================================
-    # COMPETITOR B: Qualcomm Hexagon LLVM Clang Compiled Kernel
-    # =========================================================================
-    $lines.Add('--- Starting Competitor B: LLVM Clang 19.0.04 V73 ---')
-    $uriLLVM = [Text.Encoding]::UTF8.GetBytes('file:///libkokoro_r0sub0_llvm_skel.so?kokoro_r0sub0_skel_handle_invoke&_modver=1.0&_dom=cdsp' + [char]0)
-    $uriLLVMPtr = & $pin $uriLLVM
-    $oaLLVM = [object[]]@($uriLLVMPtr, [uint64]0)
-    $rc = [int]$open.DynamicInvoke($oaLLVM)
-    $lines.Add("OpenLLVM_Rc=$rc")
-    if ($rc -ne 0) { throw "LLVM library open failed: rc=$rc" }
-    $handleLLVM = [uint64]$oaLLVM[1]
-
-    # Cold invoke:
-    [Array]::Clear($workspace, 0, $workspace.Length)
-    [Array]::Clear($outputLLVM, 0, $outputLLVM.Length)
-    $invArgsLLVM = [object[]]@($handleLLVM, $methodId, $argsLLVMPtr)
-
-    $coldLLVM = [Diagnostics.Stopwatch]::StartNew()
-    $rc = [int]$invoke.DynamicInvoke($invArgsLLVM)
-    $coldLLVM.Stop()
-    $lines.Add("ColdInvokeLLVM_Rc=$rc ColdInvokeLLVM_Ms=$($coldLLVM.Elapsed.TotalMilliseconds.ToString('F3', [Globalization.CultureInfo]::InvariantCulture))")
-    if ($rc -ne 0) { throw "LLVM cold invoke failed: rc=$rc" }
-
-    $outHashLLVM = & $hash $outputLLVM
-    $lines.Add("OutSHA256_LLVM=$outHashLLVM")
-    & $save
-
-    # 12 Warm iterations for Competitor B:
-    $timingsLLVM_Ms = [double[]]::new(12)
-    $cyclesLLVM = [ulong[]]::new(12)
-    for ($iter = 0; $iter -lt 12; $iter++) {
-        [Array]::Clear($workspace, 0, 16)
-        $sw = [Diagnostics.Stopwatch]::StartNew()
-        $rc = [int]$invoke.DynamicInvoke($invArgsLLVM)
-        $sw.Stop()
-        if ($rc -ne 0) { throw "LLVM warm invoke failed at iter $($iter): rc=$rc" }
-        $timingsLLVM_Ms[$iter] = $sw.Elapsed.TotalMilliseconds
-        $t0 = [BitConverter]::ToUInt64($workspace, 0)
-        $t1 = [BitConverter]::ToUInt64($workspace, 8)
-        $cyclesLLVM[$iter] = $t1 - $t0
-        $lines.Add(("Iter={0} LLVM_Cycles={1} LLVM_Ms={2:F3}" -f $iter, $cyclesLLVM[$iter], $timingsLLVM_Ms[$iter]))
-        & $save
-    }
-
-    $closeRc = [int]$close.DynamicInvoke([object[]]@($handleLLVM))
-    $lines.Add("CloseLLVM_Rc=$closeRc")
+    $results = @{}
+    foreach ($name in $order) { $results[$name] = & $runCompetitor $name }
+    $outHashPS = $results.PS.Hash; $timingsPS_Ms = $results.PS.Timings; $cyclesPS = $results.PS.Cycles
+    $outHashLLVM = $results.LLVM.Hash; $timingsLLVM_Ms = $results.LLVM.Timings; $cyclesLLVM = $results.LLVM.Cycles
 
     # =========================================================================
     # GATE A: CRYPTOGRAPHIC OUTPUT PARITY & DIFFERENTIAL AUDIT
