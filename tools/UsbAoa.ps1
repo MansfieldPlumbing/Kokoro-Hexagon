@@ -3,7 +3,7 @@
 USB AOA / KOKORO-HEXAGON
 
 Host-side Android Open Accessory negotiation cartridge, adapted from the
-proven AndroidSMA LiuKang-LiveDoor-R4 handle path. This establishes the owned
+proven AndroidSMA WinUSB handle path. This establishes the owned
 PowerShell/WinUSB transport door; it does not use adb for data transfer.
 
 Shape:
@@ -339,7 +339,7 @@ try {
         )
 
         try {
-            Write-Host 'KANG    GET_PROTOCOL ->'
+            Write-Host 'AOA     GET_PROTOCOL ->'
 
             $n[0] = 0
             $ok = $Native::WinUsb_ControlTransfer(
@@ -455,7 +455,7 @@ try {
                 ([uint64]0x40) `
                 -bor (([uint64]0x35) -shl 8)
 
-            Write-Host 'KANG    START_ACCESSORY ->'
+            Write-Host 'AOA     START_ACCESSORY ->'
 
             $ok = $Native::WinUsb_ControlTransfer(
                 $usb,
