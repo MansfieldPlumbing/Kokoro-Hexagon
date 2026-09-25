@@ -1,14 +1,9 @@
-# Lowered, side-effect-free operation admission tree for the appliance host.
+# Lowered, side-effect-free startup dispatch check for the appliance host.
 # The pinned Pwsh build's LambdaCompiler seam can emit this same tree into the
 # generated managed entrypoint; Compile() is used here only as its host oracle.
 
 $operations = [ordered]@{
     status = 1
-    ping = 2
-    receipt = 3
-    speak = 4
-    benchmark = 5
-    transcribe = 6
 }
 
 $build = {
@@ -42,8 +37,10 @@ $verify = {
         if ($actual -ne [int]$pair.Value) { throw "Operation '$($pair.Key)' dispatched to $actual." }
         $cases.Add([pscustomobject]@{ Operation=[string]$pair.Key; Code=[int]$actual })
     }
-    if ($dispatch.Invoke('SPEAK') -ne 0 -or $dispatch.Invoke('eval') -ne 0 -or $dispatch.Invoke($null) -ne 0) {
-        throw 'Unknown or non-canonical operations were admitted.'
+    foreach ($unsupported in @('ping', 'receipt', 'speak', 'benchmark', 'transcribe', 'SPEAK', 'eval', $null)) {
+        if ($dispatch.Invoke($unsupported) -ne 0) {
+            throw 'Unknown or unimplemented operations were admitted.'
+        }
     }
     [pscustomobject]@{
         Schema = 1

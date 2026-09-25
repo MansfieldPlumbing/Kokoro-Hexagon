@@ -23,8 +23,9 @@ the remaining gates.
   kernel test, not a complete synthesis test. Historical decoder playback
   used QNN contexts and is retained only as reference evidence.
 - The signed model-less NativeActivity/CoreCLR/SMA APK is 40,967,549 bytes and
-  has launched on both physical devices. It contains no model and does not yet
-  load one from the private model store.
+  has launched on both physical devices. That artifact predates the current
+  startup-only dispatch source and must not be used as a release artifact. It
+  contains no model and does not yet load one from the private model store.
 
 The immediate target is one admitted phoneme string to audible PCM on both
 devices through the same owned model path. Utterance boundaries will use a

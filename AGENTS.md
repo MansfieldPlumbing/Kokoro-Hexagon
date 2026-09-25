@@ -4,6 +4,14 @@ The machine/workspace `AGENTS.md` security and change-control rules apply.
 Use [ROADMAP.md](ROADMAP.md) for the current implementation gates. Do not infer
 production status from historical receipts or reference harnesses.
 
+Hard stop: the repository does not yet contain a working Kokoro synthesizer.
+A launching APK, model-weight DLL, parsed graph, native-audio tone, QNN speech
+job, or isolated Hexagon kernel is not one. Do not call any of them a product
+speech build, admit `speak` in the appliance, or demonstrate them as if they
+fulfill the mission. A live-speech claim requires one PowerShell-authored path
+from admitted phonemes and verified stock weights through the full model and
+directly emitted Hexagon code to audible PCM on the physical device.
+
 ## Governing objective: PowerShell end to end
 
 - PowerShell 7 is the authored implementation language and control plane from
@@ -69,6 +77,8 @@ production status from historical receipts or reference harnesses.
 - `src/export/`, `src/runspace/Qnn.*`, and prepared-context device jobs are
   isolated reference harnesses. New product code must live outside them and
   must not import their libraries or contexts.
+- `src/appliance/provider/` is a historical C# baseline, not an implementation
+  template. Do not promote its code or its measurements into the product.
 - Do not commit generated DLLs, APKs, ONNX, contexts, ELF, weights, audio,
   device logs, signing keys, or raw device identifiers. Use the adjacent Build
   directory for artifacts and `docs/receipts/` for compact reviewed evidence.

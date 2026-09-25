@@ -1,4 +1,5 @@
 #requires -Version 7.4
+# Source-policy lint only; this does not inspect a built APK or prove synthesis.
 $ErrorActionPreference = 'Stop'
 $root = [IO.Path]::GetFullPath([IO.Path]::Combine($PSScriptRoot, '..'))
 $setup = [IO.Path]::Combine($root, 'setup-kokoro.ps1')
@@ -39,11 +40,18 @@ foreach ($relative in $productSources) {
     }
 }
 
+$dispatch = & ([IO.Path]::Combine($root, 'tools', 'Test-ApplianceExpression.ps1'))
+if (-not $dispatch.Passed -or ($dispatch.Operations -join ',') -cne 'status') {
+    throw 'The appliance admits an operation beyond the startup check.'
+}
+
 [pscustomobject]@{
-    NativeActivityOnly = $true
-    DexAndLegacyRuntimeRejected = $true
-    ReadyToRunDisabled = $true
-    BaseApkLimitBytes = 40MB
-    ProductSourcesIsolated = $true
+    SetupSourceParses = $true
+    SourceDeclaresNativeActivityOnly = $true
+    SourceContainsDexAndLegacyRejectors = $true
+    SourceDisablesReadyToRun = $true
+    SourceBaseApkLimitBytes = 40MB
+    CheckedProductSourcesExcludeReferences = $true
+    StartupDispatchOnly = $true
     Passed = $true
 }

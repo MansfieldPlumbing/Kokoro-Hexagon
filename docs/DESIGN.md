@@ -1,6 +1,8 @@
 # Design and HTP findings
 
-This is a historical QNN/oracle investigation, not the product architecture.
+This entire document is a historical QNN/oracle investigation, not the product
+architecture or an implementation recipe. Do not copy its graph rewrites,
+prepared inputs, runtime, or APK requirements into the PowerShell product.
 The current release boundary and remaining work are in `ROADMAP.md`. Its
 numerical and AdaIN findings remain useful comparison evidence; its QNN
 passes, libraries, and contexts are not production dependencies.
@@ -45,10 +47,10 @@ has no random ops.
 - Host overhead per call is about 1.5 ms; HTP reports no wait time, so the
   remaining time is inside the graph.
 
-## Android host
+## Android host used in this historical experiment
 
-- The APK must declare `<uses-native-library android:name="libcdsprpc.so">`.
-- QNN libraries are preloaded by full path from app storage, with
+- The diagnostic APK declared `<uses-native-library android:name="libcdsprpc.so">`.
+- QNN libraries were preloaded by full path from app storage, with
   `ADSP_LIBRARY_PATH` set to the library directory plus the platform defaults
   (`/vendor/lib/rfsa/adsp;/vendor/dsp/cdsp;/dsp`).
 

@@ -1,8 +1,10 @@
 # Kokoro appliance
 
-This directory owns the source for the downloadable Kokoro-Hexagon appliance.
-The base APK combines the Xamarin-free Pwsh host, ARM64 control path, and
-direct Hexagon execution support. It does not embed a Kokoro model.
+This directory owns the source for the intended downloadable Kokoro-Hexagon
+appliance. The current base APK proves only a Xamarin-free PowerShell 7
+NativeActivity/CoreCLR host that launches on two phones. It embeds no Kokoro
+model and does not yet load one, execute the full model, or produce speech.
+Direct Hexagon execution remains a separate integration gate.
 
 The appliance is a product boundary, not a build-output directory:
 
@@ -10,7 +12,8 @@ The appliance is a product boundary, not a build-output directory:
 - model creation and admission live outside the APK; `src/export` is historical
   oracle material only;
 - ARM64 and Hexagon instruction emission remains in `src/emit`;
-- device-side diagnostic probes remain in `src/runspace`;
+- device-side diagnostic probes remain in `src/runspace` and are not appliance
+  dependencies;
 - generated APKs, packed weights, native libraries, audio, and receipts go to
   `..\Build\Kokoro-Hexagon\appliance` and are not committed.
 
@@ -53,7 +56,7 @@ Platform operations use the narrowest owned boundary:
 - the application files directory comes from `ANativeActivity`;
 - environment variables and file mapping use libc;
 - diagnostics use liblog;
-- DSP access uses the pinned native transport ABI;
+- DSP access must use a source-defined direct transport after its device gate;
 - audio output uses a pinned native Android audio API after a hardware gate;
 - JNI is added only for a capability that has no adequate native API. AOA is
   one such boundary: the host obtains the granted accessory descriptor through

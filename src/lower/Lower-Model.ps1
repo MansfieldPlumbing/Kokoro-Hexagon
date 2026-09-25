@@ -2,9 +2,9 @@
 # Lower a model written as ordinary PowerShell into a tensor operation DAG.
 #
 # The description is PowerShell source. SMA parses it; this walks the AST and recovers the
-# graph. PowerShell is the authoring language, not the runtime: nothing here executes the
-# model, it only decides what the graph is. A backend then emits QNN ops, HVX code or a CPU
-# delegate from the same DAG, and chooses what fuses.
+# graph. Nothing here executes the model; this incomplete decoder scaffold
+# records two opaque operations only. The production backend must be derived
+# from the pinned Kokoro source and emit Hexagon code directly from PowerShell.
 #
 # The AST rather than SMA's lowered expression tree, deliberately: the expression tree is
 # full of dynamic binder call-sites and PSObject boxing, which is PowerShell's own semantics

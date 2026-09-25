@@ -1,5 +1,8 @@
 # Persistent QNN and AAudio pipeline receipt
 
+Historical reference-only experiment. Its QNN contexts, prepared phrase input,
+and Android host are not the Kokoro-Hexagon product path or a live-speech gate.
+
 - Date: 2026-09-24
 - Target: Samsung Galaxy S23, SM8550 / Hexagon V73
 - Runtime: QAIRT 2.46.0.260424
@@ -56,9 +59,10 @@ whole-process high-water observation, not a per-buffer allocation measurement.
 
 ## Result and boundary
 
-Pass. Persistent QNN contexts, bounded inter-runspace handoff, synthesis during
-playback, and one persistent native stream are now device-proven for three
-repetitions of one prepared phrase.
+Pass for this historical diagnostic only: persistent QNN contexts, bounded
+inter-runspace handoff, synthesis during playback, and one persistent native
+stream worked for three repetitions of one prepared phrase. This does not
+validate the PowerShell-authored phoneme-to-PCM product path.
 
 This does not yet prove arbitrary-text phonemization, distinct long-form
 chunks, cached tensor arenas, seamless subjective boundaries, or a lower peak

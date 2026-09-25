@@ -1,5 +1,10 @@
 # First light — 2026-09-22
 
+Historical QNN/QAIRT decoder playback only. This is not PowerShell-authored
+phoneme-to-PCM Kokoro synthesis, not the model-less appliance, and not a
+product speech gate. The prepared acoustic inputs and QNN contexts must not
+become release dependencies.
+
 Device: Samsung Galaxy S23 (SM-S911U, SM8550, Hexagon V73), QAIRT 2.46.0.260424.
 Host app: AndroidSMA `.preview`, arm64 Debug, built from AndroidSMA `a320c45`
 with `<uses-native-library android:name="libcdsprpc.so" android:required="false"/>`.

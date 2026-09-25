@@ -39,7 +39,7 @@ param(
     [ValidateSet('arm64', 'x64', 'arm32')]
     [string] $Architecture = 'arm64',
 
-    # Kokoro ships only through the DEX-free NativeActivity/CoreCLR path.
+    # Kokoro's intended packaging path is DEX-free NativeActivity/CoreCLR.
     [ValidateSet('NativeActivity')]
     [string] $Admission = 'NativeActivity',
 
@@ -3738,7 +3738,7 @@ function New-PwshActivityAssemblyBytes {
         Write-Host ('[PASS] Screen: {0} methods compiled from expression trees; 6 hand-written opcodes in the OnCreate shim.' -f
             $screen.MethodCount) -ForegroundColor Green
         if ($Admission -eq 'NativeActivity') {
-            Write-Host ('[PASS] Kokoro-Hexagon.dll: DispatchOperation(string) persisted for {0} admitted operations; unknown input returns {1}.' -f
+            Write-Host ('[PASS] Kokoro-Hexagon.dll: DispatchOperation(string) persisted for {0} startup token; unknown input returns {1}.' -f
                 $script:KokoroDispatchReceipt.Operations.Count, $script:KokoroDispatchReceipt.UnknownCode) -ForegroundColor Green
             Write-Host ('[PASS] Kokoro-Hexagon.dll: model graph {0} persisted with {1} nodes and its control schema.' -f
                 $script:KokoroModelReceipt.GraphSHA256, $script:KokoroModelReceipt.Nodes) -ForegroundColor Green

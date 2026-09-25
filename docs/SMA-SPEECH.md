@@ -1,6 +1,10 @@
 # SMA speech planning boundary
 
-SMA owns realization. A language model may supply authored text, communicative
+Future planning research only. This document does not describe a working
+speech build or authorize any change to stock Kokoro semantics. The direct
+PowerShell phoneme-to-PCM model and physical speaker gate take precedence.
+
+SMA may own text planning. A language model may supply authored text, communicative
 objective, discourse annotations, or token surprisal, but it does not write the
 phoneme stream and it does not mix stage directions into the transcript.
 

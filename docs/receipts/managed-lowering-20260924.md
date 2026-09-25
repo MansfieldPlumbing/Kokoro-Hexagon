@@ -1,12 +1,15 @@
 # Kokoro managed lowering and archive — 2026-09-24
 
+Historical assembly-layout receipt. Its operation names were dispatch codes,
+not implemented handlers, and are not admitted by the current source.
+
 Target selection: Android arm64, NativeActivity/CoreCLR, Minimal payload.
 
 `setup-kokoro.ps1 -Step 4 -KeepIntermediates` consumed the pinned Pwsh package
-and specification manifest, emitted the product entry assembly, translated the
+and specification manifest, emitted a base-host test assembly, translated the
 single donor `Pwsh.dll` assembly-order slot, and selected 96 managed assemblies.
 
-Observed product assembly:
+Observed historical base-host assembly:
 
 ```text
 Name       Kokoro-Hexagon.dll

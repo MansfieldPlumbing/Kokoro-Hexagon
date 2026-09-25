@@ -2,12 +2,16 @@
 
 Date: 2026-09-25
 
+Historical packaging and startup receipt only. The measured APK predates the
+current startup-only dispatch source. It is not a release candidate and does
+not prove model loading, direct Hexagon transport, or Kokoro speech.
+
 `setup-kokoro.ps1 -Headless -Step 11` completed the full ARM64 build from 27
 pinned source specifications and 14 catalog-hash-verified packages. The build
 classified 313 IL images and 16 native payloads, excluded 101 ReadyToRun
 images, and selected 96 IL assemblies for the runtime store.
 
-The independently read-back unsigned APK contained 12 entries. The production
+The independently read-back unsigned APK contained 12 entries. The packaging
 closure gate found no DEX, `libmonodroid.so`, or `libxamarin-app.so`; the
 manifest declares `android.app.NativeActivity` with `hasCode=false`; and the
 native host imports only libc, liblog, CoreCLR, and the assembly store.

@@ -12,6 +12,7 @@ Reference-only tools and historical receipts do not become product dependencies.
 | Qualcomm QAIRT/QNN libraries and SDK | Qualcomm terms | Historical oracle/device experiments only. Libraries and generated contexts are not committed or part of the intended release. |
 | Hexagon SDK/toolchain | Qualcomm terms | Independent assembly and device verification during development; not a production build or runtime dependency. |
 
-The production path is PowerShell/SMA lowering to managed IL and directly
-emitted DSP code. Review the final SBOM and release package rather than
-assuming that every historical tool listed here is shipped.
+The intended production path is PowerShell/SMA lowering to managed IL and
+directly emitted DSP code; full synthesis is not implemented yet. Review the
+final SBOM and release package rather than assuming that every historical tool
+listed here is shipped.

@@ -31,7 +31,7 @@ if ($VoicePath) {
     $voiceResource = 'Kokoro.Voices.' + [IO.Path]::GetFileNameWithoutExtension($voiceName) + '.f32'
 }
 
-# Reuse the production builder's exact framework LambdaCompiler seam without
+# Reuse the base-host builder's exact framework LambdaCompiler seam without
 # running setup's package acquisition or Android packaging steps.
 $setupPath = [IO.Path]::Combine($root, 'setup-kokoro.ps1')
 $tokens = $null
@@ -43,7 +43,7 @@ foreach ($functionName in 'Write-MicrosoftLambdaToMethodBuilder', 'Set-Determini
         $node -is [Management.Automation.Language.FunctionDefinitionAst] -and
         $node.Name -ceq $functionName
     }, $true))
-    if ($matching.Count -ne 1) { throw "The production builder function $functionName is not unique." }
+    if ($matching.Count -ne 1) { throw "The base-host builder function $functionName is not unique." }
     . ([scriptblock]::Create($matching[0].Extent.Text))
 }
 

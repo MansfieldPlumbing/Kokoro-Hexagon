@@ -1,10 +1,11 @@
 # Kokoro Android appliance
 
-The product is a speech application with an embedded, deliberately reduced
-PowerShell runtime. PowerShell is an implementation substrate, not a permission
-boundary or a USB command language. This document describes the host boundary;
-live QNN-free Kokoro synthesis is not yet implemented. `ROADMAP.md` is the
-current product gate.
+The product is a PowerShell 7 speech application on an unsupported Android
+target. PowerShell owns the authored model, lowering, control, and runtime
+logic; NativeActivity/CoreCLR/System.Management.Automation are the host
+substrate. This document describes that host boundary, not a completed
+synthesizer. Live direct-path Kokoro speech is not yet implemented.
+`ROADMAP.md` is the current product gate.
 
 ## Build graph
 
@@ -23,22 +24,14 @@ under the external build directory and writes `assemblies.json` with byte counts
 SHA-256 values and package provenance. The APK still consumes the mapped XABA
 store; the archive exists for diffing, reuse, trimming and release artifacts.
 
-## Resident provider contract
+## Resident runtime boundary
 
-`src/appliance/provider/ProviderHost.cs` preserves the original scripted-provider
-control for A/B measurement. The product build graph now lowers the admitted
-operation tree into `Kokoro-Hexagon.dll`:
-
-1. create one runspace and keep it resident;
-2. create the least-capability initial session state rather than default cmdlets;
-3. invoke persisted typed methods from the signed entry assembly;
-4. pass text as UTF-8 data and receive bounded binary results;
-5. never load a profile from writable storage or evaluate source received from USB;
-6. dispose the runspace only when the Android process shuts down or recovers.
-
-The C# project is a behavioral baseline, not a second application framework, and
-is not packaged into the APK. Its scripted warm-dispatch cost is retained so the
-physical-device A/B can quantify the benefit of persisted methods.
+The base APK has proved NativeActivity/CoreCLR startup only. A product runspace
+must still be wired to a verified model DLL, bounded request and PCM contracts,
+direct DSP execution, and AAudio. The parsed two-node decoder description
+currently contributes graph identity to the host assembly; it is not executable
+Kokoro synthesis. Historical provider benchmarks are not an implementation
+contract for this product.
 
 ## Model boundary
 
@@ -55,9 +48,8 @@ playback or the measured Kokoro synthesis path.
 
 ## Evidence boundary
 
-The Windows provider gate proves the scripted baseline's lifecycle, profile
-integrity, AST parsing, binary return semantics and warm reuse. The build graph
-separately proves that the admitted operation tree persists into the generated
-entry assembly. Neither proves Android startup time, APK size, phone memory use,
-AOA service behavior or speech TTFT. Those claims remain gated on a signed APK
-and physical-device receipts.
+The Windows provider gate is a historical baseline. The build graph proves
+only persistence of the current incomplete graph identity into the generated
+entry assembly. The signed base APK has separately passed size and launch
+checks on two phones. None of these proves model loading, direct DSP transport,
+speech quality, or speech time-to-first-audio.
