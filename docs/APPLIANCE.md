@@ -22,7 +22,8 @@ Pwsh does not perform Kokoro model lowering or speech. Those belong to this
 repository's separately built model artifact and direct backend.
 
 The product identity is `dev.mansfieldplumbing.kokorohexagon`. The admitted host
-is NativeActivity/CoreCLR only. Xamarin, Mono, DEX, Android managed bindings and
+uses the managed namespace `Dev.MansfieldPlumbing.Kokoro` and is
+NativeActivity/CoreCLR only. Xamarin, Mono, DEX, Android managed bindings and
 the recovery activity are not part of the intended release payload.
 
 With `-KeepIntermediates`, selection also saves every chosen managed assembly

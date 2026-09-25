@@ -1104,7 +1104,7 @@ $script:ResourceChunkConstants = $null
 # The Java peer class Android instantiates for the activity. Derived, not
 # chosen: the package is a hash of the managed identity.
 $script:AssemblyName = 'Kokoro-Hexagon'
-$script:ManagedNamespace = 'Dev.MansfieldPlumbing.Pwsh'
+$script:ManagedNamespace = 'Dev.MansfieldPlumbing.Kokoro'
 
 # When an activity declares an explicit Name, .NET Android emits the Java peer
 # under that exact name instead of a crc64 package. The manifest, the peer in
@@ -2260,7 +2260,7 @@ function Add-AndroidHostDeclarations {
         [string], [Collections.Generic.IEnumerable[string]]) ([Reflection.BindingFlags]'Public,Static')
 
     $programType = $Module.DefineType(
-        'Dev.MansfieldPlumbing.Pwsh.RecoveryProgram',
+        ('{0}.RecoveryProgram' -f $script:ManagedNamespace),
         [Reflection.TypeAttributes]'Public,Abstract,Sealed,BeforeFieldInit')
     $mainType = $Main
     $runspaceType = [Management.Automation.Runspaces.Runspace]
@@ -2425,7 +2425,7 @@ function Add-RecoveryScreenMethods {
     $a = [Linq.Expressions.Expression]::Parameter($activityType, 'activity')
     $handlerName = [Linq.Expressions.Expression]::Parameter([string], 'handlerName')
     $recoveryProgramRuntimeType = New-StaticCall $typeGetType @(
-        (New-ClrConstant 'Dev.MansfieldPlumbing.Pwsh.RecoveryProgram, Pwsh' ([string])),
+        (New-ClrConstant ('{0}.RecoveryProgram, {1}' -f $script:ManagedNamespace, $script:AssemblyName) ([string])),
         (New-ClrConstant $true ([bool])))
     $eventHandlerRuntimeType = New-StaticCall $typeGetType @(
         (New-ClrConstant 'System.EventHandler' ([string])),
@@ -3595,7 +3595,7 @@ function New-PwshActivityAssemblyBytes {
 
         $activityType = $android.GetType('Android.App.Activity', $true)
         $main = $module.DefineType(
-            'Dev.MansfieldPlumbing.Pwsh.MainActivity',
+            ('{0}.MainActivity' -f $script:ManagedNamespace),
             [Reflection.TypeAttributes]'Public,Class,Sealed,BeforeFieldInit',
             $activityType)
 
@@ -3666,7 +3666,7 @@ function New-PwshActivityAssemblyBytes {
             # (0x50575348) and returns that value, or the HResult of the first
             # exception.
             # Boundary markers go to logcat through liblog, bound by P/Invoke.
-            $logType = $module.DefineType('Dev.MansfieldPlumbing.Pwsh.NativeLog',
+            $logType = $module.DefineType(('{0}.NativeLog' -f $script:ManagedNamespace),
                 [Reflection.TypeAttributes]'NotPublic,Abstract,Sealed,BeforeFieldInit')
             $logWrite = $logType.DefinePInvokeMethod('__android_log_write', 'liblog.so',
                 [Reflection.MethodAttributes]'Public,Static,PinvokeImpl,HideBySig', [Reflection.CallingConventions]::Standard,
@@ -3686,7 +3686,7 @@ function New-PwshActivityAssemblyBytes {
             $runspaceVar = [Linq.Expressions.Expression]::Variable($runspaceType, 'runspace')
             $resultVar = [Linq.Expressions.Expression]::Variable([int], 'result')
             $errorVar = [Linq.Expressions.Expression]::Variable([Exception], 'error')
-            $nativeHostType = $module.DefineType('Dev.MansfieldPlumbing.Pwsh.NativeHost',
+            $nativeHostType = $module.DefineType(('{0}.NativeHost' -f $script:ManagedNamespace),
                 [Reflection.TypeAttributes]'Public,Abstract,Sealed,BeforeFieldInit')
             $kokoroDispatch = Get-KokoroApplianceDispatch
             $kokoroModel = Get-KokoroModelContract
@@ -6792,7 +6792,7 @@ function New-NativeHostLibrary {
         snprintf "%p", RUNTIME_IDENTIFIER, APP_CONTEXT_BASE_DIRECTORY as
         internalDataPath plus "/"), calls coreclr_initialize and
         coreclr_create_delegate (lib/coreclrhost.h) for
-        Dev.MansfieldPlumbing.Pwsh.NativeHost.Admit, calls it, and logs what it
+        Dev.MansfieldPlumbing.Kokoro.NativeHost.Admit, calls it, and logs what it
         returns. The contract's external_assembly_probe
         (lib/host_runtime_contract.h) is pwsh_assembly_probe: a linear strcmp
         walk over a table of the store's own entries, returning a pointer into
@@ -6822,7 +6822,7 @@ function New-NativeHostLibrary {
         keyBase      = & $ascii 'APP_CONTEXT_BASE_DIRECTORY'
         rid          = & $ascii $script:Target.Rid
         assemblyName = & $ascii $script:AssemblyName
-        typeName     = & $ascii 'Dev.MansfieldPlumbing.Pwsh.NativeHost'
+        typeName     = & $ascii ('{0}.NativeHost' -f $script:ManagedNamespace)
         methodName   = & $ascii 'Admit'
         tag          = & $ascii 'Pwsh'
         fmtAdmit     = & $ascii 'GATE2A Admit returned 0x%08x'

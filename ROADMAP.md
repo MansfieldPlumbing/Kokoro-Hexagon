@@ -160,12 +160,17 @@ by device discovery. Do not label a payload-only DLL as a live model.
   devices. It predates the current `status`-only dispatch and does not prove
   that the current source builds or speaks. See
   `docs/receipts/model-less-appliance-20260925.md`.
-- [x] Rebuild the current, model-less NativeActivity/CoreCLR/SMA host as a
-  signed APK under 40 MiB. Verify the resulting APK itself has no DEX, Mono or
-  Xamarin native libraries, ReadyToRun images, bundled model, or unsupported
-  speech dispatch. Record its hash and size, then install and launch that exact
-  artifact on both devices. This is a packaging and launch gate only; see
+- [x] A prior `status`-only, model-less NativeActivity/CoreCLR/SMA rebuild was
+  signed under 40 MiB, inspected for forbidden payloads, and launched on both
+  devices. This is a historical packaging gate, not proof of the newly renamed
+  managed namespace or speech; see
   `docs/receipts/model-less-appliance-rebuild-20260925.md`.
+- [x] Rebuild the model-less APK from the `Dev.MansfieldPlumbing.Kokoro` source
+  after the external Build directory was cleared. The signed artifact is under
+  40 MiB; the build excluded ReadyToRun images, package inspection found no
+  DEX, Mono/Xamarin libraries, or bundled model, and that exact APK installed
+  and launched on both physical devices. This is not speech evidence. See
+  `docs/receipts/model-less-appliance-kokoro-namespace-20260925.md`.
 - [ ] Finish the R2R-free and Mono-free appliance integration: load a verified,
   compatible weight-bearing model DLL from private app storage; connect its
   admitted phoneme/text path and full stock Kokoro graph to direct Hexagon

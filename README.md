@@ -22,10 +22,10 @@ the remaining gates.
 - Physical SM8550 and SM8635 devices have passed a directly emitted V73 HVX
   kernel test, not a complete synthesis test. Historical decoder playback
   used QNN contexts and is retained only as reference evidence.
-- The current signed model-less NativeActivity/CoreCLR/SMA APK is 40,967,465
-  bytes and has launched on both physical devices. It was built by this
-  repository's unofficial Pwsh-builder fork, contains no model, and does not
-  yet load one from the private model store. It is not a speech release.
+- The signed model-less NativeActivity/CoreCLR/SMA APK built with the managed
+  namespace `Dev.MansfieldPlumbing.Kokoro` is 40,967,479 bytes and has launched
+  on both physical devices. It contains no model and does not prove speech.
+  See `docs/receipts/model-less-appliance-kokoro-namespace-20260925.md`.
 
 The immediate target is one admitted phoneme string to audible PCM on both
 devices through the same owned model path. Utterance boundaries will use a

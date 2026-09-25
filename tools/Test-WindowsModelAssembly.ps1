@@ -9,7 +9,7 @@ $ErrorActionPreference = 'Stop'
 $resolved = (Resolve-Path -LiteralPath $AssemblyPath).Path
 $source = & (Join-Path $PSScriptRoot 'Test-ModelContract.ps1')
 $assembly = [Reflection.Assembly]::LoadFrom($resolved)
-$type = $assembly.GetType('Dev.MansfieldPlumbing.Pwsh.NativeHost', $true)
+$type = $assembly.GetType('Dev.MansfieldPlumbing.Kokoro.NativeHost', $true)
 $graph = [string]$type.GetMethod('ModelGraphSHA256').Invoke($null, @())
 $controls = [string]$type.GetMethod('ModelControls').Invoke($null, @())
 if ($graph -cne $source.GraphSHA256) { throw 'Assembly graph hash does not match New-KokoroDecoderGraph.ps1' }

@@ -3,6 +3,10 @@
 Date: 2026-09-24  
 Source: repository `model.ps1` and `setup-kokoro.ps1 -Step 4 -KeepIntermediates -AcceptWritePlan`
 
+Historical receipt: its managed type name predates the
+`Dev.MansfieldPlumbing.Kokoro` namespace. The current-source load gate is in
+`model-less-appliance-kokoro-namespace-20260925.md`.
+
 The graph source was later renamed, byte-for-byte, to
 `New-KokoroDecoderGraph.ps1`; the filename above records the path used for
 this dated receipt.

@@ -70,6 +70,8 @@ directly emitted Hexagon code to audible PCM on the physical device.
   separately verified, weight-bearing managed model DLL. The final DLL owns
   admitted text/phoneme logic, graph identity, weights, control schema, and
   lowered hot paths.
+- The managed host namespace is `Dev.MansfieldPlumbing.Kokoro`. It is distinct
+  from the lowercase Android package id and from historical Pwsh type names.
 - PowerShell parses and validates authored source before lowering. User text is
   data: never parse or evaluate it as PowerShell. Check lengths, Unicode,
   tensor shapes, offsets, storage bounds, and resource hashes before use.

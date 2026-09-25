@@ -1,10 +1,12 @@
-# Current model-less appliance rebuild
+# Model-less appliance rebuild before managed-namespace change
 
 Date: 2026-09-25
 
-This receipt covers the current `status`-only NativeActivity/CoreCLR/SMA base
-host. It does not establish model loading, direct Hexagon speech execution, or
-audible Kokoro synthesis.
+This receipt covers a `status`-only NativeActivity/CoreCLR/SMA base host built
+before the namespace changed to `Dev.MansfieldPlumbing.Kokoro`. The external
+Build directory was subsequently cleared. It does not establish that the
+renamed source has been built, model loading, direct Hexagon speech execution,
+or audible Kokoro synthesis.
 
 The two Android header URLs in `lib/pwsh-build-manifest.json` were changed to
 GrapheneOS mirrors at the same pinned commits. Each fetched file matched its
