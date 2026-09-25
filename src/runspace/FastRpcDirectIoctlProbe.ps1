@@ -23,18 +23,17 @@ try {
     $binding = $ast.GetScriptBlock().InvokeReturnAsIs()
 
     $native = [Runtime.InteropServices.NativeLibrary]::Load('libc.so')
-    $fn = { param($Name, $ReturnType, $Parameters)
-        $M::GetDelegateForFunctionPointer(
-            [Runtime.InteropServices.NativeLibrary]::GetExport($native, $Name),
-            (& $binding.NewDelegateType ('Direct_' + $Name) $ReturnType $Parameters))
-    }
-    $ioctl = & $fn 'ioctl' ([int]) ([Type[]]@([int], [uint64], [IntPtr]))
-    $open = & $fn 'open' ([int]) ([Type[]]@([IntPtr], [int], [int]))
-    $close = & $fn 'close' ([int]) ([Type[]]@([int]))
+    $ioctl = & $binding.BindExport $native 'ioctl' ([int]) ([Type[]]@([int], [uint64], [IntPtr])) $true
+    $open = & $binding.BindExport $native 'open' ([int]) ([Type[]]@([IntPtr], [int], [int])) $true
+    $close = & $binding.BindExport $native 'close' ([int]) ([Type[]]@([int])) $true
 
+    # This is the only exposed non-secure FastRPC node on the current devices.
+    # A successful open would not by itself establish a CDSP session.
     $devicePath = $M::StringToHGlobalAnsi('/dev/adsprpc-smd')
     $fd = [int]$open.DynamicInvoke([object[]]@($devicePath, 0, 0)) # O_RDONLY
+    $openError = $M::GetLastPInvokeError()
     $lines.Add("OpenRc=$fd")
+    $lines.Add("OpenErrno=$openError")
     if ($fd -lt 0) { throw 'Direct FastRPC raw descriptor unavailable' }
 
     # Qualcomm upstream d247519650fe5cb16de6c78edaa95bcc4be25073:
@@ -46,8 +45,10 @@ try {
     $M::WriteInt32($cap, 0, 3)
     $M::WriteInt32($cap, 4, 6)
     $rc = [int]$ioctl.DynamicInvoke([object[]]@($fd, [uint64]0xC01C520D, $cap))
+    $ioctlError = $M::GetLastPInvokeError()
     $arch = [uint32]$M::ReadInt32($cap, 8)
     $lines.Add("GetDspInfoRc=$rc")
+    $lines.Add("GetDspInfoErrno=$ioctlError")
     $lines.Add("ArchVersion=$arch")
     $passed = ($rc -eq 0 -and $arch -gt 0)
 }

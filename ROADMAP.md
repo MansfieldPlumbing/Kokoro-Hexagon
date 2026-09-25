@@ -65,8 +65,10 @@ and its directly emitted backend remain to be built.
 - [x] Remove the managed Android descriptor/reflection dependency from the
   direct FastRPC ioctl probe. It now reaches libc through `Native.Binding`.
 - [ ] Establish the permitted production FastRPC device edge. Direct libc
-  `open` of `/dev/adsprpc-smd` returned `-1` from both current app sandboxes;
-  do not infer the cause without a source-matched SELinux/driver trace. See
+  `open` of the only exposed non-secure node returned `EACCES` from both
+  current app sandboxes. Upstream FastRPC distinguishes ADSP and CDSP nodes;
+  neither current phone exposes the documented CDSP node path. Do not infer
+  a vendor HAL ABI or a policy exception from a binary. See
   `docs/receipts/direct-fastrpc-native-open-20260925.md`.
 - [x] Implement signed, transactional model admission for private app storage.
   `Model.Store.psm1` validates manifest signature and compatibility, streams

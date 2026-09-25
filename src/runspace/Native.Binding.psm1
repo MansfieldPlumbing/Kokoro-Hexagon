@@ -9,7 +9,8 @@ $newDelegateType = {
     param(
         [Parameter(Mandatory)][string]$Name,
         [Parameter(Mandatory)][Type]$ReturnType,
-        [Parameter(Mandatory)][AllowEmptyCollection()][Type[]]$ParameterTypes
+        [Parameter(Mandatory)][AllowEmptyCollection()][Type[]]$ParameterTypes,
+        [bool]$SetLastError = $false
     )
 
     if ($Name -notmatch '^[A-Za-z_][A-Za-z0-9_]{0,127}$') {
@@ -24,7 +25,8 @@ $newDelegateType = {
         if ($null -eq $parameterType) { throw 'Native delegate parameter type is null.' }
         $parameterNames.Add($parameterType.AssemblyQualifiedName)
     }
-    $signature = $ReturnType.AssemblyQualifiedName + '(' + ($parameterNames -join ',') + ')'
+    $signature = $ReturnType.AssemblyQualifiedName + '(' + ($parameterNames -join ',') + ')' +
+        ':SetLastError=' + $SetLastError
     if ($typeCache.ContainsKey($signature)) { return $typeCache[$signature] }
 
     $delegateCounter++
@@ -46,9 +48,14 @@ $newDelegateType = {
     $attributeConstructor = [Runtime.InteropServices.UnmanagedFunctionPointerAttribute].GetConstructor(
         [Type[]]@([Runtime.InteropServices.CallingConvention])
     )
+    $lastErrorField = [Runtime.InteropServices.UnmanagedFunctionPointerAttribute].GetField('SetLastError')
     $attribute = [Reflection.Emit.CustomAttributeBuilder]::new(
         $attributeConstructor,
-        [object[]]@([Runtime.InteropServices.CallingConvention]::Cdecl)
+        [object[]]@([Runtime.InteropServices.CallingConvention]::Cdecl),
+        [Reflection.PropertyInfo[]]@(),
+        [object[]]@(),
+        [Reflection.FieldInfo[]]@($lastErrorField),
+        [object[]]@($SetLastError)
     )
     $builder.SetCustomAttribute($attribute)
 
@@ -76,11 +83,12 @@ $bindExport = {
         [Parameter(Mandatory)][IntPtr]$Library,
         [Parameter(Mandatory)][string]$Name,
         [Parameter(Mandatory)][Type]$ReturnType,
-        [Parameter(Mandatory)][AllowEmptyCollection()][Type[]]$ParameterTypes
+        [Parameter(Mandatory)][AllowEmptyCollection()][Type[]]$ParameterTypes,
+        [bool]$SetLastError = $false
     )
     if ($Library -eq [IntPtr]::Zero) { throw 'Native library handle is null.' }
     $address = [Runtime.InteropServices.NativeLibrary]::GetExport($Library, $Name)
-    $type = & $newDelegateType $Name $ReturnType $ParameterTypes
+    $type = & $newDelegateType $Name $ReturnType $ParameterTypes $SetLastError
     [Runtime.InteropServices.Marshal]::GetDelegateForFunctionPointer($address, $type)
 }.GetNewClosure()
 
