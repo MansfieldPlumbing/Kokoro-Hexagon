@@ -257,9 +257,46 @@ $getActive = {
         throw 'Active model pointer escapes private storage.'
     }
     if (-not [IO.File]::Exists($path)) { throw 'Active model payload is missing.' }
+    $manifestPath = [IO.Path]::Combine([IO.Path]::GetDirectoryName($path), 'manifest.json')
+    if (-not [IO.File]::Exists($manifestPath)) { throw 'Active model manifest is missing.' }
+    $manifest = & $readManifest ([IO.File]::ReadAllText($manifestPath))
+    if ($manifest.ModelId -cne [string]$active.modelId -or
+        $manifest.Version -cne [string]$active.version -or
+        $manifest.AssemblySha256 -cne ([string]$active.assemblySha256).ToUpperInvariant() -or
+        $manifest.AssemblySha256.ToLowerInvariant() -cne [IO.Path]::GetFileName([IO.Path]::GetDirectoryName($path))) {
+        throw 'Active model pointer does not match its signed manifest.'
+    }
+    if (([IO.FileInfo]$path).Length -ne $manifest.AssemblyBytes) {
+        throw 'Active model payload length is invalid.'
+    }
     $actual = & $getFileSha256 $path
     if ($actual -cne ([string]$active.assemblySha256).ToUpperInvariant()) { throw 'Active model payload hash is invalid.' }
-    [pscustomobject]@{ ModelId = $active.modelId; Version = $active.version; AssemblySha256 = $actual; AssemblyPath = $path }
+    & $testManagedAssembly $path $manifest.AssemblyName
+    [pscustomobject]@{
+        ModelId = $manifest.ModelId
+        Version = $manifest.Version
+        AssemblyName = $manifest.AssemblyName
+        AssemblySha256 = $actual
+        AssemblyPath = $path
+    }
+}.GetNewClosure()
+
+$loadActive = {
+    $active = & $getActive
+    if ($null -eq $active) { return $null }
+    $assembly = [Runtime.Loader.AssemblyLoadContext]::Default.LoadFromAssemblyPath($active.AssemblyPath)
+    if ($assembly.GetName().Name -cne $active.AssemblyName) {
+        throw 'Loaded model assembly identity differs from the admitted manifest.'
+    }
+    if ([IO.Path]::GetFullPath($assembly.Location) -cne $active.AssemblyPath) {
+        throw 'Loaded model assembly did not originate from the admitted payload.'
+    }
+    [pscustomobject]@{
+        ModelId = $active.ModelId
+        Version = $active.Version
+        AssemblySha256 = $active.AssemblySha256
+        Assembly = $assembly
+    }
 }.GetNewClosure()
 
 [pscustomobject]@{
@@ -269,4 +306,5 @@ $getActive = {
     InstallFile = $installFile
     Download = $download
     GetActive = $getActive
+    LoadActive = $loadActive
 }

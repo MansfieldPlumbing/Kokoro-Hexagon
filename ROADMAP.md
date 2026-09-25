@@ -171,6 +171,12 @@ by device discovery. Do not label a payload-only DLL as a live model.
   DEX, Mono/Xamarin libraries, or bundled model, and that exact APK installed
   and launched on both physical devices. This is not speech evidence. See
   `docs/receipts/model-less-appliance-kokoro-namespace-20260925.md`.
+- [x] Expose the native-supplied private app root through the independently
+  emitted managed host and verify its existence after install and launch on
+  both devices. Strengthen `Model.Store.psm1` so an active model load
+  revalidates the signed manifest, compatibility, payload length, hash, and
+  managed identity. The store load gate passes on Windows; the APK does not
+  yet package or invoke it. See `docs/receipts/private-model-root-20260925.md`.
 - [ ] Finish the R2R-free and Mono-free appliance integration: load a verified,
   compatible weight-bearing model DLL from private app storage; connect its
   admitted phoneme/text path and full stock Kokoro graph to direct Hexagon
@@ -184,6 +190,11 @@ by device discovery. Do not label a payload-only DLL as a live model.
   updater, and the offline AOA install operation. Re-run interrupted-download,
   rollback, incompatible-ABI, expiry, and multi-model activation tests on the
   packaged appliance.
+- [ ] Pin a dedicated model-signing public key in the appliance, embed the
+  validated PowerShell store source, and invoke its `LoadActive` gate from the
+  managed startup before accepting any model request. Test a signed model DLL
+  and unsigned/tampered rejection on both devices. The current base APK has
+  neither the trust anchor nor an admitted model DLL.
 - [ ] Expose a small typed session contract for model load, phoneme/text
   requests, chunked PCM, cancellation, receipts, and disposal. Keep AOA and
   local Android transport separate from synthesis semantics. Windows WASAPI

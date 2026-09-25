@@ -3701,6 +3701,12 @@ function New-PwshActivityAssemblyBytes {
             [void](Add-PersistedMethod $nativeHostType 'ModelControls' `
                 ([Reflection.MethodAttributes]'Public,Static,HideBySig') ([string]) @() `
                 ([Func[string]]) @() ([Linq.Expressions.Expression]::Constant($kokoroModel.Controls, [string])))
+            # The native bootstrap sets APP_CONTEXT_BASE_DIRECTORY from
+            # ANativeActivity.internalDataPath. Keep this path available to the
+            # managed model-store boundary without embedding a device path.
+            $privateDataRoot = Add-PersistedMethod $nativeHostType 'PrivateDataRoot' `
+                ([Reflection.MethodAttributes]'Public,Static,HideBySig') ([string]) @() `
+                ([Func[string]]) @() (New-ClrProperty $null (Get-ExactProperty ([AppContext]) 'BaseDirectory'))
             $script:KokoroModelReceipt = $kokoroModel
             $concat = Get-ExactMethod ([string]) 'Concat' @([string], [string])
             $hexText = { param($value) New-ClrCall $value (Get-ExactMethod ([int]) 'ToString' @([string])) @((New-ClrConstant 'x8' ([string]))) }
@@ -3709,6 +3715,10 @@ function New-PwshActivityAssemblyBytes {
                     'SetPowerShellAssemblyLoadContext', [Reflection.BindingFlags]'Public,Static', $null, [type[]]@([string]), $null)) @(
                     (New-ClrProperty $null (Get-ExactProperty ([AppContext]) 'BaseDirectory')))),
                 (& $mark 'GATE2B managed resolution complete'),
+                (& $log $infoPriority (New-StaticCall (Get-ExactMethod ([string]) 'Concat' @([string], [string])) @(
+                    (New-ClrConstant 'KOKORO private data root exists: ' ([string])),
+                    (New-ClrCall (New-StaticCall (Get-ExactMethod ([IO.Directory]) 'Exists' @([string])) @(
+                        (New-StaticCall $privateDataRoot))) (Get-ExactMethod ([bool]) 'ToString' @()))))),
                 (& $mark 'GATE2C Create'),
                 (New-ClrAssign $issVar (New-StaticCall (Get-ExactMethod ([Management.Automation.Runspaces.InitialSessionState]) 'Create' @()))),
                 (New-ClrAssign (New-ClrProperty $issVar (Get-ExactProperty ([Management.Automation.Runspaces.InitialSessionState]) 'LanguageMode')) `
