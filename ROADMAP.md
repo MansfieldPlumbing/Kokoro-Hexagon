@@ -68,11 +68,12 @@ and its directly emitted backend remain to be built.
   directly, without `libcdsprpc.so`, a vendor HAL client, or a QNN component
   in the product. The existing `libcdsprpc.so`-mediated R0Sub0 runs remain
   reference evidence for the emitted kernel only; they do not validate the
-  product transport. Raw libc `open` returned `EACCES` on the only exposed
-  non-secure FastRPC node in both current app sandboxes, and neither phone
-  exposes the upstream CDSP node path. Before a physical release claim,
-  obtain a source-matched device driver/policy contract and a permitted CDSP
-  descriptor; do not bypass the app sandbox or infer an ABI from binaries. See
+  product transport. The present raw-open probe targets an ADSP-named node,
+  not a proved CDSP session. Its `EACCES` result on both app sandboxes is a
+  failed probe, not a verdict on the CDSP design. Trace the actual device
+  routing and permissions to source matched to each phone, then obtain a
+  permitted CDSP descriptor and prove the direct ioctl path; do not bypass
+  the app sandbox or infer an ABI from binaries. See
   `docs/receipts/direct-fastrpc-native-open-20260925.md` and
   `docs/receipts/r0sub0-cross-soc-20260924.md`.
 - [x] Implement signed, transactional model admission for private app storage.

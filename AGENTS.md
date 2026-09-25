@@ -25,6 +25,22 @@ production status from historical receipts or reference harnesses.
   LLVM is a measurement competitor only, never a release build dependency.
   Partial-kernel wins do not establish whole-model performance or speech.
 
+## Upstream source rule
+
+- Derive model behavior from the pinned original Kokoro source revision,
+  checkpoint, config, and voices. Re-author that behavior in PowerShell; do
+  not derive an implementation from QNN contexts, exported graphs, recordings,
+  traces, or other downstream products. Use them only for differential checks.
+- Derive the compiler and runtime path from PowerShell/System.Management.Automation
+  source and documented .NET behavior, then the Hexagon ISA specification and
+  source-defined Android/Linux interfaces. Pin the exact revision or document
+  which device source is still missing. Do not reverse engineer vendor binaries
+  or invent an undocumented API from observed behavior.
+- At each layer, record source identity, the PowerShell representation, the
+  emitted artifact, and an executable equivalence gate. If the source contract
+  is missing, mark only that layer unverified and continue independent work;
+  never promote a reference implementation to fill the gap.
+
 ## Product boundary
 
 - The product is a model-less NativeActivity/CoreCLR/SMA appliance and a

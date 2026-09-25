@@ -31,11 +31,12 @@ path. Thus even a successful open of `adsprpc-smd` would not prove a CDSP
 session. This upstream source is not asserted to be the phones' exact vendor
 driver or policy build.
 
-This is a failed transport gate. The result does not distinguish app SELinux
-policy from other access controls or establish a permitted CDSP session API.
+This is a failed ADSP-node open probe, not a completed CDSP transport gate.
+The result does not distinguish app SELinux policy from other access controls
+or establish a permitted CDSP session API.
 No private vendor ABI is inferred from binaries. The existing `libcdsprpc.so`
 diagnostic path is separate evidence for the emitted kernel, not a product
 transport. The product path remains direct, source-defined FastRPC ioctls and
-memory mapping. On these stock phones, that path lacks a permitted CDSP
-descriptor. No claim is made about the vendor library's internal
+memory mapping. A source-matched CDSP descriptor route has not yet been
+established on these phones. No claim is made about the vendor library's internal
 implementation or about an undocumented HAL fallback.
