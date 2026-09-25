@@ -32,6 +32,29 @@ Not yet done, stated plainly:
   arbitrary-text AOA service, energy measurement, and multi-SoC builds are not
   yet complete.
 
+## Hexagon portability expectation
+
+The emitted kernels deliberately target the V73 scalar and HVX instruction
+subset. We expect those kernels to remain forward-compatible with later full
+Hexagon/HVX revisions when the device loader accepts the same ELF/FastRPC ABI.
+This expectation is supported by LLVM's Hexagon target model: both
+`hasV73Ops()` and `useHVXV73Ops()` test for an architecture version greater
+than or equal to V73, and the same ordered model includes V75, V79, and V81.
+LLVM also assigns distinct Hexagon ELF ISA identifiers to later revisions.
+
+This is an ISA-subset expectation, not a promise about every product's firmware,
+protection-domain policy, available HVX unit, tiny-core variant, or loader. A
+SoC is listed as validated only after the unchanged artifact passes output and
+execution gates on physical hardware. The current physical set is SM8550 and
+SM8635; see the [cross-SoC receipt](docs/receipts/r0sub0-cross-soc-20260924.md).
+
+Primary references: Qualcomm's
+[Hexagon V73 Programmer's Reference Manual](https://docs.qualcomm.com/bundle/publicresource/80-N2040-53.pdf),
+and LLVM's pinned Hexagon
+[subtarget feature predicates](https://github.com/llvm/llvm-project/blob/3243453c7b919c155a16e4e70e50d5f8417839d9/llvm/lib/Target/Hexagon/HexagonSubtarget.h#L214-L293),
+[ordered architecture set](https://github.com/llvm/llvm-project/blob/3243453c7b919c155a16e4e70e50d5f8417839d9/llvm/lib/Target/Hexagon/HexagonDepArch.h#L18-L54),
+and [ELF ISA identifiers](https://github.com/llvm/llvm-project/blob/3243453c7b919c155a16e4e70e50d5f8417839d9/llvm/include/llvm/BinaryFormat/ELF.h#L635-L652).
+
 ## Layout
 
 ```

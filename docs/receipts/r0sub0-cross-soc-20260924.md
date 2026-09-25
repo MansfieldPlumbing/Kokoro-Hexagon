@@ -53,9 +53,26 @@ as a silicon comparison.
 
 This validates identical R0Sub0 binaries and inputs on two distinct commercial
 Qualcomm SoCs, SM8550 and SM8635. It demonstrates portability of this pinned
-V73-compatible kernel and preserves output parity on both devices. It does not
-establish portability to another vendor, another DSP ISA, unrelated kernels,
-or the complete Kokoro model.
+V73-subset kernel and preserves output parity on both devices.
+
+Forward compatibility with later full Hexagon/HVX revisions is a reasonable
+expectation, not yet a blanket hardware claim. LLVM's maintained Hexagon target
+model implements scalar `hasV73Ops()` and vector `useHVXV73Ops()` as version
+tests greater than or equal to V73, over an ordered architecture set containing
+V75, V79, and V81. The project therefore targets the V73 subset for reach and
+requires a physical receipt before adding any later SoC to the validated set.
+Firmware, protection-domain policy, loader ABI, missing HVX hardware, and tiny
+cores can still prevent execution even when the instruction subset is compatible.
+
+Primary sources:
+
+- Qualcomm, [Hexagon V73 Programmer's Reference Manual](https://docs.qualcomm.com/bundle/publicresource/80-N2040-53.pdf)
+- LLVM, pinned [Hexagon subtarget feature predicates](https://github.com/llvm/llvm-project/blob/3243453c7b919c155a16e4e70e50d5f8417839d9/llvm/lib/Target/Hexagon/HexagonSubtarget.h#L214-L293)
+- LLVM, pinned [ordered Hexagon architecture set](https://github.com/llvm/llvm-project/blob/3243453c7b919c155a16e4e70e50d5f8417839d9/llvm/lib/Target/Hexagon/HexagonDepArch.h#L18-L54)
+- LLVM, pinned [Hexagon ELF ISA identifiers](https://github.com/llvm/llvm-project/blob/3243453c7b919c155a16e4e70e50d5f8417839d9/llvm/include/llvm/BinaryFormat/ELF.h#L635-L652)
+
+This does not establish portability to another vendor, another DSP ISA,
+unrelated kernels, or the complete Kokoro model.
 
 The SM8550 measurements and artifact construction evidence are in
 `docs/receipts/r0sub0-lowered-vs-llvm-20260924.md`.
