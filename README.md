@@ -22,10 +22,10 @@ the remaining gates.
 - Physical SM8550 and SM8635 devices have passed a directly emitted V73 HVX
   kernel test, not a complete synthesis test. Historical decoder playback
   used QNN contexts and is retained only as reference evidence.
-- The signed model-less NativeActivity/CoreCLR/SMA APK is 40,967,549 bytes and
-  has launched on both physical devices. That artifact predates the current
-  startup-only dispatch source and must not be used as a release artifact. It
-  contains no model and does not yet load one from the private model store.
+- The current signed model-less NativeActivity/CoreCLR/SMA APK is 40,967,465
+  bytes and has launched on both physical devices. It was built by this
+  repository's unofficial Pwsh-builder fork, contains no model, and does not
+  yet load one from the private model store. It is not a speech release.
 
 The immediate target is one admitted phoneme string to audible PCM on both
 devices through the same owned model path. Utterance boundaries will use a
@@ -33,11 +33,23 @@ measured short pause; the project does not synthesize inhalation sounds.
 
 ## Architecture boundary
 
-```text
-host build: pinned Kokoro inputs -> PowerShell/SMA validation and lowering
-                               -> managed model DLL + directly emitted DSP code
+`setup-kokoro.ps1` is an unofficial, separately maintained fork of Pwsh's
+`setup.ps1`. It builds this project's base APK from reviewed local sources and
+pinned inputs; it is not the upstream Pwsh build, and it does not automatically
+inherit upstream fixes. Pwsh contributes the Android PowerShell host/build
+substrate and generic ELF machinery; it does not lower Kokoro models. Kokoro's
+PowerShell sources own AST validation, weight assembly, model lowering, direct
+Hexagon emission, and synthesis integration. The separate `C:\Dev\Pwsh`
+checkout is not an input, workspace, or output for Kokoro work. Kokoro model
+files and generated artifacts must remain outside that checkout. The pinned
+Pwsh ELF-writer source used by the Hexagon probe is a narrow source donor, not
+a Kokoro model, synthesizer, or runtime dependency.
 
-device:     verified model DLL -> owned Hexagon execution -> PCM -> AAudio
+```text
+Kokoro model build: pinned Kokoro inputs -> Kokoro PowerShell AST/lowering
+                                        -> verified model DLL + direct DSP code
+Kokoro host build:  setup-kokoro.ps1 (unofficial Pwsh fork) -> model-less APK
+Device:             verified model DLL -> owned Hexagon execution -> PCM -> AAudio
 ```
 
 The release gate is a model-less base APK smaller than 40 MiB. After install,
@@ -58,7 +70,7 @@ and `src/runspace/Qnn.*` paths are not the product pipeline.
 | --- | --- |
 | `ROADMAP.md` | Canonical gates and checked status. |
 | `New-KokoroDecoderGraph.ps1` | Current parsed, two-node decoder contract; incomplete. |
-| `setup-kokoro.ps1` | PowerShell APK/managed-host builder; does not synthesize speech. |
+| `setup-kokoro.ps1` | Unofficial Pwsh-builder fork for the model-less APK/managed host; does not synthesize speech. |
 | `src/runspace/Native.Binding.psm1` | QNN-independent native export binding used by AAudio and direct probes. |
 | `src/runspace/Model.Store.psm1` | Signed, transactional private-storage model admission and activation. |
 | `lib/manifest.json` | Pinned model and historical reference provenance. |

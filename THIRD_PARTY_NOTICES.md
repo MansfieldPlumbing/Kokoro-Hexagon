@@ -3,6 +3,8 @@
 Repository code is Apache-2.0; see `LICENSE` and `NOTICE`. A released APK and
 model DLL must carry notices for the exact components they actually contain.
 Reference-only tools and historical receipts do not become product dependencies.
+Pwsh build machinery has first-party fork lineage documented in `NOTICE`; it
+does not supply Kokoro model weights or speech execution.
 
 | Component | License | Current role |
 | --- | --- | --- |

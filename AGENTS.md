@@ -4,10 +4,27 @@ The machine/workspace `AGENTS.md` security and change-control rules apply.
 Use [ROADMAP.md](ROADMAP.md) for the current implementation gates. Do not infer
 production status from historical receipts or reference harnesses.
 
-`C:\Dev\Pwsh` is protected upstream source, not a workspace or build output.
-Agents must not write there or run its build. Fetch required Pwsh files from a
-fixed GitHub commit, verify their pinned hashes, and emit only into the Kokoro
-build area or another explicitly approved location outside that checkout.
+## Build lineage and checkout boundary
+
+`setup-kokoro.ps1` is this repository's unofficial, separately maintained fork
+of Pwsh's `setup.ps1`. It is the Kokoro appliance build entry point, not the
+upstream Pwsh project and not an independent implementation without upstream
+lineage. Do not describe its APK as an official Pwsh build or assume that this
+fork contains subsequent upstream changes. Review and test it here.
+
+Pwsh supplies the Android PowerShell host/build substrate and generic ELF
+machinery; it does not own or perform Kokoro AST lowering, model assembly,
+weight conversion, Hexagon specialization, or speech. Those product operations
+are authored and verified in Kokoro-Hexagon. A model artifact change is not,
+by itself, a reason to rebuild the host APK; host/runtime/store changes are.
+
+`C:\Dev\Pwsh` is a separate, actively used upstream checkout. Kokoro agents
+must not inspect, modify, build in, or use it as an input or output. Fetch any
+required Pwsh source from an immutable GitHub revision, verify its pinned hash,
+and keep generated files outside that checkout. Never place Kokoro model files,
+artifacts, caches, or temporary files in the Pwsh source tree. The Hexagon
+probe's generic ELF-writer import is separate from the APK builder; neither
+provides Kokoro model execution or speech.
 
 Hard stop: the repository does not yet contain a working Kokoro synthesizer.
 A launching APK, model-weight DLL, parsed graph, native-audio tone, QNN speech

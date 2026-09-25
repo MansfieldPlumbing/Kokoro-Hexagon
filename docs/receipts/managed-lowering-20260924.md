@@ -35,5 +35,6 @@ remain outside Git.
 This receipt proves build-time lowering and managed artifact preservation. It
 does not yet prove phone startup, warm dispatch, speech TTFT or a smaller APK.
 The selected donor list still includes `Mono.Android.dll` (41,887,544 bytes),
-`Java.Interop.dll` and `Mono.Android.Runtime.dll`; removing the unused recovery
-activity from the NativeActivity entry assembly is the next payload gate.
+`Java.Interop.dll` and `Mono.Android.Runtime.dll`. That was a historical payload
+gate, superseded by the current model-less NativeActivity APK receipt; it is
+not the present release payload or the next implementation step.

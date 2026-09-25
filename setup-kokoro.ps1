@@ -1,4 +1,6 @@
 #Requires -Version 7.0
+# Unofficial Kokoro-Hexagon fork of Pwsh's setup.ps1. Build this repository's
+# base appliance here; never use C:\Dev\Pwsh as a source or output directory.
 [CmdletBinding(SupportsShouldProcess, ConfirmImpact = 'Low', PositionalBinding = $false)]
 param(
     [Alias('h')]

@@ -3,6 +3,11 @@ Copyright 2026 Scott Mansfield
 
 This product is licensed under the Apache License, Version 2.0 (see LICENSE).
 
+The APK builder, setup-kokoro.ps1, is an unofficial, separately maintained
+fork of Pwsh's setup.ps1 (https://github.com/MansfieldPlumbing/Pwsh). The
+Kokoro-Hexagon APK is not an official Pwsh release. The separate Pwsh source
+checkout is not a Kokoro build or artifact location.
+
 Model variants built from Kokoro-82M use source, weights, and voices by hexgrad
 under Apache-2.0:
 https://github.com/hexgrad/kokoro and https://huggingface.co/hexgrad/Kokoro-82M

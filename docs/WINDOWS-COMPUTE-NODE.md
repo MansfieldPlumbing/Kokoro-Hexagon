@@ -8,7 +8,7 @@ contract, not a completed live synthesis path.
 Windows text / UI
   -> SMA plan and pronunciation inputs
   -> PowerShell-owned WinUSB AOA pipe
-  -> resident Android Pwsh appliance
+  -> resident Kokoro Android appliance (unofficial Pwsh-host fork)
   -> verified model DLL and directly emitted Hexagon backend
   -> one bounded AAudio stream
   -> receipt over the same AOA pipe
@@ -29,10 +29,11 @@ either `data` or `error`. Control frames are limited to 256 KiB. Model inputs
 and other large binary artifacts will use separately typed, length-bounded,
 hash-checked frames; they are not embedded as JSON arrays.
 
-The endpoint never evaluates source received from USB. The initial admitted
-operations are `status`, `ping`, and `receipt`. `speak`, `benchmark`, and later
-`transcribe` become admissible only when their resident service handlers pass a
-physical-device round trip. The interactive Windows loop may look like a REPL,
+The endpoint never evaluates source received from USB. The current appliance
+startup dispatch admits only the internal `status` token. AOA `ping`, `receipt`,
+`speak`, `benchmark`, and `transcribe` are not admitted product operations;
+each requires an implemented resident handler and a physical-device round trip
+before admission. The interactive Windows loop may look like a REPL,
 but the wire carries typed operations rather than PowerShell source.
 
 ## Residency and latency

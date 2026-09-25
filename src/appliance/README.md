@@ -14,15 +14,18 @@ The appliance is a product boundary, not a build-output directory:
 - ARM64 and Hexagon instruction emission remains in `src/emit`;
 - device-side diagnostic probes remain in `src/runspace` and are not appliance
   dependencies;
-- generated APKs, packed weights, native libraries, audio, and receipts go to
-  `..\Build\Kokoro-Hexagon\appliance` and are not committed.
+- generated APKs, packed weights, native libraries, and audio go to the
+  external `C:\Dev\Build\Kokoro-Hexagon\appliance` area, never the Pwsh source
+  tree, and are not committed. Compact reviewed receipts go under
+  `docs/receipts/` in this repository.
 
 ## Release gate
 
 A build is downloadable only after one immutable artifact passes all of these
 checks on the physical target:
 
-1. The APK contains the owned Pwsh NativeActivity/CoreCLR host and contains no
+1. The APK contains this repository's unofficial fork of the Pwsh
+   NativeActivity/CoreCLR host build and contains no
    Xamarin runtime libraries or application DEX.
 2. Every external input and packaged native library matches its pinned
    SHA-256 manifest entry, and the model-less APK is smaller than 40 MiB.
