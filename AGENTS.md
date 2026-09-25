@@ -29,8 +29,9 @@ production status from historical receipts or reference harnesses.
 
 - Derive model behavior from the pinned original Kokoro source revision,
   checkpoint, config, and voices. Re-author that behavior in PowerShell; do
-  not derive an implementation from QNN contexts, exported graphs, recordings,
-  traces, or other downstream products. Use them only for differential checks.
+  not derive an implementation from ONNX exports, QNN contexts, recordings,
+  traces, or other downstream products. Use them only as wayfinders for
+  differential checks, never as implementation inputs or release artifacts.
 - Derive the compiler and runtime path from PowerShell/System.Management.Automation
   source and documented .NET behavior, then the Hexagon ISA specification and
   source-defined Android/Linux interfaces. Pin the exact revision or document
