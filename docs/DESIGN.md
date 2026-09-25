@@ -1,5 +1,10 @@
 # Design and HTP findings
 
+This is a historical QNN/oracle investigation, not the product architecture.
+The current release boundary and remaining work are in `ROADMAP.md`. Its
+numerical and AdaIN findings remain useful comparison evidence; its QNN
+passes, libraries, and contexts are not production dependencies.
+
 All findings below were verified on the S23 (SM8550, Hexagon V73) with QAIRT
 2.46.0.260424, by per-layer probes compared against PyTorch on the device.
 

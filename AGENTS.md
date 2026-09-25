@@ -1,23 +1,58 @@
-# Kokoro-QNN repository contract
+# Kokoro-Hexagon repository contract
 
-Keep this repository narrow and evidence-led. The rules in the workspace `AGENTS.md`
-apply.
+The machine/workspace `AGENTS.md` security and change-control rules apply.
+Use [ROADMAP.md](ROADMAP.md) for the current implementation gates. Do not infer
+production status from historical receipts or reference harnesses.
 
-- `lib/` holds pinned inputs and reference data only. Every external input is
-  listed in `lib/manifest.json` with its SHA-256.
-- `src/export/` is one-time host tooling. Python may export, verify and compile;
-  it never runs on the device.
-- `src/runspace/` is device code: PowerShell over the QNN C API, cmdlet-free
-  (the Android host has no cmdlet modules).
-- Nothing generated is committed: no ONNX, context binaries, WAVs, logs or
-  Qualcomm libraries. Build output goes to `..\Build\Kokoro-QNN (next to the repository)`.
-- Device identifiers are not written into the repository; pass them through
-  `KOKORO_QNN_SERIAL`.
+## Product boundary
 
-## Evidence rules
+- The product is a model-less NativeActivity/CoreCLR/SMA appliance and a
+  separately verified, weight-bearing managed model DLL. The final DLL owns
+  admitted text/phoneme logic, graph identity, weights, control schema, and
+  lowered hot paths.
+- PowerShell parses and validates authored source before lowering. User text is
+  data: never parse or evaluate it as PowerShell. Check lengths, Unicode,
+  tensor shapes, offsets, storage bounds, and resource hashes before use.
+- `New-KokoroDecoderGraph.ps1` is currently an incomplete, parsed decoder
+  contract. Its two nodes do not establish live phoneme-to-PCM synthesis.
+- QNN libraries, ABI, contexts, and compiler; ONNX Runtime; Python/PyTorch;
+  and LLVM are oracle/reference or historical material only. No production
+  build or runtime edge may reach them. Do not package their outputs as a
+  release dependency.
+- Keep APK and model DLL separate. Stage a downloaded or AOA-supplied DLL in
+  private storage; verify its signed manifest, compatibility, exact length,
+  SHA-256, and managed identity; then promote it by atomic active-pointer
+  replacement. Do not fetch or compile code during ordinary inference.
 
-- Every graph that reaches the device passes `src/export/qnn_gate.py`.
-- Every QNN pass is checked for exactness against the previous graph in fp32.
-- A capability is claimed only with a device receipt. A block is correct on HTP
-  only after a per-layer probe matches the PyTorch reference on the device.
-- A phrase has vocalized only when valid PCM played through the phone speaker.
+## Repository boundaries
+
+- `lib/manifest.json` pins external inputs and historical oracle provenance.
+  The `hostCompiler` and `deviceRuntime` entries are not production dependencies.
+- `src/export/`, `src/runspace/Qnn.*`, and prepared-context device jobs are
+  isolated reference harnesses. New product code must live outside them and
+  must not import their libraries or contexts.
+- Do not commit generated DLLs, APKs, ONNX, contexts, ELF, weights, audio,
+  device logs, signing keys, or raw device identifiers. Use the adjacent Build
+  directory for artifacts and `docs/receipts/` for compact reviewed evidence.
+- Use approved PowerShell Verb-Noun names for executable scripts. Parsed graph
+  sources must state what computation they currently describe.
+
+## Evidence and promotion
+
+- Pin source and inputs. Validate PowerShell ASTs and test emitted methods in
+  a clean process before use. Source/checkpoint readers are build-time only.
+- Keep generic C ABI binding in `Native.Binding.psm1`; product paths such as
+  AAudio and direct FastRPC must not import `Qnn.Abi.psm1` for delegate types.
+- Full Language Mode is required only for the owned managed/native interop
+  boundary: `Native.Binding.psm1` emits validated delegate types with
+  `Reflection.Emit`. User text and downloaded manifests remain data and are
+  never compiled or evaluated.
+- Compare each numerical or precision change to its preceding FP32/declared
+  baseline, then measure audio quality, full-path timing, and memory.
+- A device kernel claim needs a same-artifact physical receipt. A live speech
+  claim needs PCM audibly played from the phone speaker on the owned path;
+  a reference recording or prepared QNN context is not a substitute.
+- Keep SM8550 and SM8635 results separate; do not infer cross-ASIC portability
+  from an ISA-subset argument alone.
+- Preserve user changes, back up before overwriting, and obtain explicit
+  approval before deletion, history rewrite, or push.

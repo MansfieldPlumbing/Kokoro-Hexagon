@@ -1,11 +1,13 @@
-Kokoro-QNN
+Kokoro-Hexagon
 Copyright 2026 Scott Mansfield
 
 This product is licensed under the Apache License, Version 2.0 (see LICENSE).
 
-It builds on Kokoro-82M by hexgrad (Apache-2.0):
+Model variants built from Kokoro-82M use source, weights, and voices by hexgrad
+under Apache-2.0:
 https://github.com/hexgrad/kokoro and https://huggingface.co/hexgrad/Kokoro-82M
-Compiled contexts and per-voice tables produced by this project are derived
-from the Kokoro-82M weights.
+Embedded tensor and voice resources in a model DLL are derived from those
+weights and retain the applicable notice.
 
-Qualcomm QAIRT / QNN runtime libraries are not included; see THIRD_PARTY_NOTICES.md.
+Historical QNN and other oracle tooling is not part of the intended product
+release. See THIRD_PARTY_NOTICES.md.

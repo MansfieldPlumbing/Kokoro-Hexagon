@@ -1,4 +1,7 @@
-# Build output lives in ..\Build\Kokoro-QNN (next to the repository), never here.
+# Build output lives in ..\Build\Kokoro-Hexagon (next to the repository), never here.
+*.dll
+*.apk
+*.elf
 *.onnx
 *.onnx.data
 *.bin

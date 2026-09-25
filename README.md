@@ -1,122 +1,96 @@
-# Kokoro-QNN
+# Kokoro-Hexagon
 
-Kokoro-82M speech synthesis on Qualcomm Hexagon HTP, driven through the QNN C API
-from PowerShell. No ONNX Runtime on the device.
+Kokoro-Hexagon is a PowerShell-authored speech-model project targeting Qualcomm
+Hexagon. The intended release is a small, model-less Android appliance plus a
+separately verified, weight-bearing managed model DLL. The project is not yet
+an end-to-end synthesizer; see [ROADMAP.md](ROADMAP.md) for checked evidence and
+the remaining gates.
 
-## Status
+## Current status
 
-First light on 2026-09-22: a Samsung Galaxy S23 (SM8550, Hexagon V73) spoke a
-phrase through its speaker. Kokoro's whole decoder ran on HTP, iSTFT included,
-from the AndroidSMA runspace. See [docs/FIRST-LIGHT.md](docs/FIRST-LIGHT.md).
+- A PowerShell checkpoint reader extracts the pinned Kokoro-82M tensors without
+  importing PyTorch. All 548 FP32 tensors have been embedded in and read back
+  from a managed DLL on Windows. An FP16 payload candidate has passed the same
+  integrity test. These DLLs contain weights, not executable speech inference.
+- A separately emitted phoneme DLL validates the pinned 114-character
+  vocabulary, 510-phoneme limit, boundary IDs, and one voice's length-selected
+  style rows. Text-to-phoneme conversion is not implemented in the product.
+- `New-KokoroDecoderGraph.ps1` is a parsed two-node decoder scaffold that starts
+  from prepared acoustic tensors. The full phoneme-to-PCM graph and its
+  QNN-free device execution path are not implemented. No live Kokoro speech
+  from these DLLs has been claimed.
+- Physical SM8550 and SM8635 devices have passed a directly emitted V73 HVX
+  kernel test, not a complete synthesis test. Historical decoder playback
+  used QNN contexts and is retained only as reference evidence.
+- The signed model-less NativeActivity/CoreCLR/SMA APK is 40,967,549 bytes and
+  has launched on both physical devices. It contains no model and does not yet
+  load one from the private model store.
 
-| Stage | Where it runs |
+The immediate target is one admitted phoneme string to audible PCM on both
+devices through the same owned model path. Utterance boundaries will use a
+measured short pause; the project does not synthesize inhalation sounds.
+
+## Architecture boundary
+
+```text
+host build: pinned Kokoro inputs -> PowerShell/SMA validation and lowering
+                               -> managed model DLL + directly emitted DSP code
+
+device:     verified model DLL -> owned Hexagon execution -> PCM -> AAudio
+```
+
+The release gate is a model-less base APK smaller than 40 MiB. After install,
+the appliance obtains one or more model DLLs using a signed release manifest,
+or accepts the same manifest and DLL over the offline AOA channel. The model
+store verifies compatibility, length, SHA-256, managed assembly identity, and
+manifest signature before atomically changing the active-model pointer. Model
+DLLs ultimately include graph and hot paths, not just compressed tensors.
+
+QNN, ONNX Runtime, Python, PyTorch, and LLVM are oracle/reference or historical
+benchmark material, not production build or runtime dependencies. Do not feed
+their compiled contexts or libraries into the release. Existing `src/export/`
+and `src/runspace/Qnn.*` paths are not the product pipeline.
+
+## Source map
+
+| Path | Role |
 | --- | --- |
-| Text → phonemes | host CPU (Misaki) |
-| ALBERT, text encoder, duration/F0/N predictor | host CPU (PyTorch) |
-| Harmonic source (`SineGen`) + forward STFT | host CPU (PyTorch) |
-| Decoder front (`encode`, `decode`, `F0/N_conv`) | **HTP** |
-| Generator (upsamplers, resblocks, `conv_post`) + iSTFT | **HTP** |
-| Playback | persistent Android AAudio stream from PowerShell |
+| `ROADMAP.md` | Canonical gates and checked status. |
+| `New-KokoroDecoderGraph.ps1` | Current parsed, two-node decoder contract; incomplete. |
+| `setup-kokoro.ps1` | PowerShell APK/managed-host builder; does not synthesize speech. |
+| `src/runspace/Native.Binding.psm1` | QNN-independent native export binding used by AAudio and direct probes. |
+| `src/runspace/Model.Store.psm1` | Signed, transactional private-storage model admission and activation. |
+| `lib/manifest.json` | Pinned model and historical reference provenance. |
+| `src/text/` | Pinned phoneme admission and voice-row expression source. |
+| `src/weights/`, `src/runspace/Torch.Checkpoint.psm1` | Host-side tensor extraction and FP16 conversion. |
+| `tools/Build-WeightAssembly.ps1` | FP32/FP16 validation DLLs outside Git. |
+| `docs/receipts/` | Narrow, dated measurements; historical QNN receipts are not product gates. |
 
-Measured on the S23 (fp16, burst vote, 8 MB VTCM, 160-frame capacity, one
-phrase of 3.27 s): front 32 ms, generator + iSTFT 1.57 s, audio SNR 24.0 dB
-against the full-length PyTorch reference (the fp32 CPU run of the same design
-scores 24.2 dB).
-
-Not yet done, stated plainly:
-
-- The front end and harmonic source still run on the host.
-- The generator is not yet real-time. Integer (w8a16) compilation does not
-  finalize yet; the fp16 path is the one that runs.
-- The overlap scheduler is proven for a bounded three-chunk passage, but the
-  arbitrary-text AOA service, energy measurement, and multi-SoC builds are not
-  yet complete.
-
-## Hexagon portability expectation
-
-The emitted kernels deliberately target the V73 scalar and HVX instruction
-subset. We expect those kernels to remain forward-compatible with later full
-Hexagon/HVX revisions when the device loader accepts the same ELF/FastRPC ABI.
-This expectation is supported by LLVM's Hexagon target model: both
-`hasV73Ops()` and `useHVXV73Ops()` test for an architecture version greater
-than or equal to V73, and the same ordered model includes V75, V79, and V81.
-LLVM also assigns distinct Hexagon ELF ISA identifiers to later revisions.
-
-This is an ISA-subset expectation, not a promise about every product's firmware,
-protection-domain policy, available HVX unit, tiny-core variant, or loader. A
-SoC is listed as validated only after the unchanged artifact passes output and
-execution gates on physical hardware. The current physical set is SM8550 and
-SM8635; see the [cross-SoC receipt](docs/receipts/r0sub0-cross-soc-20260924.md).
-
-Primary references: Qualcomm's
-[Hexagon V73 Programmer's Reference Manual](https://docs.qualcomm.com/bundle/publicresource/80-N2040-53.pdf),
-and LLVM's pinned Hexagon
-[subtarget feature predicates](https://github.com/llvm/llvm-project/blob/3243453c7b919c155a16e4e70e50d5f8417839d9/llvm/lib/Target/Hexagon/HexagonSubtarget.h#L214-L293),
-[ordered architecture set](https://github.com/llvm/llvm-project/blob/3243453c7b919c155a16e4e70e50d5f8417839d9/llvm/lib/Target/Hexagon/HexagonDepArch.h#L18-L54),
-and [ELF ISA identifiers](https://github.com/llvm/llvm-project/blob/3243453c7b919c155a16e4e70e50d5f8417839d9/llvm/include/llvm/BinaryFormat/ELF.h#L635-L652).
-
-## Layout
-
-```
-lib/manifest.json   pinned inputs (SHA-256): weights, Kokoro source, host compiler, device runtime
-lib/qairt-2.46/     QAIRT 2.46 ABI reference data (constants, enums, layouts, functions)
-src/export/         one-time Python: static decoder export, QNN passes, gate, compile
-src/appliance/      source and release gates for the downloadable demo APK
-src/runspace/       device-side PowerShell: QNN ABI, native, graph, context, Speak runner
-tools/              host PowerShell: context metadata reader, device job and speak drivers
-docs/               design, HTP findings, receipts
-```
-
-The Windows compute-node design and its ADB-free AOA admission boundary are in
-[docs/WINDOWS-COMPUTE-NODE.md](docs/WINDOWS-COMPUTE-NODE.md).
-
-## Android appliance build
-
-`setup-kokoro.ps1` is the single, self-verifying build graph for the downloadable
-Android appliance. It is forked from the pinned Pwsh builder and defaults to the
-DEX-free NativeActivity/CoreCLR admission path; this product fork does not admit
-the Xamarin/Mono packaging path.
+The checked Windows validation commands are below. Set `KOKORO_MODEL_DIR` to
+the directory containing the pinned checkpoint and voice pack; set the two DLL
+variables to paths emitted by `tools/Build-PhonemeContractAssembly.ps1` and
+`tools/Build-WeightAssembly.ps1` in the adjacent Build directory.
 
 ```powershell
-pwsh -NoProfile -File .\setup-kokoro.ps1 -Headless -Step 11
+$voicePath = Join-Path $env:KOKORO_MODEL_DIR 'voices\af_heart.pt'
+$phonemeDll = $env:KOKORO_PHONEME_DLL
+$weightDll = $env:KOKORO_WEIGHT_DLL
+pwsh -NoProfile -File .\tools\Test-PhonemeExpression.ps1 -VoicePath $voicePath
+pwsh -NoProfile -File .\tools\Test-PhonemeContractAssembly.ps1 -AssemblyPath $phonemeDll -VoicePath $voicePath
+pwsh -NoProfile -File .\tools\Test-WeightAssembly.ps1 -AssemblyPath $weightDll
+pwsh -NoProfile -File .\tools\Test-ModelContract.ps1
+pwsh -NoProfile -File .\tools\Test-NativeBinding.ps1
+pwsh -NoProfile -File .\tools\Test-ModelStore.ps1
+pwsh -NoProfile -File .\tools\Test-ProductionClosure.ps1
 ```
 
-The normal user path is a signed release APK. The script is the reproducible
-builder path and prints its complete write plan before creating anything. Build
-output and signing material remain outside the repository.
-
-The resident provider architecture, current host control measurement, and
-remaining Android gates are in [docs/APPLIANCE.md](docs/APPLIANCE.md).
-
-Build output is never written into the repository. Compiled contexts and staged
-device jobs go to `..\Build\Kokoro-QNN (next to the repository)`.
-
-## Pipeline
-
-1. `src/export/split_export.py` — export the decoder at a fixed capacity with
-   length masks (front and generator graphs).
-2. `src/export/gen_stages.py` — generator variants (aligned, iSTFT in graph,
-   per-voice gamma/beta table).
-3. `src/export/pow2_to_mul.py`, then ORT basic optimization — QNN passes.
-4. `src/export/qnn_gate.py` — static shapes and device-proven op allowlist.
-5. `src/export/compile_ctx.py` — V73 context binary via onnxruntime-qnn 2.2.0
-   (bundles QAIRT 2.46.0.260424, matching the device runtime).
-6. `tools/Invoke-Speak.ps1` — stage both contexts and a phrase, run on the
-   device, play, and return the receipt.
-
-## Configuration
-
-Host tools read these environment variables (no machine-specific defaults):
-
-| Variable | Used by | Meaning |
-| --- | --- | --- |
-| `KOKORO_MODEL_DIR` | `src/export` | directory with `kokoro-v1_0.pth`, `config.json`, `voices/` |
-| `KOKORO_QNN_SYSTEM_LIB` | `tools` | `QnnSystem` library from the same QAIRT build as the compiler |
-| `KOKORO_QNN_SERIAL` | `tools` | adb serial of the target device |
-| `KOKORO_QNN_ADB` | `tools` | adb executable (default: `adb` on `PATH`) |
+These validate contracts and embedded data; they are not a `Speak` command.
+Generated DLLs, APKs, audio, and raw logs belong in the adjacent Build
+directory and are not committed.
 
 ## Licensing
 
-This repository is Apache-2.0 (see `LICENSE` and `NOTICE`). Kokoro-82M weights and source are Apache-2.0. Qualcomm's QNN runtime libraries
-are proprietary and are never committed or redistributed standalone; they are
-pinned by hash in `lib/manifest.json` and obtained from the QAIRT SDK.
+Repository code is Apache-2.0; see [LICENSE](LICENSE), [NOTICE](NOTICE), and
+[THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md). Kokoro-82M's pinned source,
+weights, and voices carry their own Apache-2.0 notice. Historical Qualcomm
+materials are not included in the product release.

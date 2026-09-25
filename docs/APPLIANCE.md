@@ -2,15 +2,17 @@
 
 The product is a speech application with an embedded, deliberately reduced
 PowerShell runtime. PowerShell is an implementation substrate, not a permission
-boundary or a USB command language.
+boundary or a USB command language. This document describes the host boundary;
+live QNN-free Kokoro synthesis is not yet implemented. `ROADMAP.md` is the
+current product gate.
 
 ## Build graph
 
 `setup-kokoro.ps1` is a fork of the pinned Pwsh build graph. It emits and checks
 the Android manifest, managed host, XABA assembly store, native ELF libraries,
 APK archive and v2 signature from one PowerShell program. Its package provenance
-is isolated in `lib/pwsh-build-manifest.json`; Kokoro and QNN provenance remains
-in `lib/manifest.json`.
+is isolated in `lib/pwsh-build-manifest.json`; Kokoro source and historical
+oracle provenance remain in `lib/manifest.json`.
 
 The product identity is `dev.mansfieldplumbing.kokorohexagon`. The admitted host
 is NativeActivity/CoreCLR only. Xamarin, Mono, DEX, Android managed bindings and
@@ -40,11 +42,12 @@ physical-device A/B can quantify the benefit of persisted methods.
 
 ## Model boundary
 
-The current runtime consumes the pinned upstream Kokoro-82M checkpoint. Graph
-splits, QNN contexts, emitted Hexagon kernels and quantized device artifacts are
-runtime derivatives, not a separately trained model. A separately published
-model becomes appropriate when weights or architecture change, such as a baked
-integer checkpoint, trained speaker material or a FiLM-based generator.
+The intended runtime consumes a verified managed model DLL derived from the
+pinned upstream Kokoro-82M checkpoint; it does not read that checkpoint.
+Historical QNN contexts are reference artifacts, not runtime derivatives in
+the product path. The current DLL experiments contain phoneme admission or
+weights separately and are not a complete model. Quantized variants retain
+their own precision and release identity.
 
 An optional language or perception model sits in front of this contract. It may
 produce text and speech-planning hints, but it does not own phonemization, audio

@@ -1,13 +1,17 @@
 # Third-party notices
 
-The code in this repository is licensed under Apache-2.0 (see `LICENSE` and `NOTICE`). It depends on or
-produces artifacts from the following, which keep their own licenses:
+Repository code is Apache-2.0; see `LICENSE` and `NOTICE`. A released APK and
+model DLL must carry notices for the exact components they actually contain.
+Reference-only tools and historical receipts do not become product dependencies.
 
-| Component | License | How it is used |
+| Component | License | Current role |
 | --- | --- | --- |
-| Kokoro-82M weights and voices (hexgrad) | Apache-2.0 | Input to the export pipeline. Compiled contexts and per-voice tables derived from the weights remain subject to Apache-2.0 and carry its notice. |
-| Kokoro source (hexgrad/kokoro 0.9.4) | Apache-2.0 | Model definitions used at export time; not redistributed here. |
-| Misaki lexicons | Apache-2.0 | Planned front-end data; pinned by hash. |
-| ONNX Runtime, onnxruntime-qnn | MIT | Host-side export and compile tooling; not redistributed here. |
-| Qualcomm QAIRT / QNN runtime | Qualcomm AI Stack License | Never committed or redistributed standalone. Obtain from the QAIRT SDK; may be distributed only as object code incorporated into an application. |
-| Hexagon SDK, toolchain, HexKL | Qualcomm license terms | Host-side build tools for custom kernels; not redistributed here. |
+| Kokoro-82M source, weights, and voices (hexgrad) | Apache-2.0 | Pinned stock model source; emitted tensor and voice resources are derived from the weights. |
+| Misaki and the pinned `MisakiSharp` port | Apache-2.0 per pinned source | Pronunciation and differential-test oracles. Not packaged in the current model DLL or APK. |
+| ONNX Runtime and onnxruntime-qnn | MIT | Historical host export/compiler comparison only; not a production build or runtime dependency. |
+| Qualcomm QAIRT/QNN libraries and SDK | Qualcomm terms | Historical oracle/device experiments only. Libraries and generated contexts are not committed or part of the intended release. |
+| Hexagon SDK/toolchain | Qualcomm terms | Independent assembly and device verification during development; not a production build or runtime dependency. |
+
+The production path is PowerShell/SMA lowering to managed IL and directly
+emitted DSP code. Review the final SBOM and release package rather than
+assuming that every historical tool listed here is shipped.

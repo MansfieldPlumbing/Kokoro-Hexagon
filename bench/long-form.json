@@ -11,9 +11,9 @@
     },
     {
       "id": "project-brief",
-      "label": "BRIEF.md",
+      "label": "Historical project overview",
       "sha256": "9f039c6e1acbff2bd107aedbef37fc5131b0d343e3f57dcbef387cb493be6a83",
-      "provenance": "Repository-adjacent project brief; narration below is updated to match current receipts."
+      "provenance": "Archived source in Git history at commit 02128ae; retained only as bounded evaluation provenance."
     },
     {
       "id": "original-lyrics",

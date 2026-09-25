@@ -3,6 +3,10 @@
 Date: 2026-09-24  
 Source: repository `model.ps1` and `setup-kokoro.ps1 -Step 4 -KeepIntermediates -AcceptWritePlan`
 
+The graph source was later renamed, byte-for-byte, to
+`New-KokoroDecoderGraph.ps1`; the filename above records the path used for
+this dated receipt.
+
 The build verified the pinned package catalogs, parsed the model source into a two-node DAG, persisted its identity and control schema, and produced the managed assembly outside the repository.
 
 ```text

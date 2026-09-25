@@ -1,17 +1,18 @@
 # Kokoro appliance
 
-This directory owns the source for the downloadable Kokoro-Hexagon demo. The
-appliance combines the Xamarin-free Pwsh host with this repository's packed
-model, ARM64 control path, and emitted Hexagon kernels.
+This directory owns the source for the downloadable Kokoro-Hexagon appliance.
+The base APK combines the Xamarin-free Pwsh host, ARM64 control path, and
+direct Hexagon execution support. It does not embed a Kokoro model.
 
 The appliance is a product boundary, not a build-output directory:
 
 - source and packaging policy live here;
-- reusable model export remains in `src/export`;
+- model creation and admission live outside the APK; `src/export` is historical
+  oracle material only;
 - ARM64 and Hexagon instruction emission remains in `src/emit`;
 - device-side diagnostic probes remain in `src/runspace`;
 - generated APKs, packed weights, native libraries, audio, and receipts go to
-  `..\Build\Kokoro-QNN\appliance` and are not committed.
+  `..\Build\Kokoro-Hexagon\appliance` and are not committed.
 
 ## Release gate
 
@@ -21,8 +22,9 @@ checks on the physical target:
 1. The APK contains the owned Pwsh NativeActivity/CoreCLR host and contains no
    Xamarin runtime libraries or application DEX.
 2. Every external input and packaged native library matches its pinned
-   SHA-256 manifest entry.
-3. The W4-packed model maps without creating a second full-model copy.
+   SHA-256 manifest entry, and the model-less APK is smaller than 40 MiB.
+3. Each separately installed model DLL passes signed-manifest, compatibility,
+   length, hash, managed-identity, and transactional-activation checks.
 4. DSP state is initialized and warmed before the measured synthesis request.
 5. Output matches the approved reference gate and valid PCM plays through the
    device speaker.

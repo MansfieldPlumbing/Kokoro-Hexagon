@@ -9,7 +9,7 @@ authored text + objective + optional model evidence
     -> coordinate-preserving SMA parse
     -> speech-act and boundary candidates
     -> spoken normalization
-    -> pronunciation oracle
+    -> admitted phoneme adapter (checked against a pinned oracle)
     -> Kokoro inputs
     -> device acoustic and listening gates
 ```
@@ -34,21 +34,22 @@ the dialogue plan, and one voice can serve multiple anonymous roles.
 ## Multiple speakers
 
 Every speech plan and phrase bundle carries both `speaker` and `voice`. A speaker
-turn changes the style vector and the precomputed per-voice gamma/beta input; it
-does not change or reload either compiled QNN graph. The persistent pipeline
-therefore keeps all capacity contexts and its one bounded AAudio stream alive
-while consecutive phrases use different voices. Device receipts name both
-fields so a listening result remains attributable.
+turn selects a verified voice/style resource without reloading the model DLL.
+The intended pipeline keeps the model session and one bounded AAudio stream
+alive across phrases. Device receipts name both fields so a listening result
+remains attributable; this multi-speaker path is not yet device-proven.
 
-This is cheap in execution, not evidence-free: each admitted voice asset must be
-pinned by hash, each phrase still passes the fp32 oracle gate, and the first
-multi-speaker claim requires a physical speaker receipt. Voice tensors remain
-host-side export inputs rather than runtime model dependencies.
+This is a target, not evidence-free: each admitted voice asset must be pinned by
+hash, each phrase still passes the FP32 oracle gate, and the first multi-speaker
+claim requires a physical speaker receipt. Voice resources belong in the
+verified model DLL, not a host export step at inference time.
 
 The initial cue vocabulary is deliberately small: `breath`, `pause`, `laugh`,
 `cough`, `clear_throat`, `sigh`, and `gasp`. Pauses require an explicit duration
-from 20 to 5000 milliseconds. Asterisks and ordinary square brackets have no
-special meaning.
+from 20 to 5000 milliseconds. `breath` denotes a planning boundary to be
+rendered as a measured short pause, not an inhalation sound. Other nonverbal
+cues are not proven audio outputs. Asterisks and ordinary square brackets have
+no special meaning.
 
 ## Borrowed mechanisms
 

@@ -1,41 +1,33 @@
-# Kokoro model assembly
+# Kokoro managed assemblies
 
-`model.ps1` is the canonical device graph contract. The build parses it without executing the model, lowers it to a two-node tensor DAG, hashes the canonical DAG, and persists that identity and its control schema into `Kokoro-Hexagon.dll`.
+`New-KokoroDecoderGraph.ps1` is the current parsed two-node decoder contract.
+The build does not execute it as a script. It lowers the AST to a graph hash
+and control schema persisted in the managed Android host assembly. Its inputs
+are precomputed acoustic tensors; it does not implement phoneme-to-PCM speech.
 
-## Build from source
-
-From a verified checkout on Windows with PowerShell 7.4 or newer:
+From a verified checkout with PowerShell 7.4 or newer, the existing host build
+and its Windows identity test are:
 
 ```powershell
 ./setup-kokoro.ps1 -Step 4 -KeepIntermediates -AcceptWritePlan
-```
-
-The build verifies the pinned source specifications and package catalog hashes before producing the assembly outside the repository:
-
-```text
-../Build/Kokoro-Hexagon/arm64-v8a/managed/by-name/Kokoro-Hexagon.dll
-```
-
-No Python environment is involved in this managed assembly build. Python remains host-only export tooling when weights or tensor graph shapes change.
-
-## Verify on Windows
-
-The model surface can be loaded and checked before an Android appliance is installed:
-
-```powershell
 ./tools/Test-WindowsModelAssembly.ps1
 ```
 
-The verifier loads the assembly, calls `ModelGraphSHA256()` and `ModelControls()`, independently lowers the checked-out `model.ps1`, and requires the graph identities to match.
+The current internal controls are `asr`, `F0_curve`, `N`, `style`, `gb`, `har8`,
+`mask`, `mask8`, and `capacity`. They are coupled tensor boundaries, not a
+stable public prosody API. The test matches the saved host assembly's graph
+hash to an independent lowering of the checked-out source.
 
-The current controls are the deployed context boundaries:
+Separate validation artifacts now exist outside Git:
 
-```text
-asr, F0_curve, N, style, gb, har8, mask, mask8, capacity
-```
+- `Kokoro.Phonemes.dll` persists the pinned phoneme ID and voice-row methods;
+  the tested voice variant embeds the raw `af_heart` rows.
+- `Kokoro.Weights.FP32.dll` and `Kokoro.Weights.FP16.dll` contain indexed,
+  hash-checked tensor resources. All 548 resources load on Windows. The FP16
+  payload has only sampled weight-error evidence, not audio-quality evidence.
 
-`F0_curve` and `har8` are coupled: a pitch change requires a coherent harmonic source. `style` and `gb` are also coupled because `gb` is the precomputed per-voice AdaIN table. These are tensor controls, not yet a stable public prosody API.
-
-## Completeness boundary
-
-The current assembly proves a portable, source-identified model control surface. It does not yet contain the admitted text normalizer and phonemizer, large weights, QNN contexts, or DSP libraries. Text-to-phoneme lowering must pass a differential corpus gate before it becomes part of the persisted assembly API. The Android appliance remains responsible for the HTP bindings, resident buffers, typed transport, and audio output.
+These three artifacts have **not** been joined into the final model DLL. They
+do not contain the full Kokoro computation, a text-to-phoneme adapter, a
+QNN-free Hexagon path, or live speech. The checkpoint reader is host-side
+build tooling; the released app must load only verified model resources and
+must not read the checkpoint or historical QNN contexts.
