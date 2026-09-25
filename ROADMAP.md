@@ -153,12 +153,12 @@ by device discovery. Do not label a payload-only DLL as a live model.
   devices. It predates the current `status`-only dispatch and does not prove
   that the current source builds or speaks. See
   `docs/receipts/model-less-appliance-20260925.md`.
-- [ ] Rebuild the current, model-less NativeActivity/CoreCLR/SMA host as a
+- [x] Rebuild the current, model-less NativeActivity/CoreCLR/SMA host as a
   signed APK under 40 MiB. Verify the resulting APK itself has no DEX, Mono or
   Xamarin native libraries, ReadyToRun images, bundled model, or unsupported
   speech dispatch. Record its hash and size, then install and launch that exact
-  artifact on both devices. Do not mark this complete from the historical APK
-  or source-only checks.
+  artifact on both devices. This is a packaging and launch gate only; see
+  `docs/receipts/model-less-appliance-rebuild-20260925.md`.
 - [ ] Finish the R2R-free and Mono-free appliance integration: load a verified,
   compatible weight-bearing model DLL from private app storage; connect its
   admitted phoneme/text path and full stock Kokoro graph to direct Hexagon
