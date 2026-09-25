@@ -4,6 +4,27 @@ The machine/workspace `AGENTS.md` security and change-control rules apply.
 Use [ROADMAP.md](ROADMAP.md) for the current implementation gates. Do not infer
 production status from historical receipts or reference harnesses.
 
+## Governing objective: PowerShell end to end
+
+- PowerShell 7 is the authored implementation language and control plane from
+  Windows model ingestion and build through Android appliance execution.
+  Android is an unsupported PowerShell target that this project must make work
+  through an owned NativeActivity/CoreCLR/System.Management.Automation host.
+- PowerShell parses and validates PowerShell source with its AST, emits the
+  weight-bearing managed model assembly and Hexagon ELF directly, stages the
+  verified artifacts, invokes the DSP, and delivers PCM to Android AAudio or
+  Windows WASAPI. The managed runtime and minimal native bootstrap are
+  substrates, not alternate application or synthesis implementations.
+- Do not author product behavior in C#, use Roslyn or `Add-Type` source
+  compilation, or substitute a C/C++/Python/ONNX/QNN/LLVM compiler pipeline for
+  PowerShell lowering and emission. A pinned native bootstrap needed to start
+  CoreCLR on Android is an explicit platform exception, not permission to move
+  model logic out of PowerShell.
+- The performance goal is to beat a same-input, same-weight LLVM baseline with
+  PowerShell-emitted Hexagon kernels while preserving stock Kokoro numerics.
+  LLVM is a measurement competitor only, never a release build dependency.
+  Partial-kernel wins do not establish whole-model performance or speech.
+
 ## Product boundary
 
 - The product is a model-less NativeActivity/CoreCLR/SMA appliance and a

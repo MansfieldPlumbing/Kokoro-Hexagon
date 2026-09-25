@@ -34,11 +34,8 @@ driver or policy build.
 This is a failed transport gate. The result does not distinguish app SELinux
 policy from other access controls or establish a permitted CDSP session API.
 No private vendor ABI is inferred from binaries. The existing `libcdsprpc.so`
-diagnostic path is separate evidence and is not yet product integration. The
-pinned upstream [FastRPC public header](https://github.com/qualcomm/fastrpc/blob/d247519650fe5cb16de6c78edaa95bcc4be25073/inc/remote.h#L775)
-specifies `remote_handle64_open`, `remote_handle64_invoke`, and
-`remote_handle64_close`; `KokoroR0Sub0Probe.ps1` already used that ABI to run
-an emitted kernel on both phones. The next product gate is to promote that
-source-backed transport outside the diagnostic harness, with no QNN runtime
-or context dependency. No claim is made about the vendor library's internal
-implementation.
+diagnostic path is separate evidence for the emitted kernel, not a product
+transport. The product path remains direct, source-defined FastRPC ioctls and
+memory mapping. On these stock phones, that path lacks a permitted CDSP
+descriptor. No claim is made about the vendor library's internal
+implementation or about an undocumented HAL fallback.
