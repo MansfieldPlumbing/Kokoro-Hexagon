@@ -1,5 +1,5 @@
 # Lowered, side-effect-free startup dispatch check for the appliance host.
-# The pinned Pwsh build's LambdaCompiler seam can emit this same tree into the
+# This fork's pinned LambdaCompiler seam can emit this same tree into the
 # generated managed entrypoint; Compile() is used here only as its host oracle.
 
 $operations = [ordered]@{

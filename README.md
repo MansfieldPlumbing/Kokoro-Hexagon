@@ -34,16 +34,11 @@ measured short pause; the project does not synthesize inhalation sounds.
 ## Architecture boundary
 
 `setup-kokoro.ps1` is an unofficial, separately maintained fork of Pwsh's
-`setup.ps1`. It builds this project's base APK from reviewed local sources and
-pinned inputs; it is not the upstream Pwsh build, and it does not automatically
-inherit upstream fixes. Pwsh contributes the Android PowerShell host/build
-substrate and generic ELF machinery; it does not lower Kokoro models. Kokoro's
-PowerShell sources own AST validation, weight assembly, model lowering, direct
-Hexagon emission, and synthesis integration. The separate `C:\Dev\Pwsh`
-checkout is not an input, workspace, or output for Kokoro work. Kokoro model
-files and generated artifacts must remain outside that checkout. The pinned
-Pwsh ELF-writer source used by the Hexagon probe is a narrow source donor, not
-a Kokoro model, synthesizer, or runtime dependency.
+`setup.ps1`. This fork independently builds the model-less Kokoro APK; it is
+not an official Pwsh build and does not track current Pwsh work automatically.
+Kokoro's PowerShell sources separately own model lowering, weights, direct
+Hexagon emission, and speech integration. The active `C:\Dev\Pwsh` checkout is
+neither an input nor an output; Kokoro files never belong there.
 
 ```text
 Kokoro model build: pinned Kokoro inputs -> Kokoro PowerShell AST/lowering

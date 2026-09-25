@@ -9,20 +9,17 @@ synthesizer. Live direct-path Kokoro speech is not yet implemented.
 
 ## Build graph
 
-`setup-kokoro.ps1` is this repository's unofficial, separately maintained fork
-of the Pwsh build graph. It is not the upstream Pwsh build and does not inherit
-upstream changes automatically. The active `C:\Dev\Pwsh` checkout is neither an
-input nor an output. The fork emits and checks the Android manifest, managed
+`setup-kokoro.ps1` is this repository's independent, unofficial fork of the
+Pwsh build graph. It is not an official Pwsh build and does not track upstream
+changes automatically. The active `C:\Dev\Pwsh` checkout is neither an input
+nor an output. The fork emits and checks the Android manifest, managed
 host, XABA assembly store, native ELF libraries, APK archive and v2 signature
 from one PowerShell program. Its package provenance is isolated in
 `lib/pwsh-build-manifest.json`; Kokoro source and historical
 oracle provenance remain in `lib/manifest.json`.
 
-The Pwsh lineage ends at host/build substrate and generic ELF mechanics. Pwsh
-does not perform Kokoro AST lowering, weight assembly, model graph execution,
-or speech. Those belong to Kokoro-Hexagon's separately built model artifact and
-direct backend. Updating that artifact does not imply an APK rebuild unless the
-host, runtime, store, or their compatibility contract changes.
+Pwsh does not perform Kokoro model lowering or speech. Those belong to this
+repository's separately built model artifact and direct backend.
 
 The product identity is `dev.mansfieldplumbing.kokorohexagon`. The admitted host
 is NativeActivity/CoreCLR only. Xamarin, Mono, DEX, Android managed bindings and

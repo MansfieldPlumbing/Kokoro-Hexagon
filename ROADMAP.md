@@ -5,12 +5,9 @@ receipt; it does not imply that the whole synthesis path works. Historical
 measurements remain in `docs/receipts/` and do not define production dependencies.
 
 `setup-kokoro.ps1` is an unofficial, separately maintained fork of Pwsh's
-`setup.ps1`; it builds the Kokoro base APK, not the upstream Pwsh product.
-Upstream Pwsh supplies the Android PowerShell host/build substrate and generic
-ELF machinery. It does not lower Kokoro models or supply weights, model
-execution, or speech. Kokoro-specific PowerShell source in this repository
-owns those tasks. A model DLL revision and a host APK revision are separate
-release decisions; only a host/runtime/store change requires a new base APK.
+`setup.ps1`; it independently builds the Kokoro base APK. Pwsh does not lower
+Kokoro models. Kokoro-specific PowerShell source owns the model DLL and direct
+backend, so model and host releases remain separate decisions.
 The active `C:\Dev\Pwsh` checkout is outside this roadmap and must never
 receive Kokoro files or be used as a build, cache, or output location.
 

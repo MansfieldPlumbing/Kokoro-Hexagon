@@ -1095,7 +1095,7 @@ function Get-KokoroModelContract {
     }
 }
 
-# Application identity. The activity class is the type emitted into Pwsh.dll.
+# Application identity. The activity class is emitted into Kokoro-Hexagon.dll.
 $script:PackageName = 'dev.mansfieldplumbing.kokorohexagon'
 $script:ActivityClassName = 'MainActivity'
 $script:ApplicationLabel = 'Kokoro Hexagon'
@@ -6913,7 +6913,7 @@ function New-NativeHostLibrary {
         @{ Op = 'call-import'; Import = 'snprintf'; Args = 4; Variadic = $true },
         @{ Op = 'cmp-imm32'; Rn = 0; Imm = 32 },
         @{ Op = 'b.hs'; Label = 'contractFailed' },
-        # coreclr_initialize(package, "Pwsh", 3, keys, values, &hostHandle, &domainId)
+        # coreclr_initialize(package, "Kokoro-Hexagon", 3, keys, values, &hostHandle, &domainId)
         @{ Op = 'lea-data'; Rd = 0; Data = 'packageName' },
         @{ Op = 'lea-data'; Rd = 1; Data = 'domainName' },
         @{ Op = 'movz'; Rd = 2; Imm = 3; Is64 = $false },
@@ -6923,7 +6923,7 @@ function New-NativeHostLibrary {
         @{ Op = 'lea-data'; Rd = 6; Data = 'domainId' },
         @{ Op = 'call-import'; Import = 'coreclr_initialize'; Args = 7 },
         @{ Op = 'cbnz'; Rt = 0; Is64 = $false; Label = 'initFailed' },
-        # coreclr_create_delegate(hostHandle, domainId, "Pwsh", type, "Admit", &admit)
+        # coreclr_create_delegate(hostHandle, domainId, "Kokoro-Hexagon", type, "Admit", &admit)
         @{ Op = 'load64-data'; Rd = 0; Data = 'hostHandle' },
         @{ Op = 'load32-data'; Rd = 1; Data = 'domainId' },
         @{ Op = 'lea-data'; Rd = 2; Data = 'assemblyName' },
@@ -6944,7 +6944,7 @@ function New-NativeHostLibrary {
         @{ Op = 'lea-data'; Rd = 2; Data = 'fmtAdmit' },
         @{ Op = 'call-import'; Import = '__android_log_print'; Args = 4; Variadic = $true },
         # Gates 2b/2c, only after gate 2a held in this process:
-        # coreclr_create_delegate(hostHandle, domainId, "Pwsh", type, "RunPowerShell", &runPowerShell)
+        # coreclr_create_delegate(hostHandle, domainId, "Kokoro-Hexagon", type, "RunPowerShell", &runPowerShell)
         @{ Op = 'load64-data'; Rd = 0; Data = 'hostHandle' },
         @{ Op = 'load32-data'; Rd = 1; Data = 'domainId' },
         @{ Op = 'lea-data'; Rd = 2; Data = 'assemblyName' },
@@ -7031,7 +7031,7 @@ function New-NativeHostLibrary {
         @{ Op = 'lea-data'; Rd = 1; Data = 'tag' },
         @{ Op = 'lea-data'; Rd = 2; Data = $format },
         @{ Op = 'call-import'; Import = '__android_log_print'; Args = $(if ($withValue) { 4 } else { 3 }); Variadic = $true }) }
-    # coreclr_create_delegate(*hostHandle, *domainId, "Pwsh", type, method, slot)
+    # coreclr_create_delegate(*hostHandle, *domainId, "Kokoro-Hexagon", type, method, slot)
     $createDelegate = { param([string] $method, [string] $slot, [string] $failed) @(
         @{ Op = 'lea-data'; Rd = 0; Data = $method },
         @{ Op = 'str'; Rt = 0; Rn = 13; Offset = 0 },
@@ -7065,7 +7065,7 @@ function New-NativeHostLibrary {
         @{ Op = 'call-import'; Import = 'snprintf'; Args = 4; Variadic = $true },
         @{ Op = 'cmp-imm'; Rn = 0; Imm = 32 },
         @{ Op = 'bhs'; Label = 'contractFailed' },
-        # coreclr_initialize(package, "Pwsh", 3, keys, values, &hostHandle, &domainId)
+        # coreclr_initialize(package, "Kokoro-Hexagon", 3, keys, values, &hostHandle, &domainId)
         @{ Op = 'lea-data'; Rd = 0; Data = 'propertyValues' },
         @{ Op = 'str'; Rt = 0; Rn = 13; Offset = 0 },
         @{ Op = 'lea-data'; Rd = 0; Data = 'hostHandle' },
@@ -7171,7 +7171,7 @@ function New-NativeHostLibrary {
         @{ Op = 'call-import'; Import = 'snprintf'; Args = 4; Variadic = $true },
         @{ Op = 'cmp32-imm'; Reg = 0; Imm = 32 },
         @{ Op = 'jae'; Label = 'contractFailed' },
-        # coreclr_initialize(package, "Pwsh", 3, keys, values, &hostHandle, &domainId)
+        # coreclr_initialize(package, "Kokoro-Hexagon", 3, keys, values, &hostHandle, &domainId)
         @{ Op = 'lea-data'; Dst = 7; Data = 'packageName' },
         @{ Op = 'lea-data'; Dst = 6; Data = 'domainName' },
         @{ Op = 'movimm32'; Dst = 2; Imm = 3 },
@@ -7183,7 +7183,7 @@ function New-NativeHostLibrary {
         @{ Op = 'call-import'; Import = 'coreclr_initialize'; Args = 6; StackArgs = 1 },
         @{ Op = 'test32'; Reg = 0 },
         @{ Op = 'jnz'; Label = 'initFailed' },
-        # coreclr_create_delegate(hostHandle, domainId, "Pwsh", type, "Admit", &admit)
+        # coreclr_create_delegate(hostHandle, domainId, "Kokoro-Hexagon", type, "Admit", &admit)
         @{ Op = 'load64-data'; Dst = 7; Data = 'hostHandle' },
         @{ Op = 'load32-data'; Dst = 6; Data = 'domainId' },
         @{ Op = 'lea-data'; Dst = 2; Data = 'assemblyName' },
@@ -7204,7 +7204,7 @@ function New-NativeHostLibrary {
         @{ Op = 'xor32'; Dst = 0 },
         @{ Op = 'call-import'; Import = '__android_log_print'; Args = 4; Variadic = $true },
         # Gates 2b/2c, only after gate 2a held in this process:
-        # coreclr_create_delegate(hostHandle, domainId, "Pwsh", type, "RunPowerShell", &runPowerShell)
+        # coreclr_create_delegate(hostHandle, domainId, "Kokoro-Hexagon", type, "RunPowerShell", &runPowerShell)
         @{ Op = 'load64-data'; Dst = 7; Data = 'hostHandle' },
         @{ Op = 'load32-data'; Dst = 6; Data = 'domainId' },
         @{ Op = 'lea-data'; Dst = 2; Data = 'assemblyName' },
