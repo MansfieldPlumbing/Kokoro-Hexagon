@@ -18,6 +18,9 @@ param(
     [double] $FramesPerChar = 1.0  # placeholder until the duration predictor runs on device
 )
 $ErrorActionPreference = 'Stop'
+if ($MaxFrames -lt 0 -or -not [double]::IsFinite($FramesPerChar) -or $FramesPerChar -le 0) {
+    throw 'Frame planning inputs must be finite and nonnegative, with positive frames per character.'
+}
 
 # Punctuation that carries a pause, with a provisional strength. These are hypotheses:
 # 'breath' is a full stop, 'phrase' an intonational-phrase boundary. Validate against
@@ -90,13 +93,15 @@ if ($MaxFrames -gt 0) {
         if ($g.EstFrames -le $MaxFrames) { $split.Add($g); continue }
         $cuts = @($spans | Where-Object { $_.Kind -eq 'space' -and $_.Start -gt $g.Start -and $_.End -lt $g.End } | ForEach-Object { $_.Start })
         [int]$from = $g.Start
-        [int]$budget = [int][Math]::Ceiling($MaxFrames / $FramesPerChar)
+        [int]$budget = [int][Math]::Floor($MaxFrames / $FramesPerChar)
+        if ($budget -lt 1) { throw 'The frame cap cannot admit one phoneme character.' }
         while ($from -lt $g.End) {
             [int]$limit = $from + $budget
             if ($limit -ge $g.End) { $limit = $g.End }
             else {
                 $candidate = @($cuts | Where-Object { $_ -gt $from -and $_ -le $limit })
                 if ($candidate.Count) { $limit = $candidate[-1] }
+                else { throw "No legal whitespace boundary fits the frame cap in group at offset $($g.Start)." }
             }
             $piece = $Phonemes.Substring($from, $limit - $from).Trim()
             if ($piece) {

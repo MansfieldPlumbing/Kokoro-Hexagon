@@ -237,33 +237,151 @@ $read = {
     finally { $zip.Dispose() }
 }.GetNewClosure()
 
-# Materialise one tensor's raw bytes from its storage entry.
-$bytes = {
-    param([object]$Checkpoint, [string]$Name)
-    $t = $Checkpoint.Tensors[$Name]
-    if ($null -eq $t) { throw "no tensor $Name" }
-    [void][Reflection.Assembly]::LoadWithPartialName('System.IO.Compression.FileSystem')
-    $zip = [IO.Compression.ZipFile]::OpenRead($Checkpoint.Path)
+# A voice pack is a top-level tensor, not the nested state_dict accepted by Read.
+# The caller supplies the pinned file hash before any pickle bytes are parsed.
+$readTensor = {
+    param([string]$Path, [string]$ExpectedSHA256)
+
+    if ($ExpectedSHA256 -notmatch '^[0-9A-Fa-f]{64}$') { throw 'A pinned SHA-256 is required.' }
+    $resolved = (Resolve-Path -LiteralPath $Path).Path
+    if ((Get-FileHash -LiteralPath $resolved -Algorithm SHA256).Hash -cne $ExpectedSHA256.ToUpperInvariant()) {
+        throw 'Tensor archive does not match the pinned SHA-256.'
+    }
+    $zip = [IO.Compression.ZipFile]::OpenRead($resolved)
     try {
-        $e = ($zip.Entries | Where-Object { $_.FullName -eq $t.Entry } | Select-Object -First 1)
-        if ($null -eq $e) { throw "no storage entry $($t.Entry)" }
-        [byte[]]$raw = [byte[]]::new($e.Length)
-        $s = $e.Open()
-        try { [void]$s.ReadExactly($raw, 0, $raw.Length) } finally { $s.Dispose() }
-        [long]$start = $t.Offset * $t.ItemBytes
-        [long]$len = $t.Count * $t.ItemBytes
-        if ($start + $len -gt $raw.Length) { throw "tensor $Name runs past storage: $start+$len > $($raw.Length)" }
-        [byte[]]$slice = [byte[]]::new($len)
-        [Array]::Copy($raw, $start, $slice, 0, $len)
-        return ,$slice
+        $pklEntries = @($zip.Entries | Where-Object { $_.FullName -like '*/data.pkl' })
+        if ($pklEntries.Count -ne 1 -or $pklEntries[0].Length -gt 1048576) {
+            throw 'Tensor archive lacks a unique, bounded data.pkl.'
+        }
+        $entry = $pklEntries[0]
+        $prefix = $entry.FullName.Substring(0, $entry.FullName.Length - 'data.pkl'.Length)
+        $pickle = [byte[]]::new($entry.Length)
+        $stream = $entry.Open()
+        try { $stream.ReadExactly($pickle, 0, $pickle.Length) } finally { $stream.Dispose() }
+        $root = & $unpickle $pickle
+        if ($root.Kind -cne 'tensor') { throw 'Tensor archive root is not a tensor.' }
+        $storage = $root.Storage
+        $dtype = $dtypeOf[$storage.StorageType]
+        if ($null -eq $dtype) { throw 'Tensor archive storage type is unsupported.' }
+        [long]$count = 1
+        foreach ($dimension in $root.Shape) {
+            if ($dimension -le 0 -or $count -gt [long]::MaxValue / [long]$dimension) {
+                throw 'Tensor archive shape is invalid or overflows.'
+            }
+            $count *= [long]$dimension
+        }
+        $storageName = "$prefix" + "data/" + $storage.Key
+        $storageEntry = @($zip.Entries | Where-Object FullName -CEQ $storageName)
+        if ($storageEntry.Count -ne 1 -or $storageEntry[0].Length -lt ($root.Offset + $count) * $dtype.Bytes) {
+            throw 'Tensor archive storage does not cover the declared tensor.'
+        }
+        $tensors = [Collections.Specialized.OrderedDictionary]::new()
+        $tensors['value'] = [pscustomobject]@{
+            Name = 'value'; DType = $dtype.Name; ItemBytes = $dtype.Bytes
+            Shape = [int[]]$root.Shape; Stride = [long[]]$root.Stride
+            Count = $count; Entry = $storageName; Offset = [long]$root.Offset
+        }
+        [pscustomobject]@{
+            PSTypeName = 'Torch.TensorArchive'; Path = $resolved
+            SHA256 = $ExpectedSHA256.ToUpperInvariant(); Tensors = $tensors
+        }
     }
     finally { $zip.Dispose() }
+}.GetNewClosure()
+
+# Copy one tensor through a fixed 64 KiB buffer. The destination owns its
+# lifetime; this method never allocates in proportion to tensor size.
+$copyTensor = {
+    param([object]$Checkpoint, [string]$Name, [IO.Stream]$Destination)
+
+    $tensor = $Checkpoint.Tensors[$Name]
+    if ($null -eq $tensor) { throw "no tensor $Name" }
+    if ($null -eq $Destination -or -not $Destination.CanWrite) { throw 'A writable destination stream is required.' }
+    if ($tensor.ItemBytes -le 0 -or $tensor.Count -lt 0 -or $tensor.Offset -lt 0 -or
+        $tensor.Count -gt [long]::MaxValue / $tensor.ItemBytes -or
+        $tensor.Offset -gt [long]::MaxValue / $tensor.ItemBytes) {
+        throw 'Tensor byte length or offset is invalid.'
+    }
+    [long]$start = $tensor.Offset * $tensor.ItemBytes
+    [long]$length = $tensor.Count * $tensor.ItemBytes
+    $zip = [IO.Compression.ZipFile]::OpenRead($Checkpoint.Path)
+    try {
+        $matches = @($zip.Entries | Where-Object { $_.FullName -ceq $tensor.Entry })
+        if ($matches.Count -ne 1 -or $start -gt $matches[0].Length -or
+            $length -gt $matches[0].Length - $start) {
+            throw "Tensor $Name is not covered by one storage entry."
+        }
+        $source = $matches[0].Open()
+        $digest = [Security.Cryptography.IncrementalHash]::CreateHash(
+            [Security.Cryptography.HashAlgorithmName]::SHA256)
+        try {
+            [byte[]]$buffer = [byte[]]::new(65536)
+            [long]$remaining = $start
+            while ($remaining -gt 0) {
+                [int]$take = [int][Math]::Min($remaining, $buffer.Length)
+                [int]$read = $source.Read($buffer, 0, $take)
+                if ($read -le 0) { throw 'Tensor storage ended before its offset.' }
+                $remaining -= $read
+            }
+            $remaining = $length
+            while ($remaining -gt 0) {
+                [int]$take = [int][Math]::Min($remaining, $buffer.Length)
+                [int]$read = $source.Read($buffer, 0, $take)
+                if ($read -le 0) { throw 'Tensor storage ended before its payload.' }
+                $Destination.Write($buffer, 0, $read)
+                $digest.AppendData($buffer, 0, $read)
+                $remaining -= $read
+            }
+            [pscustomobject]@{
+                BytesWritten = $length
+                SHA256 = [Convert]::ToHexString($digest.GetHashAndReset())
+            }
+        }
+        finally { $digest.Dispose(); $source.Dispose() }
+    }
+    finally { $zip.Dispose() }
+}.GetNewClosure()
+
+# Existing small-tensor callers keep the byte[] interface. Large callers must
+# use CopyTensor and provide a destination stream.
+$bytes = {
+    param([object]$Checkpoint, [string]$Name)
+    $tensor = $Checkpoint.Tensors[$Name]
+    if ($null -eq $tensor) { throw "no tensor $Name" }
+    [long]$length = [long]$tensor.Count * [long]$tensor.ItemBytes
+    if ($length -gt 67108864) { throw 'Tensor exceeds the 64 MiB byte-array admission limit; use CopyTensor.' }
+    $destination = [IO.MemoryStream]::new()
+    try {
+        $null = & $copyTensor $Checkpoint $Name $destination
+        return ,$destination.ToArray()
+    }
+    finally { $destination.Dispose() }
+}.GetNewClosure()
+
+$tensorRow = {
+    param([object]$TensorArchive, [int]$Row)
+
+    $tensor = $TensorArchive.Tensors['value']
+    if ($null -eq $tensor -or $tensor.Shape.Length -ne 3 -or
+        $tensor.Shape[1] -ne 1 -or $tensor.Stride[2] -ne 1 -or
+        $tensor.Stride[0] -ne ($tensor.Shape[1] * $tensor.Shape[2]) -or
+        $Row -lt 0 -or $Row -ge $tensor.Shape[0]) {
+        throw 'The tensor does not admit the requested contiguous voice row.'
+    }
+    [byte[]]$all = & $bytes $TensorArchive 'value'
+    [int]$rowBytes = $tensor.Shape[1] * $tensor.Shape[2] * $tensor.ItemBytes
+    [byte[]]$result = [byte[]]::new($rowBytes)
+    [Array]::Copy($all, [long]$Row * $rowBytes, $result, 0, $rowBytes)
+    return ,$result
 }.GetNewClosure()
 
 [pscustomobject]@{
     PSTypeName = 'Torch.CheckpointReader'
     Name       = 'Torch.Checkpoint'
     Read       = $read
+    ReadTensor = $readTensor
     Bytes      = $bytes
+    CopyTensor = $copyTensor
+    TensorRow  = $tensorRow
     Unpickle   = $unpickle
 }
