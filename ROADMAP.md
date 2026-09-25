@@ -147,10 +147,24 @@ by device discovery. Do not label a payload-only DLL as a live model.
 ## Appliance, facade, and release
 
 - [x] Build, sign, and install the model-less NativeActivity/CoreCLR/SMA APK on
-  both physical devices. The 40,967,549-byte signed artifact contains no DEX,
-  `libmonodroid`, or `libxamarin-app`, excludes R2R images, and remained live
-  after launch on both devices. See
+  both physical devices. This is a historical packaging and launch checkpoint:
+  the 40,967,549-byte signed artifact contains no DEX, `libmonodroid`, or
+  `libxamarin-app`, excludes R2R images, and remained live after launch on both
+  devices. It predates the current `status`-only dispatch and does not prove
+  that the current source builds or speaks. See
   `docs/receipts/model-less-appliance-20260925.md`.
+- [ ] Rebuild the current, model-less NativeActivity/CoreCLR/SMA host as a
+  signed APK under 40 MiB. Verify the resulting APK itself has no DEX, Mono or
+  Xamarin native libraries, ReadyToRun images, bundled model, or unsupported
+  speech dispatch. Record its hash and size, then install and launch that exact
+  artifact on both devices. Do not mark this complete from the historical APK
+  or source-only checks.
+- [ ] Finish the R2R-free and Mono-free appliance integration: load a verified,
+  compatible weight-bearing model DLL from private app storage; connect its
+  admitted phoneme/text path and full stock Kokoro graph to direct Hexagon
+  execution and resident AAudio output. Validate the same model and requests
+  through the Windows AOA/WASAPI controller. A launch or test tone is not a
+  speech validation result.
 - [ ] Complete the owned Android bindings and load only a compatible model DLL
   admitted by the private model store. The running base appliance does not yet
   establish a device-proven Kokoro integration.
