@@ -64,12 +64,18 @@ and its directly emitted backend remain to be built.
   and executes a native call in a clean process.
 - [x] Remove the managed Android descriptor/reflection dependency from the
   direct FastRPC ioctl probe. It now reaches libc through `Native.Binding`.
-- [ ] Establish the permitted production FastRPC device edge. Direct libc
-  `open` of the only exposed non-secure node returned `EACCES` from both
-  current app sandboxes. Upstream FastRPC distinguishes ADSP and CDSP nodes;
-  neither current phone exposes the documented CDSP node path. Do not infer
-  a vendor HAL ABI or a policy exception from a binary. See
-  `docs/receipts/direct-fastrpc-native-open-20260925.md`.
+- [ ] Promote the documented FastRPC `remote_session_control` and
+  `remote_handle64_{open,invoke,close}` ABI into an owned, QNN-free transport
+  module. The already-proved emitted R0Sub0 kernel uses this ABI through
+  `libcdsprpc.so` on both phones, but its diagnostic harness and paths are
+  not production integration. Pin the transport ABI to upstream `remote.h`,
+  stage it outside QNN-named directories, and prove the same emitted ELF from
+  the model-less appliance before claiming this gate. Raw libc `open` is not
+  the release transport: it returned `EACCES` on the exposed device node, and
+  neither phone exposes the upstream CDSP node path. Do not infer a vendor HAL
+  ABI or a policy exception from a binary. See
+  `docs/receipts/direct-fastrpc-native-open-20260925.md` and
+  `docs/receipts/r0sub0-cross-soc-20260924.md`.
 - [x] Implement signed, transactional model admission for private app storage.
   `Model.Store.psm1` validates manifest signature and compatibility, streams
   through bounded hashing, inspects managed metadata without loading code,
