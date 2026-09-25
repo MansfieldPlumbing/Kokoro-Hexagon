@@ -1,5 +1,7 @@
 # Hardware receipt: persistent AAudio stream reuse
 
+Historical QNN-backed stream-lifecycle test, not a product speech gate.
+
 Date: 2026-09-24
 Target: physical Samsung Galaxy S23, SM8550
 Input chunk: `p01`, 33,600 frames, 1.40 seconds

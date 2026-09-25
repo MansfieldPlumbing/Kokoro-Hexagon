@@ -1,5 +1,8 @@
 # Hardware receipt: corpus float playback
 
+Historical QNN reference playback only; this does not validate the direct
+PowerShell phoneme-to-PCM product path.
+
 Date: 2026-09-24
 Target: physical Samsung Galaxy S23, SM8550, Hexagon V73
 Model: Kokoro-82M

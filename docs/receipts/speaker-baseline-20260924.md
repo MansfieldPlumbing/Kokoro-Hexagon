@@ -1,5 +1,7 @@
 # Hardware receipt: speaker baseline
 
+Historical QNN reference playback only, not product speech.
+
 Date: 2026-09-24
 Target: physical Samsung Galaxy S23
 Pipeline: established QNN FP16 front and generator contexts

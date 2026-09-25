@@ -1,5 +1,8 @@
 # Hardware receipt: native AAudio speaker path
 
+Historical QNN-backed audio-sink test. The native AAudio result does not make
+the QNN model path a product dependency or prove direct-path speech.
+
 Date: 2026-09-24
 Target: physical Samsung Galaxy S23, SM8550
 Phrase: `p01`, 33,600 frames, 1.40 seconds
