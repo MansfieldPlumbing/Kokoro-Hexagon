@@ -11,6 +11,8 @@ population statistics (leave-one-out over the corpus), and cumulative seeded wit
 The harmonic source (SineGen) is computed once per phrase and fed to every run, so waveform
 comparison is phase-valid. CPU only; no device, no Hexagon. Writes results.json (and, with
 --wav, 16-bit WAVs for listening) to <outdir>; nothing it writes belongs in the repository.
+Importable: load(model_dir), prepare, run (mode 'given' takes supplied statistics from ST['given'];
+ST['observe'] sees every norm input) and the metrics are shared with norm_calibration.py.
 """
 import sys, types, json, math, hashlib, pathlib, os, argparse, time, platform
 sys.modules['misaki'] = types.ModuleType('misaki')          # pipeline import only; G2P unused here
@@ -20,12 +22,6 @@ import numpy as np, scipy, scipy.signal, torch, torch.nn.functional as F
 import kokoro.istftnet as ist
 from kokoro.model import KModel
 from importlib.metadata import version
-
-ap = argparse.ArgumentParser()
-ap.add_argument('out'); ap.add_argument('--wav', action='store_true'); ap.add_argument('--phrases', type=int, default=12)
-ap.add_argument('--summarize', action='store_true')
-A = ap.parse_args()
-OUT = pathlib.Path(A.out); OUT.mkdir(parents=True, exist_ok=True)
 
 def summarize(R):
     P = R['phrases']; mean = lambda xs: sum(xs) / len(xs)
@@ -64,42 +60,41 @@ def summarize(R):
     w(f"\nConvolution (non-norm) lookahead, measured with causal norms: whole decoder {c['decoder_samples']['ms']:.1f} ms, "
       f"generator alone {c['generator_samples']['ms']:.1f} ms.")
     return '\n'.join(L)
-if A.summarize:
-    print(summarize(json.loads((OUT / 'results.json').read_text(encoding='utf-8')))); sys.exit(0)
-M = pathlib.Path(os.environ['KOKORO_MODEL_DIR'])
 REPO = pathlib.Path(__file__).resolve().parents[2]
 SR, U, FPS = 24000, 600, 40.0                                  # asr frame = 600 samples = 25 ms
 VOICE, SEED = 'af_heart', 0
 LOOKAHEADS = (4, 8, 16, 32, 64)                                # frames at each layer's own rate
 EMA_TAUS_MS = (100, 400, 1600)
-torch.set_num_threads(os.cpu_count() or 1)
-
 sha = lambda p: hashlib.sha256(pathlib.Path(p).read_bytes()).hexdigest().upper()
-cfg = json.loads((M / 'config.json').read_text(encoding='utf-8'))
-km = KModel(repo_id='hexgrad/Kokoro-82M', config=str(M / 'config.json'),
-            model=str(M / 'kokoro-v1_0.pth'), disable_complex=True).eval()
-dec, gen = km.decoder, km.decoder.generator
 
-# ---- corpus: bench/corpus.json p01..p10 plus two long concatenations (same voice) ----------
-corpus = {c['id']: c for c in json.loads((REPO / 'bench' / 'corpus.json').read_text(encoding='utf-8'))}
-PHRASES = [(k, corpus[k]['phonemes']) for k in sorted(corpus)]
-PHRASES += [('long1', ' '.join(corpus[k]['phonemes'] for k in ('p06', 'p08', 'p10'))),
-            ('long2', ' '.join(corpus[k]['phonemes'] for k in ('p09', 'p05', 'p07', 'p03')))]
-PHRASES = PHRASES[:A.phrases]
-
-# ---- norm sites -----------------------------------------------------------------------------
-NAMES = {id(m): n for n, m in dec.named_modules() if isinstance(m, ist.AdaIN1d)}
 def group(n):
     if n.startswith(('encode', 'decode')): return 'front'
     if n.startswith('generator.noise_res'): return 'noise'
     return 'gen0' if int(n.split('.')[2]) < gen.num_kernels else 'gen1'
-GROUPS = {g: {n for n in NAMES.values() if group(n) == g} for g in ('front', 'noise', 'gen0', 'gen1')}
-SCOPES = {'all': set(NAMES.values()), 'gen': GROUPS['noise'] | GROUPS['gen0'] | GROUPS['gen1']}
 
-ST = {'moments': None, 'prior': {}, 'name': None, 'mode': 'whole', 'p': 0, 'active': set(), 'T': 1, 'cap': None, 'ref': None, 'acc': None, 'len': {}}
+def load(model_dir):
+    """Load the pinned model and voice; install the AdaIN replacement and the decoder-input capture."""
+    global M, cfg, km, dec, gen, NAMES, GROUPS, SCOPES, pack
+    torch.set_num_threads(os.cpu_count() or 1)
+    M = pathlib.Path(model_dir)
+    cfg = json.loads((M / 'config.json').read_text(encoding='utf-8'))
+    km = KModel(repo_id='hexgrad/Kokoro-82M', config=str(M / 'config.json'),
+                model=str(M / 'kokoro-v1_0.pth'), disable_complex=True).eval()
+    dec, gen = km.decoder, km.decoder.generator
+    NAMES = {id(m): n for n, m in dec.named_modules() if isinstance(m, ist.AdaIN1d)}     # norm sites
+    GROUPS = {g: {n for n in NAMES.values() if group(n) == g} for g in ('front', 'noise', 'gen0', 'gen1')}
+    SCOPES = {'all': set(NAMES.values()), 'gen': GROUPS['noise'] | GROUPS['gen0'] | GROUPS['gen1']}
+    ist.AdaIN1d.forward = adain
+    pack = torch.load(M / 'voices' / f'{VOICE}.pt', weights_only=True)
+    dec.register_forward_hook(lambda m, a, o: cap_in.update(asr=a[0], F0=a[1], N=a[2], s=a[3]))
+
+ST = {'moments': None, 'prior': {}, 'given': {}, 'observe': None, 'name': None, 'mode': 'whole', 'p': 0, 'active': set(),
+      'T': 1, 'cap': None, 'ref': None, 'acc': None, 'len': {}}
 
 def stats(x, mode, p, rate):
     """x [1,C,T] float64 -> (mean, biased var), broadcastable to x. Row t uses only what mode allows."""
+    if mode == 'given':                                        # supplied (mean, biased var), per channel
+        return ST['given'][ST['name']]
     if mode == 'whole':
         return x.mean(-1, keepdim=True), x.var(-1, unbiased=False, keepdim=True)
     T = x.shape[-1]
@@ -126,6 +121,7 @@ def adain(self, x, s):
     name = NAMES.get(id(self))                                 # None: prosody predictor, left untouched
     if name is None: return (1 + gamma) * self.norm(x) + beta
     ST['len'][name] = x.shape[-1]; ST['name'] = name
+    if ST['observe'] is not None: ST['observe'](name, x)
     if ST.get('moments') is not None:                         # per-channel whole-phrase moments of the norm input
         xd = x.double(); ST['moments'][name] = (xd.sum(-1, keepdim=True), (xd * xd).sum(-1, keepdim=True), x.shape[-1])
     if name in ST['active']:
@@ -139,7 +135,6 @@ def adain(self, x, s):
     if ST['ref'] is not None:
         r = ST['ref'][name]; ST['acc'][name] = 10 * math.log10(float((r.double() ** 2).sum()) / max(float(((r - o).double() ** 2).sum()), 1e-30))
     return o
-ist.AdaIN1d.forward = adain
 
 def front(asr, F0_curve, N, s):
     F0 = dec.F0_conv(F0_curve.unsqueeze(1)); Nn = dec.N_conv(N.unsqueeze(1))
@@ -211,8 +206,7 @@ def logmel_quarters(r, p):                                     # time-resolved: 
     R, P = logmel(r), logmel(p); fl = R.max() - 80; D = np.abs(np.maximum(R, fl) - np.maximum(P, fl))
     return [float(q.mean()) for q in np.array_split(D, 4, axis=1)]
 
-pack = torch.load(M / 'voices' / f'{VOICE}.pt', weights_only=True)
-cap_in = {}; dec.register_forward_hook(lambda m, a, o: cap_in.update(asr=a[0], F0=a[1], N=a[2], s=a[3]))
+cap_in = {}
 def source(inp, seed):
     torch.manual_seed(seed)
     with torch.no_grad():
@@ -221,95 +215,115 @@ def prepare(ph):
     ids = [0] + [cfg['vocab'][c] for c in ph if c in cfg['vocab']] + [0]
     torch.manual_seed(SEED)
     with torch.no_grad():
-        km.forward_with_tokens(torch.tensor([ids]), pack[len(ids) - 2])    # capture decoder inputs
-    inp = {k: v.detach().clone() for k, v in cap_in.items()}
+        _, dur = km.forward_with_tokens(torch.tensor([ids]), pack[len(ids) - 2])    # capture decoder inputs
+    inp = {k: v.detach().clone() for k, v in cap_in.items()}; inp['dur'] = dur.reshape(-1).clone()
     inp['har'] = source(inp, SEED)                                          # one source per phrase, shared by all runs
     return ids, inp
 
-results = {'phrases': [], 'layers': list(NAMES.values()),
-           'voice_pack_sha256': sha(M / 'voices' / f'{VOICE}.pt')}
-t_start = time.time()
-# Pass 1: decoder inputs and whole-phrase moments of every norm input (for the leave-one-out prior).
-DATA = []
-for pid, ph in PHRASES:
-    ids, inp = prepare(ph); ST['T'] = inp['asr'].shape[-1]
-    ST['moments'] = {}; run(inp); DATA.append((pid, ph, ids, inp, ST['moments'])); ST['moments'] = None
-def prior(excl):
-    out = {}
-    for n in NAMES.values():
-        rows = [d[4][n] for d in DATA if d[0] != excl]; c = sum(r[2] for r in rows)
-        out[n] = (sum(r[0] for r in rows) / c, sum(r[1] for r in rows) / c)
-    return out
+def main():
+    global A, OUT, PHRASES, DATA
+    ap = argparse.ArgumentParser()
+    ap.add_argument('out'); ap.add_argument('--wav', action='store_true'); ap.add_argument('--phrases', type=int, default=12)
+    ap.add_argument('--summarize', action='store_true')
+    A = ap.parse_args()
+    OUT = pathlib.Path(A.out); OUT.mkdir(parents=True, exist_ok=True)
+    if A.summarize:
+        print(summarize(json.loads((OUT / 'results.json').read_text(encoding='utf-8')))); return
+    load(os.environ['KOKORO_MODEL_DIR'])
+    # ---- corpus: bench/corpus.json p01..p10 plus two long concatenations (same voice) ----------
+    corpus = {c['id']: c for c in json.loads((REPO / 'bench' / 'corpus.json').read_text(encoding='utf-8'))}
+    PHRASES = [(k, corpus[k]['phonemes']) for k in sorted(corpus)]
+    PHRASES += [('long1', ' '.join(corpus[k]['phonemes'] for k in ('p06', 'p08', 'p10'))),
+                ('long2', ' '.join(corpus[k]['phonemes'] for k in ('p09', 'p05', 'p07', 'p03')))]
+    PHRASES = PHRASES[:A.phrases]
 
-# Pass 2: reference, calibration and variants.
-for pid, ph, ids, inp, _ in DATA:
-    T = inp['asr'].shape[-1]; ST['T'] = T; ST['prior'] = prior(pid)
-    ref_cap = {}
-    ref, _ = run(inp, cap=ref_cap)                                          # original InstanceNorm, whole phrase
-    rec = {'id': pid, 'phonemes': ph, 'tokens': len(ids), 'frames': T, 'seconds': T / FPS, 'runs': {}}
-    y, acc = run(inp, 'whole', 0, SCOPES['all'], ref=ref_cap)               # exactness of the replacement path
-    rec['runs']['whole-replaced'] = dict(metrics(ref, y), layer_snr=acc)
-    y, _ = run(inp, har=source(inp, SEED + 1))                              # calibration: SineGen reseed only
-    rec['runs']['reseed'] = dict(metrics(ref, y), logmel_quarters=logmel_quarters(ref, y))
-    if A.wav: write_wav(OUT / f'{pid}_reference.wav', ref); write_wav(OUT / f'{pid}_reseed.wav', y)
-    for scope in ('all', 'gen'):
-        for vn, mode, p in VARIANTS:
-            y, acc = run(inp, mode, p, SCOPES[scope], ref=ref_cap)
-            rec['runs'][f'{scope}/{vn}'] = dict(metrics(ref, y), logmel_quarters=logmel_quarters(ref, y), layer_snr=acc)
-            if A.wav: write_wav(OUT / f'{pid}_{scope}_{vn}.wav', y)
-    for gname, gset in GROUPS.items():
-        for vn, mode, p in ATTRIBUTE:
-            y, acc = run(inp, mode, p, gset, ref=ref_cap)
-            rec['runs'][f'only-{gname}/{vn}'] = dict(metrics(ref, y), layer_snr=acc)
-    results['phrases'].append(rec)
-    print(f'{pid:6s} T={T:4d} ({T / FPS:5.2f} s)  reseed logmel={rec["runs"]["reseed"]["logmel_db"]:.2f}  '
-          + '  '.join(f'{k}:{rec["runs"][k]["logmel_db"]:.2f}' for k in ('all/cum', 'gen/cum', 'gen/la4', 'gen/la64', 'gen/fixed', 'all/fixed')),
-          f'[{time.time() - t_start:.0f} s]', flush=True)
-    del ref_cap
+    results = {'phrases': [], 'layers': list(NAMES.values()),
+               'voice_pack_sha256': sha(M / 'voices' / f'{VOICE}.pt')}
+    t_start = time.time()
+    # Pass 1: decoder inputs and whole-phrase moments of every norm input (for the leave-one-out prior).
+    DATA = []
+    for pid, ph in PHRASES:
+        ids, inp = prepare(ph); ST['T'] = inp['asr'].shape[-1]
+        ST['moments'] = {}; run(inp); DATA.append((pid, ph, ids, inp, ST['moments'])); ST['moments'] = None
+    def prior(excl):
+        out = {}
+        for n in NAMES.values():
+            rows = [d[4][n] for d in DATA if d[0] != excl]; c = sum(r[2] for r in rows)
+            out[n] = (sum(r[0] for r in rows) / c, sum(r[1] for r in rows) / c)
+        return out
 
-# ---- rates and norm-induced lookahead latency on the critical path ---------------------------
-rate = {n: l / ST['T'] * FPS for n, l in ST['len'].items()}                # last phrase; ratios are fixed
-def serial(g, i=None):
-    if g == 'front': return [n for n in NAMES.values() if group(n) == 'front']
-    if g == 'gen': b = i * gen.num_kernels; return [n for n in NAMES.values() if n.startswith(f'generator.resblocks.{b}.')]
-    return [n for n in NAMES.values() if n.startswith(f'generator.noise_res.{i}.')]
-PATHS = {'main': serial('front') + serial('gen', 0) + serial('gen', 1),
-         'noise0': serial('noise', 0) + serial('gen', 0) + serial('gen', 1),
-         'noise1': serial('noise', 1) + serial('gen', 1)}
-def latency_ms(L, scope, har_ahead):
-    act = SCOPES[scope]; paths = ['main'] if har_ahead else list(PATHS)
-    return max(sum(1000.0 * L / rate[n] for n in PATHS[p] if n in act) for p in paths)
-results['latency_ms'] = {f'{s}/la{L}': {'streamed': latency_ms(L, s, False), 'har_ahead': latency_ms(L, s, True)}
-                         for s in ('all', 'gen') for L in LOOKAHEADS}
-results['rate_hz'] = rate
+    # Pass 2: reference, calibration and variants.
+    for pid, ph, ids, inp, _ in DATA:
+        T = inp['asr'].shape[-1]; ST['T'] = T; ST['prior'] = prior(pid)
+        ref_cap = {}
+        ref, _ = run(inp, cap=ref_cap)                                          # original InstanceNorm, whole phrase
+        rec = {'id': pid, 'phonemes': ph, 'tokens': len(ids), 'frames': T, 'seconds': T / FPS, 'runs': {}}
+        y, acc = run(inp, 'whole', 0, SCOPES['all'], ref=ref_cap)               # exactness of the replacement path
+        rec['runs']['whole-replaced'] = dict(metrics(ref, y), layer_snr=acc)
+        y, _ = run(inp, har=source(inp, SEED + 1))                              # calibration: SineGen reseed only
+        rec['runs']['reseed'] = dict(metrics(ref, y), logmel_quarters=logmel_quarters(ref, y))
+        if A.wav: write_wav(OUT / f'{pid}_reference.wav', ref); write_wav(OUT / f'{pid}_reseed.wav', y)
+        for scope in ('all', 'gen'):
+            for vn, mode, p in VARIANTS:
+                y, acc = run(inp, mode, p, SCOPES[scope], ref=ref_cap)
+                rec['runs'][f'{scope}/{vn}'] = dict(metrics(ref, y), logmel_quarters=logmel_quarters(ref, y), layer_snr=acc)
+                if A.wav: write_wav(OUT / f'{pid}_{scope}_{vn}.wav', y)
+        for gname, gset in GROUPS.items():
+            for vn, mode, p in ATTRIBUTE:
+                y, acc = run(inp, mode, p, gset, ref=ref_cap)
+                rec['runs'][f'only-{gname}/{vn}'] = dict(metrics(ref, y), layer_snr=acc)
+        results['phrases'].append(rec)
+        print(f'{pid:6s} T={T:4d} ({T / FPS:5.2f} s)  reseed logmel={rec["runs"]["reseed"]["logmel_db"]:.2f}  '
+              + '  '.join(f'{k}:{rec["runs"][k]["logmel_db"]:.2f}' for k in ('all/cum', 'gen/cum', 'gen/la4', 'gen/la64', 'gen/fixed', 'all/fixed')),
+              f'[{time.time() - t_start:.0f} s]', flush=True)
+        del ref_cap
 
-# ---- intrinsic (non-norm) lookahead of the convolutions, measured with causal norms ---------
-def conv_lookahead():
-    inp = DATA[-1][3]; T = inp['asr'].shape[-1]; ST['T'] = T
-    t0 = T // 2; out = {}
-    base, _ = run(inp, 'cum', 0, SCOPES['all'])
-    pert = dict(inp); pert['asr'] = inp['asr'].clone(); pert['asr'][..., t0:] += 0.5
-    pert['F0'] = inp['F0'].clone(); pert['F0'][..., 2 * t0:] += 20.0
-    pert['N'] = inp['N'].clone(); pert['N'][..., 2 * t0:] += 0.5
-    pert['har'] = inp['har'].clone(); pert['har'][..., U * t0:] += 0.05
-    y, _ = run(pert, 'cum', 0, SCOPES['all'])
-    d = np.nonzero(np.abs(y - base) > 1e-6 * np.abs(base).max())[0]
-    out['decoder_samples'] = int(U * t0 - d[0]) if d.size else None
-    with torch.no_grad():                                                   # generator alone, front fixed
-        ST.update(active=set()); x = front(inp['asr'], inp['F0'], inp['N'], inp['s'])
-        ST.update(mode='cum', p=0, active=SCOPES['gen']); g0 = generator(x, inp['s'], inp['har']).numpy()
-        x2 = x.clone(); x2[..., 2 * t0:] += 0.5; h2 = inp['har'].clone(); h2[..., U * t0:] += 0.05
-        g1 = generator(x2, inp['s'], h2).numpy(); ST.update(active=set())
-    d = np.nonzero(np.abs(g1 - g0) > 1e-6 * np.abs(g0).max())[0]
-    out['generator_samples'] = int(U * t0 - d[0]) if d.size else None
-    return {k: {'samples': v, 'ms': None if v is None else 1000.0 * v / SR} for k, v in out.items()}
-results['conv_lookahead'] = conv_lookahead()
+    # ---- rates and norm-induced lookahead latency on the critical path ---------------------------
+    rate = {n: l / ST['T'] * FPS for n, l in ST['len'].items()}                # last phrase; ratios are fixed
+    def serial(g, i=None):
+        if g == 'front': return [n for n in NAMES.values() if group(n) == 'front']
+        if g == 'gen': b = i * gen.num_kernels; return [n for n in NAMES.values() if n.startswith(f'generator.resblocks.{b}.')]
+        return [n for n in NAMES.values() if n.startswith(f'generator.noise_res.{i}.')]
+    PATHS = {'main': serial('front') + serial('gen', 0) + serial('gen', 1),
+             'noise0': serial('noise', 0) + serial('gen', 0) + serial('gen', 1),
+             'noise1': serial('noise', 1) + serial('gen', 1)}
+    def latency_ms(L, scope, har_ahead):
+        act = SCOPES[scope]; paths = ['main'] if har_ahead else list(PATHS)
+        return max(sum(1000.0 * L / rate[n] for n in PATHS[p] if n in act) for p in paths)
+    results['latency_ms'] = {f'{s}/la{L}': {'streamed': latency_ms(L, s, False), 'har_ahead': latency_ms(L, s, True)}
+                             for s in ('all', 'gen') for L in LOOKAHEADS}
+    results['rate_hz'] = rate
 
-results['provenance'] = {
-    'model_dir_files': {f: sha(M / f) for f in ('kokoro-v1_0.pth', 'config.json', f'voices/{VOICE}.pt')},
-    'voice': VOICE, 'seed': SEED, 'kokoro': version('kokoro'), 'torch': torch.__version__,
-    'numpy': np.__version__, 'scipy': scipy.__version__, 'python': platform.python_version(),
-    'threads': torch.get_num_threads(), 'wall_s': time.time() - t_start}
-(OUT / 'results.json').write_text(json.dumps(results, indent=1), encoding='utf-8')
-(OUT / 'summary.md').write_text(summarize(results), encoding='utf-8')
-print(json.dumps({k: results[k] for k in ('latency_ms', 'conv_lookahead', 'provenance')}, indent=1))
+    # ---- intrinsic (non-norm) lookahead of the convolutions, measured with causal norms ---------
+    def conv_lookahead():
+        inp = DATA[-1][3]; T = inp['asr'].shape[-1]; ST['T'] = T
+        t0 = T // 2; out = {}
+        base, _ = run(inp, 'cum', 0, SCOPES['all'])
+        pert = dict(inp); pert['asr'] = inp['asr'].clone(); pert['asr'][..., t0:] += 0.5
+        pert['F0'] = inp['F0'].clone(); pert['F0'][..., 2 * t0:] += 20.0
+        pert['N'] = inp['N'].clone(); pert['N'][..., 2 * t0:] += 0.5
+        pert['har'] = inp['har'].clone(); pert['har'][..., U * t0:] += 0.05
+        y, _ = run(pert, 'cum', 0, SCOPES['all'])
+        d = np.nonzero(np.abs(y - base) > 1e-6 * np.abs(base).max())[0]
+        out['decoder_samples'] = int(U * t0 - d[0]) if d.size else None
+        with torch.no_grad():                                                   # generator alone, front fixed
+            ST.update(active=set()); x = front(inp['asr'], inp['F0'], inp['N'], inp['s'])
+            ST.update(mode='cum', p=0, active=SCOPES['gen']); g0 = generator(x, inp['s'], inp['har']).numpy()
+            x2 = x.clone(); x2[..., 2 * t0:] += 0.5; h2 = inp['har'].clone(); h2[..., U * t0:] += 0.05
+            g1 = generator(x2, inp['s'], h2).numpy(); ST.update(active=set())
+        d = np.nonzero(np.abs(g1 - g0) > 1e-6 * np.abs(g0).max())[0]
+        out['generator_samples'] = int(U * t0 - d[0]) if d.size else None
+        return {k: {'samples': v, 'ms': None if v is None else 1000.0 * v / SR} for k, v in out.items()}
+    results['conv_lookahead'] = conv_lookahead()
+
+    results['provenance'] = {
+        'model_dir_files': {f: sha(M / f) for f in ('kokoro-v1_0.pth', 'config.json', f'voices/{VOICE}.pt')},
+        'voice': VOICE, 'seed': SEED, 'kokoro': version('kokoro'), 'torch': torch.__version__,
+        'numpy': np.__version__, 'scipy': scipy.__version__, 'python': platform.python_version(),
+        'threads': torch.get_num_threads(), 'wall_s': time.time() - t_start}
+    (OUT / 'results.json').write_text(json.dumps(results, indent=1), encoding='utf-8')
+    (OUT / 'summary.md').write_text(summarize(results), encoding='utf-8')
+    print(json.dumps({k: results[k] for k in ('latency_ms', 'conv_lookahead', 'provenance')}, indent=1))
+
+if __name__ == '__main__':
+    main()
