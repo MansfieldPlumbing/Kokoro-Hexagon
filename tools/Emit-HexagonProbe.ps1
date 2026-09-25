@@ -1,10 +1,33 @@
 #requires -Version 7.4
 [CmdletBinding()]
 param(
-    [string] $PwshRoot = (Join-Path $PSScriptRoot '..\..\Pwsh'),
-    [string] $OutputDirectory = (Join-Path $PSScriptRoot '..\..\Build\Kokoro-QNN\hexagon-emission\emitted'),
-    [ValidateSet('Probe','KokoroAffine','KokoroConvTile')][string] $Kernel='Probe',
-    [string] $WeightManifest=(Join-Path $PSScriptRoot '..\..\Build\Kokoro-QNN\emit\r0\r0_static.json')
+    [string] $PwshRoot = $(
+        $cands = @(
+            (Join-Path $PSScriptRoot '..\..\Pwsh'),
+            (Join-Path $PSScriptRoot '..\..\..\Pwsh'),
+            'C:\Dev\Pwsh'
+        )
+        ($cands | Where-Object { Test-Path (Join-Path $_ 'setup.ps1') } | Select-Object -First 1)
+    ),
+    [string] $OutputDirectory = $(
+        $buildDir = @(
+            (Join-Path $PSScriptRoot '..\..\Build\Kokoro-QNN'),
+            (Join-Path $PSScriptRoot '..\..\..\Build\Kokoro-QNN'),
+            'C:\Dev\Build\Kokoro-QNN'
+        ) | Where-Object { Test-Path $_ } | Select-Object -First 1
+        if (-not $buildDir) { $buildDir = 'C:\Dev\Build\Kokoro-QNN' }
+        Join-Path $buildDir 'hexagon-emission\emitted'
+    ),
+    [ValidateSet('Probe','KokoroAffine','KokoroConvTile','KokoroR0Sub0','KokoroHmxLock','KokoroHmxMatrix')][string] $Kernel='Probe',
+    [string] $WeightManifest = $(
+        $cands = @(
+            (Join-Path $PSScriptRoot '..\..\Build\Kokoro-QNN\emit\r0\r0_static.json'),
+            (Join-Path $PSScriptRoot '..\..\..\Build\Kokoro-QNN\emit\r0\r0_static.json'),
+            'C:\Dev\Build\Kokoro-QNN\emit\r0\r0_static.json'
+        )
+        ($cands | Where-Object { Test-Path $_ } | Select-Object -First 1)
+    ),
+    [switch] $Force
 )
 $ErrorActionPreference = 'Stop'
 # Host-only. The pinned ELF writer uses .NET APIs requiring FullLanguage.
@@ -24,10 +47,11 @@ function Import-LibSourceText {
     [IO.File]::ReadAllText($file)
 }
 function Write-NewOrIdenticalFile {
-    param([string] $Path, [byte[]] $Bytes)
+    param([string] $Path, [byte[]] $Bytes, [switch] $AllowOverwrite)
     if ([IO.File]::Exists($Path)) {
-        if ([Convert]::ToHexString([Security.Cryptography.SHA256]::HashData([IO.File]::ReadAllBytes($Path))) -ne
+        if (-not $AllowOverwrite -and [Convert]::ToHexString([Security.Cryptography.SHA256]::HashData([IO.File]::ReadAllBytes($Path))) -ne
             [Convert]::ToHexString([Security.Cryptography.SHA256]::HashData($Bytes))) { throw "Output exists with different bytes: $Path. Choose a new output directory." }
+        [IO.File]::WriteAllBytes($Path,$Bytes)
     } else { [IO.File]::WriteAllBytes($Path,$Bytes) }
 }
 [void][IO.Directory]::CreateDirectory($OutputDirectory)
@@ -61,7 +85,7 @@ $adapter=Join-Path $OutputDirectory 'Pwsh.ElfWriter.ps1'
 $text=$definitions -join "`n`n"
 $null=[Management.Automation.Language.Parser]::ParseInput($text,[ref]$tokens,[ref]$errors)
 if($errors.Count) { throw 'Writer adapter does not parse' }
-Write-NewOrIdenticalFile $adapter ([Text.Encoding]::UTF8.GetBytes($text))
+Write-NewOrIdenticalFile $adapter ([Text.Encoding]::UTF8.GetBytes($text)) -AllowOverwrite:$Force
 . $adapter
 . (Join-Path $PSScriptRoot '..\src\emit\Hexagon.ps1')
 $script:ElfConstants=$null
@@ -76,7 +100,19 @@ $m=[regex]::Match((Import-LibSourceText 'DynamicTags.def'),'HEXAGON_DYNAMIC_TAG\
 if(-not $m.Success) { throw 'Missing Hexagon dynamic version tag' }
 $elf.DT_HEXAGON_VER=[Convert]::ToUInt32($m.Groups[1].Value.Substring(2),16)
 $script:Target=[pscustomobject]@{ElfClass=32;Machine='EM_HEXAGON';ElfFlags=@('EF_HEXAGON_ISA_V73');RelocationForm='RELA'}
-if($Kernel -in 'KokoroAffine','KokoroConvTile') {
+if($Kernel -eq 'KokoroR0Sub0') {
+    $modelPath=Join-Path $PSScriptRoot '..\src\models\Kokoro.R0Sub0.ps1'
+    $modelAst=[Management.Automation.Language.Parser]::ParseFile($modelPath,[ref]$tokens,[ref]$errors)
+    if($errors.Count) { throw 'R0Sub0 model does not parse' }
+    $nodes=@(& (Join-Path $PSScriptRoot '..\src\lower\Lower-Model.ps1') -Model $modelAst.GetScriptBlock())
+    $weights=Get-Content $WeightManifest -Raw | ConvertFrom-Json
+    $weightPath=Join-Path (Split-Path $WeightManifest) 'r0_static.bin'
+    if((Get-FileHash $weightPath).Hash -ne $weights.Sha256 -or (Get-Item $weightPath).Length -ne $weights.Bytes) { throw 'Existing weights fail their manifest' }
+    . (Join-Path $PSScriptRoot '..\src\emit\Kokoro.R0Sub0.ps1')
+    $steps=@(New-KokoroR0Sub0Steps -Nodes $nodes -Frames 7681 -Channels $weights.Channels -WeightBytes $weights.Bytes -Weights $weights.Values)
+    $symbol='kokoro_r0sub0_skel_handle_invoke'; $soname='libkokoro_r0sub0_skel.so'
+    Write-NewOrIdenticalFile (Join-Path $OutputDirectory 'lowered.json') ([Text.Encoding]::UTF8.GetBytes(($nodes | ConvertTo-Json -Depth 6))) -AllowOverwrite:$Force
+} elseif($Kernel -in 'KokoroAffine','KokoroConvTile') {
     $modelName=if($Kernel -eq 'KokoroAffine'){'Kokoro.Affine.ps1'}else{'Kokoro.ConvTile.ps1'}
     $modelPath=Join-Path $PSScriptRoot "..\src\models\$modelName"
     $modelAst=[Management.Automation.Language.Parser]::ParseFile($modelPath,[ref]$tokens,[ref]$errors)
@@ -87,9 +123,9 @@ if($Kernel -in 'KokoroAffine','KokoroConvTile') {
     $weightPath=Join-Path (Split-Path $WeightManifest) 'r0_static.bin'
     if((Get-FileHash $weightPath).Hash -ne $weights.Sha256 -or (Get-Item $weightPath).Length -ne $weights.Bytes) { throw 'Existing weights fail their manifest' }
     if($Kernel -eq 'KokoroAffine') {
-    . (Join-Path $PSScriptRoot '..\src\emit\Kokoro.Affine.ps1')
-    $steps=@(New-KokoroAffineSteps -Nodes $nodes -Channels $weights.Channels -GainOffset $weights.Values.'adain1.0.gain'.Offset -ShiftOffset $weights.Values.'adain1.0.shift'.Offset -WeightBytes $weights.Bytes)
-    $symbol='kqnn_affine_skel_handle_invoke'; $soname='libkqnn_affine_skel.so'
+        . (Join-Path $PSScriptRoot '..\src\emit\Kokoro.Affine.ps1')
+        $steps=@(New-KokoroAffineSteps -Nodes $nodes -Channels $weights.Channels -GainOffset $weights.Values.'adain1.0.gain'.Offset -ShiftOffset $weights.Values.'adain1.0.shift'.Offset -WeightBytes $weights.Bytes)
+        $symbol='kqnn_affine_skel_handle_invoke'; $soname='libkqnn_affine_skel.so'
     } else {
         if(($weights.Values.'convs1.0.weight'.Shape -join ',') -ne '1,3,128,128' -or
             ($weights.Values.'convs1.0.bias'.Shape -join ',') -ne '128') { throw 'Unexpected convolution weight layout' }
@@ -97,19 +133,28 @@ if($Kernel -in 'KokoroAffine','KokoroConvTile') {
         $steps=@(New-KokoroConvTileSteps -Nodes $nodes -Channels $weights.Channels -WeightOffset $weights.Values.'convs1.0.weight'.Offset -BiasOffset $weights.Values.'convs1.0.bias'.Offset -WeightBytes $weights.Bytes)
         $symbol='kokoro_conv_skel_handle_invoke'; $soname='libkokoro_conv_skel.so'
     }
-    Write-NewOrIdenticalFile (Join-Path $OutputDirectory 'lowered.json') ([Text.Encoding]::UTF8.GetBytes(($nodes | ConvertTo-Json -Depth 6)))
+    Write-NewOrIdenticalFile (Join-Path $OutputDirectory 'lowered.json') ([Text.Encoding]::UTF8.GetBytes(($nodes | ConvertTo-Json -Depth 6))) -AllowOverwrite:$Force
+} elseif($Kernel -eq 'KokoroHmxLock') {
+    . (Join-Path $PSScriptRoot '..\src\emit\Kokoro.HmxLockProbe.ps1')
+    $steps=@(New-KokoroHmxLockSteps)
+    $symbol='kokoro_hmx_lock_skel_handle_invoke'; $soname='libkokoro_hmx_lock_skel.so'
+} elseif($Kernel -eq 'KokoroHmxMatrix') {
+    . (Join-Path $PSScriptRoot '..\src\emit\Kokoro.HmxMatrixProbe.ps1')
+    $steps=@(New-KokoroHmxMatrixSteps)
+    $symbol='kokoro_hmx_matrix_skel_handle_invoke'; $soname='libkokoro_hmx_matrix_skel.so'
 } else {
     $steps=@(New-HexagonProbeSteps)
     $symbol='kqnn_emit_skel_handle_invoke'; $soname='libkqnn_emit_skel.so'
 }
 $library=New-ElfCodeLibrary -Soname $soname -Needed @() -Functions ([ordered]@{$symbol=$steps}) -PageSize 4096
 $path=Join-Path $OutputDirectory $soname
-Write-NewOrIdenticalFile $path $library.Bytes
+Write-NewOrIdenticalFile $path $library.Bytes -AllowOverwrite:$Force
 $asm=@('.text','.p2align 2',".global $symbol",".type $symbol,@function","${symbol}:")
 $asm+=@($steps | ForEach-Object {ConvertTo-HexagonAssembly $_})
-Write-NewOrIdenticalFile (Join-Path $OutputDirectory 'probe-oracle.s') ([Text.Encoding]::UTF8.GetBytes(($asm -join "`n")+"`n"))
+Write-NewOrIdenticalFile (Join-Path $OutputDirectory 'probe-oracle.s') ([Text.Encoding]::UTF8.GetBytes(($asm -join "`n")+"`n")) -AllowOverwrite:$Force
 $codeStart=[int]$library.Exports[$symbol]
-$codeLength=4*@($steps | Where-Object Op -ne 'label').Count
+$isa=Get-InstructionSet
+$codeLength=($steps | Where-Object Op -ne 'label' | ForEach-Object { & $isa.Length $_ } | Measure-Object -Sum).Sum
 $code=[byte[]]::new($codeLength); [Array]::Copy($library.Bytes,$codeStart,$code,0,$codeLength)
-Write-NewOrIdenticalFile (Join-Path $OutputDirectory 'emitted-code.bin') $code
+Write-NewOrIdenticalFile (Join-Path $OutputDirectory 'emitted-code.bin') $code -AllowOverwrite:$Force
 [pscustomobject]@{Path=$path;Bytes=$library.Bytes.Length;CodeBytes=$codeLength;SHA256=(Get-FileHash $path).Hash;Imports=$library.Imports.Count;Relocations=0}

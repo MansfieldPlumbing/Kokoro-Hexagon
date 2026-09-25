@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Merge these children into the release NativeActivity declaration. -->
+<activity-aoa xmlns:android="http://schemas.android.com/apk/res/android">
+  <intent-filter>
+    <action android:name="android.hardware.usb.action.USB_ACCESSORY_ATTACHED" />
+  </intent-filter>
+  <meta-data
+      android:name="android.hardware.usb.action.USB_ACCESSORY_ATTACHED"
+      android:resource="@xml/kokoro_accessory_filter" />
+</activity-aoa>

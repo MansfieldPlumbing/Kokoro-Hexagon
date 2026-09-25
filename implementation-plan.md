@@ -1,228 +1,432 @@
-Yes. Sol needs a sequence of evidence gates, a clear critical path, and explicit limits on infrastructure work.
-
-One correction to my earlier advice: I overstated what had been recovered from your prior work. The old receipts identify useful boundaries; they do **not** yet establish that those components can be dropped into today’s decoder. Likewise, the new pipeline only passed parsing. Its sleep-based playback scheduling is provisional and needs replacement before it can support credible gap or first-PCM claims.
-
-Here is the implementation brief for Sol.
-
-# Kokoro-QNN implementation plan
-
-## Objective
-
-Develop the existing working Kokoro decoder into a reproducible, low-latency Hexagon implementation, with a PowerShell Android demonstration APK and Hugging Face artifacts.
-
-Preserve the current successful decoder. Recover prior work selectively through executable gates. Optimize for time to the next verified improvement.
-
-## Established baseline
-
-- Repository: `C:\Dev\Kokoro-QNN`.
-- Frozen contexts: `C:\Dev\Build\Kokoro-QNN\known-good`.
-- Canonical recorded result: generator 1.3729 seconds warm mean over 20 runs; RTF 0.419; front approximately 14.9 ms; audio SNR 24.06 dB.
-- Baseline receipt: `docs/receipts/baseline-fp16-20260922.md`.
-- The phone was subsequently left with the slower plain generator. Its latest replay reported 1.5638 seconds warm mean and successful playback.
-- SDK, Hexagon compiler 19.0.02, and HexKL have been extracted in WSL. Compiler version was queried successfully; a project kernel has not yet been proven on the phone.
-- Local changes include Claude’s baseline documentation and uncommitted prototype phrase/pipeline code. Inspect and preserve them.
-- Do not describe proposed capacity buckets, pipeline timing, dynamic narration, or fused kernels as device-proven.
-
-## Operating rules
-
-1. PowerShell owns orchestration, candidate selection, lifetimes, scheduling, measurements, and promotion.
-2. Remove Python from repeated inference and benchmark operation as soon as the necessary front-end boundaries are proven. Existing Python export/reference tools may temporarily manufacture artifacts and provide an independent numerical oracle.
-3. Every promoted speech path must produce valid PCM and play through the phone speaker. Record playback completion separately from merely calling `Play()`.
-4. Benchmark narration must use actual recorded results and run outside timed measurement intervals.
-5. Keep generated artifacts outside the repository. Preserve known-good artifacts; compile into unique candidate locations.
-6. Follow repository instructions and read the required local skills.
-7. No push, publication, irreversible overwrite, or history rewrite without the required confirmation.
-8. Each experiment answers one stated question, has a measurable acceptance gate, and ends with a receipt or a precise failure.
-9. No framework expansion unless an immediate experiment needs it.
-
-## Prior art: what to use and what must be proved
-
-| Source | Reuse | Admission gate |
-|---|---|---|
-| Old Kokoro-QNN | Predictor/BiLSTM, duration/cardinality, F0/N probes, graph bindings, solver/replay and phrase geometry | Locate implementation and original inputs; reproduce the receipt on the current runtime; verify compatibility with the current graph |
-| ChangeModel | Experience records, representation refinement, constrained proposals, replay and acceptance | Adapt to real Kokoro receipts; verify predictions on held-out cases |
-| JS2PS | Explicit, reversible candidate changes; bounded greedy search checked against exhaustive search | Demonstrate on a small real optimization space |
-| QuickPS | Native binding and deterministic resource ownership patterns | Verify exact Android ABI, cleanup and execution on device |
-| Pwsh | Pinned build inputs, write plan, APK production and persistent runspace host | Prove the Android facilities Kokoro actually requires |
-| PSPersistence | Potential persisted control methods | Show an actual startup/control bottleneck and pass the exact Android runtime gate first |
-
-ChangeModel currently contains bounded research proofs, not a ready numerical optimizer. JS2PS is not a general translator. PSPersistence is not yet an Android execution solution. Pwsh’s owned-host UI/audio migration must not block decoder progress.
-
-## Phase 0 — Recover the exact reproducible starting point
-
-Do this before further feature work.
-
-- Read current instructions and inspect the working diff.
-- Compute and compare the known-good context hashes against `known-good.json`.
-- Locate the baseline phrase inputs, oracle, context metadata, and benchmark-enabled runner. The manifest inspected previously listed only three context binaries; input preservation has not been verified.
-- Recover the original export environment and exact commands from the supplied scratchpad location. Use targeted searches.
-- Compare the phone’s benchmark runner with the repository copy; preserve the benchmark capability that exists only on the phone or scratchpad.
-- Restore the canonical native-norm candidate using its actual tensor metadata.
-- Replay correctness, repeated timing, and speaker playback.
-- Record the complete reproduction command and artifact identities.
-
-Exit: another session can reproduce the canonical baseline without reconstructing missing commands or guessing paths.
-
-## Phase 1 — Make the current runner reusable and measurements honest
-
-Implement a small reusable PowerShell session around existing QNN modules:
-
-- Load a context and bind reusable buffers.
-- Validate tensor names, shapes, types and byte lengths.
-- Execute repeatedly without reopening the app or reloading contexts.
-- Release buffers, contexts, performance resources and audio resources deterministically.
-- Reject failed native calls.
-- Save a structured receipt with hashes and measurement scope.
-
-Timing fields must distinguish:
-
-- App/context initialization.
-- Prepared-input-to-PCM latency.
-- Text-to-PCM latency, once a live front end exists.
-- PCM submission.
-- Playback timestamp/completion.
-- Timed graph execution.
-- Validation and narration overhead.
-
-Review the prototype `Pipeline.ps1` and `Invoke-Pipeline.ps1` before using them. Replace wall-clock sleeps as the authority for playback completion. Validate audio-write results, quality before playback, cleanup, staging failures, and context compatibility. Predicted headroom is not a measured underrun or audible gap.
-
-Exit: the existing 160-frame candidate runs repeatedly through this session and matches its baseline within declared measurement variation.
-
-## Phase 2 — Prove capacity buckets and phrase overlap
-
-First experiment: does a smaller capacity improve prepared-input-to-first-audio latency without unacceptable quality loss?
-
-- Start with one short phrase and one longer phrase.
-- Measure their true predicted frame counts before choosing capacities.
-- Export/compile 64 and 96 only when the phrase fits; do not truncate or invent logical lengths.
-- Preserve sentinel slots and distinguish token count, physical capacity, valid frames and valid samples.
-- Verify every transformation against its predecessor.
-- Compare each bucket with the full-length reference and the established masked design.
-- Check native InstanceNorm behavior for low occupancy; do not assume the baseline quality holds for much shorter phrases.
-- Measure load time and memory before deciding which contexts stay resident.
-
-Then implement synthesis/playback overlap:
-
-1. Synthesize and validate the first phrase.
-2. Submit its PCM.
-3. Synthesize the next phrase while Android plays the first.
-4. Queue audio using an observed playback state or supported completion mechanism.
-5. Measure completion, underruns and boundary quality.
-
-A continuous audio queue is preferable if supported by the existing host. Avoid replacing one playing static track based on estimated duration.
-
-Exit: two different phrases play in order, with a receipt that proves overlap and correctly labels timing boundaries.
-
-## Phase 3 — Remove Python from repeated speech generation
-
-The decoder alone cannot synthesize arbitrary benchmark narration. Recover the missing front end in dependency order.
-
-- Inventory the old graph boundaries and their actual inputs/outputs.
-- Determine which upstream stages are still missing; a proven BiLSTM does not establish a complete text encoder or prosody pipeline.
-- Replay the most useful proven boundary on the current runtime.
-- Connect it to the present decoder only after tensor layout and semantic-length parity pass.
-- Advance through text encoding, duration/alignment, F0/N and harmonic source/STFT.
-- Use PowerShell to own planning and native/HTP kernels for bulk arithmetic.
-- Preserve an independent reference while replacing each stage.
-
-For G2P, the old Misaki corpus demonstrates lexical coverage, not a finished PowerShell implementation. First implement the bounded vocabulary needed for truthful benchmark narration, with verified number expansion and pronunciation. Expand to general text separately.
-
-Exit: a fresh benchmark result becomes text, then Kokoro PCM, and is spoken on the S23 without Python participating in that repeated workflow.
-
-## Phase 4 — Prove one useful fused kernel
-
-Run this once the baseline harness can reliably compare candidates.
-
-- Pin SDK/compiler/HexKL identities.
-- Use a minimal compiler smoke test only if needed.
-- Extract representative input/output fixtures from an expensive real decoder block.
-- First kernel: the required reduction and activation/table operation on real tensor geometry.
-- Compare against the reference on the S23.
-- Establish whether it can integrate through a QNN custom op or FastRPC.
-- Compare integration routes where feasible, including copies, synchronization, context transitions, memory and VTCM contention.
-- Begin with the least numerically disruptive implementation that tests the bottleneck.
-- Add table interpolation and integer representations incrementally.
-- Fuse one block before expanding across the generator.
-
-The stats, lookup, convolution and quantization design remains a hypothesis until its individual numerical and performance gates pass.
-
-Exit: one block gives a repeatable inclusive speedup while meeting quality constraints on held-out inputs. If it does not, keep the QNN implementation and record why.
-
-## Phase 5 — Automate the hill climb using prior art
-
-Start with a small PowerShell candidate record and receipt cache. Do not build a general optimizer first.
-
-Candidate identity includes:
-
-- Parent graph and source hashes.
-- Transformation sequence and parameters.
-- Compiler/runtime identities.
-- Target hardware.
-- Calibration and evaluation corpus versions.
-- Relevant execution settings.
-
-Use the old solver/replay implementation where it actually reduces work.
-
-Evaluation order:
-
-1. Static admission.
-2. Reference equivalence or declared approximation test.
-3. Quality screening.
-4. Compilation.
-5. Device block measurement.
-6. Whole-phrase validation.
-7. Promotion suite and speaker playback.
-
-Reuse artifacts for identical candidates. Reuse historical timing only with its measurement conditions; hardware timing requires fresh confirmation before promotion.
-
-Adapt ChangeModel to identify missing explanatory features when outcomes conflict. Keep compile failures, quality failures and timing noise distinct. Use bounded JS2PS-style search for the first handful of knobs, then test limited joint moves if one-at-a-time search stalls.
-
-Correctness and quality are hard constraints. Keep latency, memory and energy as explicit tradeoffs rather than hiding them in an arbitrary weighted score.
-
-Exit: one automated search produces a reproducible winner using fewer expensive evaluations than its bounded exhaustive comparison.
-
-## Phase 6 — Demonstration APK and model zoo
-
-Use the proven Android host for the first demonstration. Migrate to the owned Pwsh host when the exact required Android APIs pass their gates.
-
-APK:
-
-- Text entry and voice selection.
-- Speak, cancel and replay.
-- Hardware and artifact identification.
-- Clear stage placement.
-- Correctly scoped latency/RTF display.
-- Benchmark execution and spoken result.
-- Receipt export.
-
-Release artifacts:
-
-- Reproduction instructions and pinned source.
-- Supported-device/runtime matrix.
-- Model/context manifests and hashes.
-- Representative audio comparisons.
-- Benchmark corpus and raw receipts.
-- Dependency and licensing records.
-- Hugging Face artifact layout aligned with actual tested configurations.
-
-Resolve redistribution rights for each artifact, including compiled contexts and runtime dependencies, before publication. Publish only measured compatibility.
-
-## How to prevent drift
-
-At the start of each work session, state:
-
-- Current gate.
-- One question being answered.
-- Existing evidence being reused.
-- Expected artifact or receipt.
-
-At the end, record:
-
-- What changed.
-- What ran and what passed.
-- What remains unproven.
-- The exact next command or blocking dependency.
-
-Keep one canonical status document. Do not substitute strategy prose for implementation or call parser success a device result.
-
-The immediate assignment is Phase 0 followed by Phase 1. Complete those before expanding the prototype pipeline or creating another subsystem.
+# Kokoro-Hexagon implementation plan
+
+This is the canonical execution plan. Measurements and historical detail belong
+in `docs/receipts/`; this file defines the product boundary, ordered gates, and
+the evidence required to advance them.
+
+## Product
+
+Kokoro-Hexagon is a portable, PowerShell-lowered speech model delivered as a
+literal weight-bearing managed assembly, with platform-specific execution and
+audio backends:
+
+```text
+admitted text
+  -> thin text adapter or admitted Kokoro phonemes
+  -> phoneme validation, stress and chunk state
+  -> model controls and specialization selection
+  -> Kokoro-Hexagon.dll
+       -> Windows reference backend -> WASAPI
+       -> Android appliance backend -> HTP/Hexagon -> AAudio
+       -> Windows controller -> resident Android compute backend -> WASAPI or AAudio
+```
+
+`model.ps1` is the auditable model and control source. PowerShell parses,
+validates, and lowers it before release. Each `Kokoro-Hexagon.dll` variant
+contains its own serialized, indexed weight blob, admitted text pipeline,
+typed streaming API, graph identity, control schema, specialization map, and
+integrity metadata. The pinned checkpoint is converted once into a safe,
+versioned tensor source pack; routine PowerShell builds consume that pack, not
+the checkpoint serializer. PowerShell emits both the managed model assembly and
+our target-specific DSP ELF binaries. Independent assemblers and existing graph
+runtimes may verify or temporarily execute blocks that have not passed direct
+lowering; they are not the production emitter. The phone's required system
+runtime remains a platform dependency. No executable payload is fetched or
+generated during ordinary inference.
+
+The ordinary user path is turnkey: with PowerShell 7, obtain a verified release,
+load one model DLL, select the connected phone's Hexagon backend and an audio
+sink, and stream text. Windows acts as the controller; Windows-only inference
+is a later feature campaign, not an MVP gate.
+The APK is a minimal resident backend. A source user must be able to reproduce
+a variant with one documented `setup-kokoro.ps1` command. The script reuses the
+proven `C:\Dev\pwsh\setup.ps1` facade and write-plan discipline where
+applicable, but exposes only Kokoro's required steps. Routine source builds and
+the appliance require PowerShell 7, pinned inputs, and the declared platform
+runtime; they do not require a separate model compiler. The release contains
+ordinary managed IL and PowerShell-emitted DSP payloads. Developer JIT is an
+opt-in source-build/test workflow over that IL, not a separate runtime artifact
+format.
+
+The model variants are separate DLL artifacts in the adjacent, Git-ignored
+Build directory, not one process-resident collection. FP32 is the numerical
+reference; FP16, INT8, and W4A8 candidates require per-layer, speech-quality,
+memory, and end-to-end timing gates before release. W4A8 may apply only to
+eligible blocks, so record the actual precision of every block instead of
+labeling a mixed graph as wholly W4A8. Each artifact has its own embedded
+weight hash and release identity. Load one variant at a time on a
+memory-constrained device.
+
+The existing Subsystem `agent.obp` WebView and Gemma runtime are a possible
+separate demonstration package (TBD). They are not prerequisites for the model
+DLL or its first speech release.
+
+### Build methodology
+
+The maintainer first admits a pinned tensor source pack against the original
+checkpoint and independent numerical/audio references. That conversion is a
+separate, recorded provenance step, not a requirement for a release user or a
+routine source rebuild. Thereafter `setup-kokoro.ps1` uses PowerShell 7 and
+pinned source data to validate the model AST, specialize and lower its graph,
+pack the selected weights into the managed assembly, emit required DSP ELF
+code, and run differential gates. The documented clean build must not require
+a model framework or separate language toolchain. Validated text processing,
+control, scheduling, and kernel dispatch move into the assembly rather than
+remaining interpreted work on the speech hot path.
+
+## Permanent ratchets
+
+These results are already established and must not regress silently:
+
+1. **Portable managed identity.** The source build emits a 15,360-byte
+   `Kokoro-Hexagon.dll` that loads in Windows PowerShell before Android setup.
+   Its persisted graph hash matches an independent lowering of `model.ps1`.
+   Receipt: `docs/receipts/model-assembly-windows-20260924.md`.
+2. **Model-aware V73 code generation.** The lowered R0Sub0 elementwise graph
+   uses an eight-lane, 30-register HVX schedule. In counterbalanced physical
+   runs it was bit-exact with the pinned gold and LLVM outputs and measured
+   2.213x to 2.256x the LLVM implementation's DSP-tick performance for this
+   kernel. Receipt: `docs/receipts/r0sub0-lowered-vs-llvm-20260924.md`.
+3. **Audio sinks.** Persistent Android AAudio playback at 24 kHz mono float has
+   completed consecutive chunks without an observed underrun in its recorded
+   scope. QuickPS contains a pinned direct WASAPI binding for the Windows
+   reference backend.
+4. **DSP substrates.** Direct HVX emission is checked byte-for-byte by the
+   pinned Qualcomm assembler oracle. HMX W4A8 instruction and layout probes have
+   exact device readback; they do not yet constitute a quantized Kokoro model.
+5. **Warm graph execution.** Capacity-specific QNN contexts and a bounded audio
+   queue can remain resident across prepared phrase fixtures. Arbitrary text is
+   not yet connected to that warm path.
+
+Every performance change must keep output/quality gates, independent encoder
+verification, and the applicable physical-device ratchet. Beating one LLVM
+kernel is a compiler result for that specialization, not a claim about LLVM in
+general or complete speech synthesis.
+
+## Gate 1: phoneme admission and thin text adapter
+
+The model's native language is a bounded Kokoro phoneme string. The canonical
+MVP API accepts that string directly, validates every code point against the
+pinned 114-entry model vocabulary, adds the boundary IDs, and rejects inputs
+over the model limit. This path must work before arbitrary text admission.
+
+Kokoro's pinned source delegates text-to-phoneme conversion and token-aware
+chunking to Misaki; it does not ask the acoustic model or PowerShell to infer
+pronunciation. Preserve that separation. SMA is limited to authored cue cards,
+explicit pronunciation overrides, source-span preservation, and continuation
+state. It is not a general natural-language parser or pronunciation engine.
+Only bounded validated data reaches the DLL; user text is never parsed or
+executed as PowerShell.
+
+The text adapter is replaceable and is tested against pinned reference output.
+It may use a compiled lexicon/rule table or another admitted implementation,
+but its output contract is always the same Kokoro phoneme alphabet. The pinned
+host phonemizer remains an oracle during development, not an APK dependency.
+Evaluate the Apache-2.0 `MisakiSharp` English implementation at commit
+`beb91a9f06ebe5e25e595b5a3c990ee616ad75e5` as a behavior and corpus reference.
+Its English path is managed code with compressed lexicon, tokenizer, and tagger
+tables. Re-author the admitted rules in PowerShell, validate their SMA AST, and
+lower them into deterministic scanners, tries, and lookup tables. Do not carry
+regular-expression execution into the released adapter or parse user prose as
+PowerShell syntax.
+
+### Work
+
+1. Define `SynthesizePhonemes` as the stable primitive: admitted phoneme
+   alphabet, boundary IDs, maximum length, voice/style selection, speed, and
+   source identity. Expose phoneme-to-ID conversion from the DLL on Windows so
+   Muse and the differential harness can test model variants without a G2P
+   dependency.
+2. Define a versioned text adapter contract covering Unicode normalization, numbers,
+   abbreviations, punctuation, quotations, cue cards, language selection,
+   speaker/voice turns, and explicit pronunciation overrides.
+3. Pin three independent references:
+   - the exact Kokoro source revision and vocabulary used by the model;
+   - the existing pinned host phonemizer as the pronunciation oracle;
+   - the supplied TypeScript parser as a second implementation reference,
+      after source review rather than direct adoption.
+   - the pinned `MisakiSharp` English fixtures as a managed-port differential
+     reference, after provenance and license review.
+   Use the pinned Kokoro vocabulary to test emitted IDs, not SMA parse success
+   as a proxy for pronunciation correctness.
+4. Build a machine-readable differential corpus from:
+   - narrative excerpts for continuity and dialogue;
+   - technical prose for numbers, symbols, abbreviations, and code-adjacent
+     language;
+   - lyrics for meter, contractions, repetition, and line boundaries.
+   Source text remains outside generated artifacts unless its inclusion is
+   explicitly intended and licensed.
+5. Implement the admitted normalizer and phoneme/ID pipeline in portable
+   managed logic. Preserve source spans and distinguish authored text, spoken
+   text, phonemes, model IDs, and nonverbal cue cards.
+6. Carry bounded continuation state between chunks: unfinished punctuation,
+   quotation/dialogue state, speaker/voice, pronunciation override scope, and
+   boundary strength. A cut may not occur inside a normalized token or phoneme.
+7. Differentially test every corpus case. Store expected outputs and compact
+   mismatch categories, not an opaque pass/fail total. Add held-out heteronym,
+   morphology, and chunk-boundary pairs before admitting a new context feature.
+8. Persist the validated methods and their contract/version hashes into
+   `Kokoro-Hexagon.dll`. Loading the DLL on Windows must be sufficient to
+   normalize, phonemize, produce IDs, and plan chunks without Android, a model
+   framework, or a network connection.
+
+### Exit gate
+
+- Direct phoneme input maps exactly to the pinned model vocabulary and rejects
+  unknown code points, malformed boundaries, and over-limit input.
+- All admitted text-adapter corpus cases match the pinned oracle or carry an explicit,
+  reviewed model-specific exception.
+- Re-running a chunked passage produces the same normalized text and phoneme ID
+  stream as an unchunked pass, except for declared boundary events.
+- Invalid Unicode, excessive input, unknown cue cards, and unsupported language
+  fail closed with bounded allocation.
+- A Windows test loads only the release assembly and its declared data resources
+  and reproduces the corpus hashes.
+
+## Gate 2: portable streaming API and Windows proof
+
+Define one small public surface; platform details stay behind backend bindings.
+The target shape is conceptually:
+
+```text
+Load(dll, variant) -> model
+Plan(text, voice, controls, continuation) -> chunks
+Open(computeBackend, audioSink) -> session
+session.Write(chunk) -> timing and quality receipt
+session.Complete()
+```
+
+### Work
+
+1. Persist typed request, chunk, continuation, control, and receipt shapes in the
+   assembly. Do not expose internal graph tensor names as the stable user API.
+2. Pack the pinned tensor source into a deterministic blob with explicit
+   tensor names, shapes, dtypes, offsets, alignment, and hashes. Embed that blob
+   in the variant DLL; verify every range and hash before use. Measure assembly
+   load, blob access, and peak memory so the embedding does not silently create
+   a second full-weight copy. The released path never opens the source checkpoint.
+3. Keep compute and audio selection independent: Windows reference or resident
+   phone compute; WASAPI, AAudio, or caller-owned PCM output. Unsupported
+   combinations fail explicitly. The transport is an adapter, not model logic.
+4. Bind the pinned QuickPS WASAPI mechanism as the Windows audio sink. Preserve
+   its COM ownership, buffer, format, and deterministic disposal contracts.
+5. Provide a Windows reference execution mode for correctness and listening.
+   It may be slower than Android, but it must consume the same plan and return
+   the same control and artifact identities.
+6. Add a minimal `Speak-Kokoro.ps1` driver that loads the assembly, selects a
+   variant, voice, compute backend, and audio sink, streams text, and prints a
+   compact receipt.
+7. Keep model load, text planning, synthesis, queuing, presentation, and drain
+   timings separate.
+
+### Exit gate
+
+- A clean Windows process loads the release bundle, plans arbitrary admitted
+  text, plays multiple chunks through WASAPI, and disposes all native resources.
+- The same input plan is accepted without translation by the Android backend.
+- Repeated calls reuse the model session; no per-chunk runspace or model reload
+  is permitted.
+- The source checkpoint is absent from the runtime environment. The embedded
+  blob matches its build manifest and loads within a measured memory budget.
+
+## Gate 3: real long-form Android stream
+
+Replace prepared phrase fixtures with output from the admitted text path while
+keeping contexts, buffers, and audio resident.
+
+### Work
+
+1. Select capacity buckets from planned phoneme/duration demand. Do not allocate
+   every bucket or the full passage at once.
+2. Keep QNN libraries, contexts, tensor metadata, voice tables, reusable arenas,
+   and one AAudio stream resident for the session.
+3. Use a bounded producer/consumer pipeline. While AAudio presents chunk `n`,
+   prepare chunk `n+1`; retain at most the configured look-ahead so long text
+   cannot accumulate PCM in unified memory.
+4. Carry acoustic boundary state where the model supports it. Measure crossfade
+   or overlap only as an explicit candidate; do not conceal discontinuity with
+   unmeasured post-processing.
+5. Exercise narrative, technical, and metered passages, including speaker
+   changes and cue cards.
+
+### Exit gate
+
+- One physical-phone session speaks each long-form lane without reloading the
+  runspace, model, contexts, or audio stream.
+- The receipt records cold and warm time to first audio, per-chunk readiness,
+  inter-chunk audible gap, sustained real-time factor, underruns, peak resident
+  memory, managed memory, and completion/drain state.
+- The phone speaker audibly plays valid PCM; automated tensor success alone is
+  insufficient.
+
+## Gate 4: control discovery and lowering
+
+The public controls must be derived from causal probes, not names that merely
+sound plausible.
+
+Current internal boundaries are `asr`, `F0_curve`, `N`, `style`, `gb`, `har8`,
+`mask`, `mask8`, and `capacity`. They are not independent public knobs:
+
+- `style` and the precomputed AdaIN `gb` table are coupled.
+- `F0_curve` and the harmonic source represented by `har8` are coupled.
+- masks, valid duration, bucket capacity, and output length are coupled.
+- `N` is an internal predicted contour until a controlled probe establishes a
+  stable perceptual interpretation.
+
+### Work
+
+1. Establish a neutral baseline phrase and voice, then vary one coherent control
+   family at a time.
+2. Record tensor deltas, audio hashes, duration, F0 statistics, loudness, quality
+   against the reference path, and a human listening note.
+3. Admit only controls that are monotonic or otherwise repeatable over multiple
+   phrases and both pinned voices.
+4. Convert stable controls into explicit `model.ps1` inputs. Bake fixed choices
+   into specialization constants when they improve code generation and do not
+   need to vary per chunk.
+5. Lower speaker tables and frequent control combinations once their hashes and
+   behavior are stable.
+
+### Exit gate
+
+A versioned public control schema maps every admitted control to traced model
+inputs, legal ranges, coupling rules, and physical receipts. The same request
+has equivalent semantics on Windows and Android.
+
+## Gate 5: systematic Hexagon lowering
+
+Generalize the R0Sub0 result from a successful specialization into a compiler
+path used across the model.
+
+### Work
+
+1. Extract reusable DAG liveness, register allocation, lane-count selection,
+   scheduling, tail handling, and legality checks from the R0Sub0 backend.
+2. Make schedule selection deterministic from graph, shape, target, and control
+   constants. Include the schedule identity in artifact hashes.
+3. Lower elementwise/fusion islands to HVX and convolution/matrix tiles to the
+   appropriate HVX/HMX path. Use all available registers when liveness and ABI
+   constraints justify it; register occupancy is a resource, not a goal by
+   itself.
+4. Pass real dynamic voice/style parameters through the optimized path without
+   reverting to tensor materialization between fusible operations.
+5. Evaluate packed FP16 and then int8/W4A8 at operator and block boundaries.
+   Quantized promotion requires declared error bounds, audio-quality gates, and
+   an end-to-end latency/memory win. Hardware instruction support alone is not
+   admission.
+6. Cache build artifacts by source graph, weight, target, schedule, and tool
+   hashes. Runtime compilation or downloaded executable code is not the product
+   mechanism.
+
+### Exit gate
+
+- Each promoted block matches its previous fp32/declared-error reference on the
+  physical device.
+- Inclusive measurements include packing, copies, synchronization, and
+  transport.
+- The complete generator improves warm synthesis and/or memory without
+  regressing speech quality or the established R0Sub0 ratchet.
+
+## Gate 6: appliance and transport
+
+The Android appliance is a resident backend for the model DLL, not the model's
+identity and not the user's scripting environment.
+
+1. Keep the NativeActivity/CoreCLR host minimal and typed. Remove recovery UI
+   and unused managed assemblies only after the streaming path is stable.
+2. Replace host-script staging with signed, fixed release resources and a typed
+   local request pipe. AOA can expose the same protocol to a Windows controller.
+3. Treat FastRPC as the measured supported CDSP boundary unless pinned source,
+   specification, or a documented probe proves a safe lower route. Keep its
+   setup out of per-chunk timing by maintaining a resident session.
+4. Read embedded weights without a second full-model copy. Record proportional
+   set size and peak resident memory during cold load and long-form use. Any
+   temporary prepared context remains separately measured until its graph is
+   replaced by a validated PowerShell-emitted DSP implementation.
+5. Keep the appliance a fixed native host with a typed managed entry point;
+   do not compile managed or DSP code during ordinary inference.
+
+Exit: the signed APK installs, accepts the typed model protocol, speaks a warm
+stream, survives repeated sessions and cancellation, restores/cleans temporary
+state, and reports its exact component hashes.
+
+## Gate 7: release exemplar
+
+Publish reproducible, separately selectable model variants suitable for Hugging
+Face and GitHub:
+
+- one weight-bearing `Kokoro-Hexagon.dll` per admitted precision;
+- PowerShell-emitted DSP ELF payloads for the admitted Android specializations;
+- manifest with source revisions, licenses, sizes, and SHA-256 values;
+- minimal Windows and Android/AOA drivers;
+- PowerShell 7 quick start and one-command source build/verification instructions;
+- counterbalanced performance and speaker receipts with narrow claim language;
+- an SBOM and signed release artifacts.
+
+The release page must distinguish the stock pinned Kokoro weights from any
+future trained, FiLM-modified, or quantized checkpoint. A separate model identity
+is created only when weights or architecture actually change.
+
+### Developer source/JIT path
+
+`setup-kokoro.ps1` is the single documented entry point for source users. It
+reuses the existing PowerShell setup facade's pinned-input, preview/write-plan,
+and resumable-step patterns, while retaining only steps required by this model.
+The documented developer command must validate `model.ps1` and the pinned
+tensor source pack, lower the selected graph and weight precision through
+PowerShell, emit ordinary managed IL and target DSP ELF, run independent
+numerical and corpus checks, and
+either test that IL under the installed PowerShell 7 runtime or persist the
+same release-shaped DLL. Developer JIT does not alter model semantics or bypass
+admission gates. The default user command does none of this build work.
+
+Exit: a clean PowerShell 7 user can invoke a verified variant with a short
+documented command; a developer can rebuild it with one setup command and
+reproduce its graph, weight, and corpus identities. The source-run and
+prebuilt-assembly paths return equivalent outputs on the same backend.
+
+## Work order
+
+Do not run these tracks as competing prototypes. The order is:
+
+1. Phoneme differential corpus and portable text pipeline.
+2. Build a weight-bearing FP32 reference DLL and verify its embedded tensor
+   index and bytes in a clean Windows PowerShell process. Keep candidate DLLs
+   in the adjacent Build directory and never commit them.
+3. Produce FP16, INT8, and eligible W4A8 candidate DLLs from the same pinned
+   tensor source. Differentially check each against FP32, then measure speech
+   quality, device memory, and full-path latency before admitting a release
+   variant.
+4. Persist text/phoneme methods into the DLL and prove them on Windows.
+5. Minimal DLL driver controlling the resident phone Hexagon backend and
+   returning PCM to a Windows audio sink. Native Windows inference is deferred.
+6. Feed those plans into the existing warm Android pipeline and obtain a
+   long-form speaker receipt.
+7. Generalize the successful HVX scheduler and lower the next expensive model
+   blocks, using physical A/B gates after each promotion.
+8. Reduce appliance/runtime payload and harden lifecycle behavior.
+9. Prove the Windows-controlled phone path with framed requests and inclusive
+   transport, compute, and audio timing; do not claim remote general compute
+   before that round trip exists.
+10. Package and publish the reproducible variants and source-build instructions.
+
+## Change discipline
+
+- Generated models, contexts, DLLs, audio, logs, APKs, and raw device receipts
+  remain in the adjacent Build directory. Only compact reviewed receipts enter
+  `docs/receipts/`.
+- Every external input is pinned and hashed. Every graph passes the export gate.
+  Every optimization is checked against its predecessor before promotion.
+- Capability claims require an applicable device or platform receipt. Audible
+  completion requires actual speaker playback.
+- No runtime eval of input, runtime compiler dependency, silent network fetch,
+  or unbounded text/audio queue enters the product path.
+- Commit and push coherent hills only after their tests and evidence gates pass.
+
+## Immediate deliverable
+
+Build and verify the first weight-bearing DLL on Windows, then use it as the
+stable test target for the phoneme differential corpus and portable
+PowerShell/managed text pipeline. The Windows proof checks model identity and
+weight access; speech inference runs through the phone's Hexagon until a
+separate Windows backend is admitted.

@@ -1,0 +1,141 @@
+[
+  {
+    "id": "heh-short",
+    "cue": "laugh",
+    "hypothesis": "A short restrained chuckle",
+    "phonemes": "h\u02c8\u025bh.",
+    "voice": "af_heart",
+    "capacity": 64
+  },
+  {
+    "id": "laugh-open",
+    "cue": "laugh",
+    "hypothesis": "A two-pulse open laugh",
+    "phonemes": "h\u0259 h\u02c8\u0251!",
+    "voice": "af_heart",
+    "capacity": 64
+  },
+  {
+    "id": "sigh-falling",
+    "cue": "sigh",
+    "hypothesis": "A voiced falling sigh",
+    "phonemes": "h\u02c8\u0251\u02d0\u2198\u2026",
+    "voice": "af_heart",
+    "capacity": 64
+  },
+  {
+    "id": "gasp-initial-stop",
+    "cue": "gasp",
+    "hypothesis": "A sharp glottal-onset gasp",
+    "phonemes": "\u0294h\u02c8\u0251!",
+    "voice": "af_heart",
+    "capacity": 64
+  },
+  {
+    "id": "cough-single",
+    "cue": "cough",
+    "hypothesis": "A single abrupt cough-like pulse",
+    "phonemes": "k\u02b0\u02c8\u0251\u0294!",
+    "voice": "af_heart",
+    "capacity": 64
+  },
+  {
+    "id": "cough-double",
+    "cue": "cough",
+    "hypothesis": "A double cough-like pulse",
+    "phonemes": "k\u02c8\u0251\u0294, k\u02c8\u0251\u0294!",
+    "voice": "af_heart",
+    "capacity": 64
+  },
+  {
+    "id": "clear-throat",
+    "cue": "clear_throat",
+    "hypothesis": "A two-pulse throat clear",
+    "phonemes": "\u0294\u02c8\u0259m, \u0294\u02c8\u0259m.",
+    "voice": "af_heart",
+    "capacity": 64
+  },
+  {
+    "id": "wheeze-long",
+    "cue": "wheeze",
+    "hypothesis": "A long voiced wheeze",
+    "phonemes": "h\u02c8i\u02d0\u2026 h\u02c8i\u02d0\u2026",
+    "voice": "af_heart",
+    "capacity": 64
+  },
+  {
+    "id": "breath-soft",
+    "cue": "breath",
+    "hypothesis": "A soft unvoiced exhale",
+    "phonemes": "h\u0251\u02d0\u2026",
+    "voice": "af_heart",
+    "capacity": 64,
+    "acoustics": {
+      "f0Scale": 0.0,
+      "nScale": 0.85,
+      "sourceGain": 0.8,
+      "envelopePower": 0.6,
+      "seed": 2401
+    }
+  },
+  {
+    "id": "breath-natural",
+    "cue": "breath",
+    "hypothesis": "A medium unvoiced exhale",
+    "phonemes": "h\u0251\u02d0\u2026",
+    "voice": "af_heart",
+    "capacity": 64,
+    "acoustics": {
+      "f0Scale": 0.0,
+      "nScale": 1.0,
+      "sourceGain": 1.5,
+      "envelopePower": 0.45,
+      "seed": 2402
+    }
+  },
+  {
+    "id": "breath-strong",
+    "cue": "breath",
+    "hypothesis": "A strong unvoiced exhale",
+    "phonemes": "h\u0251\u02d0\u2026",
+    "voice": "af_heart",
+    "capacity": 64,
+    "acoustics": {
+      "f0Scale": 0.0,
+      "nScale": 1.25,
+      "sourceGain": 2.4,
+      "envelopePower": 0.35,
+      "seed": 2403
+    }
+  },
+  {
+    "id": "breath-h",
+    "cue": "breath",
+    "hypothesis": "A bare aspirate with no vowel target",
+    "phonemes": "h\u2026",
+    "voice": "af_heart",
+    "capacity": 64,
+    "acoustics": {
+      "f0Scale": 0.0,
+      "nScale": 1.0,
+      "sourceGain": 1.4,
+      "envelopePower": 0.55,
+      "seed": 2411
+    }
+  },
+  {
+    "id": "breath-hh",
+    "cue": "breath",
+    "hypothesis": "Two bare aspirates with no vowel target",
+    "phonemes": "h, h\u2026",
+    "voice": "af_heart",
+    "capacity": 64,
+    "acoustics": {
+      "f0Scale": 0.0,
+      "nScale": 1.0,
+      "sourceGain": 1.6,
+      "envelopePower": 0.45,
+      "seed": 2412
+    }
+  }
+]

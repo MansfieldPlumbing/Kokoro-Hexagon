@@ -4,9 +4,25 @@
 param(
     [Parameter(Mandatory)][string] $ContextPath,
     [Parameter(Mandatory)][string] $QnnSystem,   # QnnSystem library matching the QAIRT build (e.g. from onnxruntime-qnn)
-    [string] $NativePs1 = (Join-Path $PSScriptRoot '..\..\QuickPS\src\Native.ps1')
+    [string] $NativePs1 = $(
+        @(
+            (Join-Path $PSScriptRoot '..\..\QuickPS\src\Native.ps1'),
+            (Join-Path $PSScriptRoot '..\..\..\QuickPS\src\Native.ps1')
+        ) | Where-Object { Test-Path -LiteralPath $_ -PathType Leaf } | Select-Object -First 1
+    )
 )
 $ErrorActionPreference = 'Stop'
+$manifestPath = Join-Path $PSScriptRoot '..\lib\manifest.json'
+$pins = Get-Content -LiteralPath $manifestPath -Raw | ConvertFrom-Json
+foreach ($item in @(
+    @{ Path = $NativePs1; Pin = $pins.quickPsNative; Name = 'QuickPS native bridge' },
+    @{ Path = $QnnSystem; Pin = $pins.hostCompiler.qnnSystem; Name = 'QnnSystem host library' }
+)) {
+    if (-not $item.Path -or -not (Test-Path -LiteralPath $item.Path -PathType Leaf)) { throw "$($item.Name) is missing." }
+    $file = Get-Item -LiteralPath $item.Path
+    $hash = (Get-FileHash -LiteralPath $item.Path -Algorithm SHA256).Hash
+    if ($file.Length -ne [long]$item.Pin.bytes -or $hash -ne $item.Pin.sha256) { throw "$($item.Name) integrity check failed." }
+}
 $Native = & $NativePs1
 $M = [Runtime.InteropServices.Marshal]
 $u64 = [uint64]; $ptr = [IntPtr]

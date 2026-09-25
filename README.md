@@ -16,7 +16,7 @@ from the AndroidSMA runspace. See [docs/FIRST-LIGHT.md](docs/FIRST-LIGHT.md).
 | Harmonic source (`SineGen`) + forward STFT | host CPU (PyTorch) |
 | Decoder front (`encode`, `decode`, `F0/N_conv`) | **HTP** |
 | Generator (upsamplers, resblocks, `conv_post`) + iSTFT | **HTP** |
-| Playback | Android `AudioTrack` from PowerShell |
+| Playback | persistent Android AAudio stream from PowerShell |
 
 Measured on the S23 (fp16, burst vote, 8 MB VTCM, 160-frame capacity, one
 phrase of 3.27 s): front 32 ms, generator + iSTFT 1.57 s, audio SNR 24.0 dB
@@ -28,7 +28,32 @@ Not yet done, stated plainly:
 - The front end and harmonic source still run on the host.
 - The generator is not yet real-time. Integer (w8a16) compilation does not
   finalize yet; the fp16 path is the one that runs.
-- No streaming scheduler, energy measurement, or multi-SoC builds yet.
+- The overlap scheduler is proven for a bounded three-chunk passage, but the
+  arbitrary-text AOA service, energy measurement, and multi-SoC builds are not
+  yet complete.
+
+## Hexagon portability expectation
+
+The emitted kernels deliberately target the V73 scalar and HVX instruction
+subset. We expect those kernels to remain forward-compatible with later full
+Hexagon/HVX revisions when the device loader accepts the same ELF/FastRPC ABI.
+This expectation is supported by LLVM's Hexagon target model: both
+`hasV73Ops()` and `useHVXV73Ops()` test for an architecture version greater
+than or equal to V73, and the same ordered model includes V75, V79, and V81.
+LLVM also assigns distinct Hexagon ELF ISA identifiers to later revisions.
+
+This is an ISA-subset expectation, not a promise about every product's firmware,
+protection-domain policy, available HVX unit, tiny-core variant, or loader. A
+SoC is listed as validated only after the unchanged artifact passes output and
+execution gates on physical hardware. The current physical set is SM8550 and
+SM8635; see the [cross-SoC receipt](docs/receipts/r0sub0-cross-soc-20260924.md).
+
+Primary references: Qualcomm's
+[Hexagon V73 Programmer's Reference Manual](https://docs.qualcomm.com/bundle/publicresource/80-N2040-53.pdf),
+and LLVM's pinned Hexagon
+[subtarget feature predicates](https://github.com/llvm/llvm-project/blob/3243453c7b919c155a16e4e70e50d5f8417839d9/llvm/lib/Target/Hexagon/HexagonSubtarget.h#L214-L293),
+[ordered architecture set](https://github.com/llvm/llvm-project/blob/3243453c7b919c155a16e4e70e50d5f8417839d9/llvm/lib/Target/Hexagon/HexagonDepArch.h#L18-L54),
+and [ELF ISA identifiers](https://github.com/llvm/llvm-project/blob/3243453c7b919c155a16e4e70e50d5f8417839d9/llvm/include/llvm/BinaryFormat/ELF.h#L635-L652).
 
 ## Layout
 
@@ -36,10 +61,32 @@ Not yet done, stated plainly:
 lib/manifest.json   pinned inputs (SHA-256): weights, Kokoro source, host compiler, device runtime
 lib/qairt-2.46/     QAIRT 2.46 ABI reference data (constants, enums, layouts, functions)
 src/export/         one-time Python: static decoder export, QNN passes, gate, compile
+src/appliance/      source and release gates for the downloadable demo APK
 src/runspace/       device-side PowerShell: QNN ABI, native, graph, context, Speak runner
 tools/              host PowerShell: context metadata reader, device job and speak drivers
 docs/               design, HTP findings, receipts
 ```
+
+The Windows compute-node design and its ADB-free AOA admission boundary are in
+[docs/WINDOWS-COMPUTE-NODE.md](docs/WINDOWS-COMPUTE-NODE.md).
+
+## Android appliance build
+
+`setup-kokoro.ps1` is the single, self-verifying build graph for the downloadable
+Android appliance. It is forked from the pinned Pwsh builder and defaults to the
+DEX-free NativeActivity/CoreCLR admission path; this product fork does not admit
+the Xamarin/Mono packaging path.
+
+```powershell
+pwsh -NoProfile -File .\setup-kokoro.ps1 -Headless -Step 11
+```
+
+The normal user path is a signed release APK. The script is the reproducible
+builder path and prints its complete write plan before creating anything. Build
+output and signing material remain outside the repository.
+
+The resident provider architecture, current host control measurement, and
+remaining Android gates are in [docs/APPLIANCE.md](docs/APPLIANCE.md).
 
 Build output is never written into the repository. Compiled contexts and staged
 device jobs go to `..\Build\Kokoro-QNN (next to the repository)`.

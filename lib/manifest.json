@@ -18,6 +18,11 @@
         "path": "voices\\af_heart.pt",
         "bytes": 523425,
         "sha256": "0AB5709B8FFAB19BFD849CD11D98F75B60AF7733253AD0D67B12382A102CB4FF"
+      },
+      {
+        "path": "voices\\am_michael.pt",
+        "bytes": 523435,
+        "sha256": "9A443B79A4B22489A5B0AB7C651A0BCD1A30BEF675C28333F06971ABBD47BD37"
       }
     ]
   },
@@ -35,6 +40,11 @@
       "path": "onnxruntime_qnn-2.2.0 wheel",
       "bytes": 190440071,
       "sha256": "CACCCAEFEA820D07473C67F42AB11F1CAC98CD40A712C547ABCFEEAD4D469B28"
+    },
+    "qnnSystem": {
+      "path": "onnxruntime_qnn/libs/amd64/QnnSystem.dll",
+      "bytes": 3318464,
+      "sha256": "1DCEC81313373763EEA7D2FA02BB5494AC3D3FDFECD692EA785EA973AD963066"
     }
   },
   "deviceRuntime": {
@@ -72,5 +82,41 @@
     "path": "QuickPS/src/Native.ps1",
     "bytes": 6113,
     "sha256": "04C3C2F76027AFB5BE411E8B87EA3348743B839BC9673F5CC4C41CE358872B67"
+  },
+  "quickPsWasapi": {
+    "path": "QuickPS/src/Wasapi.Windows.ps1",
+    "bytes": 18866,
+    "sha256": "33185FF24A9DFF34450C473924DBE59DF5E570829F8BFF4EAE2DA661D49ADDE6",
+    "role": "Pinned Windows audio binding donor for the model assembly reference backend"
+  },
+  "androidAaudioApi": {
+    "repo": "https://android.googlesource.com/platform/frameworks/av",
+    "commit": "9e7dd63dfff0cc967f025ea9e27a299aaa99fd69",
+    "path": "media/libaaudio/include/aaudio/AAudio.h",
+    "blob": "25ad5f8ef976c33b8670e4217d3f984c13096829"
+  },
+  "usbAoaDonor": {
+    "path": "AndroidSMA/src/UsbAoa.ps1",
+    "role": "Locally proven Windows AOA negotiation mechanism adapted by tools/UsbAoa.ps1",
+    "sha256": "B6E44EDEF20FC787F21586DD3184AE7A739824A84FE4E2BD2B4D3BBB4B2C0EDF"
+  },
+  "pwshBuildDonor": {
+    "role": "Pinned Xamarin-free NativeActivity/CoreCLR APK build graph forked as setup-kokoro.ps1",
+    "bytes": 592110,
+    "sha256": "44432CB738EDB13FB7B2AEA999C265A94F5EEAC867DC4E4E39C1503E0E813D62"
+  },
+  "pwshBuildManifestDonor": {
+    "role": "Pinned package and specification provenance consumed only by setup-kokoro.ps1",
+    "bytes": 11694,
+    "sha256": "C2B3C6D044EACBACAD7E7B1C58F18EA8AE6FB836B421B5EC3788D009E57CEDC4"
+  },
+  "speechFrontEnd": {
+    "package": "phonemizer",
+    "version": "1.2.1",
+    "source": "https://registry.npmjs.org/phonemizer/-/phonemizer-1.2.1.tgz",
+    "license": "Apache-2.0",
+    "npmIntegrity": "sha512-v0KJ4mi2T4Q7eJQ0W15Xd4G9k4kICSXE8bpDeJ8jisL4RyJhNWsweKTOi88QXFc4r4LZlz5jVL5lCHhkpdT71A==",
+    "sha256": "12F9F3582F8B5D557A0577180D83FF0458A4A5C15B2EFB625EE71C3EBBEE22E9",
+    "role": "Pinned host-side pronunciation oracle; never an APK dependency."
   }
 }

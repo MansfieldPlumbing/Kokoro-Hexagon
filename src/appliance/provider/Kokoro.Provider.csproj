@@ -1,0 +1,19 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>net11.0</TargetFramework>
+    <LangVersion>preview</LangVersion>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>disable</ImplicitUsings>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <Deterministic>true</Deterministic>
+    <ContinuousIntegrationBuild>true</ContinuousIntegrationBuild>
+    <DebugType>none</DebugType>
+  </PropertyGroup>
+  <ItemGroup>
+    <PackageReference Include="System.Management.Automation" Version="7.7.0-preview.4" />
+  </ItemGroup>
+  <ItemGroup>
+    <Compile Remove="Gate\**\*.cs" />
+    <None Remove="Gate\**\*" />
+  </ItemGroup>
+</Project>
