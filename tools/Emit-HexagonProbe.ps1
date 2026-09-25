@@ -1,23 +1,7 @@
 #requires -Version 7.4
 [CmdletBinding()]
 param(
-    [string] $PwshRoot = $(
-        $cands = @(
-            (Join-Path $PSScriptRoot '..\..\Pwsh'),
-            (Join-Path $PSScriptRoot '..\..\..\Pwsh'),
-            'C:\Dev\Pwsh'
-        )
-        ($cands | Where-Object { Test-Path (Join-Path $_ 'setup.ps1') } | Select-Object -First 1)
-    ),
-    [string] $OutputDirectory = $(
-        $buildDir = @(
-            (Join-Path $PSScriptRoot '..\..\Build\Kokoro-QNN'),
-            (Join-Path $PSScriptRoot '..\..\..\Build\Kokoro-QNN'),
-            'C:\Dev\Build\Kokoro-QNN'
-        ) | Where-Object { Test-Path $_ } | Select-Object -First 1
-        if (-not $buildDir) { $buildDir = 'C:\Dev\Build\Kokoro-QNN' }
-        Join-Path $buildDir 'hexagon-emission\emitted'
-    ),
+    [string] $OutputDirectory = (Join-Path $PSScriptRoot '..\..\Build\Kokoro-Hexagon\hexagon-emission\emitted'),
     [ValidateSet('Probe','KokoroAffine','KokoroConvTile','KokoroR0Sub0','KokoroHmxLock','KokoroHmxMatrix')][string] $Kernel='Probe',
     [string] $WeightManifest = $(
         $cands = @(
@@ -31,20 +15,35 @@ param(
 )
 $ErrorActionPreference = 'Stop'
 # Host-only. The pinned ELF writer uses .NET APIs requiring FullLanguage.
-# No model text or external script input is executed by this adapter.
-$setup = Join-Path $PwshRoot 'setup.ps1'
-$manifestPath = Join-Path $PwshRoot 'lib\manifest.json'
-if ((Get-FileHash $setup).Hash -ne '44432CB738EDB13FB7B2AEA999C265A94F5EEAC867DC4E4E39C1503E0E813D62') { throw 'Pwsh writer source pin mismatch' }
-if ((Get-FileHash $manifestPath).Hash -ne 'C2B3C6D044EACBACAD7E7B1C58F18EA8AE6FB836B421B5EC3788D009E57CEDC4') { throw 'Pwsh manifest pin mismatch' }
-$script:PwshLib = Join-Path $PwshRoot 'lib'
-$script:PwshSources = (Get-Content $manifestPath -Raw | ConvertFrom-Json).sources
+# Fetch source from an immutable upstream GitHub revision; never use or write
+# the protected local Pwsh checkout. No model text is executed by this adapter.
+$script:PwshBaseUrl = 'https://raw.githubusercontent.com/MansfieldPlumbing/Pwsh/e215a963295eda290599840366b51cbd99bb6d57/'
+$protectedRoot = [IO.Path]::GetFullPath('C:\Dev\Pwsh').TrimEnd([IO.Path]::DirectorySeparatorChar)
+$outputFullPath = [IO.Path]::GetFullPath($OutputDirectory)
+if ($outputFullPath.Equals($protectedRoot, [StringComparison]::OrdinalIgnoreCase) -or
+    $outputFullPath.StartsWith($protectedRoot + [IO.Path]::DirectorySeparatorChar, [StringComparison]::OrdinalIgnoreCase)) {
+    throw 'OutputDirectory must not be inside the protected Pwsh checkout.'
+}
+$OutputDirectory = $outputFullPath
+function Get-PinnedUpstreamText {
+    param(
+        [Parameter(Mandatory)][ValidatePattern('^(setup\.ps1|lib/[A-Za-z0-9._-]+)$')][string] $Path,
+        [Parameter(Mandatory)][ValidatePattern('^[0-9A-Fa-f]{64}$')][string] $Sha256
+    )
+    $response = Invoke-WebRequest -Uri ($script:PwshBaseUrl + $Path) -UseBasicParsing
+    $bytes = $response.RawContentStream.ToArray()
+    $actual = [Convert]::ToHexString([Security.Cryptography.SHA256]::HashData($bytes))
+    if ($actual -cne $Sha256) { throw "Pinned upstream source hash mismatch: $Path" }
+    [Text.Encoding]::UTF8.GetString($bytes)
+}
+$setupText = Get-PinnedUpstreamText 'setup.ps1' '44432CB738EDB13FB7B2AEA999C265A94F5EEAC867DC4E4E39C1503E0E813D62'
+$manifestText = Get-PinnedUpstreamText 'lib/manifest.json' 'C2B3C6D044EACBACAD7E7B1C58F18EA8AE6FB836B421B5EC3788D009E57CEDC4'
+$script:PwshSources = ($manifestText | ConvertFrom-Json).sources
 function Import-LibSourceText {
     param([string] $Path)
     $record = @($script:PwshSources | Where-Object path -CEQ $Path)
     if ($record.Count -ne 1) { throw "Missing source pin: $Path" }
-    $file = Join-Path $script:PwshLib $Path
-    if ((Get-FileHash $file).Hash -ne $record[0].sha256) { throw "Source hash mismatch: $Path" }
-    [IO.File]::ReadAllText($file)
+    Get-PinnedUpstreamText "lib/$Path" ([string]$record[0].sha256)
 }
 function Write-NewOrIdenticalFile {
     param([string] $Path, [byte[]] $Bytes, [switch] $AllowOverwrite)
@@ -56,7 +55,7 @@ function Write-NewOrIdenticalFile {
 }
 [void][IO.Directory]::CreateDirectory($OutputDirectory)
 $tokens=$null; $errors=$null
-$ast=[Management.Automation.Language.Parser]::ParseFile($setup,[ref]$tokens,[ref]$errors)
+$ast=[Management.Automation.Language.Parser]::ParseInput($setupText,[ref]$tokens,[ref]$errors)
 if ($errors.Count) { throw 'Pinned writer does not parse' }
 $names=@('Get-ElfConstants','Get-ElfHashTableBytes','Get-ElfLayout','Get-ElfHeaderFlags',
     'Get-ElfRelocationEntrySize','Get-ElfRelocationTags','Get-AlignedOffset','Set-ElfField',

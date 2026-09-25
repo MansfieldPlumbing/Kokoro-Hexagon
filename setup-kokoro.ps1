@@ -538,6 +538,22 @@ function Resolve-WritePlan {
     $script:SigningKeyPath = [System.IO.Path]::GetFullPath($script:SigningKeyPath)
     $script:CacheDirectory = [System.IO.Path]::GetFullPath($script:CacheDirectory)
 
+    if ($IsWindows) {
+        $protectedRoot = 'C:\Dev\Pwsh'
+        foreach ($entry in @(
+                @{ Name = 'APK'; Path = $script:ApkPath },
+                @{ Name = 'Build output'; Path = $script:OutputDirectory },
+                @{ Name = 'Signing key'; Path = $script:SigningKeyPath },
+                @{ Name = 'Package cache'; Path = $script:CacheDirectory })) {
+            if (Test-PathInside -Path $entry.Path -Root $protectedRoot) {
+                throw "$($entry.Name) must not be written inside the protected Pwsh checkout."
+            }
+        }
+        if ($Debug -and (Test-PathInside -Path ([System.IO.Path]::GetTempPath()) -Root $protectedRoot)) {
+            throw 'Reference build temporary files must not be written inside the protected Pwsh checkout.'
+        }
+    }
+
     $plan = [ordered]@{
         'APK'           = $script:ApkPath
         'Intermediates' = if ($KeepIntermediates) { $script:OutputDirectory } else { 'none (kept in memory)' }

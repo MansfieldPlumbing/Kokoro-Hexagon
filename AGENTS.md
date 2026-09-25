@@ -4,6 +4,11 @@ The machine/workspace `AGENTS.md` security and change-control rules apply.
 Use [ROADMAP.md](ROADMAP.md) for the current implementation gates. Do not infer
 production status from historical receipts or reference harnesses.
 
+`C:\Dev\Pwsh` is protected upstream source, not a workspace or build output.
+Agents must not write there or run its build. Fetch required Pwsh files from a
+fixed GitHub commit, verify their pinned hashes, and emit only into the Kokoro
+build area or another explicitly approved location outside that checkout.
+
 Hard stop: the repository does not yet contain a working Kokoro synthesizer.
 A launching APK, model-weight DLL, parsed graph, native-audio tone, QNN speech
 job, or isolated Hexagon kernel is not one. Do not call any of them a product
