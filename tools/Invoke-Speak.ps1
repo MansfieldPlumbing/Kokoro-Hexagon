@@ -46,6 +46,7 @@ $job = "[pscustomobject]@{ Name='kokoro-speak'; MinSnrDb=$MinSnrDb; Repeat=$Repe
 Set-Content (Join-Path $st 'speak-job.ps1') $job
 Copy-Item (Join-Path $PSScriptRoot '..\src\runspace\Speak.ps1') $st -Force
 Copy-Item (Join-Path $PSScriptRoot '..\src\runspace\Audio.AAudio.psm1') $st -Force
+Copy-Item (Join-Path $PSScriptRoot '..\src\runspace\Native.Binding.psm1') $st -Force
 
 $names = (Get-ChildItem $st -File).Name
 foreach ($n in $names) { [void](& $adb -s $Serial push (Join-Path $st $n) "/data/local/tmp/kokoro-fl/$n") }
@@ -53,6 +54,7 @@ $steps = [Collections.Generic.List[string]]::new()
 foreach ($n in $names) { $steps.Add("run-as $Package cp /data/local/tmp/kokoro-fl/$n files/kokoro-fl/$n") }
 $steps.Add("run-as $Package mkdir -p files/kokoro-fl/modules")
 $steps.Add("run-as $Package cp files/kokoro-fl/Audio.AAudio.psm1 files/kokoro-fl/modules/Audio.AAudio.psm1")
+$steps.Add("run-as $Package cp files/kokoro-fl/Native.Binding.psm1 files/kokoro-fl/modules/Native.Binding.psm1")
 $steps.Add("run-as $Package cp files/kokoro-fl/Speak.ps1 files/Start.ps1")
 $steps.Add("run-as $Package cp files/kokoro-fl/Speak.ps1 files/PROFILE.PS1")
 $steps.Add("run-as $Package truncate -s 0 files/kokoro-fl/receipt.txt")

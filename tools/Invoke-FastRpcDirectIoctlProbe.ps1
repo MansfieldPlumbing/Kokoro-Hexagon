@@ -20,6 +20,7 @@ $run = {
     $result
 }
 $harness = Join-Path $PSScriptRoot '..\src\runspace\FastRpcDirectIoctlProbe.ps1'
+$binding = Join-Path $PSScriptRoot '..\src\runspace\Native.Binding.psm1'
 $tokens = $null; $errors = $null
 [Management.Automation.Language.Parser]::ParseFile($harness, [ref]$tokens, [ref]$errors) | Out-Null
 if ($errors.Count) { throw 'Direct ioctl harness does not parse' }
@@ -33,7 +34,8 @@ $null = & $run @('shell', "run-as $Package mkdir -p $backup $target && run-as $P
 $changed = $false
 try {
     $null = & $run @('push', $harness, "$temp/FastRpcDirectIoctlProbe.ps1")
-    $null = & $run @('shell', "run-as $Package cp $temp/FastRpcDirectIoctlProbe.ps1 $target/FastRpcDirectIoctlProbe.ps1 && run-as $Package truncate -s 0 $target/receipt.txt")
+    $null = & $run @('push', $binding, "$temp/Native.Binding.psm1")
+    $null = & $run @('shell', "run-as $Package cp $temp/FastRpcDirectIoctlProbe.ps1 $target/FastRpcDirectIoctlProbe.ps1 && run-as $Package cp $temp/Native.Binding.psm1 $target/Native.Binding.psm1 && run-as $Package truncate -s 0 $target/receipt.txt")
     $deviceHash = ((& $run @('shell','run-as',$Package,'sha256sum',"$target/FastRpcDirectIoctlProbe.ps1")) -join '').Split(' ')[0]
     if ($deviceHash -ne (Get-FileHash $harness).Hash) { throw 'Staged harness hash mismatch' }
     $changed = $true
@@ -46,6 +48,7 @@ try {
     $receiptPath = Join-Path $BuildDirectory "direct-ioctl-receipt-$id.txt"
     [IO.File]::WriteAllText($receiptPath, $receipt)
     $receipt
+    if ($receipt -notmatch '(?m)^Passed=True') { throw "Direct FastRPC ioctl probe failed; receipt: $receiptPath" }
 }
 finally {
     if ($changed) {

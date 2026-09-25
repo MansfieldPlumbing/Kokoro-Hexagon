@@ -10,7 +10,7 @@ $M=[Runtime.InteropServices.Marshal]; $native=[IntPtr]::Zero; $opened=$false
 $pins=[Collections.Generic.List[object]]::new(); $allocations=[Collections.Generic.List[object]]::new()
 $passed=$false; $setup=[Diagnostics.Stopwatch]::StartNew()
 try {
-    $modulePath=[IO.Path]::Combine($root,'emit.Qnn.Abi.ps1')
+    $modulePath=[IO.Path]::Combine($root,'Native.Binding.psm1')
     if((& $hash ([IO.File]::ReadAllBytes($modulePath))) -ne 'B4820C76C79FC0B66EE96E27E8D655689F33181165F55E2B0A96A3A4BE34391D') { throw 'Delegate factory pin mismatch' }
     $tokens=$null; $errors=$null
     $ast=[Management.Automation.Language.Parser]::ParseFile($modulePath,[ref]$tokens,[ref]$errors)

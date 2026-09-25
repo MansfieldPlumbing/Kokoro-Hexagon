@@ -1056,7 +1056,7 @@ function Get-KokoroApplianceDispatch {
 }
 
 function Get-KokoroModelContract {
-    $path = Join-Path $script:RepositoryRoot 'model.ps1'
+    $path = Join-Path $script:RepositoryRoot 'New-KokoroDecoderGraph.ps1'
     $tokens = $null
     $parseErrors = $null
     $ast = [Management.Automation.Language.Parser]::ParseFile($path, [ref]$tokens, [ref]$parseErrors)
@@ -8717,6 +8717,10 @@ function Invoke-SignStep {
 
     $signed = New-SignedApk -Apk ([byte[]]$script:BuildContext.UnsignedApk.Bytes) -Certificate $certificate
     $report = Test-SignedApk -Apk $signed.Bytes -Certificate $certificate
+    $baseApkLimit = 40MB
+    if ($signed.Bytes.Length -ge $baseApkLimit) {
+        throw "The model-less base APK is $($signed.Bytes.Length) bytes; it must remain below $baseApkLimit bytes."
+    }
 
     $apkPath = $script:ApkPath
     if ($PSCmdlet.ShouldProcess($apkPath, 'Write signed APK')) {

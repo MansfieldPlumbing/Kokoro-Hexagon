@@ -34,6 +34,7 @@ $run = {
 }
 
 $harness = Join-Path $PSScriptRoot '..\src\runspace\DspCapabilityProbe.ps1'
+$binding = Join-Path $PSScriptRoot '..\src\runspace\Native.Binding.psm1'
 $tokens = $null; $errors = $null
 $null = [Management.Automation.Language.Parser]::ParseFile($harness, [ref]$tokens, [ref]$errors)
 if ($errors.Count) { throw 'Device harness does not parse' }
@@ -52,8 +53,9 @@ $changed = $false
 try {
     $name = 'DspCapabilityProbe.ps1'
     $null = & $run @('push', $harness, "$temp/$name")
+    $null = & $run @('push', $binding, "$temp/Native.Binding.psm1")
     $destination = "$target/$name"
-    $null = & $run @('shell', "if run-as $Package test -f $destination; then run-as $Package cp $destination $backup/$name; fi; run-as $Package cp $temp/$name $destination")
+    $null = & $run @('shell', "if run-as $Package test -f $destination; then run-as $Package cp $destination $backup/$name; fi; run-as $Package cp $temp/$name $destination; run-as $Package cp $temp/Native.Binding.psm1 $target/Native.Binding.psm1")
     $deviceHash = (& $run @('shell', 'run-as', $Package, 'sha256sum', $destination) -join '').Split(' ')[0]
     if ($deviceHash -ne (Get-FileHash $harness).Hash) { throw "Staged artifact hash mismatch for $name" }
 

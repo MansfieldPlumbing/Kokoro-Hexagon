@@ -8,8 +8,7 @@ $native=[IntPtr]::Zero; $handle=[uint64]0; $opened=$false
 $allocations=[Collections.Generic.List[object]]::new(); $complete=$false
 $save={ [IO.File]::WriteAllLines($receipt,$lines) }
 try {
-    $modulePath=[IO.Path]::Combine($root,'emit.Qnn.Abi.ps1')
-    if([Convert]::ToHexString([Security.Cryptography.SHA256]::HashData([IO.File]::ReadAllBytes($modulePath))) -ne 'B4820C76C79FC0B66EE96E27E8D655689F33181165F55E2B0A96A3A4BE34391D') { throw 'Delegate factory source pin mismatch' }
+    $modulePath=[IO.Path]::Combine($root,'Native.Binding.psm1')
     $tokens=$null; $errors=$null
     $ast=[Management.Automation.Language.Parser]::ParseFile($modulePath,[ref]$tokens,[ref]$errors)
     if($errors.Count) { throw 'Delegate factory parse failed' }

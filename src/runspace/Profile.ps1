@@ -9,7 +9,7 @@ try {
     foreach ($v in 'ADSP_LIBRARY_PATH', 'DSP_LIBRARY_PATH') { [Environment]::SetEnvironmentVariable($v, $dsp); [Android.Systems.Os]::Setenv($v, $dsp, $true) }
     foreach ($so in 'libQnnHtpV73Stub.so', 'libQnnHtp.so') { [void][Runtime.InteropServices.NativeLibrary]::Load([IO.Path]::Combine($qnn, $so)) }
     $load = { param([string]$n, [object[]]$a) [scriptblock]::Create([IO.File]::ReadAllText([IO.Path]::Combine($root, 'modules', $n))).InvokeReturnAsIs($a) }
-    $abi = & $load 'Qnn.Abi.psm1' @(); $native = & $load 'Qnn.Native.psm1' @($abi); $graph = & $load 'Qnn.Graph.psm1' @($abi, $native); $ctx = & $load 'Qnn.Context.psm1' @($abi, $native, $graph)
+    $binding = & $load 'Native.Binding.psm1' @(); $abi = & $load 'Qnn.Abi.psm1' @($binding); $native = & $load 'Qnn.Native.psm1' @($abi); $graph = & $load 'Qnn.Graph.psm1' @($abi, $native); $ctx = & $load 'Qnn.Context.psm1' @($abi, $native, $graph)
     [void](& $native.Initialize ([pscustomobject]@{ DataRoot = $qnn; NativeLibraryDirectory = $dsp }))
     [void](& $ctx.SetPerformance 'burst')
     $st = $job.Gen

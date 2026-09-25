@@ -10,9 +10,9 @@ try {
     $qnn = [IO.Path]::Combine($root, 'qnn')
     $dsp = (@($qnn, '/vendor/lib/rfsa/adsp', '/vendor/dsp/cdsp', '/dsp') -join ';')
     foreach ($v in 'ADSP_LIBRARY_PATH', 'DSP_LIBRARY_PATH') { [Environment]::SetEnvironmentVariable($v, $dsp); [Android.Systems.Os]::Setenv($v, $dsp, $true) }
-    $abi = [scriptblock]::Create([IO.File]::ReadAllText([IO.Path]::Combine($root, 'modules', 'Qnn.Abi.psm1'))).InvokeReturnAsIs(@())
+    $binding = [scriptblock]::Create([IO.File]::ReadAllText([IO.Path]::Combine($root, 'modules', 'Native.Binding.psm1'))).InvokeReturnAsIs(@())
     $lib = [Runtime.InteropServices.NativeLibrary]::Load('libcdsprpc.so')
-    $fn = { param([string]$n, [Type]$ret, [Type[]]$ptypes) $M::GetDelegateForFunctionPointer([Runtime.InteropServices.NativeLibrary]::GetExport($lib, $n), (& $abi.NewDelegateType ('Rpc_' + $n) $ret $ptypes)) }
+    $fn = { param([string]$n, [Type]$ret, [Type[]]$ptypes) & $binding.BindExport $lib $n $ret $ptypes }
     $ctl = & $fn 'remote_session_control' ([int]) ([Type[]]@([uint32], [IntPtr], [uint32]))
     $open = & $fn 'remote_handle64_open' ([int]) ([Type[]]@([IntPtr], ([uint64]).MakeByRefType()))
     $invoke = & $fn 'remote_handle64_invoke' ([int]) ([Type[]]@([uint64], [uint32], [IntPtr]))

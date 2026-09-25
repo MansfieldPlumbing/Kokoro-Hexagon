@@ -1,4 +1,6 @@
-param()
+param(
+    [Parameter(Mandatory)][object]$NativeBinding
+)
 
 # Generated-authority projection for the SMA hot path.
 # Source: qnn/authority/QAIRT-2.46.0.260424.
@@ -141,61 +143,9 @@ $enum = [ordered]@{
     ParamTensor = 1
 }
 
-$newDelegateType = {
-    param(
-        [string]$Name,
-        [Type]$ReturnType,
-        [Type[]]$ParameterTypes
-    )
-
-    $assemblyName = [Reflection.AssemblyName]::new(
-        "AndroidSMA.Qnn.Dynamic.$Name.$([Guid]::NewGuid().ToString('N'))"
-    )
-
-    $assembly = [Reflection.Emit.AssemblyBuilder]::DefineDynamicAssembly(
-        $assemblyName,
-        [Reflection.Emit.AssemblyBuilderAccess]::Run
-    )
-
-    $module = $assembly.DefineDynamicModule('QnnDelegates')
-    $builder = $module.DefineType(
-        $Name,
-        [Reflection.TypeAttributes]'Class, Public, Sealed',
-        [MulticastDelegate]
-    )
-
-    $attributeConstructor =
-        [Runtime.InteropServices.UnmanagedFunctionPointerAttribute].
-        GetConstructor(
-            [Type[]]@([Runtime.InteropServices.CallingConvention])
-        )
-
-    $attribute = [Reflection.Emit.CustomAttributeBuilder]::new(
-        $attributeConstructor,
-        [object[]]@([Runtime.InteropServices.CallingConvention]::Cdecl)
-    )
-
-    $builder.SetCustomAttribute($attribute)
-
-    $constructor = $builder.DefineConstructor(
-        [Reflection.MethodAttributes]'RTSpecialName, HideBySig, Public',
-        [Reflection.CallingConventions]::Standard,
-        [Type[]]@([object], [IntPtr])
-    )
-    $constructor.SetImplementationFlags(
-        [Reflection.MethodImplAttributes]::Runtime
-    )
-
-    $invoke = $builder.DefineMethod(
-        'Invoke',
-        [Reflection.MethodAttributes]'Public, HideBySig, NewSlot, Virtual',
-        $ReturnType,
-        $ParameterTypes
-    )
-    $invoke.SetImplementationFlags([Reflection.MethodImplAttributes]::Runtime)
-
-    $builder.CreateType()
-}.GetNewClosure()
+if ($NativeBinding.Name -cne 'Native.Binding' -or $null -eq $NativeBinding.NewDelegateType) {
+    throw 'Qnn.Abi requires the generic Native.Binding capability.'
+}
 
 $newOpConfigType = {
     $assemblyName = [Reflection.AssemblyName]::new(
@@ -247,6 +197,6 @@ $newOpConfigType = {
     Layout          = $layout
     Slot            = $slot
     Enum            = $enum
-    NewDelegateType = $newDelegateType
+    NewDelegateType = $NativeBinding.NewDelegateType
     NewOpConfigType = $newOpConfigType
 }

@@ -53,10 +53,12 @@ $job="[pscustomobject]@{MinSnrDb=$MinSnrDb;Buckets=@($($bucketText -join ','));P
 Set-Content -LiteralPath (Join-Path $st 'pipeline-job.ps1') -Value $job
 Copy-Item -LiteralPath (Join-Path $PSScriptRoot '..\src\runspace\Pipeline.ps1') -Destination $st -Force
 Copy-Item -LiteralPath (Join-Path $PSScriptRoot '..\src\runspace\Audio.AAudio.psm1') -Destination $st -Force
+Copy-Item -LiteralPath (Join-Path $PSScriptRoot '..\src\runspace\Native.Binding.psm1') -Destination $st -Force
 $names=@(Get-ChildItem -LiteralPath $st -File|Select-Object -ExpandProperty Name)
 foreach($name in $names){& $adb -s $Serial push (Join-Path $st $name) "/data/local/tmp/kokoro-fl/$name"|Out-Null;if($LASTEXITCODE){throw "adb push failed: $name"}}
 $steps=[Collections.Generic.List[string]]::new(); foreach($name in $names){$steps.Add("run-as $Package cp /data/local/tmp/kokoro-fl/$name files/kokoro-fl/$name")}
 $steps.Add("run-as $Package cp files/kokoro-fl/Audio.AAudio.psm1 files/kokoro-fl/modules/Audio.AAudio.psm1")
+$steps.Add("run-as $Package cp files/kokoro-fl/Native.Binding.psm1 files/kokoro-fl/modules/Native.Binding.psm1")
 $steps.Add("run-as $Package cp files/kokoro-fl/Pipeline.ps1 files/Start.ps1");$steps.Add("run-as $Package cp files/kokoro-fl/Pipeline.ps1 files/PROFILE.PS1");$steps.Add("run-as $Package truncate -s 0 files/kokoro-fl/receipt.txt");$steps.Add("am force-stop $Package");$steps.Add("monkey -p $Package -c android.intent.category.LAUNCHER 1")
 & $adb -s $Serial shell ($steps -join '; ')|Out-Null;if($LASTEXITCODE){throw 'device staging or launch failed'}
 $receipt=$null; foreach($i in 1..180){Start-Sleep -Seconds 2;$receipt=& $adb -s $Serial shell run-as $Package cat files/kokoro-fl/receipt.txt 2>$null;if(($receipt -join "`n") -match 'Job=kokoro-pipeline' -and ($receipt -join "`n") -match 'Passed='){break}}

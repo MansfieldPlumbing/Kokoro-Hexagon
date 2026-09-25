@@ -14,11 +14,12 @@ try {
     foreach ($v in 'ADSP_LIBRARY_PATH', 'DSP_LIBRARY_PATH') { [Environment]::SetEnvironmentVariable($v, $dsp); [Android.Systems.Os]::Setenv($v, $dsp, $true) }
     foreach ($so in 'libQnnHtpV73Stub.so', 'libQnnHtp.so') { [void][Runtime.InteropServices.NativeLibrary]::Load([IO.Path]::Combine($qnn, $so)) }
     $load = { param([string]$n, [object[]]$a) [scriptblock]::Create([IO.File]::ReadAllText([IO.Path]::Combine($root, 'modules', $n))).InvokeReturnAsIs($a) }
-    $abi = & $load 'Qnn.Abi.psm1' @()
+    $binding = & $load 'Native.Binding.psm1' @()
+    $abi = & $load 'Qnn.Abi.psm1' @($binding)
     $native = & $load 'Qnn.Native.psm1' @($abi)
     $graph = & $load 'Qnn.Graph.psm1' @($abi, $native)
     $ctx = & $load 'Qnn.Context.psm1' @($abi, $native, $graph)
-    $audio = & $load 'Audio.AAudio.psm1' @($abi)
+    $audio = & $load 'Audio.AAudio.psm1' @($binding)
     [void](& $native.Initialize ([pscustomobject]@{ DataRoot = $qnn; NativeLibraryDirectory = $dsp }))
     if ($native.State.DeviceCreateRc -ne 0) { throw "deviceCreate rc=$($native.State.DeviceCreateRc)" }
     $mode = if ($null -ne $job.PerfMode) { $job.PerfMode } else { 'burst' }; $vote = & $ctx.SetPerformance $mode; $lines.Add("Perf=$($vote.Mode) PowerConfigId=$($vote.PowerConfigId) SetRc=$($vote.SetRc)")

@@ -12,7 +12,8 @@ try {
 
     $mr = [IO.Path]::Combine($root, 'r009-modules')
     $load = { param([string]$n, [object[]]$a) [scriptblock]::Create([IO.File]::ReadAllText([IO.Path]::Combine($mr, $n))).InvokeReturnAsIs($a) }
-    $abi = & $load 'Qnn.Abi.psm1' ([object[]]@())
+    $binding = & $load 'Native.Binding.psm1' ([object[]]@())
+    $abi = & $load 'Qnn.Abi.psm1' ([object[]]@($binding))
     $native = & $load 'Qnn.Native.psm1' ([object[]]@($abi))
     $graph = & $load 'Qnn.Graph.psm1' ([object[]]@($abi, $native))
     $cap = & $load 'Kokoro.F0NSecondPairPolyphaseR009.psm1' ([object[]]@($abi, $native, $graph))

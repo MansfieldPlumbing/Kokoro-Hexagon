@@ -13,7 +13,8 @@ try {
     foreach ($so in 'libQnnHtpV73Stub.so', 'libQnnHtp.so') { [void][Runtime.InteropServices.NativeLibrary]::Load([IO.Path]::Combine($qnn, $so)) }
     $mr = [IO.Path]::Combine($root, 'r009-modules')
     $load = { param([string]$nm, [object[]]$a) [scriptblock]::Create([IO.File]::ReadAllText([IO.Path]::Combine($mr, $nm))).InvokeReturnAsIs($a) }
-    $abi = & $load 'Qnn.Abi.psm1' ([object[]]@())
+    $binding = & $load 'Native.Binding.psm1' ([object[]]@())
+    $abi = & $load 'Qnn.Abi.psm1' ([object[]]@($binding))
     $native = & $load 'Qnn.Native.psm1' ([object[]]@($abi))
     $graph = & $load 'Qnn.Graph.psm1' ([object[]]@($abi, $native))
     [void](& $native.Initialize ([pscustomobject]@{ DataRoot = $qnn; NativeLibraryDirectory = $qnn }))

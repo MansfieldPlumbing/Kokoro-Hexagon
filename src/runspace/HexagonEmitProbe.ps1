@@ -8,7 +8,7 @@ $native=[IntPtr]::Zero; $handle=[uint64]0; $opened=$false
 $allocations=[Collections.Generic.List[object]]::new()
 $passed=$false
 try {
-    $modulePath=[IO.Path]::Combine($root,'emit.Qnn.Abi.ps1')
+    $modulePath=[IO.Path]::Combine($root,'Native.Binding.psm1')
     $moduleBytes=[IO.File]::ReadAllBytes($modulePath)
     $moduleHash=[Convert]::ToHexString([Security.Cryptography.SHA256]::HashData($moduleBytes))
     if($moduleHash -ne 'B4820C76C79FC0B66EE96E27E8D655689F33181165F55E2B0A96A3A4BE34391D') { throw 'Delegate factory source pin mismatch' }

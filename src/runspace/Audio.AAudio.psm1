@@ -1,6 +1,6 @@
 param(
     [Parameter(Mandatory)]
-    [object]$Abi
+    [object]$NativeBinding
 )
 
 # Blocking AAudio output for the persistent PowerShell runspace. The signatures
@@ -13,9 +13,7 @@ $delegates = [Collections.Generic.Dictionary[string, object]]::new()
 $bind = {
     param([string]$Name, [Type]$ReturnType, [Type[]]$ParameterTypes)
     if ($delegates.ContainsKey($Name)) { return $delegates[$Name] }
-    $address = [Runtime.InteropServices.NativeLibrary]::GetExport($lib, $Name)
-    $type = & $Abi.NewDelegateType $Name $ReturnType $ParameterTypes
-    $call = [Runtime.InteropServices.Marshal]::GetDelegateForFunctionPointer($address, $type)
+    $call = & $NativeBinding.BindExport $lib $Name $ReturnType $ParameterTypes
     $delegates.Add($Name, $call)
     $call
 }.GetNewClosure()

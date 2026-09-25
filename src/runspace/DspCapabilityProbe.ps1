@@ -13,11 +13,11 @@ $allocations = [Collections.Generic.List[object]]::new()
 $passed = $false; $watch = [Diagnostics.Stopwatch]::StartNew()
 
 try {
-    $modulePath = [IO.Path]::Combine($root, 'emit.Qnn.Abi.ps1')
+    $modulePath = [IO.Path]::Combine($dir, 'Native.Binding.psm1')
     $tokens = $null; $errors = $null
     $ast = [Management.Automation.Language.Parser]::ParseFile($modulePath, [ref]$tokens, [ref]$errors)
     if ($errors.Count) { throw 'Delegate factory parse failed' }
-    $abi = $ast.GetScriptBlock().InvokeReturnAsIs()
+    $binding = $ast.GetScriptBlock().InvokeReturnAsIs()
 
     $search = [IO.Path]::Combine($root, 'qnn') + ';/vendor/lib/rfsa/adsp;/vendor/dsp/cdsp;/dsp'
     foreach ($name in 'ADSP_LIBRARY_PATH', 'DSP_LIBRARY_PATH') {
@@ -28,7 +28,7 @@ try {
     $native = [Runtime.InteropServices.NativeLibrary]::Load('libcdsprpc.so')
     $fn = { param($Name, $ReturnType, $Parameters)
         $M::GetDelegateForFunctionPointer([Runtime.InteropServices.NativeLibrary]::GetExport($native, $Name),
-            (& $abi.NewDelegateType ('Cap_' + $Name) $ReturnType $Parameters))
+            (& $binding.NewDelegateType ('Cap_' + $Name) $ReturnType $Parameters))
     }
     $sessionControl = & $fn 'remote_session_control' ([int]) ([Type[]]@([uint32], [IntPtr], [uint32]))
     $handleControl  = & $fn 'remote_handle_control'  ([int]) ([Type[]]@([uint32], [IntPtr], [uint32]))

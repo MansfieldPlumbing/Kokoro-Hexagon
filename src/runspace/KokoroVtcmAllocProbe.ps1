@@ -15,7 +15,7 @@ $pins = [Collections.Generic.List[object]]::new(); $allocations = [Collections.G
 $passed = $false; $watch = [Diagnostics.Stopwatch]::StartNew()
 
 try {
-    $modulePath = [IO.Path]::Combine($root, 'emit.Qnn.Abi.ps1')
+    $modulePath = [IO.Path]::Combine($root, 'Native.Binding.psm1')
     $tokens = $null; $errors = $null
     $ast = [Management.Automation.Language.Parser]::ParseFile($modulePath, [ref]$tokens, [ref]$errors)
     if ($errors.Count) { throw 'Delegate factory parse failed' }
