@@ -86,6 +86,11 @@ and its directly emitted backend remain to be built.
   identify its bootstrap and signal mode, then validate the same emitted
   worker and queue protocol on both devices before promotion. See
   `docs/receipts/dspqueue-upstream-audit-20260926.md`.
+- [x] Record a same-session read-only RPC-node inventory on both devices.
+  The queried node names and access metadata match; candidate external
+  kernel revisions do not match the installed kernel bases. This is an
+  inventory gate only, not a queue or app-access test. See
+  `docs/receipts/cross-device-cdsp-inventory-20260926.md`.
 - [ ] Establish the lowest source-defined CDSP communication path available
   to the intended app on each device; FastRPC is one candidate, not a required
   architecture. Keep QNN and vendor userspace RPC libraries out of the product.
