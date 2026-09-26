@@ -77,6 +77,13 @@ directly emitted Hexagon code to audible PCM on the physical device.
   tensor shapes, offsets, storage bounds, and resource hashes before use.
 - `New-KokoroDecoderGraph.ps1` is currently an incomplete, parsed decoder
   contract. Its two nodes do not establish live phoneme-to-PCM synthesis.
+- Name new product graph operators, emitted methods, and PowerShell stages
+  for their actual model semantics. AdaIN normalization, style projection,
+  and affine lowering must say `AdaIn` in their public names; do not publish
+  them as generic `Normalize` or `Affine` methods. Historical diagnostic
+  artifact labels may stay stable but must not become product APIs. Keep any
+  future non-AdaIN model behind its own versioned model assembly and operator
+  contract. The appliance must not assume AdaIN is permanent in all model DLLs.
 - QNN libraries, ABI, contexts, and compiler; ONNX Runtime; Python/PyTorch;
   and LLVM are oracle/reference or historical material only. No production
   build or runtime edge may reach them. Do not package their outputs as a

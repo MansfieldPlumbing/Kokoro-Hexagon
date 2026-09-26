@@ -145,15 +145,25 @@ and its directly emitted backend remain to be built.
   scalar stage, not live speech or the optimized Hexagon path.
 - [x] Establish the full-span AdaIN normalization contract before the emitted
   affine subgraph. `src/models/ConvertTo-KokoroAdaIn.ps1` and
-  `tools/Test-KokoroAdaIn.ps1` gate population variance, epsilon, the learned
-  instance-normalization affine, and the style affine. Surrounding
+  `tools/Test-KokoroAdaIn.ps1` gate population variance, epsilon, the optional
+  instance-normalization affine, and the style affine. The pinned checkpoint
+  has no AdaIN norm weight/bias tensors, so stock execution uses initialized
+  identity values for that inner affine. Surrounding
   convolutions, graph wiring, and emitted normalization remain open; this
   scalar stage is not a speech or performance claim.
 - [x] Connect the style vector to that AdaIN reference stage through the stock
   linear gamma/beta projection. `ConvertTo-KokoroAdaInStyle.ps1` and
   `tools/Test-KokoroAdaInStyle.ps1` gate row-major weight layout, the
   `1 + gamma` gain, beta shift, and composition with normalization. The actual
-  checkpoint tensors and emitted execution path remain to be connected.
+  checkpoint tensors were checked for one generator block by
+  `tools/Test-KokoroAdaInCheckpoint.ps1`; the emitted execution path and full
+  graph wiring remain to be connected.
+- [x] Keep AdaIN-specific entry points explicitly named so a later model DLL
+  can replace this operator family without inheriting generic `Affine` or
+  `Normalize` semantics. The emitted helper is
+  `New-KokoroAdaInAffineSteps`; `tools/Test-KokoroAdaInOperatorNames.ps1`
+  gates the reference and emitted names. The historical file/kernel labels
+  remain for existing probe artifacts, not a model-neutral product API.
 - [x] Represent the stock duration-to-frame alignment as a bounded index map
   instead of allocating its dense one-hot matrix. `New-KokoroDurationMap.ps1`
   and `Expand-KokoroAlignedFeatures.ps1` gate duration reduction, ties-to-even

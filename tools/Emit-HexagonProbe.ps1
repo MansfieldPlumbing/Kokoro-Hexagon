@@ -123,7 +123,7 @@ if($Kernel -eq 'KokoroR0Sub0') {
     if((Get-FileHash $weightPath).Hash -ne $weights.Sha256 -or (Get-Item $weightPath).Length -ne $weights.Bytes) { throw 'Existing weights fail their manifest' }
     if($Kernel -eq 'KokoroAffine') {
         . (Join-Path $PSScriptRoot '..\src\emit\Kokoro.Affine.ps1')
-        $steps=@(New-KokoroAffineSteps -Nodes $nodes -Channels $weights.Channels -GainOffset $weights.Values.'adain1.0.gain'.Offset -ShiftOffset $weights.Values.'adain1.0.shift'.Offset -WeightBytes $weights.Bytes)
+        $steps=@(New-KokoroAdaInAffineSteps -Nodes $nodes -Channels $weights.Channels -GainOffset $weights.Values.'adain1.0.gain'.Offset -ShiftOffset $weights.Values.'adain1.0.shift'.Offset -WeightBytes $weights.Bytes)
         $symbol='kqnn_affine_skel_handle_invoke'; $soname='libkqnn_affine_skel.so'
     } else {
         if(($weights.Values.'convs1.0.weight'.Shape -join ',') -ne '1,3,128,128' -or

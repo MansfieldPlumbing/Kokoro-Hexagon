@@ -1,7 +1,7 @@
 # V73 backend for the two-node AdaIN affine DAG. Method 2 fuses both nodes;
 # methods 3 and 4 provide identical-arithmetic separate passes for comparison.
 # All registers are caller-saved r0-r15/p0; no frame, imports or relocations.
-function New-KokoroAffineSteps {
+function New-KokoroAdaInAffineSteps {
     param([Parameter(Mandatory)] $Nodes, [int] $Frames=7681, [int] $Channels=128,
         [int] $GainOffset=1182720, [int] $ShiftOffset=1183232, [int] $WeightBytes=1195008)
     if($Frames -le 0 -or $Frames -gt 19201 -or $Channels -ne 128 -or

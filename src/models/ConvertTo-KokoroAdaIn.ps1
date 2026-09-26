@@ -4,6 +4,8 @@
 # PyTorch InstanceNorm1d uses input statistics in eval when running statistics
 # are disabled: torch/nn/modules/instancenorm.py at
 # 2b3ec34829036a65cd9d1398ea72a0167dc37470.
+# The pinned stock checkpoint has no AdaIN norm.weight/norm.bias tensors, so
+# _NormBase defaults (weight=1, bias=0) apply unless both are supplied.
 # The style projection is upstream; Gain is 1 + gamma, Shift is beta.
 # This scalar FP32 reference is not the emitted Hexagon execution path.
 [CmdletBinding()]
@@ -11,8 +13,8 @@ param(
     [Parameter(Mandatory)][float[]] $InputTensor,
     [Parameter(Mandatory)][ValidateRange(1, 32768)][int] $Frames,
     [Parameter(Mandatory)][ValidateRange(1, 1024)][int] $Channels,
-    [Parameter(Mandatory)][float[]] $NormWeight,
-    [Parameter(Mandatory)][float[]] $NormBias,
+    [float[]] $NormWeight,
+    [float[]] $NormBias,
     [Parameter(Mandatory)][float[]] $Gain,
     [Parameter(Mandatory)][float[]] $Shift
 )
@@ -22,7 +24,14 @@ $elements = [long]$Frames * $Channels
 if ($elements -gt 8388608 -or $InputTensor.Length -ne $elements) {
     throw 'AdaIN tensor shape is invalid or exceeds the reference bound.'
 }
-foreach ($parameter in @($NormWeight, $NormBias, $Gain, $Shift)) {
+$hasNormWeight = $PSBoundParameters.ContainsKey('NormWeight')
+$hasNormBias = $PSBoundParameters.ContainsKey('NormBias')
+if ($hasNormWeight -ne $hasNormBias) {
+    throw 'AdaIN norm weight and bias must be supplied together.'
+}
+$parameters = if ($hasNormWeight) { @($NormWeight, $NormBias, $Gain, $Shift) }
+    else { @($Gain, $Shift) }
+foreach ($parameter in $parameters) {
     if ($parameter.Length -ne $Channels) { throw 'AdaIN channel parameter shape is invalid.' }
     foreach ($value in $parameter) {
         if (-not [float]::IsFinite($value)) { throw 'AdaIN channel parameter is non-finite.' }
@@ -46,8 +55,10 @@ for ($channel = 0; $channel -lt $Channels; $channel++) {
     }
     # Instance normalization uses population variance, not Bessel correction.
     $inverseStd = 1.0 / [Math]::Sqrt($squares / $Frames + 1e-5)
-    $scale = [double]$NormWeight[$channel] * [double]$Gain[$channel]
-    $bias = [double]$NormBias[$channel] * [double]$Gain[$channel] + [double]$Shift[$channel]
+    $normScale = if ($hasNormWeight) { [double]$NormWeight[$channel] } else { 1.0 }
+    $normShift = if ($hasNormBias) { [double]$NormBias[$channel] } else { 0.0 }
+    $scale = $normScale * [double]$Gain[$channel]
+    $bias = $normShift * [double]$Gain[$channel] + [double]$Shift[$channel]
     for ($frame = 0; $frame -lt $Frames; $frame++) {
         $value = (([double]$InputTensor[$offset + $frame] - $mean) * $inverseStd) * $scale + $bias
         if (-not [double]::IsFinite($value) -or [Math]::Abs($value) -gt [float]::MaxValue) {

@@ -20,7 +20,12 @@ $inputTensor = [float[]]@(1, 2, 3, 8, 8, 8)
 $normWeight = [float[]]@(1, 1)
 $normBias = [float[]]@(0, 0)
 [float[]]$output = & $normalize -InputTensor $inputTensor -Frames 3 -Channels 2 `
+    -Gain $affine.Gain -Shift $affine.Shift
+[float[]]$explicitIdentity = & $normalize -InputTensor $inputTensor -Frames 3 -Channels 2 `
     -NormWeight $normWeight -NormBias $normBias -Gain $affine.Gain -Shift $affine.Shift
+if (($output -join ',') -cne ($explicitIdentity -join ',')) {
+    throw 'Omitted stock norm affine differs from explicit identity parameters.'
+}
 for ($i = 0; $i -lt 3; $i++) {
     if ([Math]::Abs([double]$output[3 + $i] - 0.75) -gt 1e-6) {
         throw 'Projected style did not feed the constant-channel AdaIN stage.'
