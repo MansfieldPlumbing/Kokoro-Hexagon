@@ -223,8 +223,22 @@ and its directly emitted backend remain to be built.
   bidirectional LSTM gate equations and reverse-direction layout, plus the
   stock 512-to-50 duration projection connected to the existing frame map.
   Analytic and pinned-checkpoint tests pass. This does not close the duration
-  branch: the style-conditioned duration encoder feeding the LSTM is not yet
-  implemented. See `docs/receipts/lstm-duration-fp32-reference-20260926.md`.
+  branch by itself. See `docs/receipts/lstm-duration-fp32-reference-20260926.md`.
+- [x] Compose the three stock style-conditioned duration-encoder LSTM/AdaLayerNorm
+  pairs, predictor LSTM, duration projection, and aligned predictor features
+  as a bounded PowerShell FP32 branch. A stock-weight two-token shape/finite
+  gate passes from supplied 512-channel token features. The ALBERT-to-duration
+  connection and independent numerical oracle comparison are still open;
+  this is not phoneme-to-PCM or speech. See
+  `docs/receipts/duration-branch-fp32-reference-20260926.md`.
+- [x] Re-author the stock text encoder as a bounded PowerShell FP32 reference:
+  token embedding, three weight-normalized Conv1D / channel LayerNorm /
+  LeakyReLU blocks, and bidirectional LSTM. Analytic and pinned-checkpoint
+  two-token gates pass. `Invoke-KokoroWeightNormConv1d.ps1` provides a
+  model-neutral primitive verified against the existing AdaIN-specific
+  reference. Full-length numerical parity and the text-to-aligned-ASR
+  integration remain open; see
+  `docs/receipts/text-encoder-fp32-reference-20260926.md`.
 - [ ] Lower a complete FP32 path without QNN, Python, or LLVM in the build or
   device execution graph. Prove each promoted block against the pinned oracle
   and preserve a same-input/same-weight baseline before changing precision.
