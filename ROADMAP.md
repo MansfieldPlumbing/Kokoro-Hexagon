@@ -143,6 +143,12 @@ and its directly emitted backend remain to be built.
   squared-window normalization. `tools/Test-KokoroPcm.ps1` gates the envelope,
   padded frames, output length, and non-finite input. This is an isolated
   scalar stage, not live speech or the optimized Hexagon path.
+- [x] Establish the full-span AdaIN normalization contract before the emitted
+  affine subgraph. `src/models/ConvertTo-KokoroAdaIn.ps1` and
+  `tools/Test-KokoroAdaIn.ps1` gate population variance, epsilon, the learned
+  instance-normalization affine, and the style affine. The style projection,
+  surrounding convolutions, graph wiring, and emitted normalization remain
+  open; this scalar stage is not a speech or performance claim.
 - [ ] Author the full stock computation from admitted phoneme IDs and the
   selected voice row through ALBERT, text encoder, duration, F0/N, harmonic
   source, decoder, iSTFT, and PCM. Replace the opaque prepared-input boundary
