@@ -214,11 +214,9 @@ and its directly emitted backend remain to be built.
   execution pass; the 12-layer stock output still needs an independent
   numerical differential. The post-ALBERT `bert_encoder` 768-to-512 linear
   primitive is also gated. See `docs/receipts/albert-fp32-reference-20260926.md`.
-- [ ] Complete the stock ALBERT numerical differential and connect its output
-  to duration-encoder and text-encoder branches. Then integrate F0/N with
-  the aligned duration branch, source excitation, remaining decoder blocks,
-  and waveform synthesis. Do not start further Hexagon lowering to substitute
-  for these missing model computations.
+- [ ] Complete the stock ALBERT numerical differential, source excitation,
+  decoder blocks, and waveform synthesis. Do not start further Hexagon
+  lowering to substitute for these missing model computations.
 - [x] Add bounded PowerShell FP32 references for the shared one-layer
   bidirectional LSTM gate equations and reverse-direction layout, plus the
   stock 512-to-50 duration projection connected to the existing frame map.
@@ -246,6 +244,14 @@ and its directly emitted backend remain to be built.
   pass. The duration-to-F0/N connection and numerical parity remain open;
   this is not yet PCM. See
   `docs/receipts/f0n-branch-fp32-reference-20260926.md`.
+- [x] Connect admitted token IDs and a 256-element voice row through ALBERT,
+  its 768-to-512 projection, duration prediction/alignment, text encoder,
+  and F0/N heads. The style halves and common frame map are explicit. A
+  stock-checkpoint three-token, high-speed shape/finite gate passes with
+  one ALBERT repeat and one layer of each configurable encoder; each component
+  also has its own gate. This does not establish 12-repeat/full-layer
+  numerical parity, normal-speed execution, decoder output, or PCM. See
+  `docs/receipts/acoustic-branches-fp32-reference-20260926.md`.
 - [ ] Lower a complete FP32 path without QNN, Python, or LLVM in the build or
   device execution graph. Prove each promoted block against the pinned oracle
   and preserve a same-input/same-weight baseline before changing precision.
