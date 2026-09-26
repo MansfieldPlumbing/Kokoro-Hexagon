@@ -266,6 +266,13 @@ and its directly emitted backend remain to be built.
   pass. Learned generator upsampling, noise convolutions, AdaIN/Snake
   residual blocks, and final spectrogram projection remain before PCM.
   See `docs/receipts/generator-source-stft-fp32-reference-20260926.md`.
+- [x] Preserve the existing bounded PowerShell AdaIN/Snake residual block
+  and add both weight-normalized transposed-convolution upsamplers and both
+  ordinary noise convolutions. The existing residual analytic gate and new
+  analytic/pinned-checkpoint upsampler and noise-convolution gates pass. Compose and
+  numerically gate the full two-stage learned generator, reflection pad,
+  post-projection, and waveform output before any speech claim. See
+  `docs/receipts/generator-learned-primitives-fp32-reference-20260926.md`.
 - [ ] Lower a complete FP32 path without QNN, Python, or LLVM in the build or
   device execution graph. Prove each promoted block against the pinned oracle
   and preserve a same-input/same-weight baseline before changing precision.
