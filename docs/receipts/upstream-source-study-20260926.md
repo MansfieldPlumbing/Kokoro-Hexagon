@@ -37,12 +37,11 @@ operators and algorithms only.
 
 Submodule completeness is separate from the top-level source pins. NumPy's
 seven declared submodules were fetched at their recorded Git links. PyTorch's
-top-level tree is clean and all 37 submodule directories were acquired, but
-only 15 matched their recorded Git links on the last check. A checkout conflict
-in `third_party/cutlass` stopped completion; no forced overwrite or cleanup was
-performed. Treat those submodule working trees as incomplete until separately
-verified. The top-level PyTorch operator source needed for the current study
-remains available at the pinned commit through `git show`.
+top-level tree and all 65 recursively declared submodules now match their
+recorded Git links. The interrupted `third_party/cutlass` checkout was moved
+to the repository's ignored `build/source-recovery/` area before that one
+submodule was recreated at PyTorch's pinned commit; no other source tree was
+overwritten. The study sources remain outside the product build graph.
 
 The PCM boundary is two distinct contracts: Kokoro's decoder and `CustomSTFT`
 define the generated waveform, while Android AAudio accepts a stream of
