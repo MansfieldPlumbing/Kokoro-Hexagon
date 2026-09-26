@@ -55,6 +55,19 @@ digests and emitted a fresh diagnostic worker into this repository's ignored
 new library has the same byte length as, but a different digest from, the
 archived installed library. Binary contents were not inspected.
 
+The diagnostic source and a build script adapted to this repository's
+git-ignored `build/` are now retained at
+`tools/reference/dspqueue-echo/`. The C translation unit is isolated
+reference material, not a production implementation. Its executable body
+matches the recorded source, and the local pinned build completed with the
+expected library byte length. That repository-local build was then run on
+both phones with the same guarded staging and restoration procedure: Razr+
+warm queue median 124.531 µs versus 226.041 µs synchronous; S23 warm queue
+median 282.812 µs versus 341.042 µs synchronous. Both runs passed, reported
+64 DSP packets received with zero worker errors, and restored the prior
+worker and diagnostic-app state. The detailed table below records the
+preceding build from the same executable source body.
+
 The source shows that status error 14 can come from the callback error
 argument before any packet is received. It does not establish why the
 archived binary took that path. Replacing the worker temporarily with the

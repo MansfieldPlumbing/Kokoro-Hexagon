@@ -17,6 +17,11 @@ and labeled `vendor_qdsp_device`; the secure node was mode `0644`, also
 `system:system`, and labeled `vendor_xdsp_device`. Neither queried path set
 contained a CDSP-named node. The external report's proposed 5.15.208 and
 6.1.57 kernel revisions are not exact matches to these installed kernels.
+The later same-session recheck still found these same node names on both
+phones. Therefore the external assertion that this Razr+ exposes
+`/dev/fastrpc-cdsp` while this S23 alone uses `/dev/adsprpc-smd` is not
+supported by the attached devices. Node names do not by themselves identify
+the complete driver implementation or its CDSP domain routing.
 
 This inventory does not establish app access, a CDSP queue capability, or
 the cause of the owner's reported Razr+ success and S23 failure. Node

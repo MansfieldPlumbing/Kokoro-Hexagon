@@ -85,6 +85,10 @@ and its directly emitted backend remain to be built.
   packet zero and differ in digest from the fresh build. This is a diagnostic
   result, not product transport or speech. See
   `docs/receipts/dspqueue-live-reproduction-20260926.md`.
+- [x] Retain the authored diagnostic DSP echo source and pinned reference
+  build recipe in `tools/reference/dspqueue-echo/`, isolated from the
+  PowerShell-emitted product closure. The local build writes only under
+  git-ignored `build/`.
 - [ ] Determine why the S23 response-read interval is longer with the same
   fresh worker. Establish the queue signaling mode and controlled latency
   breakdown before attributing the gap to kernel, firmware, or hypervisor.
