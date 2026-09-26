@@ -215,10 +215,16 @@ and its directly emitted backend remain to be built.
   numerical differential. The post-ALBERT `bert_encoder` 768-to-512 linear
   primitive is also gated. See `docs/receipts/albert-fp32-reference-20260926.md`.
 - [ ] Complete the stock ALBERT numerical differential and connect its output
-  to duration-encoder and text-encoder branches. Then implement and gate the
-  shared LSTM, duration projection and alignment, F0/N, source excitation,
-  remaining decoder blocks, and waveform synthesis. Do not start further
+  to duration-encoder and text-encoder branches. Then integrate the shared
+  LSTM and duration projection, and implement the missing F0/N, source
+  excitation, remaining decoder blocks, and waveform synthesis. Do not start further
   Hexagon lowering to substitute for these missing model computations.
+- [x] Add bounded PowerShell FP32 references for the shared one-layer
+  bidirectional LSTM gate equations and reverse-direction layout, plus the
+  stock 512-to-50 duration projection connected to the existing frame map.
+  Analytic and pinned-checkpoint tests pass. This does not close the duration
+  branch: the style-conditioned duration encoder feeding the LSTM is not yet
+  implemented. See `docs/receipts/lstm-duration-fp32-reference-20260926.md`.
 - [ ] Lower a complete FP32 path without QNN, Python, or LLVM in the build or
   device execution graph. Prove each promoted block against the pinned oracle
   and preserve a same-input/same-weight baseline before changing precision.
