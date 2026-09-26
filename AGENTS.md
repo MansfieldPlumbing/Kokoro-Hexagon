@@ -130,9 +130,11 @@ directly emitted Hexagon code to audible PCM on the physical device.
   1.94x faster than its synchronous-invoke baseline. The scripts differ by
   device, are not checked in, and still use `libcdsprpc.so`; they are not a
   product transport or a controlled cross-device benchmark. A 2026-09-26
-  live rerun reached queue import on both phones but failed at the first
-  response; see `docs/receipts/dspqueue-live-reproduction-20260926.md`.
-  Preserve the distinction between old stored passes and current failures.
+  live rerun with the archived worker failed at the first response on both
+  phones; a subsequent pinned-source rebuild passed on both, with a 120.364 µs
+  Razr+ warm median. See `docs/receipts/dspqueue-live-reproduction-20260926.md`.
+  Preserve the distinction between archived-worker failure, source-built
+  diagnostic success, and the still-unbuilt product transport.
 - DSPQueue-style shared-memory dispatch is physically evidenced as a
   historical diagnostic, not a proved product path. Distinguish one-time
   FastRPC bootstrap from per-job signaling and queue traffic; the pinned
