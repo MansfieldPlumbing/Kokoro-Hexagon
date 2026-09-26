@@ -84,7 +84,9 @@ directly emitted Hexagon code to audible PCM on the physical device.
 - Keep APK and model DLL separate. Stage a downloaded or AOA-supplied DLL in
   private storage; verify its signed manifest, compatibility, exact length,
   SHA-256, and managed identity; then promote it by atomic active-pointer
-  replacement. Do not fetch or compile code during ordinary inference.
+  replacement. An update becomes loadable only after the appliance process
+  restarts; do not claim in-process model hot-swap. Do not fetch or compile
+  code during ordinary inference.
 
 ## Repository boundaries
 

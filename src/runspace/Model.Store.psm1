@@ -125,6 +125,11 @@ $testManagedAssembly = {
         $reader = [Reflection.PortableExecutable.PEReader]::new($stream)
         try {
             if (-not $reader.HasMetadata) { throw 'Model payload is not a managed assembly.' }
+            if ($null -eq $reader.PEHeaders.CorHeader -or
+                $reader.PEHeaders.CorHeader.ManagedNativeHeaderDirectory.Size -ne 0 -or
+                ($reader.PEHeaders.CorHeader.Flags -band [Reflection.PortableExecutable.CorFlags]::ILOnly) -eq 0) {
+                throw 'Model payload must be an IL-only managed assembly.'
+            }
             $metadata = [Reflection.Metadata.PEReaderExtensions]::GetMetadataReader($reader)
             if (-not $metadata.IsAssembly) { throw 'Model payload metadata is not an assembly.' }
             $definition = $metadata.GetAssemblyDefinition()

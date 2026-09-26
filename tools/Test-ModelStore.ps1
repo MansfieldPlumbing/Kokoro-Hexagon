@@ -88,6 +88,29 @@ try {
     & pwsh -NoProfile -File $PSCommandPath -Child -PrivateRoot $temporary -PublicKeyPath $publicKeyPath
     if ($LASTEXITCODE -ne 0) { throw 'Admitted model load failed in a fresh process.' }
 
+    # A signed payload with a managed-native header is still inadmissible.
+    [byte[]]$nativeHeaderBytes = $assemblyBytes.Clone()
+    $nativeStream = [IO.MemoryStream]::new($nativeHeaderBytes, $false)
+    $nativeReader = [Reflection.PortableExecutable.PEReader]::new($nativeStream)
+    try { $nativeHeaderOffset = $nativeReader.PEHeaders.CorHeaderStartOffset + 68 }
+    finally { $nativeReader.Dispose(); $nativeStream.Dispose() }
+    [BitConverter]::GetBytes([int]1).CopyTo($nativeHeaderBytes, $nativeHeaderOffset)
+    $nativePath = [IO.Path]::Combine($temporary, 'Kokoro.Store.NativeHeader.dll')
+    [IO.File]::WriteAllBytes($nativePath, $nativeHeaderBytes)
+    $nativeHash = [Convert]::ToHexString([Security.Cryptography.SHA256]::HashData($nativeHeaderBytes))
+    $nativeSignedJson = $signed.Replace($assemblyHash, $nativeHash)
+    if ($nativeSignedJson -ceq $signed) { throw 'Test payload hash substitution failed.' }
+    $nativeSignature = $ecdsa.SignData([Text.Encoding]::UTF8.GetBytes($nativeSignedJson), [Security.Cryptography.HashAlgorithmName]::SHA256)
+    $nativeManifest = '{"schema":1,"signed":' + $nativeSignedJson + ',"signature":{"algorithm":"ECDSA_P256_SHA256","value":"' + [Convert]::ToBase64String($nativeSignature) + '"}}'
+    $nativeRejected = $false
+    $nativeFailure = $null
+    try { [void](& $store.InstallFile $nativeManifest $nativePath) }
+    catch {
+        $nativeFailure = $_.Exception.Message
+        $nativeRejected = $nativeFailure -eq 'Model payload must be an IL-only managed assembly.'
+    }
+    if (-not $nativeRejected) { throw "Signed managed-native payload was not rejected. Actual result: $nativeFailure" }
+
     $badManifest = $manifest.Replace('"version":"1.0.0"', '"version":"1.0.1"')
     $rejected = $false
     try { [void](& $store.InstallFile $badManifest $assemblyPath) }
@@ -108,6 +131,7 @@ try {
         TamperRejected = $true
         ActiveLoadVerified = $true
         ActiveManifestTamperRejected = $true
+        ManagedNativePayloadRejected = $true
         AssemblyBytes = $assemblyBytes.Length
         InstallMilliseconds = [Math]::Round($installMilliseconds, 1)
         Passed = $true

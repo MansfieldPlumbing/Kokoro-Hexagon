@@ -16,6 +16,8 @@ $required = @(
     "`$_ -like '*/libxamarin-app.so'",
     "android.app.NativeActivity",
     "<PublishReadyToRun>false</PublishReadyToRun>"
+    "Minimal payload selects",
+    "Refusing to emit a store containing ReadyToRun image"
 )
 foreach ($needle in $required) {
     if (-not $text.Contains($needle, [StringComparison]::Ordinal)) {

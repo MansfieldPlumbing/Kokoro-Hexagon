@@ -17,7 +17,9 @@ it selected 96 managed assemblies after classifying 101 ReadyToRun images.
 verification. The signed APK is 40,967,479 bytes with SHA-256
 `E62AC595D7D77D0793D1CFBD8EA04DBAF2C25647268AC61D1866925BA6704518`.
 An independent ZIP read-back found 12 entries, no DEX, Mono/Xamarin library
-name, ReadyToRun-named DLL, or model-like payload name. The assembly-store
+name or model-like payload name. There was no separately named ReadyToRun DLL,
+but a later PE-header audit found 62 ReadyToRun images among the selected
+96 assemblies. The assembly-store
 bytes contain `Dev.MansfieldPlumbing.Kokoro` and not the prior managed
 namespace.
 

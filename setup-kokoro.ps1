@@ -60,7 +60,8 @@ param(
     [switch] $Debuggable,
 
 
-    # Minimal:  Assembly set, IL only, no ReadyToRun (R2R) code.
+    # Minimal: selected assembly set; refuse ReadyToRun until IL-only
+    # re-emission is implemented and independently verified.
     # Standard: every runtime assembly the packages ship, R2R code included.
     # SDK:      Standard plus the PowerShell SDK assemblies.
     [ValidateSet('Minimal', 'Standard', 'SDK')]
@@ -233,7 +234,8 @@ OPTIONS
                             folder that is deleted afterwards).
   -Payload <Minimal|Standard|SDK>
                             Minimal: lean assembly set, IL only, no
-                            ReadyToRun (R2R) code. Standard: every runtime
+                            ReadyToRun (R2R) code; the build stops until
+                            IL-only re-emission is available. Standard: every runtime
                             assembly, R2R code included. SDK: Standard plus
                             the PowerShell SDK assemblies. Standard and SDK
                             are not built yet.
@@ -1617,7 +1619,7 @@ function Invoke-InspectionStep {
         $managedCount += $packageManaged
         $nativeCount += $packageNative
         $r2rCount += $packageR2r
-        Write-Host ('[PASS] Inventory: {0} | IL={1} | native={2} | R2R excluded={3}' -f
+        Write-Host ('[PASS] Inventory: {0} | IL={1} | native={2} | R2R detected={3}' -f
             $package.Id,
             $packageManaged,
             $packageNative,
@@ -3839,6 +3841,13 @@ function Invoke-SelectionStep {
         throw "Lean assembly selection produced $($selected.Count) entries; the pinned list names $($manifest.Count)."
     }
 
+    $selectedR2r = @($selected.GetEnumerator() | Where-Object {
+        Test-ReadyToRunImage -ImageBytes ([byte[]]$_.Value.Bytes)
+    })
+    if ($selectedR2r.Count -gt 0) {
+        throw "Minimal payload selects $($selectedR2r.Count) ReadyToRun images. IL-only re-emission is required before store emission."
+    }
+
     $script:BuildContext.SelectedAssemblies = $selected
     if ($KeepIntermediates) {
         $archiveDirectory = Join-Path (Join-Path (Join-Path $OutputDirectory $script:Target.Abi) 'managed') 'by-name'
@@ -3863,7 +3872,7 @@ function Invoke-SelectionStep {
         Write-BuildFile -Intermediate -Path $archivePath -Bytes ([Text.UTF8Encoding]::new($false).GetBytes($archiveJson + [Environment]::NewLine))
         Write-Host "[PASS] Assembly archive: $($archive.Count) DLLs plus SHA-256 manifest saved under $archiveDirectory." -ForegroundColor Green
     }
-    Write-Host "[PASS] Step 4 complete: $($selected.Count) ordered runtime assemblies selected in memory; reference-only images and Probe.r2r.dll rejected." -ForegroundColor Green
+    Write-Host "[PASS] Step 4 complete: $($selected.Count) ordered IL-only runtime assemblies selected in memory; reference-only images rejected." -ForegroundColor Green
 }
 
 $script:Crc32Table = $null
@@ -3936,6 +3945,12 @@ function New-AssemblyStoreBytes {
         # the upstream layout (images end to end).
         [ValidateSet(1, 16)][int] $DataAlignment = 1
     )
+
+    foreach ($entry in $SelectedAssemblies.GetEnumerator()) {
+        if (Test-ReadyToRunImage -ImageBytes ([byte[]]$entry.Value.Bytes)) {
+            throw "Refusing to emit a store containing ReadyToRun image '$($entry.Key)'."
+        }
+    }
 
     $headerSize = Get-ContractStructureSize -Contract $Contract -StructureName 'AssemblyStoreHeader'
     $indexEntrySize = Get-ContractStructureSize -Contract $Contract -StructureName 'AssemblyStoreIndexEntry'

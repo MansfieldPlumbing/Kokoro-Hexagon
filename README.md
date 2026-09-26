@@ -53,6 +53,9 @@ or accepts the same manifest and DLL over the offline AOA channel. The model
 store verifies compatibility, length, SHA-256, managed assembly identity, and
 manifest signature before atomically changing the active-model pointer. Model
 DLLs ultimately include graph and hot paths, not just compressed tensors.
+The newly activated DLL is loaded after an appliance process restart, not
+hot-swapped into the current CoreCLR process. The packaged appliance has not
+yet wired this load path or demonstrated speech.
 
 QNN, ONNX Runtime, Python, PyTorch, and LLVM are oracle/reference or historical
 benchmark material, not production build or runtime dependencies. Do not feed

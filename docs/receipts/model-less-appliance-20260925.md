@@ -8,8 +8,10 @@ not prove model loading, direct Hexagon transport, or Kokoro speech.
 
 `setup-kokoro.ps1 -Headless -Step 11` completed the full ARM64 build from 27
 pinned source specifications and 14 catalog-hash-verified packages. The build
-classified 313 IL images and 16 native payloads, excluded 101 ReadyToRun
-images, and selected 96 IL assemblies for the runtime store.
+classified 313 IL images, 16 native payloads, and 101 ReadyToRun candidates,
+then selected 96 managed assemblies for the runtime store. A subsequent
+PE-header audit found that 62 selected images still carried ReadyToRun code.
+The inventory classification did not exclude them.
 
 The independently read-back unsigned APK contained 12 entries. The packaging
 closure gate found no DEX, `libmonodroid.so`, or `libxamarin-app.so`; the

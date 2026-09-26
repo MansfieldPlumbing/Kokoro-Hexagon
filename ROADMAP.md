@@ -156,7 +156,7 @@ by device discovery. Do not label a payload-only DLL as a live model.
 - [x] Build, sign, and install the model-less NativeActivity/CoreCLR/SMA APK on
   both physical devices. This is a historical packaging and launch checkpoint:
   the 40,967,549-byte signed artifact contains no DEX, `libmonodroid`, or
-  `libxamarin-app`, excludes R2R images, and remained live after launch on both
+  `libxamarin-app` and remained live after launch on both
   devices. It predates the current `status`-only dispatch and does not prove
   that the current source builds or speaks. See
   `docs/receipts/model-less-appliance-20260925.md`.
@@ -167,10 +167,16 @@ by device discovery. Do not label a payload-only DLL as a live model.
   `docs/receipts/model-less-appliance-rebuild-20260925.md`.
 - [x] Rebuild the model-less APK from the `Dev.MansfieldPlumbing.Kokoro` source
   after the external Build directory was cleared. The signed artifact is under
-  40 MiB; the build excluded ReadyToRun images, package inspection found no
+  40 MiB; package inspection found no
   DEX, Mono/Xamarin libraries, or bundled model, and that exact APK installed
   and launched on both physical devices. This is not speech evidence. See
   `docs/receipts/model-less-appliance-kokoro-namespace-20260925.md`.
+- [ ] Re-emit every selected ReadyToRun runtime image as a verified IL-only
+  image before store emission. A direct PE-header audit of the existing
+  96-assembly archive found 62 R2R images, including CoreLib; prior inventory
+  messages classified them but did not exclude them. Selection and store
+  emission now fail closed until this transformation and an artifact-level
+  zero-R2R gate pass. See `docs/receipts/r2r-payload-audit-20260926.md`.
 - [x] Expose the native-supplied private app root through the independently
   emitted managed host and verify its existence after install and launch on
   both devices. Strengthen `Model.Store.psm1` so an active model load
@@ -189,7 +195,8 @@ by device discovery. Do not label a payload-only DLL as a live model.
 - [ ] Wire `Model.Store.psm1` to `ANativeActivity.internalDataPath`, the HTTPS
   updater, and the offline AOA install operation. Re-run interrupted-download,
   rollback, incompatible-ABI, expiry, and multi-model activation tests on the
-  packaged appliance.
+  packaged appliance. A verified update replaces the active pointer, then
+  requires an appliance process restart before loading; no in-process hot-swap.
 - [ ] Pin a dedicated model-signing public key in the appliance, embed the
   validated PowerShell store source, and invoke its `LoadActive` gate from the
   managed startup before accepting any model request. Test a signed model DLL
