@@ -45,4 +45,44 @@ for ($channel = 0; $channel -lt 128; $channel++) {
     }
 }
 
-Write-Output 'PASS: pinned stock AdaIN tensors, identity norm default, style projection'
+$convPrefix = 'decoder.module.generator.resblocks.3.convs1.0.'
+$vName = $convPrefix + 'weight_v'
+$gName = $convPrefix + 'weight_g'
+$convBiasName = $convPrefix + 'bias'
+if (($checkpoint.Tensors[$vName].Shape -join ',') -cne '128,128,3' -or
+    ($checkpoint.Tensors[$gName].Shape -join ',') -cne '128,1,1' -or
+    ($checkpoint.Tensors[$convBiasName].Shape -join ',') -cne '128') {
+    throw 'Stock AdaIN Conv1D tensor shapes differ.'
+}
+[byte[]]$vBytes = & $reader.Bytes $checkpoint $vName
+[byte[]]$gBytes = & $reader.Bytes $checkpoint $gName
+[byte[]]$convBiasBytes = & $reader.Bytes $checkpoint $convBiasName
+$v = [float[]]::new(128 * 128 * 3)
+$g = [float[]]::new(128)
+$convBias = [float[]]::new(128)
+[Buffer]::BlockCopy($vBytes, 0, $v, 0, $vBytes.Length)
+[Buffer]::BlockCopy($gBytes, 0, $g, 0, $gBytes.Length)
+[Buffer]::BlockCopy($convBiasBytes, 0, $convBias, 0, $convBiasBytes.Length)
+$inputTensor = [float[]]::new(128 * 3)
+$inputTensor[1] = 1.0
+$conv = Join-Path $root 'src/models/Invoke-KokoroAdaInConv1d.ps1'
+[float[]]$convOutput = & $conv -InputTensor $inputTensor -Frames 3 `
+    -InputChannels 128 -OutputChannels 128 -KernelSize 3 -Dilation 1 `
+    -WeightV $v -WeightG $g -Bias $convBias
+foreach ($channel in @(0, 1, 127)) {
+    $offset = $channel * 128 * 3
+    $squares = 0.0
+    for ($i = 0; $i -lt 128 * 3; $i++) {
+        $value = [double]$v[$offset + $i]
+        $squares += $value * $value
+    }
+    $scale = [double]$g[$channel] / [Math]::Sqrt($squares)
+    for ($frame = 0; $frame -lt 3; $frame++) {
+        $expected = [double]$convBias[$channel] + [double]$v[$offset + (2 - $frame)] * $scale
+        if ([Math]::Abs([double]$convOutput[$channel * 3 + $frame] - $expected) -gt 1e-6) {
+            throw 'Stock AdaIN Conv1D impulse response differs.'
+        }
+    }
+}
+
+Write-Output 'PASS: pinned stock AdaIN tensors, identity norm, style projection, Conv1D impulse'

@@ -164,6 +164,13 @@ and its directly emitted backend remain to be built.
   `New-KokoroAdaInAffineSteps`; `tools/Test-KokoroAdaInOperatorNames.ps1`
   gates the reference and emitted names. The historical file/kernel labels
   remain for existing probe artifacts, not a model-neutral product API.
+- [x] Re-author the AdaIN residual block's weight-normalized Conv1D primitive
+  with source-defined channel layout, per-output-channel weight norm,
+  dilation, and same-length zero padding. `Invoke-KokoroAdaInConv1d.ps1` and
+  `tools/Test-KokoroAdaInConv1d.ps1` cover an analytic case; the pinned
+  checkpoint gate covers one block's real weights and impulse response.
+  This bounded scalar reference is not the full residual block or emitted
+  fast path; a full numerical oracle comparison remains open.
 - [x] Represent the stock duration-to-frame alignment as a bounded index map
   instead of allocating its dense one-hot matrix. `New-KokoroDurationMap.ps1`
   and `Expand-KokoroAlignedFeatures.ps1` gate duration reduction, ties-to-even
