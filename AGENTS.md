@@ -125,16 +125,17 @@ directly emitted Hexagon code to audible PCM on the physical device.
   from an ISA-subset argument alone.
 - Do not treat FastRPC as the required or lowest CDSP transport. The recorded
   SM8635 R0Sub0 result is an emitted-kernel comparison invoked through
-  FastRPC, not evidence that FastRPC was bypassed. The owner has reported a
-  separate transport-bypass smoke test that succeeded on the Razr+ but failed
-  on the S23; its artifact and failure stage are not yet identified in this
-  checkout. Recover and trace that test before making transport or speedup
-  claims about it; keep its privilege context and comparator distinct from
-  the R0Sub0 benchmark.
-- DSPQueue-style shared-memory dispatch is a candidate, not a proved phone
-  path. Distinguish one-time FastRPC bootstrap from per-job signaling and
-  queue traffic; the pinned upstream fallback can signal through FastRPC.
-  Do not claim Queue Monitor support, a 0.1 ms dispatch, or a Razr+/S23 cause
-  without a same-artifact physical receipt.
+  FastRPC, not evidence that FastRPC was bypassed. Historical DSPQueue echo
+  diagnostics recovered from both phones passed and show a Razr+ queue median
+  1.94x faster than its synchronous-invoke baseline. The scripts differ by
+  device, are not checked in, and still use `libcdsprpc.so`; they are not a
+  product transport or a controlled cross-device benchmark. The owner's
+  earlier S23 failure remains unreconciled with the current passing receipt.
+- DSPQueue-style shared-memory dispatch is physically evidenced as a
+  historical diagnostic, not a proved product path. Distinguish one-time
+  FastRPC bootstrap from per-job signaling and queue traffic; the pinned
+  upstream fallback can signal through FastRPC. Do not claim Queue Monitor
+  support, a 0.1 ms dispatch, or a Razr+/S23 cause without a same-artifact
+  physical receipt.
 - Preserve user changes, back up before overwriting, and obtain explicit
   approval before deletion, history rewrite, or push.

@@ -31,10 +31,17 @@ describes daemons as default listeners for DSP reverse calls and dynamic
 protection-domain clients as direct peers. No device-specific access route
 is selected from the external report.
 
-The reported Razr+ queue-style bypass, S23 failure, and approximately
-0.1 ms dispatch figure remain unlinked to a reproducible artifact in this
-checkout. Queue Monitor import semantics and an owned DSP-side queue
-consumer are not established by the cited public CPU source alone. The
-next gate is to recover the prior test and identify its exact bootstrap,
-queue creation, signal mode, measured interval, and first S23 failure stage.
-Until then, DSPQueue is a candidate product transport, not a passed gate.
+Historical diagnostic queue scripts and receipts were subsequently found on
+both phones; see `recovered-dspqueue-diagnostics-20260926.md`. They establish
+successful vendor-library-mediated queue echo on both devices, with a 141 µs
+Razr+ queue median in its stored receipt. They do not identify the earlier
+S23 failure, prove a Queue Monitor import path, or provide an owned DSP-side
+consumer in this repository. DSPQueue remains a candidate product transport,
+not a passed product gate.
+
+A separately scoped PowerShell layout implementation now lives in
+`src/runspace/DspQueue.Layout.psm1`. Its host-side test
+`tools/Test-DspQueueLayout.ps1` passes for the default header and offsets,
+v2 flags, and invalid-input rejection. This verifies only construction of
+the pinned public byte layout; it does not establish DMA-BUF allocation,
+cache coherency, signaling mode, queue import, or device dispatch.

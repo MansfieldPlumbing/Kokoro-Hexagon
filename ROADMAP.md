@@ -71,20 +71,30 @@ and its directly emitted backend remain to be built.
   and executes a native call in a clean process.
 - [x] Remove the managed Android descriptor/reflection dependency from the
   direct FastRPC ioctl probe. It now reaches libc through `Native.Binding`.
-- [ ] Locate and audit the separately reported transport-bypass smoke test:
-  it succeeded on the Razr+ with a reported roughly twofold speedup and failed
-  on the S23. Its artifact, transport, privilege context, workload, comparator,
-  and S23 failure stage have not been identified in this checkout. Do not
-  conflate it with the checked-in R0Sub0 benchmark:
+- [ ] Reconcile the owner's earlier S23 queue-test failure with the currently
+  stored passing echo receipt. The archived scripts are different revisions
+  across devices; the exact earlier failing script and stage are unlocated.
+  Do not conflate the queue result with the checked-in R0Sub0 benchmark:
   that benchmark measured a 2.286–2.302x DSP-tick improvement over LLVM on
   SM8635 while both kernels were invoked through FastRPC. See
   `docs/receipts/transport-evidence-ledger-20260926.md`.
+- [x] Recover the historical DSPQueue diagnostic scripts and receipts from
+  both installed diagnostic apps without rerunning them. Both current echo
+  receipts pass, but the scripts differ, use `libcdsprpc.so`, and are not
+  product artifacts. The Razr+ queue median is 1.94x faster than its own
+  synchronous-invoke baseline; the current S23 receipt also passes. See
+  `docs/receipts/recovered-dspqueue-diagnostics-20260926.md`.
+- [x] Implement a layout-only PowerShell emitter for the pinned public
+  DSPQueue arena header and 256-byte-aligned offsets. The executable
+  `tools/Test-DspQueueLayout.ps1` checks emitted fields, v2 flags, and
+  rejection of invalid inputs. This is a host-side layout gate only: it
+  allocates no shared device memory and does not dispatch a DSP worker.
 - [ ] Evaluate a persistent shared-memory DSPQueue-style dispatch path as a
   QNN-independent candidate. The pinned public source defines queue layout,
-  FastRPC bootstrap, and signaling alternatives; it does not prove Queue
-  Monitor support or the reported device result. Recover the prior test,
-  identify its bootstrap and signal mode, then validate the same emitted
-  worker and queue protocol on both devices before promotion. See
+  FastRPC bootstrap, and signaling alternatives; the recovered diagnostics
+  prove library-mediated queue echo on both devices but not Queue Monitor
+  support or the product path. Identify the exact signal mode, then validate
+  the same owned worker and queue protocol on both devices before promotion. See
   `docs/receipts/dspqueue-upstream-audit-20260926.md`.
 - [x] Record a same-session read-only RPC-node inventory on both devices.
   The queried node names and access metadata match; candidate external
