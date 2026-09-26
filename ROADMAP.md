@@ -161,6 +161,46 @@ The first audible gate accepts admitted phonemes, not arbitrary text. It is
 blocked today by the absent full computation and QNN-free execution path, not
 by device discovery. Do not label a payload-only DLL as a live model.
 
+### Immediate demo: quoted text to the phone speaker over ADB
+
+ADB is a development transport for this gate, not an APK dependency or the
+release protocol. Keep USB debugging available during development; do not add
+an unnecessary debugging-off condition to this loop. A passing demo begins
+with a single Windows PowerShell command such as:
+
+```powershell
+pwsh -File .\tools\Invoke-KokoroSpeech.ps1 -Text "Hello from Kokoro." -Voice af_heart
+```
+
+`Invoke-KokoroSpeech.ps1` is a target interface, not a working script today.
+The command must take the quoted phrase as data, select the intended phone
+explicitly when more than one is attached, and return a structured receipt
+only after generated PCM has drained through that phone's AAudio speaker.
+It must not play a recording, tone, prepared QNN context, or precomputed
+acoustic fixture. The path must use the verified stock model DLL and owned
+PowerShell-to-Hexagon execution described above.
+
+- [ ] Complete and differentially gate stock phoneme-to-PCM computation,
+  including all missing graph stages, weight use, direct emitted backend,
+  transport, and resident AAudio. A passing isolated kernel or payload test
+  cannot close this item.
+- [ ] Complete the stock text-to-phoneme adapter below so an ordinary quoted
+  sentence reaches the phoneme gate without a host-side Python/ONNX/QNN step.
+- [ ] Package the signed-model trust anchor and `Model.Store.psm1` in the
+  independent NativeActivity APK; admit and load the same weight-bearing DLL
+  from private storage after restart. Keep the R2R-free and Mono-free gates.
+- [ ] Add a development-only, typed request ingress to that APK and a Windows
+  `tools/Invoke-KokoroSpeech.ps1` facade. Use ADB to select the device,
+  deliver the bounded text request, start or contact the appliance, and
+  retrieve a receipt. Verify the exact ingress on the independent APK;
+  do not assume the historical debug host's `run-as` access is available.
+  Keep authored device scripts in this repository, not only on phones.
+- [ ] On each target separately, run a fresh quoted sentence from the one
+  Windows command to audible phone-speaker PCM. Record model/APK/ELF hashes,
+  admitted text and voice identity, per-stage checks, sample count, AAudio
+  drain/underruns, and cold/warm timing. The owner must hear the generated
+  sentence. Do not mark this gate complete from an ADB receipt alone.
+
 ## Text and utterance planning
 
 - [ ] Re-author the admitted English text-to-phoneme behavior in PowerShell
@@ -232,9 +272,10 @@ by device discovery. Do not label a payload-only DLL as a live model.
 - [ ] Finish the R2R-free and Mono-free appliance integration: load a verified,
   compatible weight-bearing model DLL from private app storage; connect its
   admitted phoneme/text path and full stock Kokoro graph to direct Hexagon
-  execution and resident AAudio output. Validate the same model and requests
-  through the Windows AOA/WASAPI controller. A launch or test tone is not a
-  speech validation result.
+  execution and resident AAudio output. First validate speech through the
+  ADB-driven development facade above; later validate the same typed model
+  requests through the Windows AOA/WASAPI controller. A launch or test tone
+  is not a speech validation result.
 - [ ] Complete the owned Android bindings and load only a compatible model DLL
   admitted by the private model store. The running base appliance does not yet
   establish a device-proven Kokoro integration.
@@ -252,6 +293,54 @@ by device discovery. Do not label a payload-only DLL as a live model.
   requests, chunked PCM, cancellation, receipts, and disposal. Keep AOA and
   local Android transport separate from synthesis semantics. Windows WASAPI
   and Android AAudio are distinct audio sinks.
+
+### Later demo: Windows PowerShell ↔ Android PowerShell over USB AOA
+
+AOA is the prospective user-facing USB transport. It must not depend on ADB
+or require users to enable USB debugging. This is a later integration gate,
+not a prerequisite for the ADB-driven speech demo. Keep debugging available
+while developing AOA; prove absence of ADB calls in the AOA data path rather
+than disabling debugging in the daily loop.
+The platform contracts are Android's [AOA protocol](https://source.android.com/docs/core/interaction/accessories/aoa),
+[accessory permission and descriptor API](https://developer.android.com/develop/connectivity/usb/accessory),
+and the [NativeActivity handle](https://developer.android.com/ndk/reference/struct/a-native-activity).
+Windows driver admission must be checked against [WinUSB installation rules](https://learn.microsoft.com/en-us/windows-hardware/drivers/usbcon/automatic-installation-of-winusb),
+not inferred from this development machine.
+
+`tools/UsbAoa.ps1` already negotiates accessory mode on Windows, and
+`tools/Invoke-KokoroAoa.ps1` has bounded request/reply framing for diagnostic
+`status`, `ping`, and `receipt`. `src/runspace/Aoa.Appliance.ps1` is the old
+managed-host endpoint, not the independent appliance implementation. The
+current `src/appliance/aoa/AndroidManifest.fragment.xml` is not wired into
+`setup-kokoro.ps1`, and its referenced accessory-filter XML resource is not
+packaged. The independent appliance currently admits only `status` at its
+startup expression boundary. None of these parts yet proves a release AOA
+pipe. The Windows client currently asks `UsbAoa.ps1` to stop ADB when starting
+accessory mode; determine whether that is necessary on each supported Windows
+configuration, and do not make it a default product requirement.
+
+- [ ] Add the accessory declaration, filter resource, and package-level gate
+  to the NativeActivity build. On attachment or startup, obtain Android's
+  accessory permission and descriptor through the narrow source-defined JNI
+  boundary; hand bounded reads and writes to PowerShell. Test attach,
+  already-attached, denial, detach, and process restart on each device.
+- [ ] Turn the existing framing into a versioned, bidirectional session with
+  correlation IDs, bounded binary chunks, cancellation, backpressure,
+  timeouts, reconnect, and structured errors. Android-initiated events and
+  Windows-initiated requests must both work without ADB in the data path.
+- [ ] Expose a PowerShell-native Windows facade for connection, typed speech
+  requests, receipts, model transfer, and optional PCM playback through
+  WASAPI. Keep USB transport and synthesis semantics separate.
+- [ ] Admit remote script updates only as authenticated, signed, bounded
+  artifacts in private app storage. Validate identity and AST before an
+  authorized runspace executes the admitted file; never evaluate request
+  text as PowerShell or turn accessory permission into unrestricted eval.
+- [ ] Prove accessory permission and bidirectional `status`/event exchange on
+  the independent APK, then the same genuine speech request as the ADB demo.
+  Test disconnect/reconnect and the Windows USB driver-binding path on a
+  clean machine. Verify that neither `adb.exe` nor an ADB server participates
+  in the AOA data path; debugging-off may be a final independence check, not
+  a routine development condition.
 - [ ] After the speech path reaches the facade boundary, stop for integration
   review before expanding to multiple Activities, Surface, or a chat demo.
   The language-model demo is not a Kokoro synthesis prerequisite.
