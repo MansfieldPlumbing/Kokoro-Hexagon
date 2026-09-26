@@ -215,10 +215,10 @@ and its directly emitted backend remain to be built.
   numerical differential. The post-ALBERT `bert_encoder` 768-to-512 linear
   primitive is also gated. See `docs/receipts/albert-fp32-reference-20260926.md`.
 - [ ] Complete the stock ALBERT numerical differential and connect its output
-  to duration-encoder and text-encoder branches. Then integrate the shared
-  LSTM and duration projection, and implement the missing F0/N, source
-  excitation, remaining decoder blocks, and waveform synthesis. Do not start further
-  Hexagon lowering to substitute for these missing model computations.
+  to duration-encoder and text-encoder branches. Then integrate F0/N with
+  the aligned duration branch, source excitation, remaining decoder blocks,
+  and waveform synthesis. Do not start further Hexagon lowering to substitute
+  for these missing model computations.
 - [x] Add bounded PowerShell FP32 references for the shared one-layer
   bidirectional LSTM gate equations and reverse-direction layout, plus the
   stock 512-to-50 duration projection connected to the existing frame map.
@@ -239,6 +239,13 @@ and its directly emitted backend remain to be built.
   reference. Full-length numerical parity and the text-to-aligned-ASR
   integration remain open; see
   `docs/receipts/text-encoder-fp32-reference-20260926.md`.
+- [x] Compose the stock F0/N shared LSTM, both three-block AdaIN heads,
+  transposed-convolution middle upsample, channel-changing shortcut, and
+  one-channel projections as a bounded PowerShell FP32 reference. Analytic
+  upsample/shortcut tests and a pinned-checkpoint two-frame shape/finite gate
+  pass. The duration-to-F0/N connection and numerical parity remain open;
+  this is not yet PCM. See
+  `docs/receipts/f0n-branch-fp32-reference-20260926.md`.
 - [ ] Lower a complete FP32 path without QNN, Python, or LLVM in the build or
   device execution graph. Prove each promoted block against the pinned oracle
   and preserve a same-input/same-weight baseline before changing precision.
