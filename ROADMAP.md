@@ -92,6 +92,10 @@ and its directly emitted backend remain to be built.
 - [ ] Determine why the S23 response-read interval is longer with the same
   fresh worker. Establish the queue signaling mode and controlled latency
   breakdown before attributing the gap to kernel, firmware, or hypervisor.
+  A source-defined capability probe now reports signaling-performance level
+  1000 on both devices; this does not identify the actual driver-signaling
+  branch or explain the response-read split. See
+  `docs/receipts/dspqueue-capability-comparison-20260926.md`.
 - [x] Recover the historical DSPQueue diagnostic scripts and receipts from
   both installed diagnostic apps without rerunning them. Both current echo
   receipts pass, but the scripts differ, use `libcdsprpc.so`, and are not

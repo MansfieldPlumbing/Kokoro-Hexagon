@@ -1,10 +1,17 @@
 #requires -Version 7.4
 # Re-run an already installed diagnostic probe; never use for product closure.
 [CmdletBinding()]
-param([Parameter(Mandatory)][ValidateSet('Razr', 'S23')][string]$Device)
+param(
+    [Parameter(Mandatory)][ValidateSet('Razr', 'S23')][string]$Device,
+    [ValidateSet('Echo', 'Capabilities')][string]$Probe = 'Echo'
+)
 $ErrorActionPreference = 'Stop'
 $package = 'dev.mansfieldplumbing.androidsma.preview'
-$scriptPath = 'files/kokoro-fl/dspqueue-echo/DspQueueEchoProbe.ps1'
+$scriptPath = if ($Probe -eq 'Capabilities') {
+    'files/kokoro-fl/dspqueue-echo/Get-DspQueueCapabilities.ps1'
+} else {
+    'files/kokoro-fl/dspqueue-echo/DspQueueEchoProbe.ps1'
+}
 $receiptPath = 'files/kokoro-fl/dspqueue-echo/receipt.txt'
 $serials = @(& adb devices | Where-Object { $_ -match '^\S+\s+device$' } |
     ForEach-Object { ($_ -split '\s+')[0] })
@@ -43,7 +50,7 @@ try {
         Start-Sleep -Seconds 2
         $newReceipt = @(& $run @('shell', 'run-as', $package, 'cat', $receiptPath))
     } while (($newReceipt -join "`n") -notmatch '(?m)^Passed=' -and $watch.Elapsed.TotalSeconds -lt 90)
-    $allowed = '^(Job|UnsignedPdRc|CreateRc|ExportRc|OpenRc|StartRc|Packets|WarmMedianUs|WarmP95Us|WriteMedianUs|ReadMedianUs|ExplicitRemoteInvokesDuringPackets|PollPackets|PollWarmMedianUs|PollReadAttemptsMedian|SynchronousWarmMedianUs|SynchronousWarmP95Us|ExplicitRemoteInvokesForSynchronousBaseline|StopRc|RecoveryStopRc|HandleCloseRc|QueueCloseRc|Passed|Error|At)='
+    $allowed = '^(Job|UnsignedPdRc|CreateRc|ExportRc|OpenRc|StartRc|Packets|WarmMedianUs|WarmP95Us|WriteMedianUs|ReadMedianUs|ExplicitRemoteInvokesDuringPackets|PollPackets|PollWarmMedianUs|PollReadAttemptsMedian|SynchronousWarmMedianUs|SynchronousWarmP95Us|ExplicitRemoteInvokesForSynchronousBaseline|SignalingPerfRc|SignalingPerf|DspSignalRc|DspSignal|DriverSignalRc|DriverSignal|FastrpcCapabilityProbeUnavailable|StopRc|RecoveryStopRc|HandleCloseRc|QueueCloseRc|Passed|Error|At)='
     $fields = @($newReceipt | Where-Object { $_ -match $allowed })
     "Device=$Device"
     "ElapsedSeconds=$([Math]::Round($watch.Elapsed.TotalSeconds, 1))"
