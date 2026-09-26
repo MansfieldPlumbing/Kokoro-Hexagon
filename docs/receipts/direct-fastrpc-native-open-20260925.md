@@ -36,7 +36,9 @@ The result does not distinguish app SELinux policy from other access controls
 or establish a permitted CDSP session API.
 No private vendor ABI is inferred from binaries. The existing `libcdsprpc.so`
 diagnostic path is separate evidence for the emitted kernel, not a product
-transport. The product path remains direct, source-defined FastRPC ioctls and
-memory mapping. A source-matched CDSP descriptor route has not yet been
-established on these phones. No claim is made about the vendor library's internal
-implementation or about an undocumented HAL fallback.
+transport. Direct, source-defined FastRPC ioctls and memory mapping remained
+a candidate after this probe, not an established product requirement. A
+source-matched CDSP descriptor route has not yet been established on these
+phones. No claim is made about the vendor library's internal implementation
+or about an undocumented HAL fallback. The later transport evidence ledger
+separates this failed probe from the owner's reported Razr+ bypass test.

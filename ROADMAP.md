@@ -71,18 +71,23 @@ and its directly emitted backend remain to be built.
   and executes a native call in a clean process.
 - [x] Remove the managed Android descriptor/reflection dependency from the
   direct FastRPC ioctl probe. It now reaches libc through `Native.Binding`.
-- [ ] Implement the source-defined FastRPC ioctl and memory-mapping path
-  directly, without `libcdsprpc.so`, a vendor HAL client, or a QNN component
-  in the product. The existing `libcdsprpc.so`-mediated R0Sub0 runs remain
-  reference evidence for the emitted kernel only; they do not validate the
-  product transport. The present raw-open probe targets an ADSP-named node,
-  not a proved CDSP session. Its `EACCES` result on both app sandboxes is a
-  failed probe, not a verdict on the CDSP design. Trace the actual device
-  routing and permissions to source matched to each phone, then obtain a
-  permitted CDSP descriptor and prove the direct ioctl path; do not bypass
-  the app sandbox or infer an ABI from binaries. See
-  `docs/receipts/direct-fastrpc-native-open-20260925.md` and
-  `docs/receipts/r0sub0-cross-soc-20260924.md`.
+- [ ] Locate and audit the separately reported transport-bypass smoke test:
+  it succeeded on the Razr+ with a reported roughly twofold speedup and failed
+  on the S23. Its artifact, transport, privilege context, workload, comparator,
+  and S23 failure stage have not been identified in this checkout. Do not
+  conflate it with the checked-in R0Sub0 benchmark:
+  that benchmark measured a 2.286–2.302x DSP-tick improvement over LLVM on
+  SM8635 while both kernels were invoked through FastRPC. See
+  `docs/receipts/transport-evidence-ledger-20260926.md`.
+- [ ] Establish the lowest source-defined CDSP communication path available
+  to the intended app on each device; FastRPC is one candidate, not a required
+  architecture. Keep QNN and vendor userspace RPC libraries out of the product.
+  The current direct-FastRPC raw-open probe targets an ADSP-named node and
+  returned `EACCES` in both app sandboxes; it did not test a CDSP session or
+  the separately reported bypass route. Trace routing, permissions, memory
+  sharing, invocation, and teardown to device-matched source before promoting
+  a transport. Do not bypass the app sandbox or infer an ABI from binaries.
+  See `docs/receipts/direct-fastrpc-native-open-20260925.md`.
 - [x] Implement signed, transactional model admission for private app storage.
   `Model.Store.psm1` validates manifest signature and compatibility, streams
   through bounded hashing, inspects managed metadata without loading code,

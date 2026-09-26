@@ -123,5 +123,13 @@ directly emitted Hexagon code to audible PCM on the physical device.
   a reference recording or prepared QNN context is not a substitute.
 - Keep SM8550 and SM8635 results separate; do not infer cross-ASIC portability
   from an ISA-subset argument alone.
+- Do not treat FastRPC as the required or lowest CDSP transport. The recorded
+  SM8635 R0Sub0 result is an emitted-kernel comparison invoked through
+  FastRPC, not evidence that FastRPC was bypassed. The owner has reported a
+  separate transport-bypass smoke test that succeeded on the Razr+ but failed
+  on the S23; its artifact and failure stage are not yet identified in this
+  checkout. Recover and trace that test before making transport or speedup
+  claims about it; keep its privilege context and comparator distinct from
+  the R0Sub0 benchmark.
 - Preserve user changes, back up before overwriting, and obtain explicit
   approval before deletion, history rewrite, or push.

@@ -1,0 +1,16 @@
+# CDSP transport evidence ledger — 2026-09-26
+
+This ledger distinguishes code-execution, transport, and performance claims.
+It does not select a product transport.
+
+| Evidence | Established | Not established |
+| --- | --- | --- |
+| `r0sub0-cross-soc-20260924.md` | The same emitted R0Sub0 kernel ran on SM8550 and SM8635. On SM8635 its DSP-tick median was 2.286–2.302x faster than the LLVM comparison kernel; both were invoked through `libcdsprpc.so`. | A FastRPC bypass, a complete model, or a whole-path speech speedup. |
+| `direct-fastrpc-native-open-20260925.md` | A direct libc open of an ADSP-named node returned `EACCES` in both tested app sandboxes. | CDSP access through that node, another node, or a lower transport. |
+| Owner-reported cross-device smoke test | The owner reports that a separate FastRPC-bypass test succeeded on the Razr+ with roughly twofold speedup and failed on the S23. | The artifact, mechanism, privilege context, workload, comparator, S23 failure stage, and reproducibility are not yet identified in this checkout. |
+
+Next evidence action: locate the reported smoke-test artifact or immutable
+source revision, then record its exact execution path, device context,
+comparator, measured quantity, and first failing stage on the S23. Keep it
+separate from the R0Sub0 receipt.
+Do not infer that FastRPC is mandatory or that a kernel modification is needed.

@@ -27,8 +27,8 @@ try {
     $open = & $binding.BindExport $native 'open' ([int]) ([Type[]]@([IntPtr], [int], [int])) $true
     $close = & $binding.BindExport $native 'close' ([int]) ([Type[]]@([int])) $true
 
-    # This is the only exposed non-secure FastRPC node on the current devices.
-    # A successful open would not by itself establish a CDSP session.
+    # This probe targets an observed ADSP-named node, not a CDSP transport.
+    # Its result does not establish whether another permitted route exists.
     $devicePath = $M::StringToHGlobalAnsi('/dev/adsprpc-smd')
     $fd = [int]$open.DynamicInvoke([object[]]@($devicePath, 0, 0)) # O_RDONLY
     $openError = $M::GetLastPInvokeError()

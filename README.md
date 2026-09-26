@@ -67,6 +67,7 @@ and `src/runspace/Qnn.*` paths are not the product pipeline.
 | Path | Role |
 | --- | --- |
 | `ROADMAP.md` | Canonical gates and checked status. |
+| `docs/receipts/transport-evidence-ledger-20260926.md` | Separates FastRPC-mediated kernel results, the failed raw-open probe, and the reported cross-device bypass test. |
 | `New-KokoroDecoderGraph.ps1` | Current parsed, two-node decoder contract; incomplete. |
 | `setup-kokoro.ps1` | Unofficial Pwsh-builder fork for the model-less APK/managed host; does not synthesize speech. |
 | `src/runspace/Native.Binding.psm1` | QNN-independent native export binding used by AAudio and direct probes. |
