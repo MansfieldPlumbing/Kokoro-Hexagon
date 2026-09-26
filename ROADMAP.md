@@ -149,6 +149,12 @@ and its directly emitted backend remain to be built.
   instance-normalization affine, and the style affine. The style projection,
   surrounding convolutions, graph wiring, and emitted normalization remain
   open; this scalar stage is not a speech or performance claim.
+- [x] Represent the stock duration-to-frame alignment as a bounded index map
+  instead of allocating its dense one-hot matrix. `New-KokoroDurationMap.ps1`
+  and `Expand-KokoroAlignedFeatures.ps1` gate duration reduction, ties-to-even
+  rounding, minimum one-frame clamp, and channel-first gather in
+  `tools/Test-KokoroDurationMap.ps1`. A numerical oracle comparison near
+  duration half-integers and integration with the predictor remain open.
 - [ ] Author the full stock computation from admitted phoneme IDs and the
   selected voice row through ALBERT, text encoder, duration, F0/N, harmonic
   source, decoder, iSTFT, and PCM. Replace the opaque prepared-input boundary
