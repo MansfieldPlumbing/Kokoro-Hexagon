@@ -178,6 +178,16 @@ and its directly emitted backend remain to be built.
   `tools/Test-KokoroAdaInCheckpoint.ps1` validates every parameter shape for
   the pinned `generator.resblocks.3` block. No stock numerical parity or
   direct Hexagon execution is claimed for the composed block yet.
+- [ ] Before lowering the composed block, compare its PowerShell FP32 output
+  with a QNN reference run on the same pinned checkpoint weights, style,
+  input, valid-frame mask, and block shape. Gate valid-frame error and SNR;
+  record precision and mask differences rather than demanding bit identity.
+  The existing S23 `r0` diagnostic fixture is 128 channels by 7,681 frames,
+  beyond the bounded scalar runner. Use a smaller same-shape-contract QNN
+  fixture or a verified faster PowerShell reference before this gate can pass.
+  The historical 62.10 dB `r0` receipt compares QNN's own emitted graph to
+  its reference, not this PowerShell block. Do not start direct lowering from
+  that receipt alone.
 - [x] Represent the stock duration-to-frame alignment as a bounded index map
   instead of allocating its dense one-hot matrix. `New-KokoroDurationMap.ps1`
   and `Expand-KokoroAlignedFeatures.ps1` gate duration reduction, ties-to-even
@@ -203,6 +213,12 @@ and its directly emitted backend remain to be built.
   DLL to audible PCM. Record per-stage hashes, cold/warm latency, underruns,
   output duration, and a listening result. A reference recording or prepared
   acoustic-input fixture does not satisfy this gate.
+- [ ] Use the existing QNN speech path only as a differential oracle for the
+  same admitted phonemes, voice row, speed, and checkpoint. Compare duration,
+  aligned PCM, acoustic-stage tensors where available, and listening results.
+  Record its FP16/prepared-context and inverse-STFT differences explicitly;
+  do not copy its contexts, libraries, or outputs into the product path or
+  infer stock parity from an audible QNN phrase alone.
 
 The first audible gate accepts admitted phonemes, not arbitrary text. It is
 blocked today by the absent full computation and QNN-free execution path, not
