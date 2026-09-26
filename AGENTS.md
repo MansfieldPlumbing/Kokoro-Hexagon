@@ -131,5 +131,10 @@ directly emitted Hexagon code to audible PCM on the physical device.
   checkout. Recover and trace that test before making transport or speedup
   claims about it; keep its privilege context and comparator distinct from
   the R0Sub0 benchmark.
+- DSPQueue-style shared-memory dispatch is a candidate, not a proved phone
+  path. Distinguish one-time FastRPC bootstrap from per-job signaling and
+  queue traffic; the pinned upstream fallback can signal through FastRPC.
+  Do not claim Queue Monitor support, a 0.1 ms dispatch, or a Razr+/S23 cause
+  without a same-artifact physical receipt.
 - Preserve user changes, back up before overwriting, and obtain explicit
   approval before deletion, history rewrite, or push.

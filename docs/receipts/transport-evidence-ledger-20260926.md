@@ -8,6 +8,7 @@ It does not select a product transport.
 | `r0sub0-cross-soc-20260924.md` | The same emitted R0Sub0 kernel ran on SM8550 and SM8635. On SM8635 its DSP-tick median was 2.286–2.302x faster than the LLVM comparison kernel; both were invoked through `libcdsprpc.so`. | A FastRPC bypass, a complete model, or a whole-path speech speedup. |
 | `direct-fastrpc-native-open-20260925.md` | A direct libc open of an ADSP-named node returned `EACCES` in both tested app sandboxes. | CDSP access through that node, another node, or a lower transport. |
 | Owner-reported cross-device smoke test | The owner reports that a separate FastRPC-bypass test succeeded on the Razr+ with roughly twofold speedup and failed on the S23. | The artifact, mechanism, privilege context, workload, comparator, S23 failure stage, and reproducibility are not yet identified in this checkout. |
+| Pinned Qualcomm DSPQueue source | Defines a QNN-independent shared-memory queue layout, a FastRPC queue bootstrap, and driver-signaling capability checks. See `dspqueue-upstream-audit-20260926.md`. | Use of this mechanism in the reported phone tests, Queue Monitor availability on either phone, and a universal no-ioctl-per-job path. |
 
 Next evidence action: locate the reported smoke-test artifact or immutable
 source revision, then record its exact execution path, device context,

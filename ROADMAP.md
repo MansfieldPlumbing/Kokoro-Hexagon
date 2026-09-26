@@ -79,6 +79,13 @@ and its directly emitted backend remain to be built.
   that benchmark measured a 2.286–2.302x DSP-tick improvement over LLVM on
   SM8635 while both kernels were invoked through FastRPC. See
   `docs/receipts/transport-evidence-ledger-20260926.md`.
+- [ ] Evaluate a persistent shared-memory DSPQueue-style dispatch path as a
+  QNN-independent candidate. The pinned public source defines queue layout,
+  FastRPC bootstrap, and signaling alternatives; it does not prove Queue
+  Monitor support or the reported device result. Recover the prior test,
+  identify its bootstrap and signal mode, then validate the same emitted
+  worker and queue protocol on both devices before promotion. See
+  `docs/receipts/dspqueue-upstream-audit-20260926.md`.
 - [ ] Establish the lowest source-defined CDSP communication path available
   to the intended app on each device; FastRPC is one candidate, not a required
   architecture. Keep QNN and vendor userspace RPC libraries out of the product.
