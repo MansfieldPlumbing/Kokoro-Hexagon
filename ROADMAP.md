@@ -137,6 +137,12 @@ and its directly emitted backend remain to be built.
 
 ## Next: live synthesis, before quantization
 
+- [x] Re-author the stock default generator-head inverse STFT as a bounded
+  PowerShell FP32 PCM stage. `src/models/ConvertTo-KokoroPcm.ps1` implements
+  one-sided inverse DFT, periodic Hann overlap-add, centered crop, and
+  squared-window normalization. `tools/Test-KokoroPcm.ps1` gates the envelope,
+  padded frames, output length, and non-finite input. This is an isolated
+  scalar stage, not live speech or the optimized Hexagon path.
 - [ ] Author the full stock computation from admitted phoneme IDs and the
   selected voice row through ALBERT, text encoder, duration, F0/N, harmonic
   source, decoder, iSTFT, and PCM. Replace the opaque prepared-input boundary
@@ -220,6 +226,15 @@ PowerShell-to-Hexagon execution described above.
 - [ ] Stream narrative, technical, and metered passages on both devices with
   bounded look-ahead and no per-chunk model reload. Measure inter-chunk gaps,
   real-time factor, peak memory, and completion/drain state.
+- [ ] Compare exact full-utterance scheduling against legal-boundary segment
+  scheduling on the same inputs. Stock `AdaIN1d` uses `InstanceNorm1d` without
+  running statistics, so each channel's mean and variance depend on its full
+  input time axis even in inference (Kokoro `istftnet.py:20-31`; PyTorch
+  `instancenorm.py`, pinned source revisions in the PCM stage). Test tiled
+  reductions and fused normalization/affine within each block, but do not
+  substitute online or per-chunk statistics and call them stock-equivalent.
+  Record time-to-first-audio, total latency, quality, and peak memory before
+  choosing the faster production schedule.
 
 ## Precision and backend promotion
 
