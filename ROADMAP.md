@@ -169,8 +169,15 @@ and its directly emitted backend remain to be built.
   dilation, and same-length zero padding. `Invoke-KokoroAdaInConv1d.ps1` and
   `tools/Test-KokoroAdaInConv1d.ps1` cover an analytic case; the pinned
   checkpoint gate covers one block's real weights and impulse response.
-  This bounded scalar reference is not the full residual block or emitted
-  fast path; a full numerical oracle comparison remains open.
+  This bounded scalar reference is not the emitted fast path; a full numerical
+  oracle comparison remains open.
+- [x] Compose one complete three-pass AdaIN residual block from named style
+  projection, full-time normalization, Snake1D, weight-normalized Conv1D,
+  and residual addition. `Invoke-KokoroAdaInResBlock1.ps1` and
+  `tools/Test-KokoroAdaInResBlock1.ps1` gate a deterministic reference case;
+  `tools/Test-KokoroAdaInCheckpoint.ps1` validates every parameter shape for
+  the pinned `generator.resblocks.3` block. No stock numerical parity or
+  direct Hexagon execution is claimed for the composed block yet.
 - [x] Represent the stock duration-to-frame alignment as a bounded index map
   instead of allocating its dense one-hot matrix. `New-KokoroDurationMap.ps1`
   and `Expand-KokoroAlignedFeatures.ps1` gate duration reduction, ties-to-even

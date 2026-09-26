@@ -18,6 +18,25 @@ if ((Get-Item -LiteralPath $path).Length -ne [long]$pin[0].bytes -or
 $readerPath = Join-Path $root 'src/runspace/Torch.Checkpoint.psm1'
 $reader = [scriptblock]::Create([IO.File]::ReadAllText($readerPath)).InvokeReturnAsIs()
 $checkpoint = & $reader.Read $path
+$blockPrefix = 'decoder.module.generator.resblocks.3.'
+for ($pass = 0; $pass -lt 3; $pass++) {
+    foreach ($side in 1, 2) {
+        $shapes = @{
+            "adain$side.$pass.fc.weight" = '256,128'
+            "adain$side.$pass.fc.bias" = '256'
+            "alpha$side.$pass" = '1,128,1'
+            "convs$side.$pass.weight_v" = '128,128,3'
+            "convs$side.$pass.weight_g" = '128,1,1'
+            "convs$side.$pass.bias" = '128'
+        }
+        foreach ($suffix in $shapes.Keys) {
+            $tensor = $checkpoint.Tensors[$blockPrefix + $suffix]
+            if ($null -eq $tensor -or ($tensor.Shape -join ',') -cne $shapes[$suffix]) {
+                throw 'Stock AdaIN residual block parameter shape differs.'
+            }
+        }
+    }
+}
 $prefix = 'decoder.module.generator.resblocks.3.adain1.0.'
 $weightName = $prefix + 'fc.weight'
 $biasName = $prefix + 'fc.bias'
@@ -85,4 +104,4 @@ foreach ($channel in @(0, 1, 127)) {
     }
 }
 
-Write-Output 'PASS: pinned stock AdaIN tensors, identity norm, style projection, Conv1D impulse'
+Write-Output 'PASS: pinned stock AdaIN residual block shapes, identity norm, style projection, Conv1D impulse'

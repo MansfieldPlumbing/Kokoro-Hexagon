@@ -36,4 +36,11 @@ try {
 } catch { $rejected = $true }
 if (-not $rejected) { throw 'AdaIN accepted a non-finite input.' }
 
+$rejected = $false
+try {
+    $null = & $stage -InputTensor ([float[]]@(1)) -Frames 1 -Channels 1 `
+        -Gain ([float[]]@(1)) -Shift ([float[]]@(0))
+} catch { $rejected = $true }
+if (-not $rejected) { throw 'AdaIN accepted one temporal element despite input-statistics mode.' }
+
 Write-Output 'PASS: AdaIN population variance, affine, constant channel, finite-input gate'
