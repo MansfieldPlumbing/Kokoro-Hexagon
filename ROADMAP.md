@@ -78,6 +78,11 @@ and its directly emitted backend remain to be built.
   that benchmark measured a 2.286–2.302x DSP-tick improvement over LLVM on
   SM8635 while both kernels were invoked through FastRPC. See
   `docs/receipts/transport-evidence-ledger-20260926.md`.
+- [ ] Reproduce the historical ~0.1 ms Razr+ diagnostic echo and then compare
+  the same worker on S23. The live rerun currently reaches queue import on
+  both phones but expires on the first response with worker status error 14;
+  no latency sample completed. The original custom worker source/build recipe
+  is missing. See `docs/receipts/dspqueue-live-reproduction-20260926.md`.
 - [x] Recover the historical DSPQueue diagnostic scripts and receipts from
   both installed diagnostic apps without rerunning them. Both current echo
   receipts pass, but the scripts differ, use `libcdsprpc.so`, and are not
