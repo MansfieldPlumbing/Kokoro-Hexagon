@@ -256,15 +256,15 @@ and its directly emitted backend remain to be built.
   references: F0/N stride-two convolution, aligned text residual, encode
   AdaIN block, three same-rate decode blocks, and the final upsample block.
   Analytic layout/shortcut gates and pinned-checkpoint two-frame shape/finite
-  gates pass. This produces 512-channel generator features, not PCM; source
-  excitation, generator residual blocks, and iSTFT remain. See
+  gates pass. This produces 512-channel generator features, not PCM; the
+  learned generator remains to be composed. See
   `docs/receipts/decoder-core-fp32-reference-20260926.md`.
 - [x] Re-author the configured generator's stochastic harmonic source and
   20-point, hop-5 centered Hann STFT/iSTFT as bounded PowerShell FP32
   references. Analytic phase/voicing and spectral gates, stock source-weight
-  shape/finite gates, and a controlled-source round trip above 90 dB SNR
-  pass. Learned generator upsampling, noise convolutions, AdaIN/Snake
-  residual blocks, and final spectrogram projection remain before PCM.
+  shape/finite gates, a controlled-source round trip above 90 dB SNR, and
+  the connected 22-channel source-spectrum prelude gate pass. Full learned
+  generator composition and final spectrogram projection remain before PCM.
   See `docs/receipts/generator-source-stft-fp32-reference-20260926.md`.
 - [x] Preserve the existing bounded PowerShell AdaIN/Snake residual block
   and add both weight-normalized transposed-convolution upsamplers and both
@@ -340,6 +340,12 @@ PowerShell-to-Hexagon execution described above.
 
 ## Text and utterance planning
 
+- [x] Audit sherpa-onnx's pinned Kokoro callback/playback path as a
+  scheduling reference. It invokes the callback only after each complete
+  sentence/token-limited model run, not from within one running model. Keep
+  its ONNX/runtime/frontend implementation out of the product. Do not copy
+  the example's unbounded playback queue or per-callback allocations. See
+  `docs/receipts/sherpa-onnx-kokoro-streaming-audit-20260926.md`.
 - [ ] Re-author the admitted English text-to-phoneme behavior in PowerShell
   and lower deterministic scanners/tries/tables into the model DLL. Use pinned
   Kokoro/Misaki and `MisakiSharp` only as differential oracles. Preserve source
@@ -355,8 +361,12 @@ PowerShell-to-Hexagon execution described above.
   duration from speaker tests; the current frames-per-character estimate is
   not an admission criterion.
 - [ ] Stream narrative, technical, and metered passages on both devices with
-  bounded look-ahead and no per-chunk model reload. Measure inter-chunk gaps,
-  real-time factor, peak memory, and completion/drain state.
+  bounded look-ahead and no per-chunk model reload. Keep a resident AAudio
+  stream and a capacity-bounded PCM handoff between synthesis and playback;
+  no allocation, conversion, logging, or wait belongs in an audio callback.
+  Measure inter-chunk gaps, real-time factor, peak memory, queue occupancy,
+  underruns, and completion/drain state. A completed-segment callback must
+  not be reported as intra-model streaming.
 - [ ] Compare exact full-utterance scheduling against legal-boundary segment
   scheduling on the same inputs. Stock `AdaIN1d` uses `InstanceNorm1d` without
   running statistics, so each channel's mean and variance depend on its full

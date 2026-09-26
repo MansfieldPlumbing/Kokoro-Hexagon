@@ -98,5 +98,20 @@ if ($CheckpointPath) {
     }
     $snr = 10 * [Math]::Log10($signalEnergy / [Math]::Max($errorEnergy, 1e-30))
     if ($snr -lt 90) { throw 'Stock source STFT round-trip SNR is below 90 dB.' }
+    $prelude = & (Join-Path $root 'src/models/Invoke-KokoroGeneratorPrelude.ps1') `
+        -F0 $args.F0 -SourceMergeWeights $stockWeights `
+        -SourceMergeBias $stockBias -InitialPhase $phaseA `
+        -HarmonicGaussian $draws -NoiseGaussian $args.NoiseGaussian
+    if ($prelude.F0Frames -ne 2 -or $prelude.ExcitationSamples -ne 600 -or
+        $prelude.SpectrumFrames -ne 121 -or
+        $prelude.SourceSpectrum.Length -ne 22 * 121) {
+        throw 'Stock generator source prelude dimensions differ.'
+    }
+    for ($i = 0; $i -lt 11 * 121; $i++) {
+        if ($prelude.SourceSpectrum[$i] -ne $spectrum.Magnitude[$i] -or
+            $prelude.SourceSpectrum[11 * 121 + $i] -ne $spectrum.Phase[$i]) {
+            throw 'Generator source spectrum channel layout differs.'
+        }
+    }
 }
-Write-Output 'PASS: sine source analytic phase/voicing and optional stock-weight gate'
+Write-Output 'PASS: sine source analytic phase/voicing and optional stock spectrum prelude'

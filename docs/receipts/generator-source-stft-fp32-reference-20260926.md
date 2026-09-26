@@ -5,7 +5,9 @@ The bounded PowerShell reference now implements Kokoro's nine-harmonic
 and the configured 20-point, hop-5, centered Hann STFT and iSTFT. Supplied
 random draws permit reproducible correctness gates; omitted draws use fresh
 uniform and Gaussian samples. The source is not a replacement for the learned
-generator and does not independently produce Kokoro speech.
+generator and does not independently produce Kokoro speech. The connected
+generator prelude assembles magnitude followed by phase into the stock
+22-channel spectrum supplied to both noise-convolution stages.
 
 Source identity: Kokoro `dfb907a02bba8152ca444717ca5d78747ccb4bec`,
 `kokoro/istftnet.py` (`SineGen`, `SourceModuleHnNSF`, `TorchSTFT`, `Generator`)
@@ -23,6 +25,7 @@ Executable gates:
   -CheckpointPath <pinned checkpoint>`: analytic phase interpolation and
   voicing, digest-verified stock merge weights, deterministic 600-sample
   source, 121-frame spectrum, and source/STFT inverse above 90 dB SNR — pass.
+  The same gate checks the connected prelude's channel layout and frame count.
 
 At the configured 300× upsample, the source's random phase added at
 full-rate sample zero is discarded by subsequent half-pixel linear
