@@ -252,6 +252,13 @@ and its directly emitted backend remain to be built.
   also has its own gate. This does not establish 12-repeat/full-layer
   numerical parity, normal-speed execution, decoder output, or PCM. See
   `docs/receipts/acoustic-branches-fp32-reference-20260926.md`.
+- [x] Author the decoder prelude and core as bounded PowerShell FP32
+  references: F0/N stride-two convolution, aligned text residual, encode
+  AdaIN block, three same-rate decode blocks, and the final upsample block.
+  Analytic layout/shortcut gates and pinned-checkpoint two-frame shape/finite
+  gates pass. This produces 512-channel generator features, not PCM; source
+  excitation, generator residual blocks, and iSTFT remain. See
+  `docs/receipts/decoder-core-fp32-reference-20260926.md`.
 - [ ] Lower a complete FP32 path without QNN, Python, or LLVM in the build or
   device execution graph. Prove each promoted block against the pinned oracle
   and preserve a same-input/same-weight baseline before changing precision.

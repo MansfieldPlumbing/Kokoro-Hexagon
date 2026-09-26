@@ -7,7 +7,7 @@
 param(
     [Parameter(Mandatory)][float[]] $InputTensor,
     [Parameter(Mandatory)][ValidateRange(1, 32768)][int] $Frames,
-    [Parameter(Mandatory)][ValidateRange(1, 1024)][int] $InputChannels,
+    [Parameter(Mandatory)][ValidateRange(1, 2048)][int] $InputChannels,
     [Parameter(Mandatory)][ValidateRange(1, 1024)][int] $OutputChannels,
     [Parameter(Mandatory)][ValidateRange(1, 31)][int] $KernelSize,
     [Parameter(Mandatory)][ValidateRange(1, 32)][int] $Dilation,

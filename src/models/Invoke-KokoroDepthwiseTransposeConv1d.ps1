@@ -11,7 +11,7 @@ param(
     [Parameter(Mandatory)][float[]] $WeightG,
     [Parameter(Mandatory)][float[]] $Bias,
     [Parameter(Mandatory)][ValidateRange(1, 32768)][int] $Frames,
-    [Parameter(Mandatory)][ValidateRange(1, 1024)][int] $Channels
+    [Parameter(Mandatory)][ValidateRange(1, 2048)][int] $Channels
 )
 
 $ErrorActionPreference = 'Stop'

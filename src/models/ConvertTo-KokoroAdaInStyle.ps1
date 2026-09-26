@@ -8,7 +8,7 @@ param(
     [Parameter(Mandatory)][float[]] $Style,
     [Parameter(Mandatory)][float[]] $Weights,
     [Parameter(Mandatory)][float[]] $Bias,
-    [Parameter(Mandatory)][ValidateRange(1, 1024)][int] $Channels
+    [Parameter(Mandatory)][ValidateRange(1, 2048)][int] $Channels
 )
 
 $ErrorActionPreference = 'Stop'

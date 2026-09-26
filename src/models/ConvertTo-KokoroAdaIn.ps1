@@ -12,7 +12,7 @@
 param(
     [Parameter(Mandatory)][float[]] $InputTensor,
     [Parameter(Mandatory)][ValidateRange(2, 32768)][int] $Frames,
-    [Parameter(Mandatory)][ValidateRange(1, 1024)][int] $Channels,
+    [Parameter(Mandatory)][ValidateRange(1, 2048)][int] $Channels,
     [float[]] $NormWeight,
     [float[]] $NormBias,
     [Parameter(Mandatory)][float[]] $Gain,
