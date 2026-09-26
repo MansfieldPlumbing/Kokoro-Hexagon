@@ -26,6 +26,12 @@ fulfill the mission. A live-speech claim requires one PowerShell-authored path
 from admitted phonemes and verified stock weights through the full model and
 directly emitted Hexagon code to audible PCM on the physical device.
 
+Complete and verify the stock PowerShell phoneme-to-PCM computation before
+lowering more of it to Hexagon. Lowering is the optimization phase, not a way
+to fill missing ALBERT, duration, F0/N, decoder, or waveform semantics. Keep
+bounded FP32 correctness references and their gates separate from device
+benchmarks and from claims of audible speech.
+
 ## Governing objective: PowerShell end to end
 
 - PowerShell 7 is the authored implementation language and control plane from
