@@ -146,9 +146,14 @@ and its directly emitted backend remain to be built.
 - [x] Establish the full-span AdaIN normalization contract before the emitted
   affine subgraph. `src/models/ConvertTo-KokoroAdaIn.ps1` and
   `tools/Test-KokoroAdaIn.ps1` gate population variance, epsilon, the learned
-  instance-normalization affine, and the style affine. The style projection,
-  surrounding convolutions, graph wiring, and emitted normalization remain
-  open; this scalar stage is not a speech or performance claim.
+  instance-normalization affine, and the style affine. Surrounding
+  convolutions, graph wiring, and emitted normalization remain open; this
+  scalar stage is not a speech or performance claim.
+- [x] Connect the style vector to that AdaIN reference stage through the stock
+  linear gamma/beta projection. `ConvertTo-KokoroAdaInStyle.ps1` and
+  `tools/Test-KokoroAdaInStyle.ps1` gate row-major weight layout, the
+  `1 + gamma` gain, beta shift, and composition with normalization. The actual
+  checkpoint tensors and emitted execution path remain to be connected.
 - [x] Represent the stock duration-to-frame alignment as a bounded index map
   instead of allocating its dense one-hot matrix. `New-KokoroDurationMap.ps1`
   and `Expand-KokoroAlignedFeatures.ps1` gate duration reduction, ties-to-even
@@ -247,6 +252,22 @@ PowerShell-to-Hexagon execution described above.
   substitute online or per-chunk statistics and call them stock-equivalent.
   Record time-to-first-audio, total latency, quality, and peak memory before
   choosing the faster production schedule.
+- [ ] Once a complete speech path exists, compare a short first legal
+  prosodic segment followed by duration-sized steady segments against uniform
+  segmentation. Select boundaries from admitted tokens and measured/predicted
+  duration, not fixed word or syllable counts. A segment cut changes AdaIN
+  statistics and may change prosody; record listening results, first-audio
+  latency, inter-segment gaps, total synthesis time, underruns, and memory on
+  each device. Keep the model resident and the audio queue bounded. The
+  historical 768-frame AAudio capacity is not a 500-ms hardware buffer.
+- [ ] Evaluate startup scheduling only behind source-defined and physical
+  gates: a reversible direct-path DSP/DDR performance vote, user-PD VTCM
+  allocation and legal transfer/preload, and persistent AAudio operation.
+  Measure cold/warm first-audio latency, clocks if observable, energy,
+  thermals, and sustained throughput against a no-vote/no-preload baseline.
+  Do not import QNN power APIs, assume an 8-MiB user allocation, require
+  MMAP/exclusive audio, or claim DSP-to-AAudio zero-copy without a verified
+  transport and buffer-ownership contract. No sub-25-ms target is established.
 
 ## Precision and backend promotion
 
