@@ -77,7 +77,7 @@ and `src/runspace/Qnn.*` paths are not the product pipeline.
 The checked Windows validation commands are below. Set `KOKORO_MODEL_DIR` to
 the directory containing the pinned checkpoint and voice pack; set the two DLL
 variables to paths emitted by `tools/Build-PhonemeContractAssembly.ps1` and
-`tools/Build-WeightAssembly.ps1` in the adjacent Build directory.
+`tools/Build-WeightAssembly.ps1` outside Git.
 
 ```powershell
 $voicePath = Join-Path $env:KOKORO_MODEL_DIR 'voices\af_heart.pt'
@@ -93,8 +93,9 @@ pwsh -NoProfile -File .\tools\Test-ProductionClosure.ps1
 ```
 
 These validate contracts and embedded data; they are not a `Speak` command.
-Generated DLLs, APKs, audio, and raw logs belong in the adjacent Build
-directory and are not committed.
+Generated DLLs, APKs, audio, and raw logs are not committed. The independent
+appliance build defaults to the ignored `build/` directory; its signing-key
+and package-cache defaults remain outside the repository.
 
 ## Licensing
 

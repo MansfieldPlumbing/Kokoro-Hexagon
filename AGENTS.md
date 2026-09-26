@@ -96,8 +96,11 @@ directly emitted Hexagon code to audible PCM on the physical device.
 - `src/appliance/provider/` is a historical C# baseline, not an implementation
   template. Do not promote its code or its measurements into the product.
 - Do not commit generated DLLs, APKs, ONNX, contexts, ELF, weights, audio,
-  device logs, signing keys, or raw device identifiers. Use the adjacent Build
-  directory for artifacts and `docs/receipts/` for compact reviewed evidence.
+  device logs, signing keys, or raw device identifiers. The independent
+  `setup-kokoro.ps1` defaults to the ignored `build/` directory for its APK
+  and intermediates; its signing-key and package-cache defaults remain outside
+  the repo.
+  Use `docs/receipts/` for compact reviewed evidence.
 - Use approved PowerShell Verb-Noun names for executable scripts. Parsed graph
   sources must state what computation they currently describe.
 

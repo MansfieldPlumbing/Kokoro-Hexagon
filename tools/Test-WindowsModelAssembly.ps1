@@ -2,7 +2,7 @@
 [CmdletBinding()]
 param(
     [string]$AssemblyPath = [IO.Path]::GetFullPath([IO.Path]::Combine(
-        $PSScriptRoot, '..', '..', 'Build', 'Kokoro-Hexagon', 'arm64-v8a',
+        $PSScriptRoot, '..', 'build', 'arm64-v8a',
         'managed', 'by-name', 'Kokoro-Hexagon.dll'))
 )
 $ErrorActionPreference = 'Stop'

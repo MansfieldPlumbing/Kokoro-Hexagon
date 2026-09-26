@@ -210,8 +210,10 @@ by device discovery. Do not label a payload-only DLL as a live model.
 ## Change discipline
 
 Only reviewed source, tests, manifests, and compact receipts enter Git. Keep
-DLLs, APKs, checkpoints, QNN contexts, audio, and raw device logs in the
-adjacent Build directory. A checked roadmap item requires its named test or
-receipt; a live speech claim requires PCM heard from a physical speaker.
+DLLs, APKs, checkpoints, QNN contexts, audio, and raw device logs out of Git.
+The independent appliance build defaults to ignored `build/`; its signing-key
+and package-cache defaults stay outside the repository. A checked roadmap item
+requires its named test or receipt; a live speech claim requires PCM heard
+from a physical speaker.
 Production build reachability must be checked for forbidden reference
 dependencies. Commit and push coherent, tested checkpoints.

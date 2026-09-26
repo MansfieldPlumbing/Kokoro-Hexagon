@@ -1,4 +1,5 @@
-# Build output lives in ..\Build\Kokoro-Hexagon (next to the repository), never here.
+# Generated build output is confined to this ignored directory.
+/build/
 *.dll
 *.apk
 *.elf

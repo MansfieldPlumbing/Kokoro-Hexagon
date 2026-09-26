@@ -26,9 +26,8 @@ param(
     [string] $Packages = 'Memory',
 
     # Every location this script writes to is listed in the write plan and
-    # confirmed before anything is written. None may be inside this
-    # repository. Empty values are filled with per-user suggestions that are
-    # shown in the plan, never used silently.
+    # confirmed before anything is written. Only the ignored build/ directory
+    # may be inside this repository. Other defaults use per-user locations.
     [string] $CacheDirectory = '',
 
     [Alias('c', 'Console')]
@@ -82,8 +81,7 @@ param(
     # unsigned APK, package record) to -OutputDirectory for inspection.
     [switch] $KeepIntermediates,
 
-    # Where the signed APK goes. Default: <package name>.apk next to setup.ps1,
-    # the only file the build places in the repository (*.apk is ignored by git).
+    # Where the signed APK goes. Default: build/<package name>.apk.
     [string] $ApkPath = '',
 
     # Downloaded packages are kept and reused unless this is set. The
@@ -202,8 +200,7 @@ OPTIONS
                             -Packages Folder.
   -AcceptWritePlan          Accept the write plan without a prompt.
   -ApkPath <path>           Where the signed APK goes. Default:
-                            dev.mansfieldplumbing.kokorohexagon.apk next to
-                            setup-kokoro.ps1
+                            build/dev.mansfieldplumbing.kokorohexagon.apk
                             (ignored by git).
   -KeepIntermediates        Also write the intermediate artifacts to
                             -OutputDirectory. By default they stay in memory
@@ -212,13 +209,11 @@ OPTIONS
   WRITE PLAN
   Before anything is written, the script lists every location it will write
   to and asks for confirmation. Locations left empty are filled with
-  suggestions and shown, not used silently: the signed APK next to this
-  script, intermediates (only with -KeepIntermediates) in ..\Build\<repo>,
-  side by side with the repository (created if missing; it ignores itself
-  for git), the
+  suggestions and shown, not used silently: the signed APK and intermediates
+  (only with -KeepIntermediates) in the ignored build/ directory, the
   signing key and cache in per-user data (LocalApplicationData\Kokoro-Hexagon on
   Windows, the XDG directories elsewhere). No location may be
-  inside this repository except the signed APK. Unattended runs stop unless every location is
+  inside this repository except build/. Unattended runs stop unless every location is
   given or -AcceptWritePlan is set. -WhatIf prints the plan and writes
   nothing.
   -Architecture <arm64|x64|arm32>
@@ -469,15 +464,15 @@ $script:LibDirectory = Join-Path $PSScriptRoot 'lib'
 # Write plan
 #
 # Every file this script creates goes through Write-BuildFile, which admits a
-# path only when it lies under a location the user confirmed and outside this
-# repository. The written set is reported with SHA-512 digests at the end.
+# path only when it lies under a confirmed location. build/ is the only
+# repository-local exception. Written files receive SHA-512 digests.
 # ==============================================================================
 
 $script:RepositoryRoot = [System.IO.Path]::GetFullPath($PSScriptRoot)
 $script:ApprovedWriteRoots = [System.Collections.Generic.List[string]]::new()
 $script:WrittenFiles = [System.Collections.Generic.List[object]]::new()
 $script:LibRestoreDirectory = $null
-$script:BuildRoot = $null
+$script:BuildRoot = Join-Path $script:RepositoryRoot 'build'
 
 function Get-SuggestedUserDirectory {
     # Per-user, non-roaming, not synced, not temp. XDG on Linux, the Library
@@ -516,14 +511,11 @@ function Resolve-WritePlan {
         ($Packages -eq 'Memory' -or -not [string]::IsNullOrWhiteSpace($CacheDirectory))
 
     $script:ApkFileName = "$script:PackageName.apk"
-    $script:ApkPath = if ([string]::IsNullOrWhiteSpace($ApkPath)) { Join-Path $script:RepositoryRoot $script:ApkFileName }
+    $script:ApkPath = if ([string]::IsNullOrWhiteSpace($ApkPath)) { Join-Path $script:BuildRoot $script:ApkFileName }
                       else { [System.IO.Path]::GetFullPath($ApkPath) }
 
     if ([string]::IsNullOrWhiteSpace($OutputDirectory)) {
-        # <parent>\Build\<repo>, side by side with the repository. The Build
-        # folder is created if it does not exist and ignores itself for git.
-        $script:BuildRoot = Join-Path (Split-Path -Parent $script:RepositoryRoot) 'Build'
-        $script:OutputDirectory = Join-Path $script:BuildRoot (Split-Path -Leaf $script:RepositoryRoot)
+        $script:OutputDirectory = $script:BuildRoot
     }
     if ([string]::IsNullOrWhiteSpace($SigningKeyPath)) {
         # Earlier builds kept the key directly under the data directory. Reuse
@@ -566,15 +558,18 @@ function Resolve-WritePlan {
     if ($Debug) { $plan['Reference'] = (Join-Path ([System.IO.Path]::GetTempPath()) 'pwsh-reference-*') + ' (deleted after the check)' }
 
     if ((Test-PathInside -Path $script:ApkPath -Root $script:RepositoryRoot) -and
-        -not (Test-PathInside -Path $script:ApkPath -Root (Join-Path $script:RepositoryRoot $script:ApkFileName))) {
-        throw "The APK may only be placed in the repository as '$(Join-Path $script:RepositoryRoot $script:ApkFileName)'."
+        -not (Test-PathInside -Path $script:ApkPath -Root $script:BuildRoot)) {
+        throw 'The APK may only be placed inside the repository under build/.'
+    }
+    if ((Test-PathInside -Path $script:OutputDirectory -Root $script:RepositoryRoot) -and
+        -not (Test-PathInside -Path $script:OutputDirectory -Root $script:BuildRoot)) {
+        throw 'Build output may only be placed inside the repository under build/.'
     }
     foreach ($entry in @(
-            @{ Name = 'Build output'; Path = $script:OutputDirectory },
             @{ Name = 'Signing key'; Path = $script:SigningKeyPath },
             @{ Name = 'Package cache'; Path = $script:CacheDirectory })) {
         if (Test-PathInside -Path $entry.Path -Root $script:RepositoryRoot) {
-            throw "$($entry.Name) location '$($entry.Path)' is inside the repository '$script:RepositoryRoot'. Choose a location outside it."
+            throw "$($entry.Name) must remain outside the repository."
         }
     }
     if (Test-PathInside -Path $script:SigningKeyPath -Root $script:OutputDirectory) {
@@ -588,7 +583,10 @@ function Show-WritePlan {
     param([Parameter(Mandatory)] $Plan)
     Write-Host 'Write plan. This run writes only to these locations:'
     foreach ($key in $Plan.Keys) { Write-Host ('  {0,-14} {1}' -f $key, $Plan[$key]) }
-    $repositoryNote = if (Test-PathInside -Path $script:ApkPath -Root $script:RepositoryRoot) { "only $script:ApkFileName is written" } else { 'never written' }
+    $repositoryNote = if ((Test-PathInside -Path $script:ApkPath -Root $script:RepositoryRoot) -or
+        ($KeepIntermediates -and (Test-PathInside -Path $script:OutputDirectory -Root $script:RepositoryRoot))) {
+        'only ignored build/ is written'
+    } else { 'never written' }
     Write-Host ('  {0,-14} {1}' -f 'Repository', "$script:RepositoryRoot ($repositoryNote)")
 }
 
@@ -596,31 +594,23 @@ function Enable-WritePlan {
     $script:ApprovedWriteRoots.Clear()
     if ($KeepIntermediates) { $script:ApprovedWriteRoots.Add($script:OutputDirectory) }
     $script:ApprovedWriteRoots.Add([System.IO.Path]::GetDirectoryName($script:SigningKeyPath))
-    if (-not (Test-PathInside -Path $script:ApkPath -Root $script:RepositoryRoot)) {
-        $script:ApprovedWriteRoots.Add([System.IO.Path]::GetDirectoryName($script:ApkPath))
-    }
+    $script:ApprovedWriteRoots.Add([System.IO.Path]::GetDirectoryName($script:ApkPath))
     if ($Packages -eq 'Folder') {
         $script:ApprovedWriteRoots.Add($script:CacheDirectory)
         $script:LibRestoreDirectory = Join-Path $script:CacheDirectory 'lib'
-    }
-
-    # The shared Build folder ignores itself, so no repository that ever
-    # contains it can pick up build output.
-    if ($KeepIntermediates -and $script:BuildRoot -and -not $WhatIfPreference) {
-        $ignore = Join-Path $script:BuildRoot '.gitignore'
-        if (-not (Test-Path -LiteralPath $ignore -PathType Leaf)) {
-            $script:ApprovedWriteRoots.Add($script:BuildRoot)
-            Write-BuildFile -Path $ignore -Bytes ([System.Text.Encoding]::ASCII.GetBytes("# Build output. Never tracked.`n*`n"))
-        }
     }
 }
 
 function Assert-ApprovedWritePath {
     param([Parameter(Mandatory)][string] $Path)
     if (Test-PathInside -Path $Path -Root $script:RepositoryRoot) {
-        # The single exception: the signed APK beside setup.ps1.
-        if (Test-PathInside -Path $Path -Root $script:ApkPath) { return }
-        throw "Refusing to write '$Path': it is inside the repository."
+        if (-not (Test-PathInside -Path $Path -Root $script:BuildRoot)) {
+            throw "Refusing to write '$Path': it is outside ignored build/."
+        }
+        if (-not (Test-PathInside -Path $Path -Root $script:ApkPath) -and
+            -not ($KeepIntermediates -and (Test-PathInside -Path $Path -Root $script:OutputDirectory))) {
+            throw "Refusing to write '$Path': it is not an approved APK or intermediate artifact."
+        }
     }
     foreach ($root in $script:ApprovedWriteRoots) {
         if (Test-PathInside -Path $Path -Root $root) { return }
@@ -660,7 +650,7 @@ function Get-RepositorySnapshot {
     $snapshot = @{}
     foreach ($file in Get-ChildItem -LiteralPath $script:RepositoryRoot -Recurse -File -Force -ErrorAction SilentlyContinue) {
         if ($file.FullName -like "*$([System.IO.Path]::DirectorySeparatorChar).git$([System.IO.Path]::DirectorySeparatorChar)*") { continue }
-        if ($script:ApkPath -and (Test-PathInside -Path $file.FullName -Root $script:ApkPath)) { continue }
+        if (Test-PathInside -Path $file.FullName -Root $script:BuildRoot) { continue }
         $snapshot[$file.FullName] = '{0}|{1}' -f $file.Length, $file.LastWriteTimeUtc.Ticks
     }
     $snapshot
@@ -11125,7 +11115,7 @@ finally {
         $script:ExitCode = 1
     }
     else {
-        Write-Host '[PASS] Repository unchanged.' -ForegroundColor Green
+        Write-Host '[PASS] Repository source unchanged outside build/.' -ForegroundColor Green
     }
 }
 

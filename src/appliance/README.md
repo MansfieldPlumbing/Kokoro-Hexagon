@@ -14,9 +14,9 @@ The appliance is a product boundary, not a build-output directory:
 - ARM64 and Hexagon instruction emission remains in `src/emit`;
 - device-side diagnostic probes remain in `src/runspace` and are not appliance
   dependencies;
-- generated APKs, packed weights, native libraries, and audio go to the
-  external `C:\Dev\Build\Kokoro-Hexagon\appliance` area, never the Pwsh source
-  tree, and are not committed. Compact reviewed receipts go under
+- generated appliance artifacts default to the ignored `build/` directory,
+  never the Pwsh source tree, and are not committed. Signing-key and
+  package-cache defaults remain outside this repository. Compact receipts go under
   `docs/receipts/` in this repository.
 
 ## Release gate
