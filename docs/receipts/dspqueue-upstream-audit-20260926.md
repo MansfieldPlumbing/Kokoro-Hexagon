@@ -42,6 +42,9 @@ not a passed product gate.
 A separately scoped PowerShell layout implementation now lives in
 `src/runspace/DspQueue.Layout.psm1`. Its host-side test
 `tools/Test-DspQueueLayout.ps1` passes for the default header and offsets,
-v2 flags, and invalid-input rejection. This verifies only construction of
-the pinned public byte layout; it does not establish DMA-BUF allocation,
-cache coherency, signaling mode, queue import, or device dispatch.
+v2 flags, message-only packet bytes, and invalid-input rejection. The packet
+format follows the pinned [public flags](https://github.com/qualcomm/fastrpc/blob/d247519650fe5cb16de6c78edaa95bcc4be25073/inc/dspqueue.h#L28-L33)
+and [CPU writer](https://github.com/qualcomm/fastrpc/blob/d247519650fe5cb16de6c78edaa95bcc4be25073/src/dspqueue/dspqueue_cpu.c#L1404-L1529).
+This verifies only construction of the public byte layout; it does not
+establish DMA-BUF allocation, cache coherency, signaling mode, queue import,
+or device dispatch.

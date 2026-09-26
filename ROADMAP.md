@@ -85,10 +85,11 @@ and its directly emitted backend remain to be built.
   synchronous-invoke baseline; the current S23 receipt also passes. See
   `docs/receipts/recovered-dspqueue-diagnostics-20260926.md`.
 - [x] Implement a layout-only PowerShell emitter for the pinned public
-  DSPQueue arena header and 256-byte-aligned offsets. The executable
-  `tools/Test-DspQueueLayout.ps1` checks emitted fields, v2 flags, and
-  rejection of invalid inputs. This is a host-side layout gate only: it
-  allocates no shared device memory and does not dispatch a DSP worker.
+  DSPQueue arena header, 256-byte-aligned offsets, and message-only packet
+  bytes. The executable `tools/Test-DspQueueLayout.ps1` checks emitted
+  fields, v2 flags, packet bytes, and invalid-input rejection. This is a
+  host-side layout gate only: it allocates no shared device memory and does
+  not dispatch a DSP worker.
 - [ ] Evaluate a persistent shared-memory DSPQueue-style dispatch path as a
   QNN-independent candidate. The pinned public source defines queue layout,
   FastRPC bootstrap, and signaling alternatives; the recovered diagnostics

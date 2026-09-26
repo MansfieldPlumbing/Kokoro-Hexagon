@@ -56,11 +56,37 @@ foreach ($test in @(
     if (-not $rejected) { throw 'Invalid DSPQueue layout was accepted.' }
 }
 
+$packet = & $layout.NewMessagePacket ([byte[]](0x41, 0x42, 0x43)) 255
+if ($packet.PacketLength -ne 11 -or $packet.AlignedLength -ne 16 -or
+    $packet.Flags -ne 0x11 -or $packet.Bytes.Length -ne 16 -or
+    [BitConverter]::ToUInt32($packet.Bytes, 0) -ne 11 -or
+    [BitConverter]::ToUInt16($packet.Bytes, 4) -ne 0x11 -or
+    $packet.Bytes[6] -ne 0 -or $packet.Bytes[7] -ne 255 -or
+    $packet.Bytes[8] -ne 0x41 -or $packet.Bytes[9] -ne 0x42 -or
+    $packet.Bytes[10] -ne 0x43 -or
+    ($packet.Bytes[11..15] | Where-Object { $_ -ne 0 }).Count -ne 0) {
+    throw 'DSPQueue message packet encoding is incorrect.'
+}
+$emptyPacket = & $layout.NewMessagePacket ([byte[]]@())
+if ($emptyPacket.PacketLength -ne 8 -or $emptyPacket.Flags -ne 0x10) {
+    throw 'DSPQueue empty packet encoding is incorrect.'
+}
+foreach ($test in @(
+    { & $layout.NewMessagePacket ([byte[]]::new(65537)) },
+    { & $layout.NewMessagePacket ([byte[]]::new(9)) 0 16 },
+    { & $layout.NewMessagePacket ([byte[]]@()) 256 }
+)) {
+    $rejected = $false
+    try { [void](& $test) } catch { $rejected = $true }
+    if (-not $rejected) { throw 'Invalid DSPQueue packet was accepted.' }
+}
+
 [pscustomobject]@{
     Parsed = $true
     DefaultArenaBytes = $arena.TotalBytes
     HeaderOffsetsVerified = $true
     V2FlagsVerified = $true
+    MessagePacketVerified = $true
     InvalidInputsRejected = $true
     Passed = $true
 }

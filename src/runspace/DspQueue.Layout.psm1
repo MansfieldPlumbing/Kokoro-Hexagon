@@ -3,6 +3,8 @@ param()
 # Layout-only implementation of the public DSPQueue v1/v2 arena header.
 # Source: qualcomm/fastrpc d247519650fe5cb16de6c78edaa95bcc4be25073
 # inc/dspqueue_shared.h:11-79; src/dspqueue/dspqueue_cpu.c:131-133,541-589.
+# Message-only packet: inc/dspqueue.h:28-33;
+# src/dspqueue/dspqueue_cpu.c:1404-1437,1500-1529.
 # This does not allocate shared memory, import a queue, or establish signaling.
 
 $align256 = {
@@ -86,7 +88,44 @@ $newArena = {
     }
 }.GetNewClosure()
 
+# Message-only packet bytes. Buffer descriptors and ring publication are
+# deliberately outside this layout-only contract.
+$newMessagePacket = {
+    param(
+        [Parameter(Mandatory)][AllowEmptyCollection()][byte[]]$Message,
+        [ValidateRange(0, 255)][int]$Sequence = 0,
+        [ValidateRange(8, 16777216)][int]$QueueBytes = 65536
+    )
+    if (-not [BitConverter]::IsLittleEndian) {
+        throw 'DSPQueue packet emission requires a little-endian host.'
+    }
+    if ($Message.Length -gt 65536) {
+        throw 'DSPQueue message exceeds the public maximum of 65536 bytes.'
+    }
+    $packetLength = 8 + $Message.Length
+    $alignedLength = ($packetLength + 7) -band (-bnot 7)
+    if ($alignedLength -gt $QueueBytes - 8) {
+        throw 'DSPQueue packet does not fit the ring with its required spare header.'
+    }
+    [byte[]]$bytes = [byte[]]::new($alignedLength)
+    [BitConverter]::GetBytes([uint32]$packetLength).CopyTo($bytes, 0)
+    $flags = [uint16]0x10
+    if ($Message.Length) { $flags = $flags -bor [uint16]0x01 }
+    [BitConverter]::GetBytes($flags).CopyTo($bytes, 4)
+    $bytes[6] = 0 # buffer descriptor count
+    $bytes[7] = [byte]$Sequence
+    if ($Message.Length) { [Array]::Copy($Message, 0, $bytes, 8, $Message.Length) }
+    [pscustomobject]@{
+        Bytes = $bytes
+        PacketLength = $packetLength
+        AlignedLength = $alignedLength
+        Flags = $flags
+        Sequence = $Sequence
+    }
+}.GetNewClosure()
+
 [pscustomobject]@{
     PSTypeName = 'Kokoro.DspQueue.Layout'
     NewArena = $newArena
+    NewMessagePacket = $newMessagePacket
 }
