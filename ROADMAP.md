@@ -259,6 +259,13 @@ and its directly emitted backend remain to be built.
   gates pass. This produces 512-channel generator features, not PCM; source
   excitation, generator residual blocks, and iSTFT remain. See
   `docs/receipts/decoder-core-fp32-reference-20260926.md`.
+- [x] Re-author the configured generator's stochastic harmonic source and
+  20-point, hop-5 centered Hann STFT/iSTFT as bounded PowerShell FP32
+  references. Analytic phase/voicing and spectral gates, stock source-weight
+  shape/finite gates, and a controlled-source round trip above 90 dB SNR
+  pass. Learned generator upsampling, noise convolutions, AdaIN/Snake
+  residual blocks, and final spectrogram projection remain before PCM.
+  See `docs/receipts/generator-source-stft-fp32-reference-20260926.md`.
 - [ ] Lower a complete FP32 path without QNN, Python, or LLVM in the build or
   device execution graph. Prove each promoted block against the pinned oracle
   and preserve a same-input/same-weight baseline before changing precision.
