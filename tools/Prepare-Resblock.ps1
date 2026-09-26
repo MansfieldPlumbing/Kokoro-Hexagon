@@ -6,15 +6,28 @@
 param(
     [string] $Checkpoint = 'C:\models\Kokoro-82M\kokoro-v1_0.pth',
     [int]    $Block      = 3,
-    [string] $StyleFile  = 'C:\Dev\Build\Kokoro-QNN\candidates\c64\gen\in_style.f32',
-    [string] $OutDir     = 'C:\Dev\Build\Kokoro-QNN\emit\r0',
-    [string] $ReaderPath = 'C:\Dev\Kokoro-QNN\src\runspace\Torch.Checkpoint.psm1'
+    [Parameter(Mandatory)][string] $StyleFile,
+    [string] $OutDir     = (Join-Path $PSScriptRoot '../build/r0-reference')
 )
 $ErrorActionPreference = 'Stop'
+[string]$repositoryRoot = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..'))
+[string]$resolvedOut = [IO.Path]::GetFullPath($OutDir)
+if (-not $resolvedOut.StartsWith(([IO.Path]::Combine($repositoryRoot, 'build') +
+    [IO.Path]::DirectorySeparatorChar), [StringComparison]::OrdinalIgnoreCase)) {
+    throw 'Reference output must be under the repository build directory.'
+}
+[string]$ReaderPath = Join-Path $repositoryRoot 'src/runspace/Torch.Checkpoint.psm1'
+[string]$checkpointFile = (Resolve-Path -LiteralPath $Checkpoint).Path
+$pin = @(([IO.File]::ReadAllText((Join-Path $repositoryRoot 'lib/manifest.json')) |
+    ConvertFrom-Json -AsHashtable).model.files | Where-Object { $_.path -ceq 'kokoro-v1_0.pth' })
+if ($pin.Count -ne 1 -or (Get-Item -LiteralPath $checkpointFile).Length -ne [long]$pin[0].bytes -or
+    (Get-FileHash -LiteralPath $checkpointFile -Algorithm SHA256).Hash -cne $pin[0].sha256) {
+    throw 'Stock checkpoint does not match the pinned digest.'
+}
 [void](New-Item -ItemType Directory -Force $OutDir)
 
 $reader = [scriptblock]::Create([IO.File]::ReadAllText($ReaderPath)).InvokeReturnAsIs()
-$ck = & $reader.Read $Checkpoint
+$ck = & $reader.Read $checkpointFile
 $prefix = "decoder.module.generator.resblocks.$Block."
 
 [float[]]$style = [float[]]::new(128)

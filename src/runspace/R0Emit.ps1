@@ -229,6 +229,13 @@ try {
         if ([Math]::Abs($d) -gt $mx) { $mx = [Math]::Abs($d) }
     }
     [double]$snr = if ($se -gt 0) { 10 * [Math]::Log10($sr / $se) } else { 999 }
+    $qnnHead = @(for ($i = 0; $i -lt [Math]::Min(4, $Cch * $Tlen); $i++) {
+        '{0:R}' -f [BitConverter]::ToSingle($outB, $i * 4)
+    }) -join ','
+    $oracleHead = @(for ($i = 0; $i -lt [Math]::Min(4, $Cch * $Tlen); $i++) {
+        '{0:R}' -f [BitConverter]::ToSingle($oBytes, $i * 4)
+    }) -join ','
+    $lines.Add("QnnHead=$qnnHead"); $lines.Add("OracleHead=$oracleHead")
     $lines.Add(('Result ops={0} ctxBytes={1} meanMs={2:F1} minMs={3:F1} snrDb={4:F2} maxAbs={5:E3} nonFinite={6}' -f $nOps, $ctxBytes, ($sum2 / $warm.Length), $warm[0], $snr, $mx, $bad))
     $lines.Add("Passed=$($snr -gt 20 -and $bad -eq 0)"); & $flush
     [void](& $native.CloseTrial $trial)

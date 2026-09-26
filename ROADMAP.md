@@ -187,7 +187,12 @@ and its directly emitted backend remain to be built.
   fixture or a verified faster PowerShell reference before this gate can pass.
   The historical 62.10 dB `r0` receipt compares QNN's own emitted graph to
   its reference, not this PowerShell block. Do not start direct lowering from
-  that receipt alone.
+  that receipt alone. A 2026-09-26 S23 all-valid-mask differential using
+  8- and 16-frame stock-weight fixtures failed at 0.20 and 2.88 dB SNR,
+  respectively. This is an open numerical discrepancy, not a pass or a
+  precision-tolerance adjustment. Localize it at the first differing
+  AdaIN/Snake/Conv stage before lowering; see
+  `docs/receipts/r0-powershell-qnn-differential-20260926.md`.
 - [x] Represent the stock duration-to-frame alignment as a bounded index map
   instead of allocating its dense one-hot matrix. `New-KokoroDurationMap.ps1`
   and `Expand-KokoroAlignedFeatures.ps1` gate duration reduction, ties-to-even
