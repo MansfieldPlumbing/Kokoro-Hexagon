@@ -178,20 +178,23 @@ and its directly emitted backend remain to be built.
   `tools/Test-KokoroAdaInCheckpoint.ps1` validates every parameter shape for
   the pinned `generator.resblocks.3` block. No stock numerical parity or
   direct Hexagon execution is claimed for the composed block yet.
-- [ ] Before lowering the composed block, compare its PowerShell FP32 output
+- [x] Before lowering the composed block, compare its PowerShell FP32 output
   with a QNN reference run on the same pinned checkpoint weights, style,
   input, valid-frame mask, and block shape. Gate valid-frame error and SNR;
   record precision and mask differences rather than demanding bit identity.
   The existing S23 `r0` diagnostic fixture is 128 channels by 7,681 frames,
-  beyond the bounded scalar runner. Use a smaller same-shape-contract QNN
-  fixture or a verified faster PowerShell reference before this gate can pass.
+  beyond the bounded scalar runner. A pinned-checkpoint, 128-channel,
+  64-frame, zero-style, all-valid-mask fixture passed the physical S23 QNN
+  differential at 52.99 dB SNR and 0.0601 maximum absolute error. The first
+  dilated convolution passed at 53.86 dB SNR. This admits block lowering
+  against that tested shape, not a general full-model or all-length claim.
   The historical 62.10 dB `r0` receipt compares QNN's own emitted graph to
   its reference, not this PowerShell block. Do not start direct lowering from
-  that receipt alone. A 2026-09-26 S23 all-valid-mask differential using
-  8- and 16-frame stock-weight fixtures failed at 0.20 and 2.88 dB SNR,
-  respectively. This is an open numerical discrepancy, not a pass or a
-  precision-tolerance adjustment. Localize it at the first differing
-  AdaIN/Snake/Conv stage before lowering; see
+  that receipt alone. The same all-valid-mask differential at 8 and 16 frames
+  failed at 0.20 and 2.88 dB SNR. Stagewise traces localized the short-shape
+  divergence to the first dilation-3 convolution; the prior stages agreed
+  above 52 dB. Keep those lengths as a separate QNN-reference discrepancy,
+  not a precision-tolerance adjustment or a claim about product behavior; see
   `docs/receipts/r0-powershell-qnn-differential-20260926.md`.
 - [x] Represent the stock duration-to-frame alignment as a bounded index map
   instead of allocating its dense one-hot matrix. `New-KokoroDurationMap.ps1`

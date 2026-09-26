@@ -38,6 +38,24 @@ try {
     [byte[]]$zBytes  = [IO.File]::ReadAllBytes([IO.Path]::Combine($dd, 'in_z.f32'))
     [byte[]]$mBytes  = [IO.File]::ReadAllBytes([IO.Path]::Combine($dd, 'in_mask1.f32'))
     [byte[]]$oBytes  = [IO.File]::ReadAllBytes([IO.Path]::Combine($dd, 'oracle_r0.f32'))
+    $diagnosticNames = [ordered]@{
+        AdaIn = 'oracle_a1.f32'; Snake = 'oracle_snake.f32'; Conv = 'oracle_conv.f32'
+        AdaIn2 = 'oracle_a2.f32'; Snake2 = 'oracle_snake2.f32'
+        Conv2 = 'oracle_conv2.f32'; Residual = 'oracle_residual.f32'
+        Residual1 = 'oracle_residual1.f32'
+        P1AdaIn1 = 'oracle_p1_AdaIn1.f32'; P1Snake1 = 'oracle_p1_Snake1.f32'
+        P1Conv1 = 'oracle_p1_Conv1.f32'; P1AdaIn2 = 'oracle_p1_AdaIn2.f32'
+        P1Snake2 = 'oracle_p1_Snake2.f32'; P1Conv2 = 'oracle_p1_Conv2.f32'
+    }
+    $diagnostic = $true
+    foreach ($name in $diagnosticNames.Values) {
+        $candidate = [IO.Path]::Combine($dd, $name)
+        if (-not [IO.File]::Exists($candidate) -or
+            [IO.FileInfo]::new($candidate).Length -ne $zBytes.Length) {
+            $diagnostic = $false
+        }
+    }
+    $script:diagnosticTensors = [ordered]@{}
     [int]$Cch = 128
     [int]$Tlen = [int]($mBytes.Length / 4)
     if ($zBytes.Length -ne $Cch * $Tlen * 4) { throw "z bytes $($zBytes.Length) for C=$Cch T=$Tlen" }
@@ -119,13 +137,27 @@ try {
         $y  = & $nat "$tag.y"  $sh3;   & $node "$tag.n18" 'ElementWiseMultiply' @($c, $rs) @($y) ([IntPtr[]]@())
         $yg = & $nat "$tag.yg" $sh3;   & $node "$tag.n19" 'ElementWiseMultiply' @($y, $g) @($yg) ([IntPtr[]]@())
         $yb = & $nat "$tag.yb" $sh3;   & $node "$tag.n20" 'ElementWiseAdd' @($yg, $b) @($yb) ([IntPtr[]]@())
-        $am = & $nat "$tag.am" $sh3;   & $node "$tag.n21" 'ElementWiseMultiply' @($yb, $M) @($am) ([IntPtr[]]@())
+        $am = if ($diagnostic -and $tag -in @('b0.a1.w', 'b0.a2.w', 'b1.a1.w', 'b1.a2.w')) {
+            & $reg (& $graph.NewTensor $arena "$tag.am" ([int]$abi.Enum.AppRead) ([int]$abi.Enum.Float32) $sh3 $null $null)
+        } else { & $nat "$tag.am" $sh3 }
+        & $node "$tag.n21" 'ElementWiseMultiply' @($yb, $M) @($am) ([IntPtr[]]@())
+        if ($diagnostic -and $tag -eq 'b0.a1.w') { $script:diagnosticTensors['AdaIn'] = $am }
+        if ($diagnostic -and $tag -eq 'b0.a2.w') { $script:diagnosticTensors['AdaIn2'] = $am }
+        if ($diagnostic -and $tag -eq 'b1.a1.w') { $script:diagnosticTensors['P1AdaIn1'] = $am }
+        if ($diagnostic -and $tag -eq 'b1.a2.w') { $script:diagnosticTensors['P1AdaIn2'] = $am }
         # Snake: am + (1/a) * sin(a*am)^2
         $t1 = & $nat "$tag.t1" $sh3;   & $node "$tag.n22" 'ElementWiseMultiply' @($am, $a) @($t1) ([IntPtr[]]@())
         $t2 = & $nat "$tag.t2" $sh3;   & $node "$tag.n23" 'ElementWiseSin' @($t1) @($t2) ([IntPtr[]]@())
         $t3 = & $nat "$tag.t3" $sh3;   & $node "$tag.n24" 'ElementWiseMultiply' @($t2, $t2) @($t3) ([IntPtr[]]@())
         $t4 = & $nat "$tag.t4" $sh3;   & $node "$tag.n25" 'ElementWiseMultiply' @($t3, $ai) @($t4) ([IntPtr[]]@())
-        $t5 = & $nat "$tag.t5" $sh3;   & $node "$tag.n26" 'ElementWiseAdd' @($am, $t4) @($t5) ([IntPtr[]]@())
+        $t5 = if ($diagnostic -and $tag -in @('b0.a1.w', 'b0.a2.w', 'b1.a1.w', 'b1.a2.w')) {
+            & $reg (& $graph.NewTensor $arena "$tag.t5" ([int]$abi.Enum.AppRead) ([int]$abi.Enum.Float32) $sh3 $null $null)
+        } else { & $nat "$tag.t5" $sh3 }
+        & $node "$tag.n26" 'ElementWiseAdd' @($am, $t4) @($t5) ([IntPtr[]]@())
+        if ($diagnostic -and $tag -eq 'b0.a1.w') { $script:diagnosticTensors['Snake'] = $t5 }
+        if ($diagnostic -and $tag -eq 'b0.a2.w') { $script:diagnosticTensors['Snake2'] = $t5 }
+        if ($diagnostic -and $tag -eq 'b1.a1.w') { $script:diagnosticTensors['P1Snake1'] = $t5 }
+        if ($diagnostic -and $tag -eq 'b1.a2.w') { $script:diagnosticTensors['P1Snake2'] = $t5 }
         $t5
     }
 
@@ -180,8 +212,14 @@ try {
         $o3 = & $nat "$tag.o3" ([int[]]@(1, $Tlen, $Cch))
         & $node "$tag.rs2" 'Reshape' @($out4) @($o3) ([IntPtr[]]@())
         $perm2 = & $reg (& $graph.NewTensor $arena "$tag.p2" ([int]$abi.Enum.Static) ([int]$abi.Enum.UInt32) ([int[]]@(3)) ([byte[]]@(0,0,0,0, 2,0,0,0, 1,0,0,0)) $null)
-        $back = & $nat "$tag.bk" ([int[]]@(1, $Cch, $Tlen))
+        $back = if ($diagnostic -and $tag -in @('b0.c1', 'b0.c2', 'b1.c1', 'b1.c2')) {
+            & $reg (& $graph.NewTensor $arena "$tag.bk" ([int]$abi.Enum.AppRead) ([int]$abi.Enum.Float32) ([int[]]@(1, $Cch, $Tlen)) $null $null)
+        } else { & $nat "$tag.bk" ([int[]]@(1, $Cch, $Tlen)) }
         & $node "$tag.t2" 'Transpose' @($o3) @($back) ([IntPtr[]]@((& $graph.NewTensorParam $arena 'perm' $perm2)))
+        if ($diagnostic -and $tag -eq 'b0.c1') { $script:diagnosticTensors['Conv'] = $back }
+        if ($diagnostic -and $tag -eq 'b0.c2') { $script:diagnosticTensors['Conv2'] = $back }
+        if ($diagnostic -and $tag -eq 'b1.c1') { $script:diagnosticTensors['P1Conv1'] = $back }
+        if ($diagnostic -and $tag -eq 'b1.c2') { $script:diagnosticTensors['P1Conv2'] = $back }
         $back
     }
 
@@ -194,8 +232,11 @@ try {
         $c2 = & $conv  "b$j.c2" $a2 'convs2' $j 1
         [bool]$last = ($j -eq 2)
         $sum = if ($last) { & $reg (& $graph.NewTensor $arena 'r0' ([int]$abi.Enum.AppRead) ([int]$abi.Enum.Float32) ([int[]]@(1, $Cch, $Tlen)) $null $null) }
+               elseif ($diagnostic -and $j -le 1) { & $reg (& $graph.NewTensor $arena "b$j.sum" ([int]$abi.Enum.AppRead) ([int]$abi.Enum.Float32) ([int[]]@(1, $Cch, $Tlen)) $null $null) }
                else { & $nat "b$j.sum" ([int[]]@(1, $Cch, $Tlen)) }
         & $node "b$j.res" 'ElementWiseAdd' @($c2, $cur) @($sum) ([IntPtr[]]@())
+        if ($diagnostic -and $j -eq 0) { $script:diagnosticTensors['Residual'] = $sum }
+        if ($diagnostic -and $j -eq 1) { $script:diagnosticTensors['Residual1'] = $sum }
         $cur = $sum
     }
     $lines.Add("Ops=$nOps"); & $flush
@@ -209,14 +250,63 @@ try {
     $mi = & $graph.NewExecTensor $arena $M $mBytes
     [byte[]]$outB = [byte[]]::new($Cch * $Tlen * 4)
     $yo = & $graph.NewExecTensor $arena $cur $outB
+    $diagnosticOutputs = [Collections.Generic.List[object]]::new()
+    $diagnosticBuffers = [ordered]@{}
+    if ($diagnostic) {
+        foreach ($name in $diagnosticNames.Keys) {
+            [byte[]]$buffer = [byte[]]::new($outB.Length)
+            $diagnosticBuffers[$name] = $buffer
+            $diagnosticOutputs.Add((& $graph.NewExecTensor $arena $script:diagnosticTensors[$name] $buffer))
+        }
+    }
+    $allOutputs = [object[]]@($yo) + $diagnosticOutputs.ToArray()
     [double[]]$ms = [double[]]::new(8)
     for ([int]$r = 0; $r -lt 8; $r++) {
         $sw = [Diagnostics.Stopwatch]::StartNew()
-        [uint64]$erc = & $graph.Execute $trial $arena ([object[]]@($xi, $mi)) ([object[]]@($yo))
+        [uint64]$erc = & $graph.Execute $trial $arena ([object[]]@($xi, $mi)) $allOutputs
         $ms[$r] = $sw.Elapsed.TotalMilliseconds
         if ($erc -ne 0) { throw "execute rc=$erc" }
     }
     [Runtime.InteropServices.Marshal]::Copy($yo.DataPtr, $outB, 0, $outB.Length)
+    if ($diagnostic) {
+        $diagnosticIndex = 0
+        foreach ($name in $diagnosticNames.Keys) {
+            [byte[]]$buffer = $diagnosticBuffers[$name]
+            [Runtime.InteropServices.Marshal]::Copy($diagnosticOutputs[$diagnosticIndex].DataPtr,
+                $buffer, 0, $buffer.Length)
+            $diagnosticIndex++
+            [byte[]]$reference = [IO.File]::ReadAllBytes([IO.Path]::Combine($dd, $diagnosticNames[$name]))
+            if ($reference.Length -ne $buffer.Length) { throw "Diagnostic reference shape differs: $name" }
+            [double]$signal = 0; [double]$squaredError = 0; [double]$maximum = 0
+            for ($i = 0; $i -lt $Cch * $Tlen; $i++) {
+                $expected = [double][BitConverter]::ToSingle($reference, $i * 4)
+                $actual = [double][BitConverter]::ToSingle($buffer, $i * 4)
+                $difference = $actual - $expected
+                $signal += $expected * $expected; $squaredError += $difference * $difference
+                $maximum = [Math]::Max($maximum, [Math]::Abs($difference))
+            }
+            $stageSnr = if ($squaredError -eq 0) { 999 } else {
+                10 * [Math]::Log10($signal / $squaredError)
+            }
+            $lines.Add(('Stage={0} snrDb={1:F2} maxAbs={2:E3}' -f $name, $stageSnr, $maximum))
+            if ($name -eq 'P1Conv1') {
+                [byte[]]$alternate = [IO.File]::ReadAllBytes([IO.Path]::Combine(
+                    $dd, 'oracle_p1_Conv1_dilation1.f32'))
+                if ($alternate.Length -ne $buffer.Length) { throw 'Alternate convolution shape differs.' }
+                [double]$alternateSignal = 0; [double]$alternateError = 0
+                for ($i = 0; $i -lt $Cch * $Tlen; $i++) {
+                    $expected = [double][BitConverter]::ToSingle($alternate, $i * 4)
+                    $actual = [double][BitConverter]::ToSingle($buffer, $i * 4)
+                    $alternateSignal += $expected * $expected
+                    $alternateError += ($actual - $expected) * ($actual - $expected)
+                }
+                $alternateSnr = if ($alternateError -eq 0) { 999 } else {
+                    10 * [Math]::Log10($alternateSignal / $alternateError)
+                }
+                $lines.Add(('StageAlt=P1Conv1_dilation1 snrDb={0:F2}' -f $alternateSnr))
+            }
+        }
+    }
     [double[]]$warm = $ms[2..7]; [Array]::Sort($warm)
     [double]$sum2 = 0; foreach ($v in $warm) { $sum2 += $v }
 

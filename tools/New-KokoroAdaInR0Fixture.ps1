@@ -5,7 +5,7 @@
 param(
     [Parameter(Mandatory)][string] $CheckpointPath,
     [Parameter(Mandatory)][string] $OutDir,
-    [ValidateRange(2, 16)][int] $Frames = 8
+    [ValidateRange(2, 128)][int] $Frames = 8
 )
 
 $ErrorActionPreference = 'Stop'
@@ -64,6 +64,77 @@ if ($output.Length -ne $inputTensor.Length) { throw 'Reference output length dif
 foreach ($value in $output) {
     if (-not [float]::IsFinite($value)) { throw 'Reference output is non-finite.' }
 }
+$affine = & (Join-Path $root 'src/models/ConvertTo-KokoroAdaInStyle.ps1') `
+    -Style $style -Weights $parameters['adain1.0.fc.weight'] `
+    -Bias $parameters['adain1.0.fc.bias'] -Channels $channels
+[float[]]$firstAdaIn = & (Join-Path $root 'src/models/ConvertTo-KokoroAdaIn.ps1') `
+    -InputTensor $inputTensor -Frames $Frames -Channels $channels `
+    -Gain $affine.Gain -Shift $affine.Shift
+[float[]]$firstSnake = & (Join-Path $root 'src/models/Invoke-KokoroAdaInSnake.ps1') `
+    -InputTensor $firstAdaIn -Frames $Frames -Channels $channels `
+    -Alpha $parameters['alpha1.0']
+[float[]]$firstConv = & (Join-Path $root 'src/models/Invoke-KokoroAdaInConv1d.ps1') `
+    -InputTensor $firstSnake -Frames $Frames -InputChannels $channels `
+    -OutputChannels $channels -KernelSize 3 -Dilation 1 `
+    -WeightV $parameters['convs1.0.weight_v'] `
+    -WeightG $parameters['convs1.0.weight_g'] -Bias $parameters['convs1.0.bias']
+$secondAffine = & (Join-Path $root 'src/models/ConvertTo-KokoroAdaInStyle.ps1') `
+    -Style $style -Weights $parameters['adain2.0.fc.weight'] `
+    -Bias $parameters['adain2.0.fc.bias'] -Channels $channels
+[float[]]$secondAdaIn = & (Join-Path $root 'src/models/ConvertTo-KokoroAdaIn.ps1') `
+    -InputTensor $firstConv -Frames $Frames -Channels $channels `
+    -Gain $secondAffine.Gain -Shift $secondAffine.Shift
+[float[]]$secondSnake = & (Join-Path $root 'src/models/Invoke-KokoroAdaInSnake.ps1') `
+    -InputTensor $secondAdaIn -Frames $Frames -Channels $channels `
+    -Alpha $parameters['alpha2.0']
+[float[]]$secondConv = & (Join-Path $root 'src/models/Invoke-KokoroAdaInConv1d.ps1') `
+    -InputTensor $secondSnake -Frames $Frames -InputChannels $channels `
+    -OutputChannels $channels -KernelSize 3 -Dilation 1 `
+    -WeightV $parameters['convs2.0.weight_v'] `
+    -WeightG $parameters['convs2.0.weight_g'] -Bias $parameters['convs2.0.bias']
+[float[]]$firstResidual = [float[]]::new($inputTensor.Length)
+for ($i = 0; $i -lt $firstResidual.Length; $i++) {
+    $firstResidual[$i] = [float]([double]$inputTensor[$i] + [double]$secondConv[$i])
+}
+$script:pass1Traces = [ordered]@{}
+function Invoke-ReferencePass([float[]] $State, [int] $Pass) {
+    [float[]]$next = $State
+    foreach ($side in 1, 2) {
+        $affine = & (Join-Path $root 'src/models/ConvertTo-KokoroAdaInStyle.ps1') `
+            -Style $style -Weights $parameters["adain$side.$Pass.fc.weight"] `
+            -Bias $parameters["adain$side.$Pass.fc.bias"] -Channels $channels
+        [float[]]$next = & (Join-Path $root 'src/models/ConvertTo-KokoroAdaIn.ps1') `
+            -InputTensor $next -Frames $Frames -Channels $channels `
+            -Gain $affine.Gain -Shift $affine.Shift
+        if ($Pass -eq 1) { $script:pass1Traces["AdaIn$side"] = $next }
+        [float[]]$next = & (Join-Path $root 'src/models/Invoke-KokoroAdaInSnake.ps1') `
+            -InputTensor $next -Frames $Frames -Channels $channels `
+            -Alpha $parameters["alpha$side.$Pass"]
+        if ($Pass -eq 1) { $script:pass1Traces["Snake$side"] = $next }
+        if ($Pass -eq 1 -and $side -eq 1) {
+            [float[]]$script:pass1ConvDilation1 = & (Join-Path $root 'src/models/Invoke-KokoroAdaInConv1d.ps1') `
+                -InputTensor $next -Frames $Frames -InputChannels $channels `
+                -OutputChannels $channels -KernelSize 3 -Dilation 1 `
+                -WeightV $parameters["convs$side.$Pass.weight_v"] `
+                -WeightG $parameters["convs$side.$Pass.weight_g"] `
+                -Bias $parameters["convs$side.$Pass.bias"]
+        }
+        [float[]]$next = & (Join-Path $root 'src/models/Invoke-KokoroAdaInConv1d.ps1') `
+            -InputTensor $next -Frames $Frames -InputChannels $channels `
+            -OutputChannels $channels -KernelSize 3 `
+            -Dilation $(if ($side -eq 1) { @(1, 3, 5)[$Pass] } else { 1 }) `
+            -WeightV $parameters["convs$side.$Pass.weight_v"] `
+            -WeightG $parameters["convs$side.$Pass.weight_g"] `
+            -Bias $parameters["convs$side.$Pass.bias"]
+        if ($Pass -eq 1) { $script:pass1Traces["Conv$side"] = $next }
+    }
+    [float[]]$sum = [float[]]::new($State.Length)
+    for ($i = 0; $i -lt $sum.Length; $i++) {
+        $sum[$i] = [float]([double]$State[$i] + [double]$next[$i])
+    }
+    return ,$sum
+}
+[float[]]$secondResidual = Invoke-ReferencePass $firstResidual 1
 
 function Write-F32([string] $Name, [float[]] $Values) {
     [byte[]]$bytes = [byte[]]::new($Values.Length * 4)
@@ -74,4 +145,16 @@ Write-F32 'in_z.f32' $inputTensor
 Write-F32 'in_mask1.f32' ([float[]]@(1.0) * $Frames)
 Write-F32 'in_style.f32' $style
 Write-F32 'oracle_r0.f32' $output
+Write-F32 'oracle_a1.f32' $firstAdaIn
+Write-F32 'oracle_snake.f32' $firstSnake
+Write-F32 'oracle_conv.f32' $firstConv
+Write-F32 'oracle_a2.f32' $secondAdaIn
+Write-F32 'oracle_snake2.f32' $secondSnake
+Write-F32 'oracle_conv2.f32' $secondConv
+Write-F32 'oracle_residual.f32' $firstResidual
+Write-F32 'oracle_residual1.f32' $secondResidual
+foreach ($name in $script:pass1Traces.Keys) {
+    Write-F32 "oracle_p1_$name.f32" $script:pass1Traces[$name]
+}
+Write-F32 'oracle_p1_Conv1_dilation1.f32' $script:pass1ConvDilation1
 Write-Output "PASS: stock r0 PowerShell fixture C=$channels T=$Frames, finite output"

@@ -14,14 +14,19 @@ if (-not $fixture.StartsWith(([IO.Path]::Combine($root, 'build') + [IO.Path]::Di
         [StringComparison]::OrdinalIgnoreCase)) {
     throw 'Fixture must be under the repository build directory.'
 }
-$files = @('in_z.f32', 'in_mask1.f32', 'oracle_r0.f32', 'r0_static.bin')
+$files = @('in_z.f32', 'in_mask1.f32', 'oracle_r0.f32', 'r0_static.bin',
+    'oracle_a1.f32', 'oracle_snake.f32', 'oracle_conv.f32', 'oracle_a2.f32',
+    'oracle_snake2.f32', 'oracle_conv2.f32', 'oracle_residual.f32',
+    'oracle_residual1.f32', 'oracle_p1_AdaIn1.f32', 'oracle_p1_Snake1.f32',
+    'oracle_p1_Conv1.f32', 'oracle_p1_AdaIn2.f32', 'oracle_p1_Snake2.f32',
+    'oracle_p1_Conv2.f32', 'oracle_p1_Conv1_dilation1.f32')
 foreach ($name in $files) {
     if (-not (Test-Path -LiteralPath (Join-Path $fixture $name) -PathType Leaf)) {
         throw "Fixture file is missing: $name"
     }
 }
 $frames = [int]((Get-Item -LiteralPath (Join-Path $fixture 'in_mask1.f32')).Length / 4)
-if ($frames -lt 2 -or $frames -gt 16 -or
+if ($frames -lt 2 -or $frames -gt 128 -or
     (Get-Item -LiteralPath (Join-Path $fixture 'in_z.f32')).Length -ne 128 * $frames * 4 -or
     (Get-Item -LiteralPath (Join-Path $fixture 'oracle_r0.f32')).Length -ne 128 * $frames * 4) {
     throw 'Fixture shape is invalid.'
@@ -83,7 +88,7 @@ try {
         throw 'QNN reference did not complete within the bounded wait.'
     }
     foreach ($line in ($receipt -split "`n")) {
-        if ($line -match '^(Shape|FinalizeRc|QnnHead|OracleHead|Result|Passed|Error)=|^Result ') {
+        if ($line -match '^(Shape|FinalizeRc|QnnHead|OracleHead|Result|Passed|Error|Stage|StageAlt)=|^Result ') {
             Write-Output $line.Trim()
         }
     }
