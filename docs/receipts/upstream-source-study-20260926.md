@@ -17,6 +17,7 @@ assembly, build inputs, or production runtime.
 | `espeak-ng` | `https://github.com/espeak-ng/espeak-ng.git` | `ba90c8e9f440ad544f674a790bb5f53878b6ffc5` | Pronunciation engine source and data format |
 | `espeakng-loader` | `https://github.com/thewh1teagle/espeakng-loader.git` | `0ddc87adf77e5850d7eeb542ac8a87d421b64daa` | Misaki's eSpeak library/data discovery |
 | `spacy-curated-transformers` | `https://github.com/explosion/spacy-curated-transformers.git` | `fe55b96afa1ec86a245c92095cf6559478b159a1` | Misaki English spaCy pipeline configuration |
+| `aosp-frameworks-av` | `https://android.googlesource.com/platform/frameworks/av` | `e2f098935447ca4945946de5cb69db843fe3f003` (checkout); `9e7dd63dfff0cc967f025ea9e27a299aaa99fd69` (pinned study commit) | Android AAudio implementation and PCM sink contract |
 
 The already mirrored canonical model sources remain `kokoro` at
 `dfb907a02bba8152ca444717ca5d78747ccb4bec` and `misaki` at
@@ -33,3 +34,20 @@ assembly), `kokoro/kokoro/modules.py` (`CustomAlbert` derives from upstream
 `misaki/misaki/en.py` (English text path). Their original repositories are
 the behavioral source; the listed dependency trees explain referenced
 operators and algorithms only.
+
+Submodule completeness is separate from the top-level source pins. NumPy's
+seven declared submodules were fetched at their recorded Git links. PyTorch's
+top-level tree is clean and all 37 submodule directories were acquired, but
+only 15 matched their recorded Git links on the last check. A checkout conflict
+in `third_party/cutlass` stopped completion; no forced overwrite or cleanup was
+performed. Treat those submodule working trees as incomplete until separately
+verified. The top-level PyTorch operator source needed for the current study
+remains available at the pinned commit through `git show`.
+
+The PCM boundary is two distinct contracts: Kokoro's decoder and `CustomSTFT`
+define the generated waveform, while Android AAudio accepts a stream of
+24 kHz mono float samples. The repository has a physical AAudio smoke receipt,
+but that did not execute the complete stock model. `aosp-frameworks-av` is
+study source only; no AAudio source was copied into the APK. The previously
+pinned AAudio commit and header blob are available as Git objects in that
+mirror and should be read with `git show` without changing its checkout.
