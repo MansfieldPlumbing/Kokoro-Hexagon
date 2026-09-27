@@ -18,7 +18,9 @@ param(
 
 $ErrorActionPreference = 'Stop'
 $weightCount = [long]$OutputChannels * $InputChannels * $KernelSize
-if (($KernelSize % 2) -ne 1 -or $weightCount * $Frames -gt 8000000 -or
+# Three aligned frames in the minimal stock phoneme fixture require about
+# ten million terms in the decoder's 1090-to-1024, three-tap convolution.
+if (($KernelSize % 2) -ne 1 -or $weightCount * $Frames -gt 16000000 -or
     $InputTensor.Length -ne [long]$InputChannels * $Frames -or
     $WeightV.Length -ne $weightCount -or $WeightG.Length -ne $OutputChannels -or
     $Bias.Length -ne $OutputChannels) {
