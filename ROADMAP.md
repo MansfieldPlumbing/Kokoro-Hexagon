@@ -294,6 +294,11 @@ and its directly emitted backend remain to be built.
   row `phoneme_count - 1` as specified by the stock pipeline. The one-phoneme
   row and out-of-bounds rejection gate pass. This is an input contract, not
   audible synthesis.
+- [x] Reject channel-per-task `ForEach-Object -Parallel` as the FP32
+  correctness accelerator: its exact-output 64-channel fixture ran at
+  0.30x serial throughput with four workers. The prototype was removed;
+  do not infer that other schedules or direct emitted backends are slower.
+  See `docs/receipts/adain-runspace-parallel-audit-20260927.md`.
 - [ ] Lower a complete FP32 path without QNN, Python, or LLVM in the build or
   device execution graph. Prove each promoted block against the pinned oracle
   and preserve a same-input/same-weight baseline before changing precision.
