@@ -55,6 +55,7 @@ $acoustic = & (Join-Path $modelRoot 'Invoke-KokoroAcousticBranches.ps1') `
     -F0NParameters $AcousticWeights.F0NParameters `
     -Speed $Speed -AlbertLayerRepeats 12 -DurationEncoderLayers 3 `
     -TextEncoderLayers 3
+Write-Verbose 'Full stock acoustic branches completed.'
 if ($acoustic.FrameCount -lt 2 -or $acoustic.FrameCount -gt 54 -or
     $acoustic.F0.Length -ne 2 * $acoustic.FrameCount -or
     $acoustic.N.Length -ne 2 * $acoustic.FrameCount -or
@@ -66,9 +67,11 @@ $prelude = & (Join-Path $modelRoot 'Invoke-KokoroDecoderPrelude.ps1') `
     -AlignedTextFeatures $acoustic.AlignedTextFeatures `
     -F0 $acoustic.F0 -N $acoustic.N `
     -Parameters $DecoderWeights.PreludeParameters -Frames $acoustic.FrameCount
+Write-Verbose 'Decoder prelude completed.'
 $core = & (Join-Path $modelRoot 'Invoke-KokoroDecoderCore.ps1') `
     -Prelude $prelude -Style $acoustic.DecoderStyle `
     -Parameters $DecoderWeights.CoreParameters
+Write-Verbose 'Decoder core completed.'
 if ($core.Frames -ne $acoustic.F0.Length -or $core.Channels -ne 512 -or
     $core.Features.Length -ne 512 * $core.Frames) {
     throw 'Decoder features and generator F0 frames differ.'
@@ -86,6 +89,7 @@ if ($null -ne $InitialPhase) { $generatorArgs.InitialPhase = $InitialPhase }
 if ($null -ne $HarmonicGaussian) { $generatorArgs.HarmonicGaussian = $HarmonicGaussian }
 if ($null -ne $NoiseGaussian) { $generatorArgs.NoiseGaussian = $NoiseGaussian }
 $waveform = & (Join-Path $modelRoot 'Invoke-KokoroGenerator.ps1') @generatorArgs
+Write-Verbose 'Learned generator and inverse STFT completed.'
 if ($waveform.Samples -ne 300 * $acoustic.F0.Length) {
     throw 'Waveform sample count differs from the stock 300x F0 clock.'
 }

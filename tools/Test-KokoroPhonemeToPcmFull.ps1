@@ -29,7 +29,7 @@ Write-Output 'GATE: pinned voice row admitted; executing full stock layer counts
 $result = & (Join-Path $modelRoot 'Invoke-KokoroPhonemeToPcm.ps1') `
     -TokenIds ([int[]]@(0, 43, 0)) -VoiceRow $voice -Speed 100 `
     -AcousticWeights $acousticWeights -DecoderWeights $decoderWeights `
-    -GeneratorWeights $generatorWeights
+    -GeneratorWeights $generatorWeights -Verbose
 if ($result.SampleRate -ne 24000 -or $result.TokenCount -ne 3 -or
     $result.Samples -lt 600 -or $result.Pcm.Length -ne $result.Samples) {
     throw 'Complete phoneme-to-PCM output shape differs.'
