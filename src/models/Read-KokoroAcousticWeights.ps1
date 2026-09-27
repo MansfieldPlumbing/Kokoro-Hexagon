@@ -2,20 +2,30 @@
 # Build-time stock acoustic tensor admission for the PowerShell model path.
 # Kokoro checkpoint revision f3ff3571791e39611d31c381e3a41a3af07b4987.
 [CmdletBinding()]
-param([Parameter(Mandatory)][string] $CheckpointPath, [switch] $NamesOnly)
+param([Parameter(Mandatory)][string] $CheckpointPath, [switch] $NamesOnly,
+    [switch] $SkipFiniteScan)
 
 $ErrorActionPreference = 'Stop'
+$admissionClock = [Diagnostics.Stopwatch]::StartNew()
 $root = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '../..'))
 $pin = @(([IO.File]::ReadAllText((Join-Path $root 'lib/manifest.json')) |
     ConvertFrom-Json -AsHashtable).model.files | Where-Object { $_.path -ceq 'kokoro-v1_0.pth' })
+if ($SkipFiniteScan -and ($pin.Count -ne 1 -or $pin[0].sha256 -cne
+        '496DBA118D1A58F5F3DB2EFC88DBDC216E0483FC89FE6E47EE1F2C53F18AD1E4')) {
+    throw 'Finite-scan reuse is only admitted for the audited checkpoint digest.'
+}
 $path = (Resolve-Path -LiteralPath $CheckpointPath).Path
 if ($pin.Count -ne 1 -or (Get-Item -LiteralPath $path).Length -ne [long]$pin[0].bytes -or
     (Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash -cne $pin[0].sha256) {
     throw 'Stock checkpoint does not match the pinned digest.'
 }
+Write-Verbose "Checkpoint digest verified in $($admissionClock.Elapsed.TotalSeconds.ToString('F1')) s."
+$admissionClock.Restart()
 $reader = [scriptblock]::Create([IO.File]::ReadAllText(
     (Join-Path $root 'src/runspace/Torch.Checkpoint.psm1'))).InvokeReturnAsIs()
 $checkpoint = & $reader.Read $path
+Write-Verbose "Checkpoint descriptors parsed in $($admissionClock.Elapsed.TotalSeconds.ToString('F1')) s."
+$admissionClock.Restart()
 $shapes = @{}
 $destinations = @{}
 function Add-Spec([string] $Name, [string] $Shape, [string] $Group, [string] $Key) {
@@ -158,6 +168,8 @@ foreach ($name in $shapes.Keys) {
         $expectedStride *= $descriptor.Shape[$axis]
     }
 }
+Write-Verbose "Acoustic tensor descriptors admitted in $($admissionClock.Elapsed.TotalSeconds.ToString('F1')) s."
+$admissionClock.Restart()
 if ($NamesOnly) {
     Write-Output -NoEnumerate @($shapes.Keys)
     return
@@ -173,11 +185,18 @@ foreach ($name in $shapes.Keys) {
     [byte[]]$bytes = & $reader.Bytes $checkpoint $name
     $values = [float[]]::new($bytes.Length / 4)
     [Buffer]::BlockCopy($bytes, 0, $values, 0, $bytes.Length)
-    foreach ($value in $values) {
-        if (-not [float]::IsFinite($value)) { throw "Stock acoustic tensor is non-finite: $name" }
+    if (-not $SkipFiniteScan) {
+        foreach ($value in $values) {
+            if (-not [float]::IsFinite($value)) { throw "Stock acoustic tensor is non-finite: $name" }
+        }
     }
     $destination = $destinations[$name]
     $sets[$destination[0]][$destination[1]] = $values
+}
+if ($SkipFiniteScan) {
+    Write-Verbose "Acoustic tensor bytes admitted with audited-digest finite-scan reuse in $($admissionClock.Elapsed.TotalSeconds.ToString('F1')) s."
+} else {
+    Write-Verbose "Acoustic tensor bytes and finite values admitted in $($admissionClock.Elapsed.TotalSeconds.ToString('F1')) s."
 }
 [pscustomobject]@{
     AlbertEmbeddings = $sets.AlbertEmbeddings

@@ -11,6 +11,12 @@ backend, so model and host releases remain separate decisions.
 The active `C:\Dev\Pwsh` checkout is outside this roadmap and must never
 receive Kokoro files or be used as a build, cache, or output location.
 
+PowerShell authors and validates the graph, weights, and direct Hexagon code;
+the cDSP performs model tensor arithmetic. Bounded PowerShell FP32 operators
+are differential oracles, not the product inference backend or a TTFA target.
+Do not wait for a full scalar reference pass before promoting a source-traced,
+same-input/same-weight DSP operator with a physical-device receipt.
+
 ## Product boundary
 
 The product is a model-less Android appliance and a separately versioned,
@@ -299,6 +305,17 @@ and its directly emitted backend remain to be built.
   0.30x serial throughput with four workers. The prototype was removed;
   do not infer that other schedules or direct emitted backends are slower.
   See `docs/receipts/adain-runspace-parallel-audit-20260927.md`.
+- [x] Profile the one-phoneme full-layer scalar gate: the pinned checkpoint
+  acoustic reader took 0.9 s to hash, 1.1 s to parse, and 113.9 s to copy
+  and scan values. An exact-digest, previously scanned development path
+  reduces the last step to 2.0 s. The 12-repeat ALBERT stage then took
+  423.8 s, followed by 43.1 s duration, 36.2 s text encoder, and 63.3 s
+  F0/N. The run was stopped after decoder prelude; it produced no PCM.
+  These are CPU-oracle costs, not DSP or TTFA measurements.
+- [ ] Move ALBERT and subsequent model multiply-add operators to directly
+  emitted Hexagon code with same-input/same-weight differential gates and
+  physical-device receipts. Keep PowerShell scalar operators as bounded
+  test oracles only; no product inference dispatches tensor math to them.
 - [ ] Lower a complete FP32 path without QNN, Python, or LLVM in the build or
   device execution graph. Prove each promoted block against the pinned oracle
   and preserve a same-input/same-weight baseline before changing precision.

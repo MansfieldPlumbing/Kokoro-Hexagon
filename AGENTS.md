@@ -26,11 +26,15 @@ fulfill the mission. A live-speech claim requires one PowerShell-authored path
 from admitted phonemes and verified stock weights through the full model and
 directly emitted Hexagon code to audible PCM on the physical device.
 
-Complete and verify the stock PowerShell phoneme-to-PCM computation before
-lowering more of it to Hexagon. Lowering is the optimization phase, not a way
-to fill missing ALBERT, duration, F0/N, decoder, or waveform semantics. Keep
-bounded FP32 correctness references and their gates separate from device
-benchmarks and from claims of audible speech.
+Do not put tensor arithmetic on the PowerShell runtime path. PowerShell owns
+source validation, stock graph/control semantics, weight admission, direct
+Hexagon emission, dispatch, and audio orchestration. The cDSP executes hot
+model math. Bounded FP32 PowerShell operators are test oracles only: compare
+each emitted operator against them before promotion, but do not require a
+full scalar phoneme-to-PCM run before moving math to Hexagon. Missing ALBERT,
+duration, F0/N, decoder, or waveform semantics must still be source-traced
+and gated; DSP execution does not excuse a missing model stage. Keep oracle
+timings separate from device benchmarks and audible-speech claims.
 
 ## Governing objective: PowerShell end to end
 

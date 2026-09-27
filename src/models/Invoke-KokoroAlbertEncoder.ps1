@@ -49,11 +49,13 @@ foreach ($name in @('weight', 'bias')) {
     -Embeddings $state -Weights $Projection['weight'] -Bias $Projection['bias'] `
     -Tokens $length -EmbeddingSize $EmbeddingSize -HiddenSize $HiddenSize
 for ($layer = 0; $layer -lt $LayerRepeats; $layer++) {
+    $layerClock = [Diagnostics.Stopwatch]::StartNew()
     [float[]]$state = & (Join-Path $modelRoot 'Invoke-KokoroAlbertAttention.ps1') `
         -HiddenStates $state -Parameters $Attention -Tokens $length `
         -HiddenSize $HiddenSize -Heads $Heads
     [float[]]$state = & (Join-Path $modelRoot 'Invoke-KokoroAlbertFeedForward.ps1') `
         -AttentionOutput $state -Parameters $FeedForward -Tokens $length `
         -HiddenSize $HiddenSize -IntermediateSize $IntermediateSize
+    Write-Verbose "ALBERT repeat $($layer + 1)/$LayerRepeats completed in $($layerClock.Elapsed.TotalSeconds.ToString('F1')) s."
 }
 Write-Output -NoEnumerate $state

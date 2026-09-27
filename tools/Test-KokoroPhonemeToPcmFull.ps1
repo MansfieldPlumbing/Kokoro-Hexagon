@@ -16,12 +16,14 @@ if (-not $outputPath.StartsWith($buildRoot + [IO.Path]::DirectorySeparatorChar,
     throw 'Reference PCM destination must be a new file under ignored build.'
 }
 $modelRoot = Join-Path $PSScriptRoot '../src/models'
+# This exact digest already passed all three exhaustive finite-value gates.
+# Recheck SHA-256 and shape here; readers reject reuse if the pin changes.
 $acousticWeights = & (Join-Path $modelRoot 'Read-KokoroAcousticWeights.ps1') `
-    -CheckpointPath $CheckpointPath
+    -CheckpointPath $CheckpointPath -SkipFiniteScan
 $decoderWeights = & (Join-Path $modelRoot 'Read-KokoroDecoderWeights.ps1') `
-    -CheckpointPath $CheckpointPath
+    -CheckpointPath $CheckpointPath -SkipFiniteScan
 $generatorWeights = & (Join-Path $modelRoot 'Read-KokoroGeneratorWeights.ps1') `
-    -CheckpointPath $CheckpointPath
+    -CheckpointPath $CheckpointPath -SkipFiniteScan
 Write-Output 'GATE: pinned acoustic, decoder, and generator weights admitted'
 [float[]]$voice = & (Join-Path $modelRoot 'Read-KokoroVoiceRow.ps1') `
     -VoicePath $VoicePath -PhonemeCount 1

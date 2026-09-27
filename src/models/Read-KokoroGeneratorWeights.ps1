@@ -2,12 +2,17 @@
 # Build-time extraction of the pinned stock generator's FP32 tensors.
 # Kokoro checkpoint revision f3ff3571791e39611d31c381e3a41a3af07b4987.
 [CmdletBinding()]
-param([Parameter(Mandatory)][string] $CheckpointPath, [switch] $NamesOnly)
+param([Parameter(Mandatory)][string] $CheckpointPath, [switch] $NamesOnly,
+    [switch] $SkipFiniteScan)
 
 $ErrorActionPreference = 'Stop'
 $root = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '../..'))
 $pin = @(([IO.File]::ReadAllText((Join-Path $root 'lib/manifest.json')) |
     ConvertFrom-Json -AsHashtable).model.files | Where-Object { $_.path -ceq 'kokoro-v1_0.pth' })
+if ($SkipFiniteScan -and ($pin.Count -ne 1 -or $pin[0].sha256 -cne
+        '496DBA118D1A58F5F3DB2EFC88DBDC216E0483FC89FE6E47EE1F2C53F18AD1E4')) {
+    throw 'Finite-scan reuse is only admitted for the audited checkpoint digest.'
+}
 $path = (Resolve-Path -LiteralPath $CheckpointPath).Path
 if ($pin.Count -ne 1 -or (Get-Item -LiteralPath $path).Length -ne [long]$pin[0].bytes -or
     (Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash -cne $pin[0].sha256) {
@@ -80,8 +85,10 @@ foreach ($name in $shapes.Keys) {
     [byte[]]$bytes = & $reader.Bytes $checkpoint ($prefix + $name)
     $values = [float[]]::new($bytes.Length / 4)
     [Buffer]::BlockCopy($bytes, 0, $values, 0, $bytes.Length)
-    foreach ($value in $values) {
-        if (-not [float]::IsFinite($value)) { throw "Stock generator tensor is non-finite: $name" }
+    if (-not $SkipFiniteScan) {
+        foreach ($value in $values) {
+            if (-not [float]::IsFinite($value)) { throw "Stock generator tensor is non-finite: $name" }
+        }
     }
     $vectors[$name] = $values
 }

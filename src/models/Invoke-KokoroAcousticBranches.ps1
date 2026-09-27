@@ -31,6 +31,7 @@ if ($tokens -lt 2 -or $tokens -gt 510 -or $VoiceRow.Length -ne 256 -or
     throw 'Acoustic branch token boundaries or voice-row shape differ.'
 }
 $modelRoot = $PSScriptRoot
+$stageClock = [Diagnostics.Stopwatch]::StartNew()
 $durationStyle = [float[]]::new(128)
 $decoderStyle = [float[]]::new(128)
 [Array]::Copy($VoiceRow, 128, $durationStyle, 0, 128)
@@ -39,24 +40,35 @@ $decoderStyle = [float[]]::new(128)
     -TokenIds $TokenIds -Embeddings $AlbertEmbeddings `
     -Projection $AlbertProjection -Attention $AlbertAttention `
     -FeedForward $AlbertFeedForward -LayerRepeats $AlbertLayerRepeats
+Write-Verbose "ALBERT encoder completed in $($stageClock.Elapsed.TotalSeconds.ToString('F1')) s."
+$stageClock.Restart()
 [float[]]$tokenFeatures = & (Join-Path $modelRoot 'Invoke-KokoroLinear.ps1') `
     -InputTensor $bert -Weights $BertEncoderWeights -Bias $BertEncoderBias `
     -Rows $tokens -InputChannels 768 -OutputChannels 512
+Write-Verbose "BERT projection completed in $($stageClock.Elapsed.TotalSeconds.ToString('F1')) s."
+$stageClock.Restart()
 $duration = & (Join-Path $modelRoot 'Invoke-KokoroDurationBranch.ps1') `
     -TokenFeatures $tokenFeatures -Style $durationStyle `
     -EncoderParameters $DurationEncoderParameters `
     -LstmParameters $DurationLstmParameters `
     -DurationWeights $DurationWeights -DurationBias $DurationBias `
     -TokenCount $tokens -Speed $Speed -EncoderLayers $DurationEncoderLayers
+Write-Verbose "Duration branch completed in $($stageClock.Elapsed.TotalSeconds.ToString('F1')) s; frames=$($duration.FrameCount)."
+$stageClock.Restart()
 [float[]]$textTokens = & (Join-Path $modelRoot 'Invoke-KokoroTextEncoder.ps1') `
     -TokenIds $TokenIds -Parameters $TextEncoderParameters `
     -Layers $TextEncoderLayers
+Write-Verbose "Text encoder completed in $($stageClock.Elapsed.TotalSeconds.ToString('F1')) s."
+$stageClock.Restart()
 [float[]]$alignedText = & (Join-Path $modelRoot 'Expand-KokoroAlignedFeatures.ps1') `
     -Features $textTokens -Channels 512 -TokenCount $tokens `
     -FrameToToken $duration.FrameToToken
+Write-Verbose "Text alignment completed in $($stageClock.Elapsed.TotalSeconds.ToString('F1')) s."
+$stageClock.Restart()
 $f0n = & (Join-Path $modelRoot 'Invoke-KokoroF0NBranch.ps1') `
     -AlignedFeatures $duration.AlignedPredictorFeatures `
     -Style $durationStyle -Parameters $F0NParameters -Frames $duration.FrameCount
+Write-Verbose "F0/N branch completed in $($stageClock.Elapsed.TotalSeconds.ToString('F1')) s."
 [pscustomobject]@{
     TokenCount = $tokens
     FrameCount = $duration.FrameCount
