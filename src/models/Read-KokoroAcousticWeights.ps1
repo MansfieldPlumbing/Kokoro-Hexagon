@@ -2,7 +2,7 @@
 # Build-time stock acoustic tensor admission for the PowerShell model path.
 # Kokoro checkpoint revision f3ff3571791e39611d31c381e3a41a3af07b4987.
 [CmdletBinding()]
-param([Parameter(Mandatory)][string] $CheckpointPath)
+param([Parameter(Mandatory)][string] $CheckpointPath, [switch] $NamesOnly)
 
 $ErrorActionPreference = 'Stop'
 $root = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '../..'))
@@ -157,6 +157,10 @@ foreach ($name in $shapes.Keys) {
         }
         $expectedStride *= $descriptor.Shape[$axis]
     }
+}
+if ($NamesOnly) {
+    Write-Output -NoEnumerate @($shapes.Keys)
+    return
 }
 $sets = @{}
 foreach ($group in @('AlbertEmbeddings', 'AlbertProjection', 'AlbertAttention',

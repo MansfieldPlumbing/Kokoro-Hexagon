@@ -284,7 +284,9 @@ and its directly emitted backend remain to be built.
   `docs/receipts/generator-composition-fp32-reference-20260927.md`.
 - [x] Admit the pinned checkpoint's acoustic, decoder, and generator weight
   families through reusable PowerShell readers: 171, 72, and 303 tensors
-  respectively. A bounded phoneme-to-PCM coordinator now connects the
+  respectively. The remaining two checkpoint tensors are ALBERT pooler
+  weights excluded by the stock `last_hidden_state` return path. A bounded
+  phoneme-to-PCM coordinator now connects the
   authored stages with the full stock layer counts. The reader gates pass;
   only its AST and rejection guards are gated, not a full forward. See
   `docs/receipts/model-weight-admission-20260927.md`.
