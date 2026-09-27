@@ -316,6 +316,12 @@ and its directly emitted backend remain to be built.
   emitted Hexagon code with same-input/same-weight differential gates and
   physical-device receipts. Keep PowerShell scalar operators as bounded
   test oracles only; no product inference dispatches tensor math to them.
+- [x] Emit a bounded 3×768→512 FP32 affine tile as a Hexagon ELF with
+  PowerShell-authored instruction emission. Its 504 instruction bytes match
+  the pinned independent assembler, with no imports or relocations. This is
+  an emission gate only: no device execution, same-weight differential, or
+  HMX performance result. See
+  `docs/receipts/hexagon-linear-tile-emission-20260927.md`.
 - [ ] Lower a complete FP32 path without QNN, Python, or LLVM in the build or
   device execution graph. Prove each promoted block against the pinned oracle
   and preserve a same-input/same-weight baseline before changing precision.

@@ -2,7 +2,7 @@
 [CmdletBinding()]
 param(
     [string] $OutputDirectory = (Join-Path $PSScriptRoot '..\..\Build\Kokoro-Hexagon\hexagon-emission\emitted'),
-    [ValidateSet('Probe','KokoroAffine','KokoroConvTile','KokoroR0Sub0','KokoroHmxLock','KokoroHmxMatrix')][string] $Kernel='Probe',
+    [ValidateSet('Probe','KokoroAffine','KokoroConvTile','KokoroLinearTile','KokoroR0Sub0','KokoroHmxLock','KokoroHmxMatrix')][string] $Kernel='Probe',
     [string] $WeightManifest = $(
         $cands = @(
             (Join-Path $PSScriptRoot '..\..\Build\Kokoro-QNN\emit\r0\r0_static.json'),
@@ -141,6 +141,10 @@ if($Kernel -eq 'KokoroR0Sub0') {
     . (Join-Path $PSScriptRoot '..\src\emit\Kokoro.HmxMatrixProbe.ps1')
     $steps=@(New-KokoroHmxMatrixSteps)
     $symbol='kokoro_hmx_matrix_skel_handle_invoke'; $soname='libkokoro_hmx_matrix_skel.so'
+} elseif($Kernel -eq 'KokoroLinearTile') {
+    . (Join-Path $PSScriptRoot '..\src\emit\Kokoro.LinearTile.ps1')
+    $steps=@(New-KokoroLinearTileSteps)
+    $symbol='kokoro_linear_skel_handle_invoke'; $soname='libkokoro_linear_skel.so'
 } else {
     $steps=@(New-HexagonProbeSteps)
     $symbol='kqnn_emit_skel_handle_invoke'; $soname='libkqnn_emit_skel.so'

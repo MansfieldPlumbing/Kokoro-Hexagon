@@ -12,7 +12,7 @@ param(
         Join-Path $buildDir 'hexagon-emission\emitted'
     ),
     [string] $ToolRoot = '/home/scott/hexagon/Hexagon_SDK/6.4.0.2/tools/HEXAGON_Tools/19.0.04/Tools/bin',
-    [ValidateSet('Probe','KokoroAffine','KokoroConvTile','KokoroR0Sub0','KokoroHmxLock','KokoroHmxMatrix')][string] $Kernel='Probe',
+    [ValidateSet('Probe','KokoroAffine','KokoroConvTile','KokoroLinearTile','KokoroR0Sub0','KokoroHmxLock','KokoroHmxMatrix')][string] $Kernel='Probe',
     [switch] $Force
 )
 $ErrorActionPreference='Stop'
