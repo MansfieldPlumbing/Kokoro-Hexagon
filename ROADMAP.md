@@ -263,16 +263,24 @@ and its directly emitted backend remain to be built.
   20-point, hop-5 centered Hann STFT/iSTFT as bounded PowerShell FP32
   references. Analytic phase/voicing and spectral gates, stock source-weight
   shape/finite gates, a controlled-source round trip above 90 dB SNR, and
-  the connected 22-channel source-spectrum prelude gate pass. Full learned
-  generator composition and final spectrogram projection remain before PCM.
+  the connected 22-channel source-spectrum prelude gate pass. Stock-weight
+  learned-generator numerical comparison remains before a speech claim.
   See `docs/receipts/generator-source-stft-fp32-reference-20260926.md`.
 - [x] Preserve the existing bounded PowerShell AdaIN/Snake residual block
   and add both weight-normalized transposed-convolution upsamplers and both
   ordinary noise convolutions. The existing residual analytic gate and new
-  analytic/pinned-checkpoint upsampler and noise-convolution gates pass. Compose and
-  numerically gate the full two-stage learned generator, reflection pad,
-  post-projection, and waveform output before any speech claim. See
+  analytic/pinned-checkpoint upsampler and noise-convolution gates pass. A
+  stock-weight numerical gate for the full composition remains. See
   `docs/receipts/generator-learned-primitives-fp32-reference-20260926.md`.
+- [x] Compose the two-stage learned generator topology as a bounded PowerShell
+  reference from supplied decoder features, F0, style, and parameter vectors
+  through the harmonic source, reflection padding, six residual branches,
+  post projection, and PCM. The synthetic zero/nonzero and connected
+  source-to-PCM shape gates pass. The digest-verified checkpoint's 303
+  generator tensors pass exact shape, dtype, stride, and finite-value checks.
+  A stock-weight numerical differential and connected phoneme-to-PCM run
+  remain open. See
+  `docs/receipts/generator-composition-fp32-reference-20260927.md`.
 - [ ] Lower a complete FP32 path without QNN, Python, or LLVM in the build or
   device execution graph. Prove each promoted block against the pinned oracle
   and preserve a same-input/same-weight baseline before changing precision.
