@@ -90,4 +90,5 @@ $vectors.Remove('m_source.l_linear.bias')
     SourceMergeWeights = $mergeWeights
     SourceMergeBias = $mergeBias
     TensorCount = $shapes.Count
+    CheckpointSha256 = $pin[0].sha256
 }

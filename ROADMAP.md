@@ -202,11 +202,12 @@ and its directly emitted backend remain to be built.
   rounding, minimum one-frame clamp, and channel-first gather in
   `tools/Test-KokoroDurationMap.ps1`. A numerical oracle comparison near
   duration half-integers and integration with the predictor remain open.
-- [ ] Author the full stock computation from admitted phoneme IDs and the
+- [ ] Execute and numerically verify the full stock computation from admitted phoneme IDs and the
   selected voice row through ALBERT, text encoder, duration, F0/N, harmonic
-  source, decoder, iSTFT, and PCM. Replace the opaque prepared-input boundary
-  in `New-KokoroDecoderGraph.ps1` with auditable stages. Keep source/checkpoint
-  identity and tensor shapes attached to every stage.
+  source, decoder, iSTFT, and PCM. The bounded stage coordinator is authored,
+  but its full stock-weight forward has not passed. Replace the opaque
+  prepared-input boundary in `New-KokoroDecoderGraph.ps1` with auditable stages.
+  Keep source/checkpoint identity and tensor shapes attached to every stage.
 - [x] Re-author ALBERT's embedding sum, layer normalization, 128-to-768
   projection, shared multi-head attention, `gelu_new` feed-forward, residual
   normalization, and repeated-layer control as bounded PowerShell FP32
@@ -214,9 +215,9 @@ and its directly emitted backend remain to be built.
   execution pass; the 12-layer stock output still needs an independent
   numerical differential. The post-ALBERT `bert_encoder` 768-to-512 linear
   primitive is also gated. See `docs/receipts/albert-fp32-reference-20260926.md`.
-- [ ] Complete the stock ALBERT numerical differential, source excitation,
-  decoder blocks, and waveform synthesis. Do not start further Hexagon
-  lowering to substitute for these missing model computations.
+- [ ] Complete independent stock numerical differentials across ALBERT,
+  decoder, and waveform synthesis. Do not start further Hexagon lowering
+  to substitute for unverified model computation.
 - [x] Add bounded PowerShell FP32 references for the shared one-layer
   bidirectional LSTM gate equations and reverse-direction layout, plus the
   stock 512-to-50 duration projection connected to the existing frame map.
@@ -281,6 +282,16 @@ and its directly emitted backend remain to be built.
   A stock-weight numerical differential and connected phoneme-to-PCM run
   remain open. See
   `docs/receipts/generator-composition-fp32-reference-20260927.md`.
+- [x] Admit the pinned checkpoint's acoustic, decoder, and generator weight
+  families through reusable PowerShell readers: 171, 72, and 303 tensors
+  respectively. A bounded phoneme-to-PCM coordinator now connects the
+  authored stages with the full stock layer counts. The reader gates pass;
+  only its AST and rejection guards are gated, not a full forward. See
+  `docs/receipts/model-weight-admission-20260927.md`.
+- [x] Read the pinned `af_heart` voice pack as a top-level tensor and select
+  row `phoneme_count - 1` as specified by the stock pipeline. The one-phoneme
+  row and out-of-bounds rejection gate pass. This is an input contract, not
+  audible synthesis.
 - [ ] Lower a complete FP32 path without QNN, Python, or LLVM in the build or
   device execution graph. Prove each promoted block against the pinned oracle
   and preserve a same-input/same-weight baseline before changing precision.

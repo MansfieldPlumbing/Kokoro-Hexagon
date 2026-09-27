@@ -25,7 +25,7 @@ if ($InputTensor.Length -ne [long]$Frames * $InputChannels -or
     $WeightV.Length -ne $weights -or $WeightG.Length -ne $InputChannels -or
     $Bias.Length -ne $OutputChannels -or
     $outputFrames -lt 1 -or $outputFrames -gt 32768 -or
-    $weights * $Frames -gt 16000000) {
+    $weights * $Frames -gt 32000000) {
     throw 'Transposed Conv1D shape exceeds the bounded reference contract.'
 }
 foreach ($values in @($InputTensor, $WeightV, $WeightG, $Bias)) {

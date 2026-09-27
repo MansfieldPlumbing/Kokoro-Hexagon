@@ -20,9 +20,9 @@ param(
 $ErrorActionPreference = 'Stop'
 $weightCount = [long]$OutputChannels * $InputChannels * $KernelSize
 $multiplyAdds = $weightCount * $Frames
-# Two stock F0 frames produce 121 frames at the second generator stage;
-# its 128-channel, 11-tap block requires about 22 million scalar terms.
-if (($KernelSize % 2) -ne 1 -or $multiplyAdds -gt 32000000 -or
+# Six stock F0 frames produce 361 frames at the second generator stage;
+# its 128-channel, 11-tap block requires about 65 million scalar terms.
+if (($KernelSize % 2) -ne 1 -or $multiplyAdds -gt 80000000 -or
     $InputTensor.Length -ne [long]$InputChannels * $Frames -or
     $WeightV.Length -ne $weightCount -or
     $WeightG.Length -ne $OutputChannels -or $Bias.Length -ne $OutputChannels) {
