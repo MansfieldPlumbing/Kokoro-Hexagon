@@ -16,6 +16,10 @@ $script:HexagonForms = @{
     'sfadd'          = '11101011000sssssPP0ttttt000ddddd'
     'sfsub'          = '11101011000sssssPP0ttttt001ddddd'
     'sfmpy'          = '11101011010sssssPP0ttttt000ddddd'
+    # V73 PRM 80-N2040-53 Rev. AB p.474.
+    'sfmax'          = '11101011100sssssPP0ttttt000ddddd'
+    # V73 PRM 80-N2040-53 Rev. AB p.470 (same pinned manual as above).
+    'sfinvsqrta'     = '10001011111sssssPP------0eeddddd'
     'and'            = '11110001000sssssPP0ttttt000ddddd'
     'xor'            = '11110001011sssssPP0ttttt000ddddd'
     'conv-sf2w-chop' = '10001011100sssssPP000000001ddddd'
@@ -27,6 +31,11 @@ $script:HexagonForms = @{
     'vadd-sf'        = '00011111100tttttPP1sssss110ddddd'
     'vsub-sf'        = '00011111100tttttPP1sssss111ddddd'
     'vmpy-sf'        = '00011111100tttttPP1sssss001ddddd'
+    # V73 HVX PRM 80-N2040-54 Rev. AB pp.154,250,262. QFloat
+    # intermediates are explicit; these are not the optional IEEE-result forms.
+    'vmpy-sf-qf32'   = '00011111111tttttPP1sssss001ddddd'
+    'vadd-sf-qf32'   = '00011111101tttttPP1sssss001ddddd'
+    'vconv-qf32-sf'  = '00011110--0--100PP1sssss000ddddd'
     'vsplat'         = '00011001101sssssPP000000001ddddd'
     'vand'           = '00011100001tttttPP0sssss101ddddd'
     'vxor'           = '00011100001tttttPP0sssss111ddddd'
@@ -104,7 +113,7 @@ function New-HexagonInstruction {
     param([hashtable] $Step, [long] $Pc, [long] $Target)
     if ($Step.Op -eq 'label') { return }
     $fields = @{ P=3 }
-    foreach ($key in 'd','s','t','x','u') { if ($Step.ContainsKey($key)) { $fields[$key] = $Step[$key] } }
+    foreach ($key in 'd','s','t','x','u','e') { if ($Step.ContainsKey($key)) { $fields[$key] = $Step[$key] } }
     switch ($Step.Op) {
         { $_ -in 'imm','addi' } {
             if ($Step.i -lt -32768 -or $Step.i -gt 32767) { throw 'Signed immediate out of range' }
@@ -235,6 +244,8 @@ function ConvertTo-HexagonAssembly {
         'sfadd'          { $s = "r$($Step.d) = sfadd(r$($Step.s),r$($Step.t))" }
         'sfsub'          { $s = "r$($Step.d) = sfsub(r$($Step.s),r$($Step.t))" }
         'sfmpy'          { $s = "r$($Step.d) = sfmpy(r$($Step.s),r$($Step.t))" }
+        'sfmax'          { $s = "r$($Step.d) = sfmax(r$($Step.s),r$($Step.t))" }
+        'sfinvsqrta'     { $s = "r$($Step.d),p$($Step.e) = sfinvsqrta(r$($Step.s))" }
         'and'            { $s = "r$($Step.d) = and(r$($Step.s),r$($Step.t))" }
         'xor'            { $s = "r$($Step.d) = xor(r$($Step.s),r$($Step.t))" }
         'conv-sf2w-chop' { $s = "r$($Step.d) = convert_sf2w(r$($Step.s)):chop" }
@@ -258,6 +269,9 @@ function ConvertTo-HexagonAssembly {
         'vadd-sf'        { $s = "v$($Step.d).sf = vadd(v$($Step.s).sf,v$($Step.t).sf)" }
         'vsub-sf'        { $s = "v$($Step.d).sf = vsub(v$($Step.s).sf,v$($Step.t).sf)" }
         'vmpy-sf'        { $s = "v$($Step.d).sf = vmpy(v$($Step.s).sf,v$($Step.t).sf)" }
+        'vmpy-sf-qf32'   { $s = "v$($Step.d).qf32 = vmpy(v$($Step.s).sf,v$($Step.t).sf)" }
+        'vadd-sf-qf32'   { $s = "v$($Step.d).qf32 = vadd(v$($Step.s).sf,v$($Step.t).sf)" }
+        'vconv-qf32-sf'  { $s = "v$($Step.d).sf = v$($Step.s).qf32" }
         'vsplat'         { $s = "v$($Step.d) = vsplat(r$($Step.s))" }
         'vand'           { $s = "v$($Step.d) = vand(v$($Step.s),v$($Step.t))" }
         'vxor'           { $s = "v$($Step.d) = vxor(v$($Step.s),v$($Step.t))" }

@@ -23,6 +23,11 @@ or frontend is a Kokoro-Hexagon product input.
   later units synthesize. Its queue is not capacity-bounded, and its playback
   callback allocates/copies arrays at `:117-159`. These are example choices,
   not a latency or robustness standard for our Android audio path.
+- The example starts PortAudio before synthesis at `Program.cs:163-174` and
+  writes zero-filled output while no completed chunk is queued at `:153-157`.
+  Kokoro-Hexagon's existing `src/runspace/Audio.AAudio.psm1:101-118` instead
+  primes available PCM before requesting stream start. Preserve that startup
+  ordering; its audible latency still needs a real generated-speech test.
 
 ## Kokoro-Hexagon consequence
 

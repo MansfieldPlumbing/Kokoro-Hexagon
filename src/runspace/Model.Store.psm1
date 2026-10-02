@@ -187,7 +187,8 @@ $installStream = {
 
         $contentDirectory = [IO.Path]::Combine($contentRoot, $actualHash.ToLowerInvariant())
         [IO.Directory]::CreateDirectory($contentDirectory) | Out-Null
-        $contentPath = [IO.Path]::Combine($contentDirectory, 'Kokoro-Hexagon.dll')
+        $assemblyFileName = $manifest.AssemblyName + '.dll'
+        $contentPath = [IO.Path]::Combine($contentDirectory, $assemblyFileName)
         if ([IO.File]::Exists($contentPath)) {
             $existing = & $getFileSha256 $contentPath
             if ($existing -cne $actualHash) { throw 'Content-addressed model path contains different bytes.' }
@@ -200,7 +201,7 @@ $installStream = {
             modelId = $manifest.ModelId
             version = $manifest.Version
             assemblySha256 = $actualHash
-            relativePath = 'sha256/' + $actualHash.ToLowerInvariant() + '/Kokoro-Hexagon.dll'
+            relativePath = 'sha256/' + $actualHash.ToLowerInvariant() + '/' + $assemblyFileName
             activatedUtc = [DateTimeOffset]::UtcNow.ToString('O')
         } | ConvertTo-Json -Compress
         & $writeAtomicText $activePath $active
@@ -254,7 +255,7 @@ $getActive = {
     $text = [IO.File]::ReadAllText($activePath)
     $active = $text | ConvertFrom-Json
     if ($active.schema -ne 1 -or $active.assemblySha256 -notmatch '^[A-Fa-f0-9]{64}$' -or
-        $active.relativePath -notmatch '^sha256/[a-f0-9]{64}/Kokoro-Hexagon\.dll$') {
+        $active.relativePath -notmatch '^sha256/[a-f0-9]{64}/[A-Za-z0-9][A-Za-z0-9._-]{0,127}\.dll$') {
         throw 'Active model pointer is invalid.'
     }
     $path = [IO.Path]::GetFullPath([IO.Path]::Combine($modelRoot, $active.relativePath.Replace('/', [IO.Path]::DirectorySeparatorChar)))
@@ -268,6 +269,7 @@ $getActive = {
     if ($manifest.ModelId -cne [string]$active.modelId -or
         $manifest.Version -cne [string]$active.version -or
         $manifest.AssemblySha256 -cne ([string]$active.assemblySha256).ToUpperInvariant() -or
+        [IO.Path]::GetFileName($path) -cne ($manifest.AssemblyName + '.dll') -or
         $manifest.AssemblySha256.ToLowerInvariant() -cne [IO.Path]::GetFileName([IO.Path]::GetDirectoryName($path))) {
         throw 'Active model pointer does not match its signed manifest.'
     }

@@ -1,9 +1,11 @@
 # Kokoro appliance
 
-This directory owns the source for the intended downloadable Kokoro-Hexagon
-appliance. The current base APK proves only a Xamarin-free PowerShell 7
-NativeActivity/CoreCLR host that launches on two phones. It embeds no Kokoro
-model and does not yet load one, execute the full model, or produce speech.
+This directory owns Kokoro's downstream source for the intended downloadable
+appliance. The generic Android host comes from the immutable Pwsh revision in
+`lib/manifest.json`; the retained Kokoro setup fork is not a release input. A
+historical Xamarin-free NativeActivity/CoreCLR APK launched on two phones, but
+the pinned Pwsh base has not yet been rebuilt with the downstream facade and
+model store. No APK in this repository loads the full model or produces speech.
 Direct Hexagon execution remains a separate integration gate.
 
 The appliance is a product boundary, not a build-output directory:
@@ -24,8 +26,7 @@ The appliance is a product boundary, not a build-output directory:
 A build is downloadable only after one immutable artifact passes all of these
 checks on the physical target:
 
-1. The APK contains this repository's unofficial fork of the Pwsh
-   NativeActivity/CoreCLR host build and contains no
+1. The APK derives from the pinned Pwsh NativeActivity/CoreCLR host and contains no
    Xamarin runtime libraries or application DEX.
 2. Every external input and packaged native library matches its pinned
    SHA-256 manifest entry, and the model-less APK is smaller than 40 MiB.
@@ -43,6 +44,18 @@ checks on the physical target:
 The first release target is ARM64 on the Samsung Galaxy S23. Additional SoCs
 and ABIs require their own device receipts; compatibility is not inferred from
 the V73 result.
+
+## Facade and session
+
+`Kokoro.Facade.psm1` draws the safe-area-aware phone surface through the pinned
+Pwsh Canvas binding. `Start-KokoroFacade.ps1` is the future profile entry point,
+and `Kokoro.SpeechSession.psm1` projects metadata-only engine/session state into
+the display. The session never carries samples or tensor data and refuses
+warmup while the admitted model reports `SynthesisReady = false`.
+
+`tools/Build-KokoroFacadePackage.ps1` stages these files and the launcher icon
+with hashes. That directory is an input-shape prototype, not an APK. The pinned
+Pwsh build still needs a generic integrity-declared application-input hook.
 
 ## Android platform surface
 

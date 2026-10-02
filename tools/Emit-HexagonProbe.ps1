@@ -1,16 +1,16 @@
 #requires -Version 7.4
 [CmdletBinding()]
 param(
-    [string] $OutputDirectory = (Join-Path $PSScriptRoot '..\..\Build\Kokoro-Hexagon\hexagon-emission\emitted'),
-    [ValidateSet('Probe','KokoroAffine','KokoroConvTile','KokoroLinearTile','KokoroR0Sub0','KokoroHmxLock','KokoroHmxMatrix')][string] $Kernel='Probe',
-    [string] $WeightManifest = $(
-        $cands = @(
-            (Join-Path $PSScriptRoot '..\..\Build\Kokoro-QNN\emit\r0\r0_static.json'),
-            (Join-Path $PSScriptRoot '..\..\..\Build\Kokoro-QNN\emit\r0\r0_static.json'),
-            'C:\Dev\Build\Kokoro-QNN\emit\r0\r0_static.json'
-        )
-        ($cands | Where-Object { Test-Path $_ } | Select-Object -First 1)
-    ),
+    [string] $OutputDirectory = (Join-Path $PSScriptRoot '..\build\hexagon-emission\emitted'),
+    [ValidateSet('Probe','KokoroAffine','KokoroAdaIn','KokoroAdaInResBlock','KokoroAlbertSoftmax3','KokoroAlbertAttention3','KokoroConvTile','KokoroLinearTile','KokoroR0Sub0','KokoroHmxLock','KokoroHmxMatrix')][string] $Kernel='Probe',
+    [ValidateRange(2, 2048)][int] $AdaInFrames = 64,
+    [ValidateRange(1, 128)][int] $AdaInChannels = 128,
+    [switch] $AdaInVectorConvolution,
+    [ValidateRange(1, 512)][int] $LinearRows = 3,
+    [ValidateRange(1, 4096)][int] $LinearInputChannels = 768,
+    [ValidateRange(1, 4096)][int] $LinearOutputChannels = 512,
+    [switch] $LinearVectorOutputTiles,
+    [string] $WeightManifest = (Join-Path $PSScriptRoot '..\build\emit\r0\r0_static.json'),
     [switch] $Force
 )
 $ErrorActionPreference = 'Stop'
@@ -133,6 +133,23 @@ if($Kernel -eq 'KokoroR0Sub0') {
         $symbol='kokoro_conv_skel_handle_invoke'; $soname='libkokoro_conv_skel.so'
     }
     Write-NewOrIdenticalFile (Join-Path $OutputDirectory 'lowered.json') ([Text.Encoding]::UTF8.GetBytes(($nodes | ConvertTo-Json -Depth 6))) -AllowOverwrite:$Force
+} elseif($Kernel -eq 'KokoroAdaIn') {
+    . (Join-Path $PSScriptRoot '..\src\emit\Kokoro.AdaIn.ps1')
+    $steps=@(New-KokoroAdaInSteps -Frames $AdaInFrames -Channels $AdaInChannels)
+    $symbol='kokoro_adain_skel_handle_invoke'; $soname='libkokoro_adain_skel.so'
+} elseif($Kernel -eq 'KokoroAdaInResBlock') {
+    . (Join-Path $PSScriptRoot '..\src\emit\Kokoro.AdaIn.ps1')
+    . (Join-Path $PSScriptRoot '..\src\emit\Kokoro.AdaInResBlock.ps1')
+    $steps=@(New-KokoroAdaInResBlockSteps -Frames $AdaInFrames -VectorConvolution:$AdaInVectorConvolution)
+    $symbol='kokoro_adain_resblock_skel_handle_invoke'; $soname='libkokoro_adain_resblock_skel.so'
+} elseif($Kernel -eq 'KokoroAlbertSoftmax3') {
+    . (Join-Path $PSScriptRoot '..\src\emit\Kokoro.AlbertSoftmax3.ps1')
+    $steps=@(New-KokoroAlbertSoftmax3Steps)
+    $symbol='kokoro_albert_softmax3_skel_handle_invoke'; $soname='libkokoro_albert_softmax3_skel.so'
+} elseif($Kernel -eq 'KokoroAlbertAttention3') {
+    . (Join-Path $PSScriptRoot '..\src\emit\Kokoro.AlbertAttention3.ps1')
+    $steps=@(New-KokoroAlbertAttention3Steps)
+    $symbol='kokoro_albert_attention3_skel_handle_invoke'; $soname='libkokoro_albert_attention3_skel.so'
 } elseif($Kernel -eq 'KokoroHmxLock') {
     . (Join-Path $PSScriptRoot '..\src\emit\Kokoro.HmxLockProbe.ps1')
     $steps=@(New-KokoroHmxLockSteps)
@@ -143,7 +160,9 @@ if($Kernel -eq 'KokoroR0Sub0') {
     $symbol='kokoro_hmx_matrix_skel_handle_invoke'; $soname='libkokoro_hmx_matrix_skel.so'
 } elseif($Kernel -eq 'KokoroLinearTile') {
     . (Join-Path $PSScriptRoot '..\src\emit\Kokoro.LinearTile.ps1')
-    $steps=@(New-KokoroLinearTileSteps)
+    $steps=@(New-KokoroLinearTileSteps -Rows $LinearRows `
+        -InputChannels $LinearInputChannels -OutputChannels $LinearOutputChannels `
+        -VectorOutputTiles:$LinearVectorOutputTiles)
     $symbol='kokoro_linear_skel_handle_invoke'; $soname='libkokoro_linear_skel.so'
 } else {
     $steps=@(New-HexagonProbeSteps)

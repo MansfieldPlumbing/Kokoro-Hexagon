@@ -4,7 +4,13 @@ param([Parameter(Mandatory)][string]$AssemblyPath, [string]$VoicePath)
 $ErrorActionPreference = 'Stop'
 $root = [IO.Path]::GetFullPath([IO.Path]::Combine($PSScriptRoot, '..'))
 $sourcePath = [IO.Path]::Combine($root, 'src', 'text', 'Kokoro.PhonemeExpression.ps1')
-$source = & ([scriptblock]::Create([IO.File]::ReadAllText($sourcePath))) $root
+$sourceTokens = $null
+$sourceErrors = $null
+$sourceAst = [Management.Automation.Language.Parser]::ParseFile(
+    $sourcePath, [ref]$sourceTokens, [ref]$sourceErrors)
+if ($sourceErrors.Count -ne 0) { throw 'The phoneme expression source does not parse.' }
+$sourceBlock = $sourceAst.GetScriptBlock()
+$source = & $sourceBlock $root
 $expected = & $source.Verify
 $config = [IO.File]::ReadAllText([IO.Path]::Combine($root, 'lib', 'kokoro-v1_0.config.json')) |
     ConvertFrom-Json -AsHashtable
@@ -41,7 +47,12 @@ if ($VoicePath) {
     $pin = @($manifest.model.files | Where-Object { $_.path -ceq "voices\$voiceName" })
     if ($pin.Count -ne 1) { throw 'The voice pack is not pinned.' }
     $readerPath = [IO.Path]::Combine($root, 'src', 'runspace', 'Torch.Checkpoint.psm1')
-    $reader = [scriptblock]::Create([IO.File]::ReadAllText($readerPath)).InvokeReturnAsIs()
+    $readerTokens = $null
+    $readerErrors = $null
+    $readerAst = [Management.Automation.Language.Parser]::ParseFile(
+        $readerPath, [ref]$readerTokens, [ref]$readerErrors)
+    if ($readerErrors.Count -ne 0) { throw 'The checkpoint reader source does not parse.' }
+    $reader = $readerAst.GetScriptBlock().InvokeReturnAsIs()
     $archive = & $reader.ReadTensor $VoicePath $pin[0].sha256
     $expectedVoice = & $reader.Bytes $archive 'value'
     $resourceName = 'Kokoro.Voices.' + [IO.Path]::GetFileNameWithoutExtension($voiceName) + '.f32'

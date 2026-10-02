@@ -7,7 +7,13 @@ param(
 $ErrorActionPreference = 'Stop'
 $root = [IO.Path]::GetFullPath([IO.Path]::Combine($PSScriptRoot, '..'))
 $sourcePath = [IO.Path]::Combine($root, 'src', 'text', 'Kokoro.PhonemeExpression.ps1')
-$contract = & ([scriptblock]::Create([IO.File]::ReadAllText($sourcePath))) $root
+$sourceTokens = $null
+$sourceErrors = $null
+$sourceAst = [Management.Automation.Language.Parser]::ParseFile(
+    $sourcePath, [ref]$sourceTokens, [ref]$sourceErrors)
+if ($sourceErrors.Count -ne 0) { throw 'The phoneme expression source does not parse.' }
+$sourceBlock = $sourceAst.GetScriptBlock()
+$contract = & $sourceBlock $root
 $receipt = & $contract.Verify
 if (-not $receipt.Passed) { throw 'The pinned phoneme contract did not pass verification.' }
 $voiceBytes = $null
@@ -20,7 +26,12 @@ if ($VoicePath) {
     $voicePin = @($manifest.model.files | Where-Object { $_.path -ceq "voices\$voiceName" })
     if ($voicePin.Count -ne 1) { throw 'The voice pack is not pinned in the model manifest.' }
     $readerPath = [IO.Path]::Combine($root, 'src', 'runspace', 'Torch.Checkpoint.psm1')
-    $reader = [scriptblock]::Create([IO.File]::ReadAllText($readerPath)).InvokeReturnAsIs()
+    $readerTokens = $null
+    $readerErrors = $null
+    $readerAst = [Management.Automation.Language.Parser]::ParseFile(
+        $readerPath, [ref]$readerTokens, [ref]$readerErrors)
+    if ($readerErrors.Count -ne 0) { throw 'The checkpoint reader source does not parse.' }
+    $reader = $readerAst.GetScriptBlock().InvokeReturnAsIs()
     $archive = & $reader.ReadTensor $VoicePath $voicePin[0].sha256
     $tensor = $archive.Tensors['value']
     if (($tensor.Shape -join ',') -cne '510,1,256' -or $tensor.DType -cne 'float32') {
@@ -31,21 +42,15 @@ if ($VoicePath) {
     $voiceResource = 'Kokoro.Voices.' + [IO.Path]::GetFileNameWithoutExtension($voiceName) + '.f32'
 }
 
-# Reuse the base-host builder's exact framework LambdaCompiler seam without
-# running setup's package acquisition or Android packaging steps.
-$setupPath = [IO.Path]::Combine($root, 'setup-kokoro.ps1')
-$tokens = $null
-$parseErrors = $null
-$setupAst = [Management.Automation.Language.Parser]::ParseFile($setupPath, [ref]$tokens, [ref]$parseErrors)
-if ($parseErrors.Count -ne 0) { throw 'The setup source does not parse.' }
-foreach ($functionName in 'Write-MicrosoftLambdaToMethodBuilder', 'Set-DeterministicMvid') {
-    $matching = @($setupAst.FindAll({ param($node)
-        $node -is [Management.Automation.Language.FunctionDefinitionAst] -and
-        $node.Name -ceq $functionName
-    }, $true))
-    if ($matching.Count -ne 1) { throw "The base-host builder function $functionName is not unique." }
-    . ([scriptblock]::Create($matching[0].Extent.Text))
-}
+# Reuse only the required compiler helpers from the integrity-pinned Pwsh base;
+# do not execute its setup pipeline or depend on the legacy Kokoro host fork.
+$upstream = & ([IO.Path]::Combine($root, 'tools', 'Get-PwshUpstream.ps1'))
+$setupReceipt = @($upstream.Files | Where-Object { $_.Path -ceq 'setup.ps1' })
+if ($setupReceipt.Count -ne 1) { throw 'The pinned Pwsh setup receipt is not unique.' }
+$imports = & ([IO.Path]::Combine($root, 'src', 'build', 'Import-PwshBuildFunction.ps1')) `
+    -SetupPath $setupReceipt[0].LocalPath -RepositoryRoot $root `
+    -FunctionName 'Write-MicrosoftLambdaToMethodBuilder', 'Set-DeterministicMvid'
+foreach ($definition in $imports.Definitions) { . $definition }
 
 $identity = [Reflection.AssemblyName]::new('Kokoro.Phonemes')
 $builder = [Reflection.Emit.PersistedAssemblyBuilder]::new($identity, [object].Assembly)

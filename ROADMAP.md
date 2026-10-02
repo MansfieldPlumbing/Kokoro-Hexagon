@@ -4,15 +4,23 @@ This is the single implementation roadmap. A checked item has a named test or
 receipt; it does not imply that the whole synthesis path works. Historical
 measurements remain in `docs/receipts/` and do not define production dependencies.
 
-`setup-kokoro.ps1` is an unofficial, separately maintained fork of Pwsh's
-`setup.ps1`; it independently builds the Kokoro base APK. Pwsh does not lower
-Kokoro models. Kokoro-specific PowerShell source owns the model DLL and direct
-backend, so model and host releases remain separate decisions.
-The active `C:\Dev\Pwsh` checkout is outside this roadmap and must never
-receive Kokoro files or be used as a build, cache, or output location.
+Kokoro-Hexagon is a downstream TTS engine for the Xamarin-independent Pwsh
+base pinned in `lib/manifest.json`. Pwsh owns the generic NativeActivity,
+CoreCLR, SMA, package, and startup substrate; Pwsh does not lower Kokoro
+models. Kokoro-specific PowerShell source owns the model DLL, typed speech
+session, direct backend, and audio policy, so model and host releases remain
+separate decisions. `setup-kokoro.ps1` is retained only as a migration and
+equivalence oracle. Immutable Pwsh source is fetched into this repository's
+ignored `build/` tree; no Kokoro file or build output belongs in a Pwsh
+checkout.
 
-PowerShell authors and validates the graph, weights, and direct Hexagon code;
-the cDSP performs model tensor arithmetic. Bounded PowerShell FP32 operators
+PowerShell/SMA is the build-time compiler frontend. It validates the stock
+inputs and authored source, recovers and types the graph/control representation,
+optimizes and lowers verified operators, and emits the model DLL and direct
+Hexagon code. The admitted model and minimal host execute compiled control,
+dispatch, and audio delivery without a PowerShell runspace on the utterance
+hot path; the cDSP performs model tensor arithmetic. SMA's AST does not by
+itself lower tensor operations to Hexagon. Bounded PowerShell FP32 operators
 are differential oracles, not the product inference backend or a TTFA target.
 Do not wait for a full scalar reference pass before promoting a source-traced,
 same-input/same-weight DSP operator with a physical-device receipt.
@@ -24,8 +32,9 @@ weight-bearing managed model DLL. The final DLL must contain the admitted
 phoneme and text path, tensor catalog, graph, control contract, and lowered hot
 paths—not merely a compressed checkpoint. PowerShell/System.Management.Automation
 parses and lowers the authored sources at build time. The phone executes the
-admitted managed and directly emitted Hexagon code and plays PCM through a
-resident audio stream. A Windows controller can use the same model protocol.
+admitted managed control and directly emitted Hexagon code and plays PCM
+through a resident audio stream. A Windows controller can use the same model
+protocol; neither controller nor phone runspace schedules per-operator math.
 
 The base release is model-less and must remain smaller than 40 MiB. It obtains
 one or more model DLLs after installation or accepts the same artifacts over
@@ -59,6 +68,18 @@ and its directly emitted backend remain to be built.
 - [x] Extract all 548 contiguous FP32 tensors into a managed resource assembly
   and verify every embedded hash in a fresh Windows process. The FP32 DLL is
   327,285,248 bytes. This is a payload validation artifact, not a synthesizer.
+- [x] Consolidate the verified FP32 weights, all 114 phoneme mappings, the
+  `af_heart` voice tensor, and parsed graph identity into one reproducible,
+  IL-only `Dev.MansfieldPlumbing.Kokoro.Model` downstream assembly. Two
+  independent builds are byte-identical at 327,809,536 bytes. The contract
+  reports `SynthesisReady = false` and exposes no synthesis method; this is a
+  correctly bounded model container, not speech. See
+  `docs/results/pwsh-downstream-engine-assembly-20260928.md`.
+- [x] Admit that exact consolidated assembly through `Model.Store.psm1` on
+  Windows using a signed manifest, content-addressed installation, atomic
+  activation, and a fresh-process load. This verifies the real 327,809,536-byte
+  artifact rather than the small store fixture; Android admission remains
+  open.
 - [x] Emit and verify an FP16 payload candidate from the same tensors. Its DLL
   is 163,758,080 bytes. An 80,064-value sampled comparison gives mean absolute
   weight error 1.19e-5; no acoustic parity is claimed.
@@ -155,8 +176,9 @@ and its directly emitted backend remain to be built.
   instance-normalization affine, and the style affine. The pinned checkpoint
   has no AdaIN norm weight/bias tensors, so stock execution uses initialized
   identity values for that inner affine. Surrounding
-  convolutions, graph wiring, and emitted normalization remain open; this
-  scalar stage is not a speech or performance claim.
+  whole-graph wiring remains open. Direct normalization and one complete
+  residual block are separately gated below; this scalar stage is not a
+  speech or performance claim.
 - [x] Connect the style vector to that AdaIN reference stage through the stock
   linear gamma/beta projection. `ConvertTo-KokoroAdaInStyle.ps1` and
   `tools/Test-KokoroAdaInStyle.ps1` gate row-major weight layout, the
@@ -182,8 +204,18 @@ and its directly emitted backend remain to be built.
   and residual addition. `Invoke-KokoroAdaInResBlock1.ps1` and
   `tools/Test-KokoroAdaInResBlock1.ps1` gate a deterministic reference case;
   `tools/Test-KokoroAdaInCheckpoint.ps1` validates every parameter shape for
-  the pinned `generator.resblocks.3` block. No stock numerical parity or
-  direct Hexagon execution is claimed for the composed block yet.
+  the pinned `generator.resblocks.3` block. This reference alone does not
+  establish direct execution; see the separate physical gate below.
+- [x] Execute all six AdaIN/Snake/convolution stages and three residual adds
+  of `generator.resblocks.3` inside one directly emitted DSP invocation on
+  S23/SM8550. Two 128x64 synthetic stock-weight fixtures pass against the
+  source-defined reference, including changed style. The opt-in HVX QFloat
+  convolution variant passes at maximum error 0.000061035; counterbalanced
+  diagnostic medians are approximately 15.4 ms versus 407.7 ms scalar.
+  Standalone full-time AdaIN and its next Snake consumer also pass.
+  See `docs/receipts/adain-complete-block-direct-s23-20260928.md` for hashes,
+  rejected candidates and limits. This is not full-model speech, live sparse
+  mutation, persistent transport or causal streaming.
 - [x] Before lowering the composed block, compare its PowerShell FP32 output
   with a QNN reference run on the same pinned checkpoint weights, style,
   input, valid-frame mask, and block shape. Gate valid-frame error and SNR;
@@ -218,8 +250,10 @@ and its directly emitted backend remain to be built.
   projection, shared multi-head attention, `gelu_new` feed-forward, residual
   normalization, and repeated-layer control as bounded PowerShell FP32
   references. The stock checkpoint shape gates and a stock-weight one-layer
-  execution pass; the 12-layer stock output still needs an independent
-  numerical differential. The post-ALBERT `bert_encoder` 768-to-512 linear
+  execution pass. A three-token, 12-repeat independent original-source Torch
+  differential passes at 108.75 dB SNR; longer inputs and full connected
+  synthesis remain open. See `docs/receipts/host-readiness-20261001.md`.
+  The post-ALBERT `bert_encoder` 768-to-512 linear
   primitive is also gated. See `docs/receipts/albert-fp32-reference-20260926.md`.
 - [ ] Complete independent stock numerical differentials across ALBERT,
   decoder, and waveform synthesis. Do not start further Hexagon lowering
@@ -263,7 +297,11 @@ and its directly emitted backend remain to be built.
   references: F0/N stride-two convolution, aligned text residual, encode
   AdaIN block, three same-rate decode blocks, and the final upsample block.
   Analytic layout/shortcut gates and pinned-checkpoint two-frame shape/finite
-  gates pass. This produces 512-channel generator features, not PCM; the
+  gates pass. Independent same-input comparisons pass for all five blocks,
+  but the connected two-frame stock-FP32 comparison remains below its
+  declared gate at 60.77 dB SNR; FP64 diagnostics do not close that gate.
+  See `docs/receipts/host-readiness-20261001.md`.
+  This produces 512-channel generator features, not PCM; the
   learned generator remains to be composed. See
   `docs/receipts/decoder-core-fp32-reference-20260926.md`.
 - [x] Re-author the configured generator's stochastic harmonic source and
@@ -316,6 +354,25 @@ and its directly emitted backend remain to be built.
   emitted Hexagon code with same-input/same-weight differential gates and
   physical-device receipts. Keep PowerShell scalar operators as bounded
   test oracles only; no product inference dispatches tensor math to them.
+- [x] Execute the first connected stock-weight ALBERT affine boundary,
+  embedding projection 3×128→768, through directly emitted V73 code on the
+  physical S23. Both scalar and input-major HVX forms pass the same-input
+  oracle at maximum errors below 0.0000014. Counterbalanced warm invocation
+  medians were 5.962 versus 0.704 ms and 5.899 versus 0.704 ms, respectively,
+  an 8.47× and 8.38× improvement for this boundary. Its connected stock
+  attention-query 3×768→768 consumer also passes on S23; scalar/HVX medians
+  were 26.443/7.197 ms and 26.443/7.247 ms in reversed orders, a 3.67× and
+  3.65× improvement. Stock key and value pass the same HVX geometry. A fused
+  3×768→2304 QKV job passes at maximum error below 0.000012 with warm medians
+  17.821 and 17.894 ms, versus 20.141 ms summed separate medians. The generic
+  scalar/HVX emission gate passes every ALBERT/BERT affine geometry. A fused
+  three-token, 12-head score/softmax/context region now passes 2,304 values on
+  S23 at maximum error below 0.00000048 and a 0.666 ms warm invocation median;
+  its failed HVX context candidate was not promoted. Attention output
+  projection, residual normalization, and feed-forward still lack connected
+  physical receipts. See
+  `docs/results/albert-embedding-projection-direct-s23-20260928.md` and
+  `docs/results/albert-attention3-direct-s23-20260928.md`.
 - [x] Emit a bounded 3×768→512 FP32 affine tile as a Hexagon ELF with
   PowerShell-authored instruction emission. Its 504 instruction bytes match
   the pinned independent assembler, with no imports or relocations. This is
@@ -500,6 +557,16 @@ PowerShell-to-Hexagon execution described above.
 - [ ] Complete the owned Android bindings and load only a compatible model DLL
   admitted by the private model store. The running base appliance does not yet
   establish a device-proven Kokoro integration.
+- [x] Build a downstream, state-driven phone facade against the immutable Pwsh
+  Canvas binding; validate representative safe-area layout, bounded text,
+  primary hit target, contrast, and a full-size square launcher asset. Stage the
+  exact profile/module/icon set with hashes under `build/`. This is not device
+  evidence because the installed APK is non-debuggable and the pinned Pwsh
+  builder does not yet admit downstream application assets. See
+  `docs/results/kokoro-phone-facade-20260928.md`.
+- [ ] Add the generic Pwsh application-input hook, rebuild and sign the base,
+  verify the icon/resource table and forbidden-payload gate, then exercise the
+  facade on each physical device before connecting model-session state.
 - [ ] Wire `Model.Store.psm1` to `ANativeActivity.internalDataPath`, the HTTPS
   updater, and the offline AOA install operation. Re-run interrupted-download,
   rollback, incompatible-ABI, expiry, and multi-model activation tests on the
@@ -514,6 +581,12 @@ PowerShell-to-Hexagon execution described above.
   requests, chunked PCM, cancellation, receipts, and disposal. Keep AOA and
   local Android transport separate from synthesis semantics. Windows WASAPI
   and Android AAudio are distinct audio sinks.
+- [x] Define and test the metadata-only session state machine for model
+  admission, warmup, request generation, monotonic PCM counters, draining,
+  latest-wins cancellation, faults, closure, and facade projection. It carries
+  no samples and refuses warmup while the admitted engine reports
+  `SynthesisReady = false`. The compiled request/PCM transport and disposal
+  implementation remain open parts of the typed-session gate above.
 
 ### Later demo: Windows PowerShell ↔ Android PowerShell over USB AOA
 
@@ -530,15 +603,14 @@ not inferred from this development machine.
 
 `tools/UsbAoa.ps1` already negotiates accessory mode on Windows, and
 `tools/Invoke-KokoroAoa.ps1` has bounded request/reply framing for diagnostic
-`status`, `ping`, and `receipt`. `src/runspace/Aoa.Appliance.ps1` is the old
-managed-host endpoint, not the independent appliance implementation. The
-current `src/appliance/aoa/AndroidManifest.fragment.xml` is not wired into
-`setup-kokoro.ps1`, and its referenced accessory-filter XML resource is not
-packaged. The independent appliance currently admits only `status` at its
-startup expression boundary. None of these parts yet proves a release AOA
-pipe. The Windows client currently asks `UsbAoa.ps1` to stop ADB when starting
-accessory mode; determine whether that is necessary on each supported Windows
-configuration, and do not make it a default product requirement.
+`status`, `ping`, and `receipt`. `src/runspace/Aoa.Appliance.ps1` is a legacy
+managed-host endpoint, not the downstream engine session implementation. The
+current `src/appliance/aoa/AndroidManifest.fragment.xml` and referenced
+accessory-filter resource have not been integrated into the pinned Pwsh base.
+None of these parts yet proves a release AOA pipe. The Windows client currently
+asks `UsbAoa.ps1` to stop ADB when starting accessory mode; determine whether
+that is necessary on each supported Windows configuration, and do not make it
+a default product requirement.
 
 - [ ] Add the accessory declaration, filter resource, and package-level gate
   to the NativeActivity build. On attachment or startup, obtain Android's

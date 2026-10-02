@@ -67,48 +67,11 @@ function Invoke-Linear([float[]] $InputTensor, [float[]] $Weights, [float[]] $Bi
 $query = Invoke-Linear $HiddenStates $Parameters['query.weight'] $Parameters['query.bias']
 $key = Invoke-Linear $HiddenStates $Parameters['key.weight'] $Parameters['key.bias']
 $value = Invoke-Linear $HiddenStates $Parameters['value.weight'] $Parameters['value.bias']
-$context = [float[]]::new($HiddenStates.Length)
-$headWidth = [int]($HiddenSize / $Heads)
-$scale = 1.0 / [Math]::Sqrt($headWidth)
-$scores = [double[]]::new($Tokens)
-for ($head = 0; $head -lt $Heads; $head++) {
-    for ($queryToken = 0; $queryToken -lt $Tokens; $queryToken++) {
-        $maxScore = [double]::NegativeInfinity
-        for ($keyToken = 0; $keyToken -lt $Tokens; $keyToken++) {
-            if ($null -ne $KeyMask -and -not $KeyMask[$keyToken]) {
-                $scores[$keyToken] = [double]::NegativeInfinity
-                continue
-            }
-            $dot = 0.0
-            for ($dimension = 0; $dimension -lt $headWidth; $dimension++) {
-                $offset = $head * $headWidth + $dimension
-                $dot += [double]$query[$queryToken * $HiddenSize + $offset] *
-                    [double]$key[$keyToken * $HiddenSize + $offset]
-            }
-            $scores[$keyToken] = $dot * $scale
-            $maxScore = [Math]::Max($maxScore, $scores[$keyToken])
-        }
-        $denominator = 0.0
-        for ($keyToken = 0; $keyToken -lt $Tokens; $keyToken++) {
-            if ([double]::IsNegativeInfinity($scores[$keyToken])) { continue }
-            $scores[$keyToken] = [Math]::Exp($scores[$keyToken] - $maxScore)
-            $denominator += $scores[$keyToken]
-        }
-        if ($denominator -le 0 -or -not [double]::IsFinite($denominator)) {
-            throw 'ALBERT attention softmax is invalid.'
-        }
-        for ($dimension = 0; $dimension -lt $headWidth; $dimension++) {
-            $offset = $head * $headWidth + $dimension
-            $sum = 0.0
-            for ($keyToken = 0; $keyToken -lt $Tokens; $keyToken++) {
-                if ([double]::IsNegativeInfinity($scores[$keyToken])) { continue }
-                $sum += ($scores[$keyToken] / $denominator) *
-                    [double]$value[$keyToken * $HiddenSize + $offset]
-            }
-            $context[$queryToken * $HiddenSize + $offset] = [float]$sum
-        }
-    }
-}
+$maskArguments = @{}
+if ($null -ne $KeyMask) { $maskArguments.KeyMask = $KeyMask }
+$context = & (Join-Path $PSScriptRoot 'Invoke-KokoroAlbertAttentionCore.ps1') `
+    -Query $query -Key $key -Value $value -Tokens $Tokens `
+    -HiddenSize $HiddenSize -Heads $Heads @maskArguments
 $projected = Invoke-Linear $context $Parameters['dense.weight'] $Parameters['dense.bias']
 $result = [float[]]::new($HiddenStates.Length)
 for ($token = 0; $token -lt $Tokens; $token++) {

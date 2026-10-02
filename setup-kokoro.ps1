@@ -1,6 +1,7 @@
 #Requires -Version 7.0
-# Unofficial Kokoro-Hexagon fork of Pwsh's setup.ps1. Build this repository's
-# base appliance here; never use C:\Dev\Pwsh as a source or output directory.
+# Legacy migration fork of Pwsh's setup.ps1. New downstream integration pins
+# the Xamarin-independent Pwsh base in lib/manifest.json; retain this script
+# only until its Kokoro-specific contracts have independent equivalence gates.
 [CmdletBinding(SupportsShouldProcess, ConfirmImpact = 'Low', PositionalBinding = $false)]
 param(
     [Alias('h')]
@@ -1066,24 +1067,12 @@ function Get-KokoroApplianceDispatch {
 }
 
 function Get-KokoroModelContract {
-    $path = Join-Path $script:RepositoryRoot 'New-KokoroDecoderGraph.ps1'
-    $tokens = $null
-    $parseErrors = $null
-    $ast = [Management.Automation.Language.Parser]::ParseFile($path, [ref]$tokens, [ref]$parseErrors)
-    if ($parseErrors.Count -ne 0) { throw "Kokoro model contract has $($parseErrors.Count) parse error(s)." }
-    $nodes = @(& (Join-Path $script:RepositoryRoot 'src/lower/Lower-Model.ps1') -Model $ast.GetScriptBlock())
-    $expected = @(
-        'KokoroFront|@asr,@F0_curve,@N,@style,@mask,@capacity',
-        'KokoroGenerator|%0,@gb,@har8,@mask,@mask8,@capacity'
-    )
-    $actual = @($nodes | ForEach-Object { $_.Op + '|' + ($_.Inputs -join ',') })
-    if (($actual -join "`n") -cne ($expected -join "`n")) { throw 'Kokoro model graph contract changed unexpectedly.' }
-    $json = $nodes | ConvertTo-Json -Depth 6 -Compress
-    $hash = [Convert]::ToHexString([Security.Cryptography.SHA256]::HashData([Text.Encoding]::UTF8.GetBytes($json)))
+    $contract = & (Join-Path $script:RepositoryRoot 'src/build/Get-KokoroModelContract.ps1') `
+        -RepositoryRoot $script:RepositoryRoot
     [pscustomobject]@{
-        GraphSHA256 = $hash
-        Controls = 'asr,F0_curve,N,style,gb,har8,mask,mask8,capacity'
-        Nodes = $nodes.Count
+        GraphSHA256 = $contract.GraphSHA256
+        Controls = $contract.Controls -join ','
+        Nodes = $contract.Nodes
     }
 }
 

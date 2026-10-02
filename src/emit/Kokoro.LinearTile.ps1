@@ -6,7 +6,8 @@
 function New-KokoroLinearTileSteps {
     param([ValidateRange(1, 512)][int] $Rows = 3,
         [ValidateRange(1, 4096)][int] $InputChannels = 768,
-        [ValidateRange(1, 4096)][int] $OutputChannels = 512)
+        [ValidateRange(1, 4096)][int] $OutputChannels = 512,
+        [switch] $VectorOutputTiles)
     [long]$inputBytes = 4L * $Rows * $InputChannels
     [long]$weightBytes = 4L * $OutputChannels * ($InputChannels + 1L)
     [long]$outputBytes = 4L * $Rows * $OutputChannels
@@ -62,6 +63,62 @@ function New-KokoroLinearTileSteps {
         $steps.Add(@{Op='jump-p';u=0;Label="dimension_$($dimension[0])"})
         $steps.Add(@{Op='imm';d=0;i=14}); $steps.Add(@{Op='return'})
         $steps.Add(@{Op='label';Name="dimension_$($dimension[0])"})
+    }
+    if ($VectorOutputTiles) {
+        if (($OutputChannels % 128) -ne 0) {
+            throw 'Vector linear output channels must be divisible by 128.'
+        }
+        # Vector form consumes weights repacked at build time as [input,output]
+        # followed by output bias. Four vectors cover one 128-output tile.
+        # Explicit QFloat-to-FP32 conversion after every multiply and add keeps
+        # this schedule aligned with the verified complete-block HVX strategy.
+        $steps.Add(@{Op='load';d=4;s=3;Offset=8})
+        $steps.Add(@{Op='load';d=6;s=3;Offset=24})
+        $steps.Add(@{Op='load';d=7;s=3;Offset=16})
+        & $imm 14 ([uint32](4L * $InputChannels * $OutputChannels))
+        $steps.Add(@{Op='add';d=7;s=7;t=14})
+        $steps.Add(@{Op='imm';d=9;i=$Rows})
+        $steps.Add(@{Op='label';Name='vector_row'})
+        $steps.Add(@{Op='load';d=5;s=3;Offset=16})
+        $steps.Add(@{Op='load';d=7;s=3;Offset=16})
+        & $imm 14 ([uint32](4L * $InputChannels * $OutputChannels))
+        $steps.Add(@{Op='add';d=7;s=7;t=14})
+        $steps.Add(@{Op='imm';d=13;i=($OutputChannels/128)})
+        $steps.Add(@{Op='label';Name='vector_tile'})
+        foreach ($v in 0..3) { $steps.Add(@{Op='vsplat';d=$v;s=15}) }
+        $steps.Add(@{Op='addi';d=11;s=4;i=0})
+        $steps.Add(@{Op='addi';d=12;s=5;i=0})
+        $steps.Add(@{Op='imm';d=10;i=$InputChannels})
+        $steps.Add(@{Op='label';Name='vector_reduce'})
+        $steps.Add(@{Op='load';d=0;s=11;Offset=0})
+        $steps.Add(@{Op='vsplat';d=4;s=0})
+        foreach ($v in 0..3) { $steps.Add(@{Op='vload';d=(8+$v);s=12;Offset=(128*$v)}) }
+        foreach ($v in 0..3) { $steps.Add(@{Op='vmpy-sf-qf32';d=(8+$v);s=(8+$v);t=4}) }
+        foreach ($v in 0..3) { $steps.Add(@{Op='vconv-qf32-sf';d=(8+$v);s=(8+$v)}) }
+        foreach ($v in 0..3) { $steps.Add(@{Op='vadd-sf-qf32';d=$v;s=$v;t=(8+$v)}) }
+        foreach ($v in 0..3) { $steps.Add(@{Op='vconv-qf32-sf';d=$v;s=$v}) }
+        $steps.Add(@{Op='addi';d=11;s=11;i=4})
+        & $imm 14 ([uint32](4L*$OutputChannels))
+        $steps.Add(@{Op='add';d=12;s=12;t=14})
+        $steps.Add(@{Op='addi';d=10;s=10;i=-1})
+        $steps.Add(@{Op='gtu';d=0;s=10;t=15})
+        $steps.Add(@{Op='jump-p';u=0;Label='vector_reduce'})
+        foreach ($v in 0..3) { $steps.Add(@{Op='vload';d=(8+$v);s=7;Offset=(128*$v)}) }
+        foreach ($v in 0..3) { $steps.Add(@{Op='vadd-sf-qf32';d=$v;s=$v;t=(8+$v)}) }
+        foreach ($v in 0..3) { $steps.Add(@{Op='vconv-qf32-sf';d=$v;s=$v}) }
+        foreach ($v in 0..3) { $steps.Add(@{Op='vstore';t=$v;s=6;Offset=(128*$v)}) }
+        $steps.Add(@{Op='addi';d=5;s=5;i=512})
+        $steps.Add(@{Op='addi';d=6;s=6;i=512})
+        $steps.Add(@{Op='addi';d=7;s=7;i=512})
+        $steps.Add(@{Op='addi';d=13;s=13;i=-1})
+        $steps.Add(@{Op='gtu';d=0;s=13;t=15})
+        $steps.Add(@{Op='jump-p';u=0;Label='vector_tile'})
+        $steps.Add(@{Op='addi';d=4;s=4;i=(4*$InputChannels)})
+        $steps.Add(@{Op='addi';d=9;s=9;i=-1})
+        $steps.Add(@{Op='gtu';d=0;s=9;t=15})
+        $steps.Add(@{Op='jump-p';u=0;Label='vector_row'})
+        $steps.Add(@{Op='imm';d=0;i=0}); $steps.Add(@{Op='return'})
+        return $steps.ToArray()
     }
     # r5: current weight row; r7: current bias; r14: output column offset.
     $steps.Add(@{Op='load';d=5;s=3;Offset=16})

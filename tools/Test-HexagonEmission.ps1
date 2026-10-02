@@ -2,22 +2,24 @@
 # The SDK assembler is an independent verifier, never an input to the emitted ELF.
 [CmdletBinding()]
 param(
-    [string] $OutputDirectory = $(
-        $buildDir = @(
-            (Join-Path $PSScriptRoot '..\..\Build\Kokoro-QNN'),
-            (Join-Path $PSScriptRoot '..\..\..\Build\Kokoro-QNN'),
-            'C:\Dev\Build\Kokoro-QNN'
-        ) | Where-Object { Test-Path $_ } | Select-Object -First 1
-        if (-not $buildDir) { $buildDir = 'C:\Dev\Build\Kokoro-QNN' }
-        Join-Path $buildDir 'hexagon-emission\emitted'
-    ),
+    [string] $OutputDirectory = (Join-Path $PSScriptRoot '..\build\hexagon-emission\emitted'),
     [string] $ToolRoot = '/home/scott/hexagon/Hexagon_SDK/6.4.0.2/tools/HEXAGON_Tools/19.0.04/Tools/bin',
-    [ValidateSet('Probe','KokoroAffine','KokoroConvTile','KokoroLinearTile','KokoroR0Sub0','KokoroHmxLock','KokoroHmxMatrix')][string] $Kernel='Probe',
+    [ValidateSet('Probe','KokoroAffine','KokoroAdaIn','KokoroAdaInResBlock','KokoroAlbertSoftmax3','KokoroAlbertAttention3','KokoroConvTile','KokoroLinearTile','KokoroR0Sub0','KokoroHmxLock','KokoroHmxMatrix')][string] $Kernel='Probe',
+    [ValidateRange(2, 2048)][int] $AdaInFrames = 64,
+    [ValidateRange(1, 128)][int] $AdaInChannels = 128,
+    [switch] $AdaInVectorConvolution,
+    [ValidateRange(1, 512)][int] $LinearRows = 3,
+    [ValidateRange(1, 4096)][int] $LinearInputChannels = 768,
+    [ValidateRange(1, 4096)][int] $LinearOutputChannels = 512,
+    [switch] $LinearVectorOutputTiles,
     [switch] $Force
 )
 $ErrorActionPreference='Stop'
 $output=[IO.Path]::GetFullPath((Join-Path $OutputDirectory $Kernel))
-$result=& (Join-Path $PSScriptRoot 'Emit-HexagonProbe.ps1') -OutputDirectory $output -Kernel $Kernel -Force:$Force
+$result=& (Join-Path $PSScriptRoot 'Emit-HexagonProbe.ps1') -OutputDirectory $output `
+    -Kernel $Kernel -LinearRows $LinearRows -LinearInputChannels $LinearInputChannels `
+    -LinearOutputChannels $LinearOutputChannels -LinearVectorOutputTiles:$LinearVectorOutputTiles `
+    -AdaInFrames $AdaInFrames -AdaInChannels $AdaInChannels -AdaInVectorConvolution:$AdaInVectorConvolution -Force:$Force
 $wslOutput=(& wsl.exe --exec wslpath -a $output 2>$null | Select-Object -Last 1).Trim()
 if($LASTEXITCODE -ne 0 -or -not $wslOutput.StartsWith('/')) { throw 'Cannot resolve output directory in WSL' }
 $assembler="$ToolRoot/hexagon-llvm-mc"
@@ -78,7 +80,14 @@ $badOps = @(
     @{Op='valign';d=32;s=0;t=0;r=0},
     @{Op='valign';d=0;s=0;t=0;r=8},
     @{Op='valign-imm';d=0;s=0;t=0;i=8},
-    @{Op='trap0';i=256}
+        @{Op='trap0';i=256},
+        @{Op='sfinvsqrta';d=0;s=1;e=4},
+        @{Op='sfinvsqrta';d=32;s=1;e=0},
+        @{Op='sfinvsqrta';d=0;s=32;e=0},
+        @{Op='sfmax';d=32;s=1;t=2},
+        @{Op='vmpy-sf-qf32';d=32;s=0;t=1},
+        @{Op='vadd-sf-qf32';d=0;s=32;t=1},
+        @{Op='vconv-qf32-sf';d=0;s=32}
 )
 foreach($bad in $badOps) {
     try { $null=New-HexagonInstruction $bad 0 0 } catch { $rejections++ }

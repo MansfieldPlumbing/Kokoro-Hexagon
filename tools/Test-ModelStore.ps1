@@ -23,10 +23,11 @@ if ($Child) {
         throw 'Tampered active model manifest was not rejected before load.'
     }
     $childLoaded = & $childStore.LoadActive
-    if ($null -eq $childLoaded -or
-        [IO.Path]::GetFullPath($childLoaded.Assembly.Location) -cne
+    if ($null -eq $childLoaded) { throw 'No active model was returned.' }
+    $expectedAssemblyFile = $childLoaded.Assembly.GetName().Name + '.dll'
+    if ([IO.Path]::GetFullPath($childLoaded.Assembly.Location) -cne
         [IO.Path]::GetFullPath([IO.Path]::Combine($PrivateRoot, 'models', 'sha256',
-            $childLoaded.AssemblySha256.ToLowerInvariant(), 'Kokoro-Hexagon.dll'))) {
+            $childLoaded.AssemblySha256.ToLowerInvariant(), $expectedAssemblyFile))) {
         throw 'Admitted model assembly did not load from its private-store payload.'
     }
     exit 0
@@ -72,7 +73,7 @@ try {
         weightSha256 = ('22' * 32)
         modelContractVersion = 1
         runtimeAbi = 'test-win-x64'
-        uri = 'https://example.invalid/Kokoro-Hexagon.dll'
+    uri = 'https://example.invalid/Kokoro.Store.TestModel.dll'
         expiresUtc = [DateTimeOffset]::UtcNow.AddMinutes(10).ToString('O')
     } | ConvertTo-Json -Compress
     $signature = $ecdsa.SignData([Text.Encoding]::UTF8.GetBytes($signed), [Security.Cryptography.HashAlgorithmName]::SHA256)

@@ -21,7 +21,12 @@ $target = [IO.Path]::GetFullPath($OutputPath)
 if ([IO.File]::Exists($target)) { throw "The output already exists: $target" }
 
 $readerPath = [IO.Path]::Combine($root, 'src', 'runspace', 'Torch.Checkpoint.psm1')
-$reader = [scriptblock]::Create([IO.File]::ReadAllText($readerPath)).InvokeReturnAsIs()
+$readerTokens = $null
+$readerErrors = $null
+$readerAst = [Management.Automation.Language.Parser]::ParseFile(
+    $readerPath, [ref]$readerTokens, [ref]$readerErrors)
+if ($readerErrors.Count -ne 0) { throw 'The checkpoint reader source does not parse.' }
+$reader = $readerAst.GetScriptBlock().InvokeReturnAsIs()
 $checkpoint = & $reader.Read $source
 $names = @($checkpoint.Tensors.Keys | ForEach-Object { [string]$_ } | Sort-Object -CaseSensitive)
 if ($names.Count -ne 548) { throw "Expected 548 tensors; found $($names.Count)." }
@@ -39,8 +44,13 @@ if ($IncludeTensor) {
 $complete = $names.Count -eq 548
 $assemblyName = if ($complete) { "Kokoro.Weights.$Precision" } else { "Kokoro.Weights.$Precision.Probe" }
 $fp16 = if ($Precision -eq 'FP16') {
-    [scriptblock]::Create([IO.File]::ReadAllText(
-        [IO.Path]::Combine($root, 'src', 'weights', 'Kokoro.Fp16Expression.ps1'))).InvokeReturnAsIs()
+    $fp16Path = [IO.Path]::Combine($root, 'src', 'weights', 'Kokoro.Fp16Expression.ps1')
+    $fp16Tokens = $null
+    $fp16Errors = $null
+    $fp16Ast = [Management.Automation.Language.Parser]::ParseFile(
+        $fp16Path, [ref]$fp16Tokens, [ref]$fp16Errors)
+    if ($fp16Errors.Count -ne 0) { throw 'The FP16 expression source does not parse.' }
+    $fp16Ast.GetScriptBlock().InvokeReturnAsIs()
 } else { $null }
 $builder = [Reflection.Emit.PersistedAssemblyBuilder]::new(
     [Reflection.AssemblyName]::new($assemblyName), [object].Assembly)

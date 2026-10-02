@@ -6,7 +6,8 @@
 param(
     [Parameter(Mandatory)][psobject] $Prelude,
     [Parameter(Mandatory)][float[]] $Style,
-    [Parameter(Mandatory)][System.Collections.IDictionary] $Parameters
+    [Parameter(Mandatory)][System.Collections.IDictionary] $Parameters,
+    [string] $TraceDirectory
 )
 
 $ErrorActionPreference = 'Stop'
@@ -23,6 +24,24 @@ if ($frames -lt 2 -or $frames -gt 512 -or $Style.Length -ne 128 -or
     throw 'Decoder core input shape is invalid.'
 }
 $modelRoot = $PSScriptRoot
+$traceRoot = $null
+if ($TraceDirectory) {
+    $traceRoot = [IO.Path]::GetFullPath($TraceDirectory)
+    $buildRoot = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '../../build'))
+    if (-not $traceRoot.StartsWith($buildRoot + [IO.Path]::DirectorySeparatorChar,
+            [StringComparison]::OrdinalIgnoreCase) -or [IO.Directory]::Exists($traceRoot)) {
+        throw 'Decoder traces require a new directory under repository build.'
+    }
+    [void][IO.Directory]::CreateDirectory($traceRoot)
+}
+function Write-KokoroDecoderTrace([string] $Name, [float[]] $Values) {
+    if ($null -eq $traceRoot) { return }
+    $bytes = [byte[]]::new(4 * $Values.Length)
+    [Buffer]::BlockCopy($Values, 0, $bytes, 0, $bytes.Length)
+    $stream = [IO.File]::Open((Join-Path $traceRoot ($Name + '.f32')),
+        [IO.FileMode]::CreateNew, [IO.FileAccess]::Write, [IO.FileShare]::None)
+    try { $stream.Write($bytes); $stream.Flush($true) } finally { $stream.Dispose() }
+}
 $readBlock = {
     param([string] $Prefix, [bool] $Upsample)
     $block = @{}
@@ -49,16 +68,19 @@ $readBlock = {
     return $block
 }
 $encodeParameters = & $readBlock 'encode.' $false
+Write-KokoroDecoderTrace 'encode-input' $Prelude.EncodeInput
 [float[]]$state = & (Join-Path $modelRoot 'Invoke-KokoroAdaInResBlock1d.ps1') `
     -InputTensor $Prelude.EncodeInput -Style $Style `
     -Parameters $encodeParameters -Frames $frames `
     -Channels 514 -OutputChannels 1024
+Write-KokoroDecoderTrace 'encode-output' $state
 for ($block = 0; $block -lt 4; $block++) {
     $joined = [float[]]::new(1090 * $frames)
     [Array]::Copy($state, $joined, $state.Length)
     [Array]::Copy($Prelude.AsrResidual, 0, $joined, 1024 * $frames, 64 * $frames)
     [Array]::Copy($Prelude.DownsampledF0, 0, $joined, 1088 * $frames, $frames)
     [Array]::Copy($Prelude.DownsampledN, 0, $joined, 1089 * $frames, $frames)
+    Write-KokoroDecoderTrace "decode-$block-input" $joined
     $upsample = $block -eq 3
     $blockParameters = & $readBlock "decode.$block." $upsample
     $args = @{
@@ -71,5 +93,6 @@ for ($block = 0; $block -lt 4; $block++) {
     }
     if ($upsample) { $args.Upsample = $true }
     [float[]]$state = & (Join-Path $modelRoot 'Invoke-KokoroAdaInResBlock1d.ps1') @args
+    Write-KokoroDecoderTrace "decode-$block-output" $state
 }
 [pscustomobject]@{ Features = $state; Frames = 2 * $frames; Channels = 512 }

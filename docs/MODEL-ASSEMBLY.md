@@ -1,33 +1,42 @@
-# Kokoro managed assemblies
+# Kokoro downstream model assembly
 
-`New-KokoroDecoderGraph.ps1` is the current parsed two-node decoder contract.
-The build does not execute it as a script. It lowers the AST to a graph hash
-and control schema persisted in the managed Android host assembly. Its inputs
-are precomputed acoustic tensors; it does not implement phoneme-to-PCM speech.
+The active model artifact is the IL-only
+`Dev.MansfieldPlumbing.Kokoro.Model.dll`. It is built independently of the
+Android host from pinned Kokoro inputs and deterministic assembly-emission
+helpers extracted from the immutable Pwsh revision recorded in
+`lib/manifest.json`.
 
-From a verified checkout with PowerShell 7.4 or newer, the existing host build
-and its Windows identity test are:
+The current artifact consolidates:
+
+- all 548 verified FP32 checkpoint tensors and their index;
+- the pinned 114-character phoneme vocabulary and admission limits;
+- the raw `af_heart` voice rows and length-selected row contract;
+- the hash and controls of the current parsed two-node decoder scaffold; and
+- an explicit engine contract with `SynthesisReady = false`.
+
+It does not contain the full ALBERT, duration, F0/noise, decoder, or waveform
+execution graph and does not expose `SynthesizePhonemes`. The graph identity is
+therefore a bounded incomplete contract, not evidence of phoneme-to-PCM speech.
+
+From a verified checkout with PowerShell 7.4 or newer, build and test the
+artifact with:
 
 ```powershell
-./setup-kokoro.ps1 -Step 4 -KeepIntermediates -AcceptWritePlan
-./tools/Test-WindowsModelAssembly.ps1
+./tools/Get-PwshUpstream.ps1
+./tools/Get-KokoroModelInput.ps1
+./tools/Build-WeightAssembly.ps1
+./tools/Build-PhonemeContractAssembly.ps1
+./tools/Build-KokoroEngineAssembly.ps1
+./tools/Test-KokoroEngineAssembly.ps1
+./tools/Test-KokoroEngineStore.ps1
 ```
 
-The current internal controls are `asr`, `F0_curve`, `N`, `style`, `gb`, `har8`,
-`mask`, `mask8`, and `capacity`. They are coupled tensor boundaries, not a
-stable public prosody API. The test matches the saved host assembly's graph
-hash to an independent lowering of the checked-out source.
+The builders default to the ignored `build/` tree. They validate lengths,
+hashes, tensor metadata, PowerShell ASTs, managed identity, IL-only format, and
+resource readback. The store test uses a temporary signing key and private
+directory; neither belongs in source control.
 
-Separate validation artifacts now exist outside Git:
-
-- `Kokoro.Phonemes.dll` persists the pinned phoneme ID and voice-row methods;
-  the tested voice variant embeds the raw `af_heart` rows.
-- `Kokoro.Weights.FP32.dll` and `Kokoro.Weights.FP16.dll` contain indexed,
-  hash-checked tensor resources. All 548 resources load on Windows. The FP16
-  payload has only sampled weight-error evidence, not audio-quality evidence.
-
-These three artifacts have **not** been joined into the final model DLL. They
-do not contain the full Kokoro computation, a text-to-phoneme adapter, a
-QNN-free Hexagon path, or live speech. The checkpoint reader is host-side
-build tooling; the released app must load only verified model resources and
-must not read the checkpoint or historical QNN contexts.
+The checkpoint reader is build-time tooling only. A release appliance admits
+the signed model DLL and must not read checkpoint files, QNN contexts, ONNX
+exports, or the legacy `setup-kokoro.ps1` fork. Precision changes and emitted
+operators require their own equivalence gates before promotion.

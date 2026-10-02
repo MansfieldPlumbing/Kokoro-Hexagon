@@ -6,17 +6,24 @@ production status from historical receipts or reference harnesses.
 
 ## Build lineage and checkout boundary
 
-`setup-kokoro.ps1` is this repository's unofficial, separately maintained fork
-of Pwsh's `setup.ps1`. It is an independent Kokoro build, not an official Pwsh
-build or a mirror of current Pwsh work. Maintain and verify this fork here.
-Pwsh does not perform Kokoro model lowering; Kokoro source in this repository
-owns model assembly, weight conversion, Hexagon emission, and speech.
+Kokoro-Hexagon is a downstream TTS engine for the Xamarin-independent Pwsh
+base pinned in `lib/manifest.json`. Pwsh owns the generic NativeActivity,
+CoreCLR, SMA, package, and startup substrate. Kokoro source in this repository
+owns model assembly, weight conversion, Hexagon emission, typed speech
+sessions, and audio policy. `setup-kokoro.ps1` is a legacy migration and
+equivalence oracle, not the upstream base authority; do not forward-port its
+obsolete Xamarin, DEX, Java-peer, type-map, or package-version machinery.
 
 `C:\Dev\Pwsh` is a separate, actively used upstream checkout. Kokoro agents
-must not inspect, modify, build in, or use it as an input or output. Fetch any
-required Pwsh source from an immutable GitHub revision, verify its pinned hash,
-and keep generated files outside that checkout. Never place Kokoro model files,
-artifacts, caches, or temporary files in the Pwsh source tree.
+must not modify, build in, or use it as an input or output. When Scott
+Mansfield explicitly authorizes read-only inspection of a named Pwsh checkout
+in the current conversation, the shared owner-authorized exception permits
+that inspection for the stated task only. Treat observations from an
+uncommitted working tree as diagnostic evidence, not as reproducible product
+input. Otherwise fetch required Pwsh source from an immutable GitHub revision,
+verify its pinned hash, and keep generated files outside that checkout. Never
+place Kokoro model files, artifacts, caches, or temporary files in the Pwsh
+source tree.
 
 Hard stop: the repository does not yet contain a working Kokoro synthesizer.
 A launching APK, model-weight DLL, parsed graph, native-audio tone, QNN speech
@@ -26,10 +33,14 @@ fulfill the mission. A live-speech claim requires one PowerShell-authored path
 from admitted phonemes and verified stock weights through the full model and
 directly emitted Hexagon code to audible PCM on the physical device.
 
-Do not put tensor arithmetic on the PowerShell runtime path. PowerShell owns
-source validation, stock graph/control semantics, weight admission, direct
-Hexagon emission, dispatch, and audio orchestration. The cDSP executes hot
-model math. Bounded FP32 PowerShell operators are test oracles only: compare
+Do not put PowerShell interpretation, tensor arithmetic, or per-operator
+orchestration on the product inference path. PowerShell/SMA is the model
+compiler frontend: validate authored source and stock inputs, recover and type
+the graph/control representation, admit weights, optimize and lower as far as
+the verified backend permits, and emit the managed model artifact and direct
+Hexagon code. The admitted artifact and minimal device host execute the
+compiled control/dispatch and audio path; the cDSP executes hot model math.
+Bounded FP32 PowerShell operators are test oracles only: compare
 each emitted operator against them before promotion, but do not require a
 full scalar phoneme-to-PCM run before moving math to Hexagon. Missing ALBERT,
 duration, F0/N, decoder, or waveform semantics must still be source-traced
@@ -38,15 +49,18 @@ timings separate from device benchmarks and audible-speech claims.
 
 ## Governing objective: PowerShell end to end
 
-- PowerShell 7 is the authored implementation language and control plane from
-  Windows model ingestion and build through Android appliance execution.
+- PowerShell 7 is the authored implementation language and compiler frontend
+  for Windows model ingestion and build, with an Android shell/control surface.
   Android is an unsupported PowerShell target that this project must make work
   through an owned NativeActivity/CoreCLR/System.Management.Automation host.
-- PowerShell parses and validates PowerShell source with its AST, emits the
-  weight-bearing managed model assembly and Hexagon ELF directly, stages the
-  verified artifacts, invokes the DSP, and delivers PCM to Android AAudio or
-  Windows WASAPI. The managed runtime and minimal native bootstrap are
-  substrates, not alternate application or synthesis implementations.
+- PowerShell parses and validates authored source with SMA's AST, then emits
+  the weight-bearing managed model assembly and Hexagon ELF directly. At
+  inference time, the admitted compiled model and minimal host invoke the DSP
+  and deliver PCM to Android AAudio or Windows WASAPI without a PowerShell
+  runspace driving model stages. SMA's parser and AST are a frontend, not an
+  automatic optimized Hexagon backend; every lowering and emitted operator
+  still needs its own equivalence gate. The managed runtime and minimal native
+  bootstrap are substrates, not alternate synthesis implementations.
 - Do not author product behavior in C#, use Roslyn or `Add-Type` source
   compilation, or substitute a C/C++/Python/ONNX/QNN/LLVM compiler pipeline for
   PowerShell lowering and emission. A pinned native bootstrap needed to start
@@ -115,10 +129,10 @@ timings separate from device benchmarks and audible-speech claims.
 - `src/appliance/provider/` is a historical C# baseline, not an implementation
   template. Do not promote its code or its measurements into the product.
 - Do not commit generated DLLs, APKs, ONNX, contexts, ELF, weights, audio,
-  device logs, signing keys, or raw device identifiers. The independent
-  `setup-kokoro.ps1` defaults to the ignored `build/` directory for its APK
-  and intermediates; its signing-key and package-cache defaults remain outside
-  the repo.
+  device logs, signing keys, or raw device identifiers. Active downstream
+  builders write generated artifacts under the ignored `build/` directory;
+  signing keys and package caches remain outside the repository. The retained
+  `setup-kokoro.ps1` fork is not an active product build input.
   Use `docs/receipts/` for compact reviewed evidence.
 - Use approved PowerShell Verb-Noun names for executable scripts. Parsed graph
   sources must state what computation they currently describe.

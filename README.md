@@ -1,10 +1,10 @@
 # Kokoro-Hexagon
 
-Kokoro-Hexagon is a PowerShell-authored speech-model project targeting Qualcomm
-Hexagon. The intended release is a small, model-less Android appliance plus a
-separately verified, weight-bearing managed model DLL. The project is not yet
-an end-to-end synthesizer; see [ROADMAP.md](ROADMAP.md) for checked evidence and
-the remaining gates.
+Kokoro-Hexagon is a PowerShell-authored downstream TTS engine for the
+Xamarin-independent Pwsh Android appliance, targeting Qualcomm Hexagon. The
+engine is a separately verified, weight-bearing managed model DLL plus direct
+Hexagon code. The project is not yet an end-to-end synthesizer; see
+[ROADMAP.md](ROADMAP.md) for checked evidence and the remaining gates.
 
 ## Current status
 
@@ -12,6 +12,11 @@ the remaining gates.
   importing PyTorch. All 548 FP32 tensors have been embedded in and read back
   from a managed DLL on Windows. An FP16 payload candidate has passed the same
   integrity test. These DLLs contain weights, not executable speech inference.
+- The verified FP32 weights, phoneme contract, `af_heart` voice, and current
+  parsed graph identity now also build reproducibly into one IL-only
+  `Dev.MansfieldPlumbing.Kokoro.Model` downstream DLL. It deliberately exposes
+  no synthesis method and reports `SynthesisReady = false` until the complete
+  direct phoneme-to-PCM graph is present.
 - A separately emitted phoneme DLL validates the pinned 114-character
   vocabulary, 510-phoneme limit, boundary IDs, and one voice's length-selected
   style rows. Text-to-phoneme conversion is not implemented in the product.
@@ -26,6 +31,15 @@ the remaining gates.
   namespace `Dev.MansfieldPlumbing.Kokoro` is 40,967,479 bytes and has launched
   on both physical devices. It contains no model and does not prove speech.
   See `docs/receipts/model-less-appliance-kokoro-namespace-20260925.md`.
+- A responsive phone facade now consumes the exact pinned Pwsh Canvas binding
+  and stages with a full-size 1254-pixel launcher icon. Its safe-area layout,
+  touch target, contrast, source integrity, and package manifest pass Windows
+  gates. The pinned host does not yet admit downstream profile/icon inputs, so
+  this facade has not been packaged or executed on Android.
+- A metadata-only speech-session reducer connects admitted engine readiness to
+  the facade. It tracks warmup, requests, PCM counters, draining, cancellation,
+  faults, and closure without carrying samples. The current incomplete engine
+  fails closed before warmup or request admission.
 
 The immediate target is one admitted phoneme string to audible PCM on both
 devices through the same owned model path. Utterance boundaries will use a
@@ -33,18 +47,18 @@ measured short pause; the project does not synthesize inhalation sounds.
 
 ## Architecture boundary
 
-`setup-kokoro.ps1` is an unofficial, separately maintained fork of Pwsh's
-`setup.ps1`. This fork independently builds the model-less Kokoro APK; it is
-not an official Pwsh build and does not track current Pwsh work automatically.
-Kokoro's PowerShell sources separately own model lowering, weights, direct
-Hexagon emission, and speech integration. The active `C:\Dev\Pwsh` checkout is
-neither an input nor an output; Kokoro files never belong there.
+`lib/manifest.json` pins the Xamarin-independent Pwsh base at an immutable
+commit. `tools/Get-PwshUpstream.ps1` fetches its exact build and manifest files
+into this repository's ignored `build/` tree and verifies their length and
+SHA-256. Kokoro owns model lowering, weights, direct Hexagon emission, typed
+speech sessions, and audio policy. `setup-kokoro.ps1` remains only as a legacy
+migration and equivalence oracle; it is not the upstream base authority.
 
 ```text
-Kokoro model build: pinned Kokoro inputs -> Kokoro PowerShell AST/lowering
-                                        -> verified model DLL + direct DSP code
-Kokoro host build:  setup-kokoro.ps1 (unofficial Pwsh fork) -> model-less APK
-Device:             verified model DLL -> owned Hexagon execution -> PCM -> AAudio
+Pwsh base:           pinned Pwsh source -> Xamarin-independent appliance
+Kokoro engine:       pinned Kokoro inputs -> PowerShell AST/lowering
+                                          -> verified model DLL + direct DSP code
+Device:              admitted engine -> Hexagon execution -> PCM -> AAudio
 ```
 
 The release gate is a model-less base APK smaller than 40 MiB. After install,
@@ -52,7 +66,9 @@ the appliance obtains one or more model DLLs using a signed release manifest,
 or accepts the same manifest and DLL over the offline AOA channel. The model
 store verifies compatibility, length, SHA-256, managed assembly identity, and
 manifest signature before atomically changing the active-model pointer. Model
-DLLs ultimately include graph and hot paths, not just compressed tensors.
+DLLs ultimately include graph, compiled control/dispatch, and hot paths, not
+just compressed tensors. PowerShell/SMA performs model compilation at build
+time; a runspace does not orchestrate each inference operator.
 The newly activated DLL is loaded after an appliance process restart, not
 hot-swapped into the current CoreCLR process. The packaged appliance has not
 yet wired this load path or demonstrated speech.
@@ -69,7 +85,12 @@ and `src/runspace/Qnn.*` paths are not the product pipeline.
 | `ROADMAP.md` | Canonical gates and checked status. |
 | `docs/receipts/transport-evidence-ledger-20260926.md` | Separates FastRPC-mediated kernel results, the failed raw-open probe, and the reported cross-device bypass test. |
 | `New-KokoroDecoderGraph.ps1` | Current parsed, two-node decoder contract; incomplete. |
-| `setup-kokoro.ps1` | Unofficial Pwsh-builder fork for the model-less APK/managed host; does not synthesize speech. |
+| `docs/architecture/pwsh-downstream.md` | Pwsh/Kokoro ownership boundary and migration gates. |
+| `src/appliance/Kokoro.Facade.psm1` | Accessible state-driven Canvas facade for the phone. |
+| `src/control/Kokoro.SpeechSession.psm1` | Bounded metadata-only speech-session reducer and facade projection. |
+| `tools/Build-KokoroFacadePackage.ps1` | Stages the pinned display binding, profile, facade, and icon; not an APK builder. |
+| `assets/branding/kokoro-hexagon-icon.png` | Full-size square launcher artwork. |
+| `setup-kokoro.ps1` | Legacy host-fork migration oracle; not the upstream base authority and does not synthesize speech. |
 | `src/runspace/Native.Binding.psm1` | QNN-independent native export binding used by AAudio and direct probes. |
 | `src/runspace/Model.Store.psm1` | Signed, transactional private-storage model admission and activation. |
 | `lib/manifest.json` | Pinned model and historical reference provenance. |
