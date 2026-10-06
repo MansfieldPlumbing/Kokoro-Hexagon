@@ -1,0 +1,29 @@
+# Generated build output is confined to this ignored directory.
+/build/
+*.dll
+*.apk
+*.elf
+*.onnx
+*.onnx.data
+*.bin
+*.qnn
+*.QNN
+*.so
+*.whl
+*.pth
+*.pt
+*.f32
+*.npy
+*.npz
+*.wav
+*.log
+__pycache__/
+**/*.csproj.nuget.*
+**/project.assets.json
+**/project.nuget.cache
+
+# Qualcomm-header-derived reference data: kept local pending license review
+lib/qairt-2.46/
+
+# private: competitive tracking, not for publication
+docs/SCOREBOARD.md

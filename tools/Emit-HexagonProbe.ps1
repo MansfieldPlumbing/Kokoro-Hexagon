@@ -1,0 +1,200 @@
+#requires -Version 7.4
+[CmdletBinding()]
+param(
+    [string] $OutputDirectory = (Join-Path $PSScriptRoot '..\build\hexagon-emission\emitted'),
+    [ValidateSet('Probe','KokoroAffine','KokoroAdaIn','KokoroAdaInResBlock','KokoroAlbertSoftmax3','KokoroAlbertAttention3','KokoroAlbertAttentionOutput3','KokoroAlbertConnectedAttention3','KokoroConvTile','KokoroLinearTile','KokoroR0Sub0','KokoroHmxLock','KokoroHmxMatrix')][string] $Kernel='Probe',
+    [ValidateRange(2, 2048)][int] $AdaInFrames = 64,
+    [ValidateRange(1, 128)][int] $AdaInChannels = 128,
+    [switch] $AdaInVectorConvolution,
+    [ValidateRange(1, 512)][int] $LinearRows = 3,
+    [ValidateRange(1, 4096)][int] $LinearInputChannels = 768,
+    [ValidateRange(1, 4096)][int] $LinearOutputChannels = 512,
+    [switch] $LinearVectorOutputTiles,
+    [switch] $RegionBody,
+    [string] $WeightManifest = (Join-Path $PSScriptRoot '..\build\emit\r0\r0_static.json'),
+    [switch] $Force
+)
+$ErrorActionPreference = 'Stop'
+if ($RegionBody -and $Kernel -notin @('KokoroAlbertAttention3','KokoroAlbertAttentionOutput3')) {
+    throw 'Region-body encoding is supported only for the ALBERT attention regions.'
+}
+# Host-only. The pinned ELF writer uses .NET APIs requiring FullLanguage.
+# Fetch source from an immutable upstream GitHub revision; never use or write
+# the protected local Pwsh checkout. No model text is executed by this adapter.
+$script:PwshBaseUrl = 'https://raw.githubusercontent.com/MansfieldPlumbing/Pwsh/e215a963295eda290599840366b51cbd99bb6d57/'
+$protectedRoot = [IO.Path]::GetFullPath('C:\Dev\Pwsh').TrimEnd([IO.Path]::DirectorySeparatorChar)
+$outputFullPath = [IO.Path]::GetFullPath($OutputDirectory)
+if ($outputFullPath.Equals($protectedRoot, [StringComparison]::OrdinalIgnoreCase) -or
+    $outputFullPath.StartsWith($protectedRoot + [IO.Path]::DirectorySeparatorChar, [StringComparison]::OrdinalIgnoreCase)) {
+    throw 'OutputDirectory must not be inside the protected Pwsh checkout.'
+}
+$OutputDirectory = $outputFullPath
+function Get-PinnedUpstreamText {
+    param(
+        [Parameter(Mandatory)][ValidatePattern('^(setup\.ps1|lib/[A-Za-z0-9._-]+)$')][string] $Path,
+        [Parameter(Mandatory)][ValidatePattern('^[0-9A-Fa-f]{64}$')][string] $Sha256
+    )
+    $response = Invoke-WebRequest -Uri ($script:PwshBaseUrl + $Path) -UseBasicParsing
+    $bytes = $response.RawContentStream.ToArray()
+    $actual = [Convert]::ToHexString([Security.Cryptography.SHA256]::HashData($bytes))
+    if ($actual -cne $Sha256) { throw "Pinned upstream source hash mismatch: $Path" }
+    [Text.Encoding]::UTF8.GetString($bytes)
+}
+$setupText = Get-PinnedUpstreamText 'setup.ps1' '44432CB738EDB13FB7B2AEA999C265A94F5EEAC867DC4E4E39C1503E0E813D62'
+$manifestText = Get-PinnedUpstreamText 'lib/manifest.json' 'C2B3C6D044EACBACAD7E7B1C58F18EA8AE6FB836B421B5EC3788D009E57CEDC4'
+$script:PwshSources = ($manifestText | ConvertFrom-Json).sources
+function Import-LibSourceText {
+    param([string] $Path)
+    $record = @($script:PwshSources | Where-Object path -CEQ $Path)
+    if ($record.Count -ne 1) { throw "Missing source pin: $Path" }
+    Get-PinnedUpstreamText "lib/$Path" ([string]$record[0].sha256)
+}
+function Write-NewOrIdenticalFile {
+    param([string] $Path, [byte[]] $Bytes, [switch] $AllowOverwrite)
+    if ([IO.File]::Exists($Path)) {
+        if (-not $AllowOverwrite -and [Convert]::ToHexString([Security.Cryptography.SHA256]::HashData([IO.File]::ReadAllBytes($Path))) -ne
+            [Convert]::ToHexString([Security.Cryptography.SHA256]::HashData($Bytes))) { throw "Output exists with different bytes: $Path. Choose a new output directory." }
+        [IO.File]::WriteAllBytes($Path,$Bytes)
+    } else { [IO.File]::WriteAllBytes($Path,$Bytes) }
+}
+[void][IO.Directory]::CreateDirectory($OutputDirectory)
+$tokens=$null; $errors=$null
+$ast=[Management.Automation.Language.Parser]::ParseInput($setupText,[ref]$tokens,[ref]$errors)
+if ($errors.Count) { throw 'Pinned writer does not parse' }
+$names=@('Get-ElfConstants','Get-ElfHashTableBytes','Get-ElfLayout','Get-ElfHeaderFlags',
+    'Get-ElfRelocationEntrySize','Get-ElfRelocationTags','Get-AlignedOffset','Set-ElfField',
+    'New-ElfStringTable','Write-ElfHeader','Write-ElfProgramHeader','Write-ElfSymbol',
+    'Write-ElfDynamicTable','Write-ElfRelocation','Add-ElfSectionTable','New-ElfCodeLibrary')
+$definitions=foreach($name in $names) {
+    $nodes=@($ast.FindAll({param($n) $n -is [Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -eq $name},$false))
+    if($nodes.Count -ne 1) { throw "Writer function not unique: $name" }
+    $source=$nodes[0].Extent.Text
+    if($name -eq 'New-ElfCodeLibrary') {
+        # Three explicit adaptations: permit zero imports, reserve one extra dynamic
+        # entry, and write the ABI-mandatory DT_HEXAGON_VER=3 (SDK 19.0.04 ABI guide).
+        $edits=@(
+            @('[Parameter(Mandatory)][string[]] $Needed','[AllowEmptyCollection()][string[]] $Needed'),
+            @('$L.Dynamic * (11 + $Needed.Count)','$L.Dynamic * (12 + $Needed.Count)'),
+            @('@($elf[''DT_NULL''], 0)))','@($elf[''DT_HEXAGON_VER''], 3), @($elf[''DT_NULL''], 0)))')
+        )
+        foreach($edit in $edits) {
+            if(([regex]::Matches($source,[regex]::Escape($edit[0]))).Count -ne 1) { throw 'Writer adaptation anchor mismatch' }
+            $source=$source.Replace($edit[0],$edit[1])
+        }
+    }
+    $source
+}
+$adapter=Join-Path $OutputDirectory 'Pwsh.ElfWriter.ps1'
+$text=$definitions -join "`n`n"
+$null=[Management.Automation.Language.Parser]::ParseInput($text,[ref]$tokens,[ref]$errors)
+if($errors.Count) { throw 'Writer adapter does not parse' }
+Write-NewOrIdenticalFile $adapter ([Text.Encoding]::UTF8.GetBytes($text)) -AllowOverwrite:$Force
+. $adapter
+. (Join-Path $PSScriptRoot '..\src\emit\Hexagon.ps1')
+$script:ElfConstants=$null
+$elf=Get-ElfConstants
+$header=Import-LibSourceText 'ELF.h'
+foreach($name in 'EM_HEXAGON','EF_HEXAGON_ISA_V73') {
+    $m=[regex]::Match($header,"\b$name\s*=\s*(0x[0-9a-fA-F]+|\d+)")
+    if(-not $m.Success) { throw "Missing $name" }
+    $elf[$name]=[Convert]::ToUInt32($m.Groups[1].Value.Replace('0x',''),$(if($m.Groups[1].Value.StartsWith('0x')){16}else{10}))
+}
+$m=[regex]::Match((Import-LibSourceText 'DynamicTags.def'),'HEXAGON_DYNAMIC_TAG\(HEXAGON_VER,\s*(0x[0-9a-fA-F]+)\)')
+if(-not $m.Success) { throw 'Missing Hexagon dynamic version tag' }
+$elf.DT_HEXAGON_VER=[Convert]::ToUInt32($m.Groups[1].Value.Substring(2),16)
+$script:Target=[pscustomobject]@{ElfClass=32;Machine='EM_HEXAGON';ElfFlags=@('EF_HEXAGON_ISA_V73');RelocationForm='RELA'}
+if($Kernel -eq 'KokoroR0Sub0') {
+    $modelPath=Join-Path $PSScriptRoot '..\src\models\Kokoro.R0Sub0.ps1'
+    $modelAst=[Management.Automation.Language.Parser]::ParseFile($modelPath,[ref]$tokens,[ref]$errors)
+    if($errors.Count) { throw 'R0Sub0 model does not parse' }
+    $nodes=@(& (Join-Path $PSScriptRoot '..\src\lower\Lower-Model.ps1') -Model $modelAst.GetScriptBlock())
+    $weights=Get-Content $WeightManifest -Raw | ConvertFrom-Json
+    $weightPath=Join-Path (Split-Path $WeightManifest) 'r0_static.bin'
+    if((Get-FileHash $weightPath).Hash -ne $weights.Sha256 -or (Get-Item $weightPath).Length -ne $weights.Bytes) { throw 'Existing weights fail their manifest' }
+    . (Join-Path $PSScriptRoot '..\src\emit\Kokoro.R0Sub0.ps1')
+    $steps=@(New-KokoroR0Sub0Steps -Nodes $nodes -Frames 7681 -Channels $weights.Channels -WeightBytes $weights.Bytes -Weights $weights.Values)
+    $symbol='kokoro_r0sub0_skel_handle_invoke'; $soname='libkokoro_r0sub0_skel.so'
+    Write-NewOrIdenticalFile (Join-Path $OutputDirectory 'lowered.json') ([Text.Encoding]::UTF8.GetBytes(($nodes | ConvertTo-Json -Depth 6))) -AllowOverwrite:$Force
+} elseif($Kernel -in 'KokoroAffine','KokoroConvTile') {
+    $modelName=if($Kernel -eq 'KokoroAffine'){'Kokoro.Affine.ps1'}else{'Kokoro.ConvTile.ps1'}
+    $modelPath=Join-Path $PSScriptRoot "..\src\models\$modelName"
+    $modelAst=[Management.Automation.Language.Parser]::ParseFile($modelPath,[ref]$tokens,[ref]$errors)
+    if($errors.Count) { throw 'Model does not parse' }
+    # GetScriptBlock supplies an AST to the lowerer; the model is never invoked.
+    $nodes=@(& (Join-Path $PSScriptRoot '..\src\lower\Lower-Model.ps1') -Model $modelAst.GetScriptBlock())
+    $weights=Get-Content $WeightManifest -Raw | ConvertFrom-Json
+    $weightPath=Join-Path (Split-Path $WeightManifest) 'r0_static.bin'
+    if((Get-FileHash $weightPath).Hash -ne $weights.Sha256 -or (Get-Item $weightPath).Length -ne $weights.Bytes) { throw 'Existing weights fail their manifest' }
+    if($Kernel -eq 'KokoroAffine') {
+        . (Join-Path $PSScriptRoot '..\src\emit\Kokoro.Affine.ps1')
+        $steps=@(New-KokoroAdaInAffineSteps -Nodes $nodes -Channels $weights.Channels -GainOffset $weights.Values.'adain1.0.gain'.Offset -ShiftOffset $weights.Values.'adain1.0.shift'.Offset -WeightBytes $weights.Bytes)
+        $symbol='kqnn_affine_skel_handle_invoke'; $soname='libkqnn_affine_skel.so'
+    } else {
+        if(($weights.Values.'convs1.0.weight'.Shape -join ',') -ne '1,3,128,128' -or
+            ($weights.Values.'convs1.0.bias'.Shape -join ',') -ne '128') { throw 'Unexpected convolution weight layout' }
+        . (Join-Path $PSScriptRoot '..\src\emit\Kokoro.ConvTile.ps1')
+        $steps=@(New-KokoroConvTileSteps -Nodes $nodes -Channels $weights.Channels -WeightOffset $weights.Values.'convs1.0.weight'.Offset -BiasOffset $weights.Values.'convs1.0.bias'.Offset -WeightBytes $weights.Bytes)
+        $symbol='kokoro_conv_skel_handle_invoke'; $soname='libkokoro_conv_skel.so'
+    }
+    Write-NewOrIdenticalFile (Join-Path $OutputDirectory 'lowered.json') ([Text.Encoding]::UTF8.GetBytes(($nodes | ConvertTo-Json -Depth 6))) -AllowOverwrite:$Force
+} elseif($Kernel -eq 'KokoroAdaIn') {
+    . (Join-Path $PSScriptRoot '..\src\emit\Kokoro.AdaIn.ps1')
+    $steps=@(New-KokoroAdaInSteps -Frames $AdaInFrames -Channels $AdaInChannels)
+    $symbol='kokoro_adain_skel_handle_invoke'; $soname='libkokoro_adain_skel.so'
+} elseif($Kernel -eq 'KokoroAdaInResBlock') {
+    . (Join-Path $PSScriptRoot '..\src\emit\Kokoro.AdaIn.ps1')
+    . (Join-Path $PSScriptRoot '..\src\emit\Kokoro.AdaInResBlock.ps1')
+    $steps=@(New-KokoroAdaInResBlockSteps -Frames $AdaInFrames -VectorConvolution:$AdaInVectorConvolution)
+    $symbol='kokoro_adain_resblock_skel_handle_invoke'; $soname='libkokoro_adain_resblock_skel.so'
+} elseif($Kernel -eq 'KokoroAlbertSoftmax3') {
+    . (Join-Path $PSScriptRoot '..\src\emit\Kokoro.AlbertSoftmax3.ps1')
+    $steps=@(New-KokoroAlbertSoftmax3Steps)
+    $symbol='kokoro_albert_softmax3_skel_handle_invoke'; $soname='libkokoro_albert_softmax3_skel.so'
+} elseif($Kernel -eq 'KokoroAlbertAttention3') {
+    . (Join-Path $PSScriptRoot '..\src\emit\Kokoro.AlbertAttention3.ps1')
+    $steps=if ($RegionBody) { @(New-KokoroAlbertAttention3Steps -RegionBody -LabelPrefix 'encoded_context' -DomainFailureLabel 'encoding_domain') } else { @(New-KokoroAlbertAttention3Steps) }
+    $symbol='kokoro_albert_attention3_skel_handle_invoke'; $soname='libkokoro_albert_attention3_skel.so'
+} elseif($Kernel -eq 'KokoroAlbertAttentionOutput3') {
+    . (Join-Path $PSScriptRoot '..\src\emit\Kokoro.AlbertAttentionOutput3.ps1')
+    $steps=if ($RegionBody) { @(New-KokoroAlbertAttentionOutput3Steps -RegionBody -LabelPrefix 'encoded_output' -DomainFailureLabel 'encoding_domain') } else { @(New-KokoroAlbertAttentionOutput3Steps) }
+    $symbol='kokoro_albert_attention_output3_skel_handle_invoke'; $soname='libkokoro_albert_attention_output3_skel.so'
+} elseif($Kernel -eq 'KokoroAlbertConnectedAttention3') {
+    . (Join-Path $PSScriptRoot '..\src\emit\Kokoro.AlbertConnectedAttention3.ps1')
+    $steps=@(New-KokoroAlbertConnectedAttention3Steps)
+    $symbol='kokoro_albert_connected_attention3_skel_handle_invoke'; $soname='libkokoro_albert_connected_attention3_skel.so'
+} elseif($Kernel -eq 'KokoroHmxLock') {
+    . (Join-Path $PSScriptRoot '..\src\emit\Kokoro.HmxLockProbe.ps1')
+    $steps=@(New-KokoroHmxLockSteps)
+    $symbol='kokoro_hmx_lock_skel_handle_invoke'; $soname='libkokoro_hmx_lock_skel.so'
+} elseif($Kernel -eq 'KokoroHmxMatrix') {
+    . (Join-Path $PSScriptRoot '..\src\emit\Kokoro.HmxMatrixProbe.ps1')
+    $steps=@(New-KokoroHmxMatrixSteps)
+    $symbol='kokoro_hmx_matrix_skel_handle_invoke'; $soname='libkokoro_hmx_matrix_skel.so'
+} elseif($Kernel -eq 'KokoroLinearTile') {
+    . (Join-Path $PSScriptRoot '..\src\emit\Kokoro.LinearTile.ps1')
+    $steps=@(New-KokoroLinearTileSteps -Rows $LinearRows `
+        -InputChannels $LinearInputChannels -OutputChannels $LinearOutputChannels `
+        -VectorOutputTiles:$LinearVectorOutputTiles)
+    $symbol='kokoro_linear_skel_handle_invoke'; $soname='libkokoro_linear_skel.so'
+} else {
+    $steps=@(New-HexagonProbeSteps)
+    $symbol='kqnn_emit_skel_handle_invoke'; $soname='libkqnn_emit_skel.so'
+}
+if ($RegionBody) {
+    # Close external control flow solely for independent encoding verification.
+    # This has no RPC admission/open entry and must never be deployed as a worker.
+    $steps+=@(@{Op='imm';d=0;i=0},@{Op='return'},@{Op='label';Name='encoding_domain'},@{Op='imm';d=0;i=33},@{Op='return'})
+    $symbol+='_encoding_only'; $soname=$soname.Replace('_skel.so','_region_encoding_only.so')
+}
+$library=New-ElfCodeLibrary -Soname $soname -Needed @() -Functions ([ordered]@{$symbol=$steps}) -PageSize 4096
+$path=Join-Path $OutputDirectory $soname
+Write-NewOrIdenticalFile $path $library.Bytes -AllowOverwrite:$Force
+$asm=@('.text','.p2align 2',".global $symbol",".type $symbol,@function","${symbol}:")
+$asm+=@($steps | ForEach-Object {ConvertTo-HexagonAssembly $_})
+Write-NewOrIdenticalFile (Join-Path $OutputDirectory 'probe-reference.s') ([Text.Encoding]::UTF8.GetBytes(($asm -join "`n")+"`n")) -AllowOverwrite:$Force
+$codeStart=[int]$library.Exports[$symbol]
+$isa=Get-InstructionSet
+$codeLength=($steps | Where-Object Op -ne 'label' | ForEach-Object { & $isa.Length $_ } | Measure-Object -Sum).Sum
+$code=[byte[]]::new($codeLength); [Array]::Copy($library.Bytes,$codeStart,$code,0,$codeLength)
+Write-NewOrIdenticalFile (Join-Path $OutputDirectory 'emitted-code.bin') $code -AllowOverwrite:$Force
+[pscustomobject]@{Path=$path;Bytes=$library.Bytes.Length;CodeBytes=$codeLength;SHA256=(Get-FileHash $path).Hash;Imports=$library.Imports.Count;Relocations=0;RegionBodyEncodingOnly=[bool]$RegionBody}

@@ -1,0 +1,97 @@
+# Live DSPQueue diagnostic reproduction — 2026-09-26
+
+The historical diagnostic echo script was rerun through the installed
+AndroidSMA preview app on the attached SM8635 and SM8550. This was a
+diagnostic investigation only, not Kokoro synthesis or a product transport
+test. The runner backed up and restored each app's startup scripts and prior
+receipt byte-for-byte after each attempt.
+
+The first SM8635 attempt created and exported a queue, but could not open its
+custom DSP skeleton because that artifact was absent from the diagnostic
+app's private library directory. A byte-identical copy of the SM8550 diagnostic
+app's archived skeleton was then staged to the SM8635 diagnostic app and
+verified by SHA-256. This binary's source is not in the current repository;
+it was neither inspected nor admitted to the production build. The generated
+transfer copy is in git-ignored `build/diagnostics/`. The diagnostic-app copy
+remains on the SM8635; it was not present before this test.
+
+| Gate | SM8635 with recovered skeleton | SM8550 with existing skeleton |
+| --- | --- | --- |
+| Unsigned PD, queue create/export | Pass | Pass |
+| Skeleton open and queue import/start | Pass | Pass |
+| First queue write | Success (script reached read) | Success (script reached read) |
+| First response read | Error 12 | Error 12 |
+| Recovery status | 0 packets received; DSP error 14 | 0 packets received; DSP error 14 |
+| Startup scripts and prior receipt restored | Yes | Yes |
+
+The pinned Qualcomm [error definitions](https://github.com/qualcomm/fastrpc/blob/d247519650fe5cb16de6c78edaa95bcc4be25073/inc/AEEStdErr.h#L41-L43)
+name 12 `AEE_EEXPIRED` and 14 `AEE_EBADPARM`. Its
+[CPU queue reader](https://github.com/qualcomm/fastrpc/blob/d247519650fe5cb16de6c78edaa95bcc4be25073/src/dspqueue/dspqueue_cpu.c#L2271-L2347)
+passes a read timeout to `wait_signal_locked`, which maps expiration to 12.
+That explains the host-side read result but does not identify why the custom
+worker reports 14.
+
+The two archived echo scripts differ overall, but their queue creation,
+worker start, and first 32-packet echo-loop source blocks are byte-identical.
+Their older stored receipts passed, so the current failure is a regression
+relative to those records, not proof that either chipset lacks the queue.
+The reported ~0.1 ms round trip was **not reproduced with the archived
+binary**: no packet completed in that phase, so it produced no latency sample.
+
+Do not infer the worker error's cause from Antigravity's candidate kernel
+sources: the installed kernels do not match those revisions, and both phones
+reach the same application-level worker failure.
+
+## Source recovery and source-matched rerun
+
+A one-time, read-only inspection of the exact diagnostic source and build
+script in the separate Antigravity checkout located the authored worker at
+`src/kernels/queue-echo/echo.c` and its build script at
+`tools/Build-DspQueueEchoProbe.ps1`, commit
+`85b20cc80570c20c53d2ca1c43dc03a66aae08ae`. Both files match that
+commit. The pinned SDK 6.4.0.2 build script verified its tool and header
+digests and emitted a fresh diagnostic worker into this repository's ignored
+`build/diagnostics/`; it made no changes to the Antigravity checkout. The
+new library has the same byte length as, but a different digest from, the
+archived installed library. Binary contents were not inspected.
+
+The diagnostic source and a build script adapted to this repository's
+git-ignored `build/` are now retained at
+`tools/reference/dspqueue-echo/`. The C translation unit is isolated
+reference material, not a production implementation. Its executable body
+matches the recorded source, and the local pinned build completed with the
+expected library byte length. That repository-local build was then run on
+both phones with the same guarded staging and restoration procedure: SM8635
+warm queue median 124.531 µs versus 226.041 µs synchronous; SM8550 warm queue
+median 282.812 µs versus 341.042 µs synchronous. Both runs passed, reported
+64 DSP packets received with zero worker errors, and restored the prior
+worker and diagnostic-app state. The detailed table below records the
+preceding build from the same executable source body.
+
+The source shows that status error 14 can come from the callback error
+argument before any packet is received. It does not establish why the
+archived binary took that path. Replacing the worker temporarily with the
+fresh source-built artifact, while retaining and then restoring the original
+worker on each phone, produced these same-session results:
+
+| Source-built worker | SM8635 | SM8550 |
+| --- | ---: | ---: |
+| Queue packets completed | 32 | 32 |
+| Warm queue round-trip median | 120.364 µs | 283.907 µs |
+| Warm queue round-trip p95 | 163.177 µs | 354.948 µs |
+| Warm queue write median | 56.823 µs | 12.969 µs |
+| Warm queue read median | 62.708 µs | 270.990 µs |
+| Poll-mode warm median | 152.135 µs | 249.062 µs |
+| Poll read attempts median | 1 | 24 |
+| Synchronous-invoke warm median | 230.000 µs | 347.709 µs |
+| DSP received / error | 64 / 0 | 64 / 0 |
+| Diagnostic passed | Yes | Yes |
+| Prior worker and app state restored | Yes | Yes |
+
+This reproduces an approximately 0.1 ms diagnostic queue round trip on the
+SM8635 (measured 0.120 ms in this run), not a 0.100 ms exact figure or Kokoro
+speech. The identical freshly built worker completes on both devices. The
+SM8550 response-read interval is much longer, but the receipt alone does not
+identify whether DSP execution, queue signaling, scheduler behavior, or
+another factor accounts for it. No per-packet explicit FastRPC invoke occurs
+in the PowerShell packet loop; library-internal signaling remains unmeasured.

@@ -1,0 +1,19 @@
+Kokoro-Hexagon
+Copyright 2026 Scott Mansfield
+
+This product is licensed under the Apache License, Version 2.0 (see LICENSE).
+
+The Android host base is obtained from Pwsh
+(https://github.com/MansfieldPlumbing/Pwsh) at the immutable revision recorded
+in lib/manifest.json. Kokoro-Hexagon is a separately maintained downstream TTS
+engine, not an official Pwsh release. The retained setup-kokoro.ps1 file is a
+legacy migration reference and is not an active product build input.
+
+Model variants built from Kokoro-82M use source, weights, and voices by hexgrad
+under Apache-2.0:
+https://github.com/hexgrad/kokoro and https://huggingface.co/hexgrad/Kokoro-82M
+Embedded tensor and voice resources in a model DLL are derived from those
+weights and retain the applicable notice.
+
+Historical QNN and other reference tooling is not part of the intended product
+release. See THIRD_PARTY_NOTICES.md.
