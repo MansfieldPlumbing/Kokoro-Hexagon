@@ -2,7 +2,10 @@
 [CmdletBinding()]
 param(
     [string] $OutputDirectory = (Join-Path $PSScriptRoot '..\build\hexagon-emission\emitted'),
-    [ValidateSet('Probe','KokoroAffine','KokoroAdaIn','KokoroAdaInResBlock','KokoroAlbertSoftmax3','KokoroAlbertAttention3','KokoroAlbertAttentionOutput3','KokoroAlbertConnectedAttention3','KokoroConvTile','KokoroLinearTile','KokoroR0Sub0','KokoroHmxLock','KokoroHmxMatrix','KokoroHmxConv','KokoroHmxConvRun')][string] $Kernel='Probe',
+    [ValidateSet('Probe','KokoroAffine','KokoroAdaIn','KokoroAdaInResBlock','KokoroAdaInStatistics','KokoroAdaInIntegerCoefficients','KokoroAdaInIntegerAffine','KokoroSnakeInteger','KokoroResidualInteger','KokoroAlbertSoftmax3','KokoroAlbertAttention3','KokoroAlbertAttentionOutput3','KokoroAlbertConnectedAttention3','KokoroConvTile','KokoroLinearTile','KokoroR0Sub0','KokoroHmxLock','KokoroHmxMatrix','KokoroHmxConv','KokoroHmxConvRun','KokoroResBlockRun','KokoroBranchAverageInteger','KokoroGenerator60xRun','KokoroLeakyReluInteger')][string] $Kernel='Probe',
+    [ValidateRange(2, 32768)][int] $ResBlockFrames = 7801,
+    [ValidateSet(3,7,11)][int] $ResBlockKernel = 3,
+    [ValidateSet(128,256)][int] $IntegerChannels = 128,
     [ValidateRange(1, 64)][int] $ConvTiles = 8,
     [ValidateSet(128, 256)][int] $ConvChannels = 128,
     [ValidateSet(3, 7, 11)][int] $ConvKernel = 3,
@@ -176,10 +179,50 @@ if($Kernel -eq 'KokoroR0Sub0') {
     . (Join-Path $PSScriptRoot '..\src\emit\Kokoro.HmxMatrixProbe.ps1')
     $steps=@(New-KokoroHmxMatrixSteps)
     $symbol='kokoro_hmx_matrix_skel_handle_invoke'; $soname='libkokoro_hmx_matrix_skel.so'
+} elseif($Kernel -eq 'KokoroAdaInStatistics') {
+    . (Join-Path $PSScriptRoot '..\src\emit\Kokoro.AdaInStatistics.ps1')
+    $steps=@(New-KokoroAdaInStatisticsSteps -Channels $IntegerChannels)
+    $symbol='kokoro_adain_statistics'; $soname='libkokoro_adain_statistics.so'
+} elseif($Kernel -eq 'KokoroAdaInIntegerCoefficients') {
+    . (Join-Path $PSScriptRoot '..\src\emit\Kokoro.AdaInInteger.ps1')
+    $steps=@(New-KokoroAdaInIntegerCoefficientsSteps -Channels $IntegerChannels)
+    $symbol='kokoro_adain_integer_coefficients'; $soname='libkokoro_adain_integer_coefficients.so'
+} elseif($Kernel -eq 'KokoroAdaInIntegerAffine') {
+    . (Join-Path $PSScriptRoot '..\src\emit\Kokoro.AdaInInteger.ps1')
+    $steps=@(New-KokoroAdaInIntegerAffineSteps -Channels $IntegerChannels)
+    $symbol='kokoro_adain_integer_affine'; $soname='libkokoro_adain_integer_affine.so'
+} elseif($Kernel -eq 'KokoroSnakeInteger') {
+    . (Join-Path $PSScriptRoot '..\src\emit\Kokoro.SnakeInteger.ps1')
+    $steps=@(New-KokoroSnakeIntegerSteps -Channels $IntegerChannels)
+    $symbol='kokoro_snake_integer'; $soname='libkokoro_snake_integer.so'
+} elseif($Kernel -eq 'KokoroResidualInteger') {
+    . (Join-Path $PSScriptRoot '..\src\emit\Kokoro.ResidualInteger.ps1')
+    $steps=@(New-KokoroResidualIntegerSteps -Channels $IntegerChannels)
+    $symbol='kokoro_residual_integer'; $soname='libkokoro_residual_integer.so'
 } elseif($Kernel -eq 'KokoroHmxConv') {
     . (Join-Path $PSScriptRoot '..\src\emit\Kokoro.HmxConv.ps1')
     $steps=@(New-KokoroHmxConvSteps -InputChannels $ConvChannels -OutputChannels $ConvChannels -Kernel $ConvKernel -Dilation $ConvDilation)
     $symbol='kokoro_hmx_conv'; $soname='libkokoro_hmx_conv.so'
+} elseif($Kernel -eq 'KokoroLeakyReluInteger') {
+    . (Join-Path $PSScriptRoot '..\src\emit\Kokoro.LeakyReluInteger.ps1')
+    $steps=@(New-KokoroLeakyReluIntegerSteps -Channels $IntegerChannels)
+    $symbol='kokoro_leaky_relu_integer'; $soname='libkokoro_leaky_relu_integer.so'
+} elseif($Kernel -eq 'KokoroBranchAverageInteger') {
+    . (Join-Path $PSScriptRoot '..\src\emit\Kokoro.BranchAverageInteger.ps1')
+    $steps=@(New-KokoroBranchAverageIntegerSteps -Channels $IntegerChannels)
+    $symbol='kokoro_branch_average_integer'; $soname='libkokoro_branch_average_integer.so'
+} elseif($Kernel -eq 'KokoroGenerator60xRun') {
+    . (Join-Path $PSScriptRoot '..\src\emit\Kokoro.Generator60xRun.ps1')
+    $run=New-KokoroGenerator60xRunSteps -Frames $ResBlockFrames
+    $steps=@($run.Steps)
+    $symbol='kokoro_resblock_run_skel_handle_invoke'; $soname='libkokoro_resblock_run_skel.so'
+    Write-NewOrIdenticalFile (Join-Path $OutputDirectory 'runner-layout.json') ([Text.Encoding]::UTF8.GetBytes(($run.Layout | ConvertTo-Json))) -AllowOverwrite:$Force
+} elseif($Kernel -eq 'KokoroResBlockRun') {
+    . (Join-Path $PSScriptRoot '..\src\emit\Kokoro.ResBlockRun.ps1')
+    $run=New-KokoroResBlockRunSteps -Frames $ResBlockFrames -Kernel $ResBlockKernel
+    $steps=@($run.Steps)
+    $symbol='kokoro_resblock_run_skel_handle_invoke'; $soname='libkokoro_resblock_run_skel.so'
+    Write-NewOrIdenticalFile (Join-Path $OutputDirectory 'runner-layout.json') ([Text.Encoding]::UTF8.GetBytes(($run.Layout | ConvertTo-Json))) -AllowOverwrite:$Force
 } elseif($Kernel -eq 'KokoroHmxConvRun') {
     . (Join-Path $PSScriptRoot '..\src\emit\Kokoro.HmxConvRun.ps1')
     $run=New-KokoroHmxConvRunSteps -Channels $ConvChannels -Kernel $ConvKernel -Dilation $ConvDilation -Tiles $ConvTiles
@@ -202,6 +245,9 @@ if ($RegionBody) {
     $symbol+='_encoding_only'; $soname=$soname.Replace('_skel.so','_region_encoding_only.so')
 }
 $library=New-ElfCodeLibrary -Soname $soname -Needed @() -Functions ([ordered]@{$symbol=$steps}) -PageSize 4096
+if($Kernel -in 'KokoroResBlockRun','KokoroGenerator60xRun') {
+    Write-NewOrIdenticalFile (Join-Path $OutputDirectory 'runner-link.json') ([Text.Encoding]::UTF8.GetBytes((@{Entry=$library.Exports[$symbol];Got=$library.GotSlots} | ConvertTo-Json -Depth 4))) -AllowOverwrite:$Force
+}
 $path=Join-Path $OutputDirectory $soname
 Write-NewOrIdenticalFile $path $library.Bytes -AllowOverwrite:$Force
 # GOT calls: give each step its resolved slot - pc so the independent assembly encodes the same bytes.

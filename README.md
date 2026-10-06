@@ -17,3 +17,25 @@ device receipts.
 | `lib` | Pinned inputs (`manifest.json`) and the stock Kokoro config |
 
 Generated files go in the ignored `build/`.
+
+## Current state, 2026-10-06
+
+The connected integer generator residual branches `resblocks.3`, `.4` and
+`.5` each pass V73 simulation and three SM8550 runs with exact meaningful
+output lanes and live AdaIN coefficients. See the
+[branch receipt](docs/results/generator-residual-branches-sm8550-20261006.md)
+and [resblocks.3 receipt](docs/results/resblock3-integer-device-sm8550-20261006.md).
+The [256-channel integer operators](docs/results/generator-c256-integer-simulator-20261006.md)
+have separate simulator evidence.
+
+The combined three-branch worker and native-layout mean match SDK assembly
+and pass malformed-input checks. We paused its complete arithmetic simulation
+at the time limit; the combined phone check remains pending.
+The separate mean and LeakyReLU have simulator evidence. Next is to finish
+the combined worker's arithmetic simulation, then run that same ELF on the
+phone before advancing to the remaining generator stages.
+
+Whole-generator execution, source synthesis, spectral output/iSTFT and the
+front half still require integration. Phoneme-to-PCM speaker playback,
+whole-model RTF and TTFA remain unproved on both target phones. This is an
+implementation in progress.

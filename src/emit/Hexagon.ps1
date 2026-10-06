@@ -41,6 +41,31 @@ $script:HexagonForms = @{
     'vsplat'         = '00011001101sssssPP000000001ddddd'
     'vand'           = '00011100001tttttPP0sssss101ddddd'
     'vxor'           = '00011100001tttttPP0sssss111ddddd'
+    # SDK 6.4.0.2 V73 assembler: v0.uw=vlsr(v1.uw,r2) -> 0x1982C120;
+    # v0.w=vadd(v1.w,v2.w) -> 0x1C42C100; v0.w=vmpyie(v1.w,v2.uh) -> 0x1FC2C100.
+    'vlsr-uw'        = '00011001100tttttPP0sssss001ddddd'
+    'vadd-w'         = '00011100010tttttPP0sssss000ddddd'
+    'vmpyie-w-uh'    = '00011111110tttttPP0sssss000ddddd'
+    # Integer AdaIN: SDK 6.4.0.2 V73, checked against assembler in emission tests.
+    'mpyu-d'         = '11100101010sssssPP0ttttt000ddddd'
+    'mpy-d'          = '11100101000sssssPP0ttttt000ddddd'
+    'add-d'          = '11010011000sssssPP0ttttt111ddddd'
+    'sub-d'          = '11010011001tttttPP0sssss111ddddd'
+    'gtu-d'          = '11010010100sssssPP0ttttt100000dd'
+    'gt'             = '11110010010sssssPP0ttttt000000dd'
+    'sub'            = '11110011001tttttPP0sssss000ddddd'
+    'lsr-i'          = '10001100000sssssPP0iiiii001ddddd'
+    'asl-i'          = '10001100000sssssPP0iiiii010ddddd'
+    'asr-d-i'        = '10000000000sssssPPiiiiii000ddddd'
+    'vasr-w'         = '00011001011tttttPP0sssss101ddddd'
+    'vasl-w'         = '00011001011tttttPP0sssss111ddddd'
+    'vmax-w'         = '00011111001tttttPP0sssss000ddddd'
+    'vmin-w'         = '00011111000tttttPP0sssss100ddddd'
+    'vor'            = '00011100001tttttPP0sssss110ddddd'
+    # V73 HVX PRM Rev AB pp.227-230, halfword lookup with r0..7 control.
+    'vsub-w'         = '00011100010tttttPP0sssss111ddddd'
+    'vlut16'         = '00011011vvvvvxxxPP1sssss110ddddd'
+    'vlut16-or'      = '00011011vvvvvxxxPP1sssss111ddddd'
     'valign'         = '00011011tttttxxxPP0sssss000ddddd'
     'valign-imm'     = '00011110001tttttPP1sssssiiiddddd'
     'vshuff'         = '00011011tttttrrrPP1sssss011ddddd'
@@ -129,6 +154,23 @@ function New-HexagonInstruction {
     $fields = @{ P=3 }
     foreach ($key in 'd','s','t','x','u','e') { if ($Step.ContainsKey($key)) { $fields[$key] = $Step[$key] } }
     switch ($Step.Op) {
+        { $_ -in 'mpyu-d','mpy-d','add-d','sub-d','gtu-d','asr-d-i' } {
+            $pairs = switch ($Step.Op) {
+                { $_ -in 'mpyu-d','mpy-d' } { @('d') }
+                'gtu-d' { @('s','t') }
+                'asr-d-i' { @('d','s') }
+                default { @('d','s','t') }
+            }
+            foreach ($r in $pairs) { if ($Step[$r] % 2 -ne 0 -or $Step[$r] -lt 0 -or $Step[$r] -gt 30) { throw 'Integer register pair must be even and 0..30' } }
+            if ($Step.Op -eq 'asr-d-i') {
+                if ($Step.i -lt 0 -or $Step.i -gt 63) { throw 'Double-word shift out of range' }
+                $fields.i=[long]$Step.i
+            }
+        }
+        { $_ -in 'lsr-i','asl-i' } {
+            if ($Step.i -lt 0 -or $Step.i -gt 31) { throw 'Word shift out of range' }
+            $fields.i=[long]$Step.i
+        }
         { $_ -in 'imm','addi' } {
             if ($Step.i -lt -32768 -or $Step.i -gt 32767) { throw 'Signed immediate out of range' }
             $fields.i = [long]$Step.i -band 65535
@@ -161,6 +203,12 @@ function New-HexagonInstruction {
         'valign' {
             if ($Step.ContainsKey('r')) { $fields.x = [long]$Step.r }
             if ($fields.x -lt 0 -or $fields.x -gt 7) { throw 'Valign register out of range (r0..r7)' }
+        }
+        { $_ -in 'vlut16','vlut16-or' } {
+            if ($Step.d % 2 -ne 0 -or $Step.d -lt 0 -or $Step.d -gt 30) { throw 'Lookup destination pair must be even and 0..30' }
+            if ($Step.x -lt 0 -or $Step.x -gt 7) { throw 'Lookup scalar control must be r0..7' }
+            if ($Step.v -lt 0 -or $Step.v -gt 31) { throw 'Lookup table vector out of range' }
+            $fields.v=[long]$Step.v
         }
         'valign-imm' {
             if ($Step.i -lt 0 -or $Step.i -gt 7) { throw 'Valign immediate out of range (0..7)' }
@@ -331,6 +379,27 @@ function ConvertTo-HexagonAssembly {
         'vadd-sf'        { $s = "v$($Step.d).sf = vadd(v$($Step.s).sf,v$($Step.t).sf)" }
         'vsub-sf'        { $s = "v$($Step.d).sf = vsub(v$($Step.s).sf,v$($Step.t).sf)" }
         'vmpy-sf'        { $s = "v$($Step.d).sf = vmpy(v$($Step.s).sf,v$($Step.t).sf)" }
+        'vlsr-uw'        { $s = "v$($Step.d).uw = vlsr(v$($Step.s).uw,r$($Step.t))" }
+        'vadd-w'         { $s = "v$($Step.d).w = vadd(v$($Step.s).w,v$($Step.t).w)" }
+        'vmpyie-w-uh'    { $s = "v$($Step.d).w = vmpyie(v$($Step.s).w,v$($Step.t).uh)" }
+        'mpyu-d' { $s="r$($Step.d+1):$($Step.d) = mpyu(r$($Step.s),r$($Step.t))" }
+        'mpy-d' { $s="r$($Step.d+1):$($Step.d) = mpy(r$($Step.s),r$($Step.t))" }
+        'add-d' { $s="r$($Step.d+1):$($Step.d) = add(r$($Step.s+1):$($Step.s),r$($Step.t+1):$($Step.t))" }
+        'sub-d' { $s="r$($Step.d+1):$($Step.d) = sub(r$($Step.s+1):$($Step.s),r$($Step.t+1):$($Step.t))" }
+        'gtu-d' { $s="p$($Step.d) = cmp.gtu(r$($Step.s+1):$($Step.s),r$($Step.t+1):$($Step.t))" }
+        'gt' { $s="p$($Step.d) = cmp.gt(r$($Step.s),r$($Step.t))" }
+        'sub' { $s="r$($Step.d) = sub(r$($Step.s),r$($Step.t))" }
+        'lsr-i' { $s="r$($Step.d) = lsr(r$($Step.s),#$($Step.i))" }
+        'asl-i' { $s="r$($Step.d) = asl(r$($Step.s),#$($Step.i))" }
+        'asr-d-i' { $s="r$($Step.d+1):$($Step.d) = asr(r$($Step.s+1):$($Step.s),#$($Step.i))" }
+        'vasr-w' { $s="v$($Step.d).w = vasr(v$($Step.s).w,r$($Step.t))" }
+        'vasl-w' { $s="v$($Step.d).w = vasl(v$($Step.s).w,r$($Step.t))" }
+        'vmax-w' { $s="v$($Step.d).w = vmax(v$($Step.s).w,v$($Step.t).w)" }
+        'vmin-w' { $s="v$($Step.d).w = vmin(v$($Step.s).w,v$($Step.t).w)" }
+        'vor' { $s="v$($Step.d) = vor(v$($Step.s),v$($Step.t))" }
+        'vsub-w' { $s="v$($Step.d).w = vsub(v$($Step.s).w,v$($Step.t).w)" }
+        'vlut16' { $s="v$($Step.d+1):$($Step.d).h = vlut16(v$($Step.s).b,v$($Step.v).h,r$($Step.x))" }
+        'vlut16-or' { $s="v$($Step.d+1):$($Step.d).h |= vlut16(v$($Step.s).b,v$($Step.v).h,r$($Step.x))" }
         'vmpy-sf-qf32'   { $s = "v$($Step.d).qf32 = vmpy(v$($Step.s).sf,v$($Step.t).sf)" }
         'vadd-sf-qf32'   { $s = "v$($Step.d).qf32 = vadd(v$($Step.s).sf,v$($Step.t).sf)" }
         'vconv-qf32-sf'  { $s = "v$($Step.d).sf = v$($Step.s).qf32" }

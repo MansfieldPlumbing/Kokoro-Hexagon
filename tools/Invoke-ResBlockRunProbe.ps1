@@ -1,11 +1,11 @@
 #requires -Version 7.4
 <#
 .SYNOPSIS
-Runs the emitted HMX conv runner on an attached phone and returns its receipt.
+Runs the emitted connected resblocks.3 proof job on an attached phone.
 
 .DESCRIPTION
 Stages the emitted skel, Native.Binding.psm1, the device harness and a fixture from
-New-KokoroHmxConvFixture.ps1 into the host app's private storage (hash-checked), runs the
+New-KokoroResBlockRunFixture.ps1 into the host app's private storage (hash-checked), runs the
 harness as the app's startup script, then restores the startup scripts and any replaced file
 and verifies the restore by hash. The phone is selected by ro.soc.model; no serial is printed.
 #>
@@ -20,6 +20,7 @@ param(
     [string] $Adb = 'C:\backup\Android\platform-tools\adb.exe',
     [string] $Package = 'dev.mansfieldplumbing.androidsma.preview',
     [ValidateRange(10, 600)][int] $TimeoutSeconds = 120,
+    [ValidateSet('ResBlock','Generator60x')][string] $Graph = 'ResBlock',
     [string] $CaptureOutputPath
 )
 $ErrorActionPreference = 'Stop'
@@ -39,27 +40,27 @@ $run = { param([string[]]$Arguments)
     if ($LASTEXITCODE) { throw "Device operation failed: $($Arguments[0]) $($Arguments[1])" }
     $result
 }
-$harness = Join-Path $PSScriptRoot '..\src\runspace\KokoroHmxConvRunProbe.ps1'
+$harness = Join-Path $PSScriptRoot '..\src\runspace\KokoroResBlockRunProbe.ps1'
 $binding = Join-Path $PSScriptRoot '..\src\runspace\Native.Binding.psm1'
 foreach ($p in $harness, $binding) { $e = $null; $null = [Management.Automation.Language.Parser]::ParseFile($p, [ref]$null, [ref]$e); if ($e.Count) { throw "Does not parse: $p" } }
 $spec = Join-Path ([IO.Path]::GetTempPath()) ("hmx-conv-spec-" + [Guid]::NewGuid().ToString('N') + '.txt')
-[IO.File]::WriteAllLines($spec, @("Shape=$Shape", "Tiles=$Tiles", "Runs=$Runs", "Macs=$Macs", "CaptureOutput=$([int][bool]$CaptureOutputPath)"))
+[IO.File]::WriteAllLines($spec, @("Shape=$Shape", "Graph=$Graph", "Tiles=$Tiles", "Runs=$Runs", "Macs=$Macs", "CaptureOutput=$([int][bool]$CaptureOutputPath)"))
 
 $id = [Guid]::NewGuid().ToString('N')
-$temp = "/data/local/tmp/kokoro-hmx-conv-$id"
-$backup = "files/kokoro-fl/hmx-conv-backup-$id"
-$target = 'files/kokoro-fl/hmx-conv-run'
+$temp = "/data/local/tmp/kokoro-resblock-$id"
+$backup = "files/kokoro-fl/resblock-backup-$id"
+$target = 'files/kokoro-fl/resblock-run'
 $startHashes = @(& $run @('shell', 'run-as', $Package, 'sha256sum', 'files/Start.ps1', 'files/PROFILE.PS1'))
 $null = & $run @('shell', "run-as $Package mkdir -p $backup $target files/kokoro-fl/qnn && run-as $Package cp files/Start.ps1 $backup/Start.ps1 && run-as $Package cp files/PROFILE.PS1 $backup/PROFILE.PS1 && mkdir -p $temp")
 $replaced = [Collections.Generic.List[string]]::new()
 $changed = $false
 try {
     $files = @(
-        @($harness, "$target/KokoroHmxConvRunProbe.ps1"),
+        @($harness, "$target/KokoroResBlockRunProbe.ps1"),
         @($binding, 'files/kokoro-fl/Native.Binding.psm1'),
-        @($LibraryPath, 'files/kokoro-fl/qnn/libkokoro_hmx_conv_run_skel.so'),
+        @($LibraryPath, 'files/kokoro-fl/qnn/libkokoro_resblock_run_skel.so'),
         @($spec, "$target/spec.txt"))
-    foreach ($n in 'activations.bin', 'weights.bin', 'tables.bin', 'expected.bin') { $files += , @((Join-Path $FixtureDirectory $n), "$target/$n") }
+    foreach ($n in 'activations.bin', 'weights.bin', 'tables.bin', 'expected.bin', 'expected-coefficients.bin') { $files += , @((Join-Path $FixtureDirectory $n), "$target/$n") }
     foreach ($file in $files) {
         $name = Split-Path $file[1] -Leaf; $destination = $file[1]
         $null = & $run @('push', $file[0], "$temp/$name")
@@ -71,7 +72,7 @@ try {
     }
     $null = & $run @('shell', "run-as $Package truncate -s 0 $target/receipt.txt")
     $changed = $true
-    $null = & $run @('shell', "am force-stop $Package && run-as $Package cp $target/KokoroHmxConvRunProbe.ps1 files/Start.ps1 && run-as $Package cp $target/KokoroHmxConvRunProbe.ps1 files/PROFILE.PS1 && monkey -p $Package -c android.intent.category.LAUNCHER 1")
+    $null = & $run @('shell', "am force-stop $Package && run-as $Package cp $target/KokoroResBlockRunProbe.ps1 files/Start.ps1 && run-as $Package cp $target/KokoroResBlockRunProbe.ps1 files/PROFILE.PS1 && monkey -p $Package -c android.intent.category.LAUNCHER 1")
     $watch = [Diagnostics.Stopwatch]::StartNew()
     do {
         Start-Sleep -Seconds 2
@@ -98,6 +99,6 @@ finally {
         if (($restored -join "`n") -cne ($startHashes -join "`n")) { throw 'Startup restoration hash mismatch' }
         'StartupRestored=True'
     }
-    $null = & $run @('shell', "rm -rf $temp")
-    Remove-Item $spec -ErrorAction SilentlyContinue
+    "StagingPreserved=True"
+    "SpecPreserved=True"
 }

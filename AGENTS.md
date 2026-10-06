@@ -60,6 +60,39 @@ SM8550 and SM8635 phones, against the best other Kokoro build on the same phone.
   outputs captured on Windows. Do not write a second implementation of the
   model to compare against. Report int8 error against the stock FP32 output.
 
+## Implementation workflow
+
+1. Before writing a kernel or investigating an interface, search online for
+   existing Kokoro ports, integer HMX/HVX implementations, papers, and relevant
+   graphs or profiles. Start with the pinned stock Kokoro source, onnxsim HMX
+   work, and ggml-hexagon. Record the useful source locations and full commits.
+   Use existing results to choose the next bounded implementation step.
+2. Inspect existing project emitters, weight readers, runtime code, and receipts
+   before adding code. Reuse the working path. Rewrite adopted algorithms in
+   PowerShell; do not introduce another model implementation or compiler as a
+   prerequisite. Reverse engineer only the gaps remaining after source search.
+3. For new instruction forms, use version-matched SDK assembler output to
+   establish the encoding, compare emitted bytes, then check the same emitted
+   bytes in the V73 simulator. SDK tools are validation references only.
+4. Use stock checkpoint weights and stock PyTorch captures on Windows for
+   numerical comparison. Synthetic fixtures establish instruction semantics;
+   real captures establish propagated model error. Keep those checks distinct.
+5. Run the checked artifact on each target phone, selected by SoC, and record
+   correctness and measured timing with artifact hashes. Keep SM8550 and
+   SM8635 evidence separate. Advance to the next connected region once the
+   current correctness gate passes; do not optimize an isolated throughput
+   result while real-model correctness remains unproved.
+6. Continue in this order: real generator resblocks.3 with per-channel W8A8
+   HMX convolution and HVX AdaIN/Snake in the same native layout; the complete
+   generator in one DSP job with DMA ping-pong; ALBERT, predictors, and decoder;
+   then stock phoneme-to-PCM speech played through AAudio on both phones.
+
+Render independent stock breath groups with exact full-group AdaIN statistics,
+retaining chunk-length voice-style selection. Render the next group while the
+current one plays. Preserve stock equations and the integer whole-DSP contract.
+Performance targets and competitor results guide investigation; only matched
+phone measurements establish achieved speed and time to first audio.
+
 ## Proof
 
 - A claim about the phone needs a run on the phone with the same artifact.
@@ -69,6 +102,13 @@ SM8550 and SM8635 phones, against the best other Kokoro build on the same phone.
 - Proven so far: the emitted R0Sub0 kernel runs 2.21-2.29x faster than LLVM's
   in DSP ticks, bit exact, on both SoCs; dspqueue dispatch runs 1.94x faster
   than synchronous invoke on SM8635, with a 120 us warm median.
+- Connected integer generator resblocks.3, .4 and .5 pass V73 simulation
+  and 3/3 SM8550 runs each, with exact meaningful native output lanes and
+  all live AdaIN coefficients. See
+  `docs/results/generator-residual-branches-sm8550-20261006.md`.
+  The combined worker has assembler and admission evidence only; its full
+  arithmetic simulation and phone check remain pending. Resume that gate
+  before advancing. Whole-model speech and end-to-end timing are not proved.
 
 ## Product shape
 
