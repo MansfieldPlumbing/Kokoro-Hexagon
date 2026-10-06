@@ -2,7 +2,11 @@
 [CmdletBinding()]
 param(
     [string] $OutputDirectory = (Join-Path $PSScriptRoot '..\build\hexagon-emission\emitted'),
-    [ValidateSet('Probe','KokoroAffine','KokoroAdaIn','KokoroAdaInResBlock','KokoroAlbertSoftmax3','KokoroAlbertAttention3','KokoroAlbertAttentionOutput3','KokoroAlbertConnectedAttention3','KokoroConvTile','KokoroLinearTile','KokoroR0Sub0','KokoroHmxLock','KokoroHmxMatrix')][string] $Kernel='Probe',
+    [ValidateSet('Probe','KokoroAffine','KokoroAdaIn','KokoroAdaInResBlock','KokoroAlbertSoftmax3','KokoroAlbertAttention3','KokoroAlbertAttentionOutput3','KokoroAlbertConnectedAttention3','KokoroConvTile','KokoroLinearTile','KokoroR0Sub0','KokoroHmxLock','KokoroHmxMatrix','KokoroHmxConv','KokoroHmxConvRun')][string] $Kernel='Probe',
+    [ValidateRange(1, 64)][int] $ConvTiles = 8,
+    [ValidateSet(128, 256)][int] $ConvChannels = 128,
+    [ValidateSet(3, 7, 11)][int] $ConvKernel = 3,
+    [ValidateSet(1, 3, 5)][int] $ConvDilation = 1,
     [ValidateRange(2, 2048)][int] $AdaInFrames = 64,
     [ValidateRange(1, 128)][int] $AdaInChannels = 128,
     [switch] $AdaInVectorConvolution,
@@ -102,7 +106,9 @@ foreach($name in 'EM_HEXAGON','EF_HEXAGON_ISA_V73') {
 $m=[regex]::Match((Import-LibSourceText 'DynamicTags.def'),'HEXAGON_DYNAMIC_TAG\(HEXAGON_VER,\s*(0x[0-9a-fA-F]+)\)')
 if(-not $m.Success) { throw 'Missing Hexagon dynamic version tag' }
 $elf.DT_HEXAGON_VER=[Convert]::ToUInt32($m.Groups[1].Value.Substring(2),16)
-$script:Target=[pscustomobject]@{ElfClass=32;Machine='EM_HEXAGON';ElfFlags=@('EF_HEXAGON_ISA_V73');RelocationForm='RELA'}
+# llvm-project 08169f5fb1b7386002cdb66e52192580fc0fcf24 llvm/include/llvm/BinaryFormat/ELFRelocs/Hexagon.def:40,42
+$elf['R_HEX_GLOB_DAT']=[uint32]33; $elf['R_HEX_RELATIVE']=[uint32]35
+$script:Target=[pscustomobject]@{ElfClass=32;Machine='EM_HEXAGON';ElfFlags=@('EF_HEXAGON_ISA_V73');RelocationForm='RELA';GotRelocation='R_HEX_GLOB_DAT';RelativeRelocation='R_HEX_RELATIVE'}
 if($Kernel -eq 'KokoroR0Sub0') {
     $modelPath=Join-Path $PSScriptRoot '..\src\models\Kokoro.R0Sub0.ps1'
     $modelAst=[Management.Automation.Language.Parser]::ParseFile($modelPath,[ref]$tokens,[ref]$errors)
@@ -170,6 +176,15 @@ if($Kernel -eq 'KokoroR0Sub0') {
     . (Join-Path $PSScriptRoot '..\src\emit\Kokoro.HmxMatrixProbe.ps1')
     $steps=@(New-KokoroHmxMatrixSteps)
     $symbol='kokoro_hmx_matrix_skel_handle_invoke'; $soname='libkokoro_hmx_matrix_skel.so'
+} elseif($Kernel -eq 'KokoroHmxConv') {
+    . (Join-Path $PSScriptRoot '..\src\emit\Kokoro.HmxConv.ps1')
+    $steps=@(New-KokoroHmxConvSteps -InputChannels $ConvChannels -OutputChannels $ConvChannels -Kernel $ConvKernel -Dilation $ConvDilation)
+    $symbol='kokoro_hmx_conv'; $soname='libkokoro_hmx_conv.so'
+} elseif($Kernel -eq 'KokoroHmxConvRun') {
+    . (Join-Path $PSScriptRoot '..\src\emit\Kokoro.HmxConvRun.ps1')
+    $run=New-KokoroHmxConvRunSteps -Channels $ConvChannels -Kernel $ConvKernel -Dilation $ConvDilation -Tiles $ConvTiles
+    $steps=@($run.Steps)
+    $symbol='kokoro_hmx_conv_run_skel_handle_invoke'; $soname='libkokoro_hmx_conv_run_skel.so'
 } elseif($Kernel -eq 'KokoroLinearTile') {
     . (Join-Path $PSScriptRoot '..\src\emit\Kokoro.LinearTile.ps1')
     $steps=@(New-KokoroLinearTileSteps -Rows $LinearRows `
@@ -189,6 +204,13 @@ if ($RegionBody) {
 $library=New-ElfCodeLibrary -Soname $soname -Needed @() -Functions ([ordered]@{$symbol=$steps}) -PageSize 4096
 $path=Join-Path $OutputDirectory $soname
 Write-NewOrIdenticalFile $path $library.Bytes -AllowOverwrite:$Force
+# GOT calls: give each step its resolved slot - pc so the independent assembly encodes the same bytes.
+$isaLength=(Get-InstructionSet).Length
+$pcAt=[long]$library.Exports[$symbol]
+foreach($step in $steps) {
+    if($step.Op -eq 'got-call') { $step.Delta=[long]$library.GotSlots[$step.Import]-$pcAt }
+    $pcAt+=& $isaLength $step
+}
 $asm=@('.text','.p2align 2',".global $symbol",".type $symbol,@function","${symbol}:")
 $asm+=@($steps | ForEach-Object {ConvertTo-HexagonAssembly $_})
 Write-NewOrIdenticalFile (Join-Path $OutputDirectory 'probe-reference.s') ([Text.Encoding]::UTF8.GetBytes(($asm -join "`n")+"`n")) -AllowOverwrite:$Force

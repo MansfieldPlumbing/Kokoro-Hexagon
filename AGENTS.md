@@ -29,6 +29,9 @@ SM8550 and SM8635 phones, against the best other Kokoro build on the same phone.
 - Integer from the start: W8A8, and W4A8 per layer where the error allows,
   with per-channel scales. There is no FP32 or FP16 DSP stage to quantize later.
 - Dispatch: one FastRPC setup, then dspqueue for every job.
+- Activations keep one HMX-native layout from the decoder through the iSTFT.
+  HVX work (AdaIN, Snake, residuals, source, STFT/iSTFT) reads and writes that
+  layout, so no stage spends time converting layouts between operators.
 - The model is stock Kokoro, every stage. Changing its architecture (for
   example replacing AdaIN) is the owner's decision.
 

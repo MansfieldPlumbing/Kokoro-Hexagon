@@ -22,6 +22,8 @@ $script:HexagonForms = @{
     'sfinvsqrta'     = '10001011111sssssPP------0eeddddd'
     'and'            = '11110001000sssssPP0ttttt000ddddd'
     'xor'            = '11110001011sssssPP0ttttt000ddddd'
+    # SDK 6.4.0.2 hexagon-llvm-mc (V73): r24 = or(r24,r0) = 0xF138C018.
+    'or'             = '11110001001sssssPP0ttttt000ddddd'
     'conv-sf2w-chop' = '10001011100sssssPP000000001ddddd'
     'conv-w2sf'      = '10001011010sssssPP000000000ddddd'
     'vload'          = '00101000000sssssPPiiiiii---ddddd'
@@ -63,6 +65,18 @@ $script:HexagonForms = @{
     'wt-hf'          = '10010010000uuuuuPP1vvvvv11101111'
     'wt-b'           = '10010010000uuuuuPP1vvvvv11100000'
     'wt-n'           = '10010010000uuuuuPP1vvvvv11100001'
+    # Conv forms, bit patterns from SDK 6.4.0.2 hexagon-llvm-mc (+hmxv73) with varied registers.
+    'act-ub-single'  = '10010010000sssssPP0ttttt11110000'
+    'wt-b-deep'      = '10010010000uuuuuPP1vvvvv11101000'
+    'mxmem-after-sat-ub' = '10100110111sssssPP0ttttt00000100'
+    # Calls through the GOT and stack frames, bit patterns from SDK 6.4.0.2 hexagon-llvm-mc (V73).
+    'immext'         = '0000iiiiiiiiiiiiPPiiiiiiiiiiiiii'
+    'add-pc'         = '0110101001001001PP0iiiiii00ddddd'
+    'callr'          = '01010000101sssssPP00000000000000'
+    'syncht'         = '1010100001000000PP00000000000000'
+    'allocframe'     = '1010000010011101PP000iiiiiiiiiii'
+    'dealloc-return' = '1001011000011110PP00000000011110'
+    'load-d'         = '10010ii1110sssssPPiiiiiiiiiddddd'
     'return'         = '01010010100sssssPP--------------'
 }
 
@@ -179,7 +193,53 @@ function New-HexagonInstruction {
             if ($Step.s -lt 0 -or $Step.s -gt 31) { throw 'Cvt source register out of range (0..31)' }
             $fields.s = [long]$Step.s
         }
-        { $_ -in 'mxmem-cvt','mxmem-after-hf','mxmem-after-retain-cm-ub' } {
+        'got-call' {
+            # { rd = add(pc, ##slot-pc) } ; rd = memw(rd) ; callr rd -- the ELF writer passes the
+            # import's GOT slot as Target. Clobbers rd and the caller-saved registers.
+            if (-not $Step.Import) { throw 'got-call needs an Import' }
+            if ($Step.d -lt 0 -or $Step.d -gt 27) { throw 'got-call register out of range (r0..r27)' }
+            $delta = $Target - $Pc
+            if ($delta -lt [int]::MinValue -or $delta -gt [int]::MaxValue) { throw 'GOT slot out of range' }
+            [uint32]$u = [uint32]($delta -band 0xFFFFFFFF)
+            $words = @(
+                (ConvertTo-HexagonWord 'immext' @{ i=[long]($u -shr 6); P=1 }),
+                (ConvertTo-HexagonWord 'add-pc' @{ i=[long]($u -band 63); d=[long]$Step.d; P=3 }),
+                (ConvertTo-HexagonWord 'load' @{ i=0; s=[long]$Step.d; d=[long]$Step.d; P=3 }),
+                (ConvertTo-HexagonWord 'callr' @{ s=[long]$Step.d; P=3 }))
+            $bytes = [byte[]]::new(16)
+            for ($n = 0; $n -lt 4; $n++) { [Array]::Copy([BitConverter]::GetBytes([uint32]$words[$n]), 0, $bytes, 4 * $n, 4) }
+            return $bytes
+        }
+        'allocframe' {
+            if ($Step.Bytes % 8 -ne 0 -or $Step.Bytes -lt 0 -or $Step.Bytes -gt 16376) { throw 'Frame size must be a multiple of 8 up to 16376' }
+            $fields.i = [long]($Step.Bytes / 8)
+        }
+        'dealloc-return' { }
+        'add-pc' {
+            if ($Step.i -lt 0 -or $Step.i -gt 63) { throw 'add(pc) immediate out of range (0..63)' }
+            $fields.i = [long]$Step.i
+        }
+        'load-d' {
+            if ($Step.Offset % 8 -ne 0 -or $Step.Offset -lt -8192 -or $Step.Offset -gt 8184) { throw 'Double word offset out of range or unaligned' }
+            if ($Step.d % 2 -ne 0 -or $Step.d -lt 0 -or $Step.d -gt 30) { throw 'Load-d destination register pair must be even and 0..30' }
+            $fields.i = ([long]$Step.Offset / 8) -band 2047
+        }
+        'callr' { }
+        'syncht' { }
+        'hmx-pair' {
+            # One packet: activation load (slot 1) then weight load (slot 0), named by form.
+            if ($Step.Act -notin 'act-hf','act-ub','act-ub-cm','act-ub-single') { throw "Unsupported HMX activation form: $($Step.Act)" }
+            if ($Step.Wt -notin 'wt-hf','wt-b','wt-n','wt-b-deep') { throw "Unsupported HMX weight form: $($Step.Wt)" }
+            foreach ($r in 's','t','u','v') { if ($Step[$r] -lt 0 -or $Step[$r] -gt 31) { throw "HMX register $r out of range (0..31)" } }
+            $w0 = ConvertTo-HexagonWord $Step.Act @{ s=[long]$Step.s; t=[long]$Step.t; P=1 }
+            $w1 = ConvertTo-HexagonWord $Step.Wt  @{ u=[long]$Step.u; v=[long]$Step.v; P=3 }
+            if ((Read-HexagonWord $w0).Op -ne $Step.Act -or (Read-HexagonWord $w1).Op -ne $Step.Wt) { throw 'HMX packet failed round-trip decode' }
+            $bytes = [byte[]]::new(8)
+            [Array]::Copy([BitConverter]::GetBytes($w0), 0, $bytes, 0, 4)
+            [Array]::Copy([BitConverter]::GetBytes($w1), 0, $bytes, 4, 4)
+            return $bytes
+        }
+        { $_ -in 'mxmem-cvt','mxmem-after-hf','mxmem-after-retain-cm-ub','mxmem-after-sat-ub' } {
             if ($Step.s -lt 0 -or $Step.s -gt 31) { throw 'Mxmem-cvt base register out of range (0..31)' }
             if ($Step.t -lt 0 -or $Step.t -gt 31) { throw 'Mxmem-cvt stride register out of range (0..31)' }
             $fields.s = [long]$Step.s
@@ -220,7 +280,8 @@ function Get-InstructionSet {
         Id='HexagonV73'; Name='Hexagon V73'; StateBit=0
         Length={ param($Step)
             if ($Step.Op -eq 'label') { 0 }
-            elseif ($Step.Op -in 'mxmpy-fp16','mxmpy-w8a8','mxmpy-w4a8','mxmpy-w8a8-cm','mxmpy-w4a8-cm') { 8 }
+            elseif ($Step.Op -in 'mxmpy-fp16','mxmpy-w8a8','mxmpy-w4a8','mxmpy-w8a8-cm','mxmpy-w4a8-cm','hmx-pair') { 8 }
+            elseif ($Step.Op -eq 'got-call') { 16 }
             else { 4 }
         }
         Encode={ param($Step,$Pc,$Target) New-HexagonInstruction $Step $Pc $Target }
@@ -248,6 +309,7 @@ function ConvertTo-HexagonAssembly {
         'sfinvsqrta'     { $s = "r$($Step.d),p$($Step.e) = sfinvsqrta(r$($Step.s))" }
         'and'            { $s = "r$($Step.d) = and(r$($Step.s),r$($Step.t))" }
         'xor'            { $s = "r$($Step.d) = xor(r$($Step.s),r$($Step.t))" }
+        'or'             { $s = "r$($Step.d) = or(r$($Step.s),r$($Step.t))" }
         'conv-sf2w-chop' { $s = "r$($Step.d) = convert_sf2w(r$($Step.s)):chop" }
         'conv-w2sf'      { $s = "r$($Step.d) = convert_w2sf(r$($Step.s))" }
         'vload'          {
@@ -294,6 +356,25 @@ function ConvertTo-HexagonAssembly {
         'mxmem-cvt'      { $s = "mxmem(r$($Step.s),r$($Step.t)) = cvt" }
         'mxmem-after-hf' { $s = "mxmem(r$($Step.s),r$($Step.t)):after.hf = acc" }
         'mxmem-after-retain-cm-ub' { $s = "mxmem(r$($Step.s),r$($Step.t)):after:retain:cm.ub = acc" }
+        'mxmem-after-sat-ub' { $s = "mxmem(r$($Step.s),r$($Step.t)):after:sat.ub = acc" }
+        'got-call' {
+            # Delta (GOT slot - pc) is filled in after layout by the emitter for independent assembly.
+            if ($null -eq $Step.Delta) { throw 'got-call assembly needs the resolved Delta' }
+            return "{ r$($Step.d) = add(pc,##$($Step.Delta)) }`n{ r$($Step.d) = memw(r$($Step.d)+#0) }`n{ callr r$($Step.d) }"
+        }
+        'allocframe'     { $s = "allocframe(#$($Step.Bytes))" }
+        'dealloc-return' { $s = 'dealloc_return' }
+        'add-pc'         { $s = "r$($Step.d) = add(pc,#$($Step.i))" }
+        'load-d'         { $s = "r$($Step.d + 1):$($Step.d) = memd(r$($Step.s)+#$($Step.Offset))" }
+        'callr'          { $s = "callr r$($Step.s)" }
+        'syncht'         { $s = 'syncht' }
+        'hmx-pair' {
+            $act = @{ 'act-hf'='activation.hf'; 'act-ub'='activation.ub'; 'act-ub-cm'='activation.ub'; 'act-ub-single'='activation.ub' }[$Step.Act]
+            $actSuffix = @{ 'act-hf'=''; 'act-ub'=''; 'act-ub-cm'=':cm'; 'act-ub-single'=':single' }[$Step.Act]
+            $wt = @{ 'wt-hf'='weight.hf'; 'wt-b'='weight.b'; 'wt-n'='weight.n'; 'wt-b-deep'='weight.b' }[$Step.Wt]
+            $wtSuffix = if ($Step.Wt -eq 'wt-b-deep') { ':deep' } else { '' }
+            return "{`n`t$act = mxmem(r$($Step.s),r$($Step.t))$actSuffix`n`t$wt = mxmem(r$($Step.u),r$($Step.v))$wtSuffix`n}"
+        }
         'bias-mxmem'     { $s = "bias = mxmem(r$($Step.s))" }
         'bias-mxmem2'    { $s = "bias = mxmem2(r$($Step.s))" }
         { $_ -in 'mxmpy-fp16','mxmpy-w8a8','mxmpy-w4a8','mxmpy-w8a8-cm','mxmpy-w4a8-cm' } {
