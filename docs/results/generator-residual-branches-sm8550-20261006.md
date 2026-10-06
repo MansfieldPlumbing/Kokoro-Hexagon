@@ -79,7 +79,7 @@ Manifest SHA-256:
 `D7BCD6916B6B30B12AF6C3C1C7658D676C3E9B914D083111F14AB17D5E05A0DF`.
 Tensor SNR values are diagnostic, with no audio acceptance threshold.
 
-## Combined worker: verification pending
+## Combined worker: V73 arithmetic simulation passed
 
 `Kokoro.Generator60xRun.ps1` composes the three branches and native-layout
 mean in one correctness job. The corrected ELF matches SDK assembly;
@@ -88,14 +88,26 @@ checked bytes. Four malformed-input cases pass with telemetry preserved.
 Corrected ELF SHA-256:
 `3DA827414366BC38B0DB061FDC730F2F337D5F8266F70B918B684B93D9733D31`.
 
-We paused the complete arithmetic simulation at the time limit.
-There is no completed arithmetic result or phone run for this combined
-ELF. A prior combined candidate contained a base-pointer offset bug and
-was superseded before phone deployment; its results do not establish
-correctness. Resume with a fresh fixture and the corrected ELF, complete
-`Test-KokoroResBlockRunner.ps1`, then use
-`Invoke-ResBlockRunProbe.ps1 -Graph Generator60x` on the same checked image.
-The corrected artifact and fixture are retained in ignored
-`build/generator60x-v2-emission-20261006` and
-`build/generator60x-v2-run-fixture-20261006`. The interrupted fixture must
-not be treated as a passing simulator result.
+We resumed the full-size run in a fresh fixture. Re-emission from committed
+source `03be78359af2b17da5b1203527dd7d86cee6d8e4` reproduces the corrected ELF
+byte for byte. Its full-wrapper V73 simulation returns zero, reaches stage 7
+and completes all 19 stages. Comparison has zero mismatches across 999,424
+meaningful native output lanes and all 18,432 live coefficient bytes.
+
+The extracted tensor also matches the separately checked three-branch mean
+across all 1,998,848 bytes; SHA-256:
+`1D23542E5CA3FA6AD4A57EACF54D8547DDDF98D941A11FDC03F431CB8DB85A7E`.
+The original stock comparison is unchanged: 22.665159 dB SNR,
+RMSE 0.3973752604, maximum absolute error 3.777032830 and one endpoint value.
+This establishes that composition preserves the separately verified integer
+result for this capture; it does not establish audio quality or phone timing.
+
+The combined phone run remains pending. Next use
+`Invoke-ResBlockRunProbe.ps1 -Graph Generator60x` on this same checked image.
+The corrected artifact is retained in ignored
+`build/generator60x-v2-emission-20261006`. The completed fixture, raw simulator
+log, extracted output/coefficients, stock comparison and result hashes are in
+`build/generator60x-resumed-simulator-20261006`. Reproduce by copying the five
+hash-verified fixture buffers into a fresh directory and running
+`Test-KokoroResBlockRunner.ps1` with the corrected emission. The earlier
+interrupted fixture is separate and is not a passing simulator result.

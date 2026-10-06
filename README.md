@@ -28,12 +28,13 @@ and [resblocks.3 receipt](docs/results/resblock3-integer-device-sm8550-20261006.
 The [256-channel integer operators](docs/results/generator-c256-integer-simulator-20261006.md)
 have separate simulator evidence.
 
-The combined three-branch worker and native-layout mean match SDK assembly
-and pass malformed-input checks. We paused its complete arithmetic simulation
-at the time limit; the combined phone check remains pending.
-The separate mean and LeakyReLU have simulator evidence. Next is to finish
-the combined worker's arithmetic simulation, then run that same ELF on the
-phone before advancing to the remaining generator stages.
+The combined three-branch worker and native-layout mean match SDK assembly,
+pass malformed-input checks, and pass full-group V73 arithmetic simulation:
+all 19 stages complete with exact meaningful output lanes and live AdaIN
+coefficients. The combined output matches the separately checked branch
+mean byte for byte. The separate LeakyReLU has simulator evidence. Next is
+to run that same combined ELF on the phone before advancing to the remaining
+generator stages.
 
 Whole-generator execution, source synthesis, spectral output/iSTFT and the
 front half still require integration. Phoneme-to-PCM speaker playback,

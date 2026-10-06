@@ -106,9 +106,10 @@ phone measurements establish achieved speed and time to first audio.
   and 3/3 SM8550 runs each, with exact meaningful native output lanes and
   all live AdaIN coefficients. See
   `docs/results/generator-residual-branches-sm8550-20261006.md`.
-  The combined worker has assembler and admission evidence only; its full
-  arithmetic simulation and phone check remain pending. Resume that gate
-  before advancing. Whole-model speech and end-to-end timing are not proved.
+  The combined worker also passes full-group V73 arithmetic simulation:
+  19 stages, zero output-lane and coefficient-byte mismatches. Its combined
+  phone check remains pending. Run the same checked ELF on the phone before
+  advancing. Whole-model speech and end-to-end timing are not proved.
 
 ## Product shape
 
