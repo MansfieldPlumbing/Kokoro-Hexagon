@@ -2,7 +2,7 @@
 [CmdletBinding()]
 param(
     [string] $OutputDirectory = (Join-Path $PSScriptRoot '..\build\hexagon-emission\emitted'),
-    [ValidateSet('Probe','KokoroAffine','KokoroAdaIn','KokoroAdaInResBlock','KokoroAdaInStatistics','KokoroAdaInIntegerCoefficients','KokoroAdaInIntegerAffine','KokoroSnakeInteger','KokoroResidualInteger','KokoroAlbertSoftmax3','KokoroAlbertAttention3','KokoroAlbertAttentionOutput3','KokoroAlbertConnectedAttention3','KokoroConvTile','KokoroLinearTile','KokoroR0Sub0','KokoroHmxLock','KokoroHmxMatrix','KokoroHmxConv','KokoroHmxConvRun','KokoroResBlockRun','KokoroBranchAverageInteger','KokoroGenerator60xRun','KokoroLeakyReluInteger')][string] $Kernel='Probe',
+    [ValidateSet('Probe','KokoroAffine','KokoroAdaIn','KokoroAdaInResBlock','KokoroAdaInStatistics','KokoroAdaInIntegerCoefficients','KokoroAdaInIntegerAffine','KokoroSnakeInteger','KokoroResidualInteger','KokoroAlbertSoftmax3','KokoroAlbertAttention3','KokoroAlbertAttentionOutput3','KokoroAlbertConnectedAttention3','KokoroConvTile','KokoroLinearTile','KokoroR0Sub0','KokoroHmxLock','KokoroHmxMatrix','KokoroHmxConv','KokoroHmxConvRun','KokoroResBlockRun','KokoroBranchAverageInteger','KokoroGenerator60xRun','KokoroLeakyReluInteger','KokoroVtcmQuery')][string] $Kernel='Probe',
     [ValidateRange(2, 32768)][int] $ResBlockFrames = 7801,
     [ValidateSet(3,7,11)][int] $ResBlockKernel = 3,
     [ValidateSet(128,256)][int] $IntegerChannels = 128,
@@ -232,6 +232,10 @@ if($Kernel -eq 'KokoroR0Sub0') {
     $run=New-KokoroHmxConvRunSteps -Channels $ConvChannels -Kernel $ConvKernel -Dilation $ConvDilation -Tiles $ConvTiles
     $steps=@($run.Steps)
     $symbol='kokoro_hmx_conv_run_skel_handle_invoke'; $soname='libkokoro_hmx_conv_run_skel.so'
+} elseif($Kernel -eq 'KokoroVtcmQuery') {
+    . (Join-Path $PSScriptRoot '..\src\emit\Kokoro.VtcmQueryProbe.ps1')
+    $steps=@(New-KokoroVtcmQuerySteps)
+    $symbol='kokoro_vtcm_query_skel_handle_invoke'; $soname='libkokoro_vtcm_query_skel.so'
 } elseif($Kernel -eq 'KokoroLinearTile') {
     . (Join-Path $PSScriptRoot '..\src\emit\Kokoro.LinearTile.ps1')
     $steps=@(New-KokoroLinearTileSteps -Rows $LinearRows `
