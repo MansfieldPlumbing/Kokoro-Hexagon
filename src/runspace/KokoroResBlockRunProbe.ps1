@@ -101,6 +101,25 @@ try {
         if ($rc -ne 0 -or $stageReached -ne 7 -or $completed -ne $completedStages -or $bad -ne 0 -or $coefBad -ne 0 -or $hvx -ne 0 -or $hmx -ne 0) { $allExact = $false }
         $dt = [long]($t1 - $t0); if ($stageReached -ge 6) { $ticks.Add($dt) }
         $lines.Add("Run=$run InvokeRc=$rc Stage=$stageReached PowerRc=$power Ctx=$ctx VtcmBytes=$vtcm HvxLockRc=$hvx HmxLockRc=$hmx RegionTicks=$dt CompletedStages=$completed CoefficientByteMismatches=$coefBad InvokeMs=$($sw.Elapsed.TotalMilliseconds.ToString('F3', $inv)) Mismatches=$bad/$($expected.Length / 2)")
+        if ($generator -and [BitConverter]::ToUInt64($out, 48) -gt 0) {
+            $catNames = @('Stats','Coeff','Affine','Snake','ParamCopy','WeightCopy','HaloInputStaging','HmxConv','HmxOutputCopy','Residual')
+            $stride = [int]([math]::Ceiling((192+5*$expected.Length+6144)/128)*128)
+            for ($b = 0; $b -lt 3; $b++) {
+                $bBase = $b * $stride
+                $bStart = [BitConverter]::ToUInt64($out, $bBase + 0); $bEnd = [BitConverter]::ToUInt64($out, $bBase + 8)
+                $bTotal = [long]($bEnd - $bStart)
+                $parts = [Collections.Generic.List[string]]::new()
+                for ($ci = 0; $ci -lt $catNames.Count; $ci++) {
+                    $cTicks = [BitConverter]::ToUInt64($out, $bBase + 48 + 8 * $ci)
+                    $parts.Add("$($catNames[$ci])=$cTicks")
+                }
+                $lines.Add("ProfileBranch$b TotalTicks=$bTotal $($parts -join ' ')")
+            }
+            $meanParam = [BitConverter]::ToUInt64($out, $finalOffset + 0)
+            $meanBody = [BitConverter]::ToUInt64($out, $finalOffset + 8)
+            $meanCoeff = [BitConverter]::ToUInt64($out, $finalOffset + 24)
+            $lines.Add("ProfileMean MeanParamCopy=$meanParam MeanBody=$meanBody FinalCoeffCopy=$meanCoeff")
+        }
         & { [IO.File]::WriteAllLines($receipt, $lines) }
         if ($rc -ne 0 -or $stageReached -lt 6) { break }
     }

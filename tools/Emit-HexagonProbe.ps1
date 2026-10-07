@@ -19,6 +19,10 @@ param(
     [switch] $LinearVectorOutputTiles,
     [switch] $RegionBody,
     [string] $WeightManifest = (Join-Path $PSScriptRoot '..\build\emit\r0\r0_static.json'),
+    [switch] $ProfileBreakdown,
+    [switch] $BypassAdaInCoefficients,
+    [switch] $BypassStatisticsAndCoefficients,
+    [switch] $BypassHmxCompute,
     [switch] $Force
 )
 $ErrorActionPreference = 'Stop'
@@ -213,7 +217,7 @@ if($Kernel -eq 'KokoroR0Sub0') {
     $symbol='kokoro_branch_average_integer'; $soname='libkokoro_branch_average_integer.so'
 } elseif($Kernel -eq 'KokoroGenerator60xRun') {
     . (Join-Path $PSScriptRoot '..\src\emit\Kokoro.Generator60xRun.ps1')
-    $run=New-KokoroGenerator60xRunSteps -Frames $ResBlockFrames
+    $run=New-KokoroGenerator60xRunSteps -Frames $ResBlockFrames -ProfileBreakdown:$ProfileBreakdown -BypassAdaInCoefficients:$BypassAdaInCoefficients -BypassStatisticsAndCoefficients:$BypassStatisticsAndCoefficients -BypassHmxCompute:$BypassHmxCompute
     $steps=@($run.Steps)
     $symbol='kokoro_resblock_run_skel_handle_invoke'; $soname='libkokoro_resblock_run_skel.so'
     Write-NewOrIdenticalFile (Join-Path $OutputDirectory 'runner-layout.json') ([Text.Encoding]::UTF8.GetBytes(($run.Layout | ConvertTo-Json))) -AllowOverwrite:$Force

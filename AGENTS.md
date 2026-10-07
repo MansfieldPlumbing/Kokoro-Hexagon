@@ -33,7 +33,7 @@ SM8550 and SM8635 phones, against the best other Kokoro build on the same phone.
   HVX work (AdaIN, Snake, residuals, source, STFT/iSTFT) reads and writes that
   layout, so no stage spends time converting layouts between operators.
 - The model is stock Kokoro, every stage. Changing its architecture (for
-  example replacing AdaIN) is the owner's decision.
+  example replacing AdaIN) is a team decision.
 
 ## Order of work
 
@@ -51,8 +51,8 @@ SM8550 and SM8635 phones, against the best other Kokoro build on the same phone.
 
 - Search before building or reverse engineering: Kokoro source and ports,
   published Hexagon projects (llama.cpp `ggml-hexagon`, integer-HMX work),
-  papers, and ONNX and QNN graphs, contexts and profiles. Then the owner's
-  earlier work in `C:\Dev\Kokoro-QNN-old` (read-only, with the owner's OK for
+  papers, and ONNX and QNN graphs, contexts and profiles. Then our earlier
+  work in `C:\Dev\Kokoro-QNN-old` (read-only, once the team agrees to it for
   the task). Reverse engineer only what none of them covers.
 - Read outside code at a pinned commit in `C:\Dev\.vendor`. Rewrite what is
   adopted in PowerShell and cite the project and commit.

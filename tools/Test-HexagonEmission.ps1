@@ -20,6 +20,10 @@ param(
     [ValidateRange(1, 4096)][int] $LinearOutputChannels = 512,
     [switch] $LinearVectorOutputTiles,
     [switch] $RegionBody,
+    [switch] $ProfileBreakdown,
+    [switch] $BypassAdaInCoefficients,
+    [switch] $BypassStatisticsAndCoefficients,
+    [switch] $BypassHmxCompute,
     [switch] $Force
 )
 $ErrorActionPreference='Stop'
@@ -27,7 +31,8 @@ $output=[IO.Path]::GetFullPath((Join-Path $OutputDirectory $Kernel))
 $result=& (Join-Path $PSScriptRoot 'Emit-HexagonProbe.ps1') -OutputDirectory $output `
     -Kernel $Kernel -ResBlockFrames $ResBlockFrames -ResBlockKernel $ResBlockKernel -IntegerChannels $IntegerChannels -LinearRows $LinearRows -LinearInputChannels $LinearInputChannels `
     -LinearOutputChannels $LinearOutputChannels -LinearVectorOutputTiles:$LinearVectorOutputTiles `
-    -AdaInFrames $AdaInFrames -AdaInChannels $AdaInChannels -AdaInVectorConvolution:$AdaInVectorConvolution -ConvChannels $ConvChannels -ConvKernel $ConvKernel -ConvDilation $ConvDilation -ConvTiles $ConvTiles -RegionBody:$RegionBody -Force:$Force
+    -AdaInFrames $AdaInFrames -AdaInChannels $AdaInChannels -AdaInVectorConvolution:$AdaInVectorConvolution -ConvChannels $ConvChannels -ConvKernel $ConvKernel -ConvDilation $ConvDilation -ConvTiles $ConvTiles -RegionBody:$RegionBody `
+    -ProfileBreakdown:$ProfileBreakdown -BypassAdaInCoefficients:$BypassAdaInCoefficients -BypassStatisticsAndCoefficients:$BypassStatisticsAndCoefficients -BypassHmxCompute:$BypassHmxCompute -Force:$Force
 $wslOutput=(& wsl.exe --exec wslpath -a $output 2>$null | Select-Object -Last 1).Trim()
 if($LASTEXITCODE -ne 0 -or -not $wslOutput.StartsWith('/')) { throw 'Cannot resolve output directory in WSL' }
 $assembler="$ToolRoot/hexagon-llvm-mc"

@@ -6,7 +6,7 @@
 # Method 2: config {tiles}, input native croutons, six W8 tensors, six 8192-byte
 # parameter records; output telemetry + aligned five-buffer workspace + six coefficients.
 function New-KokoroResBlockRunSteps {
- param([ValidateRange(2,32768)][int]$Frames=7801,[ValidateSet(3,7,11)][int]$Kernel=3)
+ param([ValidateRange(2,32768)][int]$Frames=7801,[ValidateSet(3,7,11)][int]$Kernel=3,[switch]$ProfileBreakdown,[switch]$BypassAdaInCoefficients,[switch]$BypassStatisticsAndCoefficients,[switch]$BypassHmxCompute)
  foreach($file in 'Kokoro.HmxConv.ps1','Kokoro.HmxConvRun.ps1','Kokoro.AdaInStatistics.ps1','Kokoro.AdaInInteger.ps1','Kokoro.SnakeInteger.ps1','Kokoro.ResidualInteger.ps1') { . (Join-Path $PSScriptRoot $file) }
  $tiles=[int][math]::Ceiling($Frames/32); $bytes=$tiles*8192
  $outputBytes=192+5*$bytes+6144
@@ -29,11 +29,21 @@ function New-KokoroResBlockRunSteps {
  $job={
   $s.Add(@{Op='addi';d=25;s=23;i=191}); & $imm 0 -128
   $s.Add(@{Op='and';d=25;s=25;t=0});$s.Add(@{Op='sub';d=0;s=25;t=23});$s.Add(@{Op='store';s=23;t=0;Offset=40})
+  if($ProfileBreakdown) {
+   $s.Add(@{Op='imm';d=0;i=0});$s.Add(@{Op='imm';d=1;i=0})
+   for($off=48;$off -le 120;$off+=8){$s.Add(@{Op='store-d';s=23;t=0;Offset=$off})}
+  }
   & $copy 25 0 20 0 $bytes
   $s.Add(@{Op='hwticks';d=26})
   for($stage=0;$stage -lt 6;$stage++) {
-   if($stage%2 -eq 0) { & $copy 25 (4*$bytes) 25 0 $bytes }
+   if($stage%2 -eq 0) {
+    if($ProfileBreakdown){$s.Add(@{Op='hwticks';d=6});$s.Add(@{Op='store-d';s=29;t=6;Offset=24})}
+    & $copy 25 (4*$bytes) 25 0 $bytes
+    if($ProfileBreakdown){$s.Add(@{Op='hwticks';d=6});$s.Add(@{Op='load-d';d=8;s=29;Offset=24});$s.Add(@{Op='sub-d';d=6;s=6;t=8});$s.Add(@{Op='load-d';d=0;s=23;Offset=120});$s.Add(@{Op='add-d';d=0;s=0;t=6});$s.Add(@{Op='store-d';s=23;t=0;Offset=120})}
+   }
+   if($ProfileBreakdown){$s.Add(@{Op='hwticks';d=6});$s.Add(@{Op='store-d';s=29;t=6;Offset=24})}
    & $copy 18 $paramOff 22 ($stage*8192) 8192
+   if($ProfileBreakdown){$s.Add(@{Op='hwticks';d=6});$s.Add(@{Op='load-d';d=8;s=29;Offset=24});$s.Add(@{Op='sub-d';d=6;s=6;t=8});$s.Add(@{Op='load-d';d=0;s=23;Offset=80});$s.Add(@{Op='add-d';d=0;s=0;t=6});$s.Add(@{Op='store-d';s=23;t=0;Offset=80})}
    # Padding odd bytes must be zero for moments, including after residuals.
    # Clear complete 32-bit lanes in padded rows; the valid rows are unchanged.
    for($t=$Frames;$t -lt $tiles*32;$t++) {
@@ -50,40 +60,69 @@ function New-KokoroResBlockRunSteps {
      $s.Add(@{Op='addi';d=4;s=4;i=4});$s.Add(@{Op='addi';d=5;s=5;i=-1});$s.Add(@{Op='gtu';d=0;s=5;t=7});$s.Add(@{Op='jump-p';u=0;Label=$label})
     }
    }
-   & $ptr 0 25 0; & $ptr 1 18 $outOff; & $imm 2 $tiles; & $call 'body_stats'
-   & $ptr 0 18 $outOff; & $ptr 1 18 $paramOff; & $ptr 2 25 (5*$bytes+$stage*1024); & $imm 3 $Frames; & $call 'body_coeff'
+   if(-not $BypassStatisticsAndCoefficients) {
+    if($ProfileBreakdown){$s.Add(@{Op='hwticks';d=6});$s.Add(@{Op='store-d';s=29;t=6;Offset=24})}
+    & $ptr 0 25 0; & $ptr 1 18 $outOff; & $imm 2 $tiles; & $call 'body_stats'
+    if($ProfileBreakdown){$s.Add(@{Op='hwticks';d=6});$s.Add(@{Op='load-d';d=8;s=29;Offset=24});$s.Add(@{Op='sub-d';d=6;s=6;t=8});$s.Add(@{Op='load-d';d=0;s=23;Offset=48});$s.Add(@{Op='add-d';d=0;s=0;t=6});$s.Add(@{Op='store-d';s=23;t=0;Offset=48})}
+   }
+   if(-not $BypassStatisticsAndCoefficients -and -not $BypassAdaInCoefficients) {
+    if($ProfileBreakdown){$s.Add(@{Op='hwticks';d=6});$s.Add(@{Op='store-d';s=29;t=6;Offset=24})}
+    & $ptr 0 18 $outOff; & $ptr 1 18 $paramOff; & $ptr 2 25 (5*$bytes+$stage*1024); & $imm 3 $Frames; & $call 'body_coeff'
+    if($ProfileBreakdown){$s.Add(@{Op='hwticks';d=6});$s.Add(@{Op='load-d';d=8;s=29;Offset=24});$s.Add(@{Op='sub-d';d=6;s=6;t=8});$s.Add(@{Op='load-d';d=0;s=23;Offset=56});$s.Add(@{Op='add-d';d=0;s=0;t=6});$s.Add(@{Op='store-d';s=23;t=0;Offset=56})}
+   }
    $s.Add(@{Op='syncht'})
+   if($ProfileBreakdown){$s.Add(@{Op='hwticks';d=6});$s.Add(@{Op='store-d';s=29;t=6;Offset=24})}
    & $ptr 0 25 0; & $ptr 1 25 $bytes; & $ptr 2 25 (5*$bytes+$stage*1024); & $imm 3 $tiles; & $call 'body_affine'
+   if($ProfileBreakdown){$s.Add(@{Op='hwticks';d=6});$s.Add(@{Op='load-d';d=8;s=29;Offset=24});$s.Add(@{Op='sub-d';d=6;s=6;t=8});$s.Add(@{Op='load-d';d=0;s=23;Offset=64});$s.Add(@{Op='add-d';d=0;s=0;t=6});$s.Add(@{Op='store-d';s=23;t=0;Offset=64})}
+   if($ProfileBreakdown){$s.Add(@{Op='hwticks';d=6});$s.Add(@{Op='store-d';s=29;t=6;Offset=24})}
    & $ptr 0 25 $bytes; & $ptr 1 25 (2*$bytes); & $ptr 2 18 ($paramOff+2048); & $imm 3 $tiles; & $call 'body_snake'
+   if($ProfileBreakdown){$s.Add(@{Op='hwticks';d=6});$s.Add(@{Op='load-d';d=8;s=29;Offset=24});$s.Add(@{Op='sub-d';d=6;s=6;t=8});$s.Add(@{Op='load-d';d=0;s=23;Offset=72});$s.Add(@{Op='add-d';d=0;s=0;t=6});$s.Add(@{Op='store-d';s=23;t=0;Offset=72})}
    $s.Add(@{Op='syncht'})
+   if($ProfileBreakdown){$s.Add(@{Op='hwticks';d=6});$s.Add(@{Op='store-d';s=29;t=6;Offset=24})}
    & $copy 18 131072 21 ($stage*$weightBytes) $weightBytes
+   if($ProfileBreakdown){$s.Add(@{Op='hwticks';d=6});$s.Add(@{Op='load-d';d=8;s=29;Offset=24});$s.Add(@{Op='sub-d';d=6;s=6;t=8});$s.Add(@{Op='load-d';d=0;s=23;Offset=88});$s.Add(@{Op='add-d';d=0;s=0;t=6});$s.Add(@{Op='store-d';s=23;t=0;Offset=88})}
    # Unroll time batches in the orchestration only. Each body retains its own tile loop.
    for($start=0;$start -lt $tiles;$start+=8) {
     $count=[math]::Min(8,$tiles-$start)
-    # Initialize halo and final padding with zero point 128 in every odd byte.
-    & $ptr 4 18 0; & $imm 5 (($count+2)*8192/4); & $imm 6 0x80008000L; $s.Add(@{Op='imm';d=7;i=0})
-    $label="halo_${stage}_${start}"
-    $s.Add(@{Op='label';Name=$label});$s.Add(@{Op='store';s=4;t=6;Offset=0});$s.Add(@{Op='addi';d=4;s=4;i=4});$s.Add(@{Op='addi';d=5;s=5;i=-1});$s.Add(@{Op='gtu';d=0;s=5;t=7});$s.Add(@{Op='jump-p';u=0;Label=$label})
-    $first=[math]::Max(0,$start-1);$last=[math]::Min($tiles,$start+$count+1)
-    & $copy 18 (($first-$start+1)*8192) 25 (2*$bytes+$first*8192) (($last-$first)*8192)
-    # Last partial tile was computed by Snake; overwrite invalid input rows with zp128.
-    if($last -eq $tiles -and $Frames%32) {
-     for($t=$Frames%32;$t -lt 32;$t++) {
-      for($block=0;$block -lt 4;$block++) {
-       $lane=($tiles-$start)*8192+$block*2048+[int][math]::Floor($t/2)*128
-       & $ptr 4 18 $lane; & $imm 6 $(if($t%2){0x0000ffffL}else{0xffff0000L}); & $imm 8 $(if($t%2){0x80000000L}else{0x00008000L})
-       $s.Add(@{Op='imm';d=5;i=32});$s.Add(@{Op='imm';d=7;i=0});$label="edge_${stage}_${start}_${t}_${block}"
-       $s.Add(@{Op='label';Name=$label});$s.Add(@{Op='load';d=0;s=4;Offset=0});$s.Add(@{Op='and';d=0;s=0;t=6});$s.Add(@{Op='or';d=0;s=0;t=8});$s.Add(@{Op='store';s=4;t=0;Offset=0});$s.Add(@{Op='addi';d=4;s=4;i=4});$s.Add(@{Op='addi';d=5;s=5;i=-1});$s.Add(@{Op='gtu';d=0;s=5;t=7});$s.Add(@{Op='jump-p';u=0;Label=$label})
+    if(-not $BypassHmxCompute) {
+     if($ProfileBreakdown){$s.Add(@{Op='hwticks';d=6});$s.Add(@{Op='store-d';s=29;t=6;Offset=24})}
+     # Initialize halo and final padding with zero point 128 in every odd byte.
+     & $ptr 4 18 0; & $imm 5 (($count+2)*8192/4); & $imm 6 0x80008000L; $s.Add(@{Op='imm';d=7;i=0})
+     $label="halo_${stage}_${start}"
+     $s.Add(@{Op='label';Name=$label});$s.Add(@{Op='store';s=4;t=6;Offset=0});$s.Add(@{Op='addi';d=4;s=4;i=4});$s.Add(@{Op='addi';d=5;s=5;i=-1});$s.Add(@{Op='gtu';d=0;s=5;t=7});$s.Add(@{Op='jump-p';u=0;Label=$label})
+     $first=[math]::Max(0,$start-1);$last=[math]::Min($tiles,$start+$count+1)
+     & $copy 18 (($first-$start+1)*8192) 25 (2*$bytes+$first*8192) (($last-$first)*8192)
+     # Last partial tile was computed by Snake; overwrite invalid input rows with zp128.
+     if($last -eq $tiles -and $Frames%32) {
+      for($t=$Frames%32;$t -lt 32;$t++) {
+       for($block=0;$block -lt 4;$block++) {
+        $lane=($tiles-$start)*8192+$block*2048+[int][math]::Floor($t/2)*128
+        & $ptr 4 18 $lane; & $imm 6 $(if($t%2){0x0000ffffL}else{0xffff0000L}); & $imm 8 $(if($t%2){0x80000000L}else{0x00008000L})
+        $s.Add(@{Op='imm';d=5;i=32});$s.Add(@{Op='imm';d=7;i=0});$label="edge_${stage}_${start}_${t}_${block}"
+        $s.Add(@{Op='label';Name=$label});$s.Add(@{Op='load';d=0;s=4;Offset=0});$s.Add(@{Op='and';d=0;s=0;t=6});$s.Add(@{Op='or';d=0;s=0;t=8});$s.Add(@{Op='store';s=4;t=0;Offset=0});$s.Add(@{Op='addi';d=4;s=4;i=4});$s.Add(@{Op='addi';d=5;s=5;i=-1});$s.Add(@{Op='gtu';d=0;s=5;t=7});$s.Add(@{Op='jump-p';u=0;Label=$label})
+       }
       }
      }
+     if($ProfileBreakdown){$s.Add(@{Op='hwticks';d=6});$s.Add(@{Op='load-d';d=8;s=29;Offset=24});$s.Add(@{Op='sub-d';d=6;s=6;t=8});$s.Add(@{Op='load-d';d=0;s=23;Offset=96});$s.Add(@{Op='add-d';d=0;s=0;t=6});$s.Add(@{Op='store-d';s=23;t=0;Offset=96})}
+     if($ProfileBreakdown){$s.Add(@{Op='hwticks';d=6});$s.Add(@{Op='store-d';s=29;t=6;Offset=24})}
+     & $ptr 0 18 8192; & $ptr 1 18 131072; & $ptr 2 18 $outOff; & $ptr 3 18 ($paramOff+4096); & $imm 4 $count
+     & $call $(if($stage -eq 2){'body_conv3'}elseif($stage -eq 4){'body_conv5'}else{'body_conv1'})
+     if($ProfileBreakdown){$s.Add(@{Op='hwticks';d=6});$s.Add(@{Op='load-d';d=8;s=29;Offset=24});$s.Add(@{Op='sub-d';d=6;s=6;t=8});$s.Add(@{Op='load-d';d=0;s=23;Offset=104});$s.Add(@{Op='add-d';d=0;s=0;t=6});$s.Add(@{Op='store-d';s=23;t=0;Offset=104})}
+     $s.Add(@{Op='syncht'})
+     if($ProfileBreakdown){$s.Add(@{Op='hwticks';d=6});$s.Add(@{Op='store-d';s=29;t=6;Offset=24})}
+     & $copy 25 (3*$bytes+$start*8192) 18 $outOff ($count*8192)
+     if($ProfileBreakdown){$s.Add(@{Op='hwticks';d=6});$s.Add(@{Op='load-d';d=8;s=29;Offset=24});$s.Add(@{Op='sub-d';d=6;s=6;t=8});$s.Add(@{Op='load-d';d=0;s=23;Offset=112});$s.Add(@{Op='add-d';d=0;s=0;t=6});$s.Add(@{Op='store-d';s=23;t=0;Offset=112})}
     }
-    & $ptr 0 18 8192; & $ptr 1 18 131072; & $ptr 2 18 $outOff; & $ptr 3 18 ($paramOff+4096); & $imm 4 $count
-    & $call $(if($stage -eq 2){'body_conv3'}elseif($stage -eq 4){'body_conv5'}else{'body_conv1'})
-    $s.Add(@{Op='syncht'}); & $copy 25 (3*$bytes+$start*8192) 18 $outOff ($count*8192)
    }
    if($stage%2) {
+    if($ProfileBreakdown){$s.Add(@{Op='hwticks';d=6});$s.Add(@{Op='store-d';s=29;t=6;Offset=24})}
     & $ptr 0 25 (4*$bytes); & $ptr 1 25 (3*$bytes); & $ptr 2 25 0; & $ptr 3 18 ($paramOff+5120); & $imm 4 $tiles; & $call 'body_residual'
-   } else { & $copy 25 0 25 (3*$bytes) $bytes }
+    if($ProfileBreakdown){$s.Add(@{Op='hwticks';d=6});$s.Add(@{Op='load-d';d=8;s=29;Offset=24});$s.Add(@{Op='sub-d';d=6;s=6;t=8});$s.Add(@{Op='load-d';d=0;s=23;Offset=120});$s.Add(@{Op='add-d';d=0;s=0;t=6});$s.Add(@{Op='store-d';s=23;t=0;Offset=120})}
+   } else {
+    if($ProfileBreakdown){$s.Add(@{Op='hwticks';d=6});$s.Add(@{Op='store-d';s=29;t=6;Offset=24})}
+    & $copy 25 0 25 (3*$bytes) $bytes
+    if($ProfileBreakdown){$s.Add(@{Op='hwticks';d=6});$s.Add(@{Op='load-d';d=8;s=29;Offset=24});$s.Add(@{Op='sub-d';d=6;s=6;t=8});$s.Add(@{Op='load-d';d=0;s=23;Offset=120});$s.Add(@{Op='add-d';d=0;s=0;t=6});$s.Add(@{Op='store-d';s=23;t=0;Offset=120})}
+   }
    $s.Add(@{Op='syncht'});$s.Add(@{Op='imm';d=0;i=($stage+1)});$s.Add(@{Op='store';s=23;t=0;Offset=44})
   }
   $s.Add(@{Op='hwticks';d=0});$s.Add(@{Op='store-d';s=23;t=26;Offset=0});$s.Add(@{Op='store-d';s=23;t=0;Offset=8})
@@ -113,7 +152,7 @@ function New-KokoroResBlockRunSteps {
   if($step.Op -eq 'imm' -and $step.d -eq 1 -and $step.i -eq 8) {$step.i=$tiles}
   $s.Add($step)
  }
- $s.Add(@{Op='label';Name='connected_job'});$s.Add(@{Op='allocframe';Bytes=8}); & $job; $s.Add(@{Op='dealloc-return'})
+ $s.Add(@{Op='label';Name='connected_job'});$s.Add(@{Op='allocframe';Bytes=$(if($ProfileBreakdown){32}else{8})}); & $job; $s.Add(@{Op='dealloc-return'})
  foreach($pair in @(
   @('body_stats',@(New-KokoroAdaInStatisticsSteps)),@('body_coeff',@(New-KokoroAdaInIntegerCoefficientsSteps)),
   @('body_affine',@(New-KokoroAdaInIntegerAffineSteps)),@('body_snake',@(New-KokoroSnakeIntegerSteps)),@('body_residual',@(New-KokoroResidualIntegerSteps)),

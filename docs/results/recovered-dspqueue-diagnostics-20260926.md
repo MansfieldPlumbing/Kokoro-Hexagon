@@ -26,7 +26,7 @@ DSPQueue library makes zero FastRPC ioctls or signals internally.
 
 The two stored echo scripts are different revisions (295 versus 261 lines).
 Their medians are within-device comparisons, not a controlled cross-device
-speed comparison. The owner's earlier account of an SM8550 failure may refer
+speed comparison. Our earlier account of an SM8550 failure may refer
 to an earlier attempt or a different test; its failing stage was not found
 in the inspected current receipts.
 

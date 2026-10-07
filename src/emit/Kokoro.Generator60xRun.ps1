@@ -3,10 +3,10 @@
 # Source: hexgrad/kokoro dfb907a02bba8152ca444717ca5d78747ccb4bec,
 # istftnet.py Generator.forward. One correctness job; blocking staging.
 function New-KokoroGenerator60xRunSteps {
- param([ValidateRange(2,32768)][int]$Frames=7801)
+ param([ValidateRange(2,32768)][int]$Frames=7801,[switch]$ProfileBreakdown,[switch]$BypassAdaInCoefficients,[switch]$BypassStatisticsAndCoefficients,[switch]$BypassHmxCompute)
  . (Join-Path $PSScriptRoot 'Kokoro.ResBlockRun.ps1')
  . (Join-Path $PSScriptRoot 'Kokoro.BranchAverageInteger.ps1')
- $blocks=@(3,7,11|ForEach-Object {New-KokoroResBlockRunSteps -Frames $Frames -Kernel $_})
+ $blocks=@(3,7,11|ForEach-Object {New-KokoroResBlockRunSteps -Frames $Frames -Kernel $_ -ProfileBreakdown:$ProfileBreakdown -BypassAdaInCoefficients:$BypassAdaInCoefficients -BypassStatisticsAndCoefficients:$BypassStatisticsAndCoefficients -BypassHmxCompute:$BypassHmxCompute})
  $bytes=$blocks[0].Layout.InputBytes
  $stride=[int]([math]::Ceiling($blocks[0].Layout.OutputBytes/128)*128)
  $finalOffset=3*$stride
@@ -44,10 +44,25 @@ function New-KokoroGenerator60xRunSteps {
  $s.Add(@{Op='load';d=23;s=29;Offset=8});$s.Add(@{Op='load';d=22;s=29;Offset=4})
  $s.Add(@{Op='addi';d=25;s=23;i=191});& $imm 0 -128;$s.Add(@{Op='and';d=25;s=25;t=0})
  # Copy the mean parameters into aligned VTCM after all contractions finish.
+ if($ProfileBreakdown) { $s.Add(@{Op='hwticks';d=6});$s.Add(@{Op='store-d';s=29;t=6;Offset=24}) }
  & $copy 18 327680 22 147456 16
+ if($ProfileBreakdown) {
+  $s.Add(@{Op='hwticks';d=6});$s.Add(@{Op='load-d';d=8;s=29;Offset=24});$s.Add(@{Op='sub-d';d=6;s=6;t=8})
+  & $ptr 4 23 $finalOffset; $s.Add(@{Op='store-d';s=4;t=6;Offset=0})
+ }
+ if($ProfileBreakdown) { $s.Add(@{Op='hwticks';d=6});$s.Add(@{Op='store-d';s=29;t=6;Offset=24}) }
  & $ptr 0 25 0;& $ptr 1 25 $stride;& $ptr 2 25 (2*$stride);& $ptr 3 25 $finalOffset;& $ptr 4 18 327680;& $imm 5 $blocks[0].Layout.Tiles
  & $call 'body_average';$s.Add(@{Op='syncht'})
+ if($ProfileBreakdown) {
+  $s.Add(@{Op='hwticks';d=6});$s.Add(@{Op='load-d';d=8;s=29;Offset=24});$s.Add(@{Op='sub-d';d=6;s=6;t=8})
+  & $ptr 4 23 $finalOffset; $s.Add(@{Op='store-d';s=4;t=6;Offset=8})
+ }
+ if($ProfileBreakdown) { $s.Add(@{Op='hwticks';d=6});$s.Add(@{Op='store-d';s=29;t=6;Offset=24}) }
  for($b=0;$b -lt 3;$b++){& $copy 25 ($finalOffset+$bytes+$b*6144) 25 ($b*$stride+5*$bytes) 6144}
+ if($ProfileBreakdown) {
+  $s.Add(@{Op='hwticks';d=6});$s.Add(@{Op='load-d';d=8;s=29;Offset=24});$s.Add(@{Op='sub-d';d=6;s=6;t=8})
+  & $ptr 4 23 $finalOffset; $s.Add(@{Op='store-d';s=4;t=6;Offset=24})
+ }
  $s.Add(@{Op='hwticks';d=0});$s.Add(@{Op='load-d';d=26;s=29;Offset=16});$s.Add(@{Op='store-d';s=23;t=26;Offset=0});$s.Add(@{Op='store-d';s=23;t=0;Offset=8})
  $s.Add(@{Op='sub';d=0;s=25;t=23});& $imm 1 $finalOffset;$s.Add(@{Op='add';d=0;s=0;t=1});$s.Add(@{Op='store';s=23;t=0;Offset=40})
  $s.Add(@{Op='imm';d=0;i=19});$s.Add(@{Op='store';s=23;t=0;Offset=44});$s.Add(@{Op='dealloc-return'})
