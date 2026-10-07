@@ -103,6 +103,18 @@ $script:HexagonForms = @{
     'dealloc-return' = '1001011000011110PP00000000011110'
     'load-d'         = '10010ii1110sssssPPiiiiiiiiiddddd'
     'return'         = '01010010100sssssPP--------------'
+    # User DMA, bit patterns from SDK 6.4.0.2 hexagon-llvm-mc (V73). Descriptor use follows
+    # llama.cpp ad2156533102a0d3c4e5fbdf422dc25fba4d03ba ggml/src/ggml-hexagon/htp/dma-queue.h.
+    'dmstart'        = '10100110000sssssPP00000000100000'
+    'dmlink'         = '10100110000sssssPP0ttttt01000000'
+    'dmwait'         = '1010100000000000PP000000001ddddd'
+    'dmpoll'         = '1010100000000000PP000000010ddddd'
+    'release-at'     = '10100000111sssssPP00000000001100'
+    # Byte load, halfword store and scalar max/min, bit patterns from SDK 6.4.0.2 hexagon-llvm-mc (V73).
+    'load-ub'        = '10010ii1001sssssPPiiiiiiiiiddddd'
+    'store-h'        = '10100ii1010sssssPPitttttiiiiiiii'
+    'max'            = '11010101110sssssPP0ttttt000ddddd'
+    'min'            = '11010101101tttttPP0sssss000ddddd'
 }
 
 function ConvertTo-HexagonWord {
@@ -179,6 +191,14 @@ function New-HexagonInstruction {
         { $_ -in 'load','store' } {
             if ($Step.Offset % 4 -ne 0 -or $Step.Offset -lt -4096 -or $Step.Offset -gt 4092) { throw 'Word offset out of range' }
             $fields.i = ([long]$Step.Offset / 4) -band 2047
+        }
+        'load-ub' {
+            if ($Step.Offset -lt -1024 -or $Step.Offset -gt 1023) { throw 'Byte offset out of range' }
+            $fields.i = [long]$Step.Offset -band 2047
+        }
+        'store-h' {
+            if ($Step.Offset % 2 -ne 0 -or $Step.Offset -lt -2048 -or $Step.Offset -gt 2046) { throw 'Halfword offset out of range or unaligned' }
+            $fields.i = ([long]$Step.Offset / 2) -band 2047
         }
         { $_ -in 'vload','vstore' } {
             $vOff = if ($Step.ContainsKey('Offset')) {
@@ -437,6 +457,15 @@ function ConvertTo-HexagonAssembly {
         'load-d'         { $s = "r$($Step.d + 1):$($Step.d) = memd(r$($Step.s)+#$($Step.Offset))" }
         'callr'          { $s = "callr r$($Step.s)" }
         'syncht'         { $s = 'syncht' }
+        'dmstart'        { $s = "dmstart(r$($Step.s))" }
+        'dmlink'         { $s = "dmlink(r$($Step.s),r$($Step.t))" }
+        'dmwait'         { $s = "r$($Step.d) = dmwait" }
+        'dmpoll'         { $s = "r$($Step.d) = dmpoll" }
+        'release-at'     { $s = "release(r$($Step.s)):at" }
+        'load-ub'        { $s = "r$($Step.d) = memub(r$($Step.s)+#$($Step.Offset))" }
+        'store-h'        { $s = "memh(r$($Step.s)+#$($Step.Offset)) = r$($Step.t)" }
+        'max'            { $s = "r$($Step.d) = max(r$($Step.s),r$($Step.t))" }
+        'min'            { $s = "r$($Step.d) = min(r$($Step.s),r$($Step.t))" }
         'hmx-pair' {
             $act = @{ 'act-hf'='activation.hf'; 'act-ub'='activation.ub'; 'act-ub-cm'='activation.ub'; 'act-ub-single'='activation.ub' }[$Step.Act]
             $actSuffix = @{ 'act-hf'=''; 'act-ub'=''; 'act-ub-cm'=':cm'; 'act-ub-single'=':single' }[$Step.Act]
