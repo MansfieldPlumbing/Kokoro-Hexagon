@@ -50,11 +50,31 @@ previous mark to that segment's category.
   shift and permute pipes.
 - L2 load stalls 0 and VTCM stalls 0.7 M against 95.8 M cycles: the stage is not memory-bound.
 
+## Issue interval (set C, 1 run, skel `7EC1C5A32E1538162FF5220A7702B6036DB4348F06D8E32FB1692D3F5D01CB6F`)
+
+Events 0x7 committed one cycle after the thread's previous packet (B2B), 0x4 two cycles after
+(BSB), 0xeb cluster busy (interlock, port conflict, "no B2B HVX", HVX FIFO full), 0x300 cycles
+with one packet committed, 0x3, 0x8 SMT packets, 0x25 packets with one thread running, 0x306
+cycles with both clusters committing. Numbers from the V75 PRM in SDK 6.4.0.2 (the V73 table
+is not compared); 0x3 here equals set A's within 0.03%.
+
+| Category | Packets | B2B | BSB | HVX packets (set A) | Cluster busy |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| AdaIN + Snake | 52.47 M | 11.92 M | 39.87 M | 40.41 M | 10.20 M |
+| Residual | 4.46 M | 0.64 M | 3.64 M | 3.94 M | 0.03 M |
+| Coefficients (scalar) | 1.69 M | 1.10 M | 0.49 M | 0 | 0.44 M |
+
+In the HVX bodies the two-cycle commits match the HVX packets and the back-to-back commits
+match the scalar packets: one thread issues an HVX packet at most every second cycle, and
+scalar packets fill the cycle between. SMT packets are under 0.2%: no other thread runs.
+For one thread the HVX body costs about 2 cycles per HVX packet plus interlocks
+(AdaIN + Snake: 2 x 40.41 M + 6.63 M register-order stalls + others = 95.8 M cycles).
+
 ## What this changes
 
 - The stage is one HVX body, not data movement: AdaIN + Snake is 79% of the time, DMA 0.6%.
-- One thread commits 0.48-0.55 packets per cycle in scalar and vector code alike;
-  register-order stalls explain 6.6 M of the 43 M cycles above one packet per cycle. Whether a
-  second thread fills those cycles is the next measurement (a thread-scaling run).
-- In the AdaIN + Snake body the permute pipe sets the floor: 64 `vlut16` per vector against
-  165 packets today.
+- One thread issues one HVX packet per two cycles. Two levers follow: more HVX instructions
+  per packet (the time is per packet, not per instruction), and a second thread for the idle
+  cycle. The thread-scaling run measures the second.
+- In the AdaIN + Snake body the permute pipe sets the packing floor: 64 `vlut16` per vector
+  against 128 HVX packets today, so packing alone is worth up to 2x on 79% of the stage.
