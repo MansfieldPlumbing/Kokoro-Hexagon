@@ -68,6 +68,18 @@ loads BART), run offline in an isolated Python 3.11 environment built from misak
 Automated branches are fixed before the run and recorded in its receipt; they choose
 what to measure next and never adopt a change.
 
+## Track 3 status (2026-10-07, scratch lab, not yet in a repository)
+
+Measured on WikipediaHomographData eval (1,615 sentences, 162 homographs, macro accuracy):
+most frequent 84.1%; per-word decision lists over neighboring words 91.5%; the same plus
+SMA tree features of the projected sentence 91.4% (no gain); misaki lexicon mode with spaCy
+89.2% (provisional). The word-context rules match misaki without a tagger; the difference is
+not significant. A reversible projection lets SMA parse 99% of held-out English sentences.
+Next for the front end: distil misaki's choices over public-domain text for parity on all 671
+heteronyms, then correct misaki where human labels (with GPT as calibrated reviewer citing
+dictionary sources) show it is wrong. Experiments may use any corpus; shipped tables derive
+only from MIT or Apache sources.
+
 ## Team decisions not yet taken
 
 - Predicted or shrunk AdaIN statistics for short bursts (departs from stock equations).
