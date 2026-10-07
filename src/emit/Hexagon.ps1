@@ -64,6 +64,15 @@ $script:HexagonForms = @{
     'vor'            = '00011100001tttttPP0sssss110ddddd'
     # V73 HVX PRM Rev AB pp.227-230, halfword lookup with r0..7 control.
     'vsub-w'         = '00011100010tttttPP0sssss111ddddd'
+    # Halfword HVX: SDK 6.4.0.2 hexagon-llvm-mc (+hvxv73, 128B), two register sets each.
+    'vmpy-h-rnd-sat' = '00011100001tttttPP0sssss001ddddd'
+    'vadd-h' = '00011111101tttttPP0sssss111ddddd'
+    'vadd-h-sat' = '00011100010tttttPP0sssss011ddddd'
+    'vsub-h' = '00011100010tttttPP0sssss110ddddd'
+    'vabs-h-sat' = '0001111000000000PP0sssss001ddddd'
+    'vasr-h' = '00011001011tttttPP0sssss110ddddd'
+    'vasl-h' = '00011001100tttttPP0sssss000ddddd'
+    'vsplat-h' = '00011001110sssssPP000000001ddddd'
     'vlut16'         = '00011011vvvvvxxxPP1sssss110ddddd'
     'vlut16-or'      = '00011011vvvvvxxxPP1sssss111ddddd'
     'valign'         = '00011011tttttxxxPP0sssss000ddddd'
@@ -423,6 +432,14 @@ function ConvertTo-HexagonAssembly {
         'vmin-w' { $s="v$($Step.d).w = vmin(v$($Step.s).w,v$($Step.t).w)" }
         'vor' { $s="v$($Step.d) = vor(v$($Step.s),v$($Step.t))" }
         'vsub-w' { $s="v$($Step.d).w = vsub(v$($Step.s).w,v$($Step.t).w)" }
+        'vmpy-h-rnd-sat' { $s="v$($Step.d).h = vmpy(v$($Step.s).h,v$($Step.t).h):<<1:rnd:sat" }
+        'vadd-h' { $s="v$($Step.d).h = vadd(v$($Step.s).h,v$($Step.t).h)" }
+        'vadd-h-sat' { $s="v$($Step.d).h = vadd(v$($Step.s).h,v$($Step.t).h):sat" }
+        'vsub-h' { $s="v$($Step.d).h = vsub(v$($Step.s).h,v$($Step.t).h)" }
+        'vabs-h-sat' { $s="v$($Step.d).h = vabs(v$($Step.s).h):sat" }
+        'vasr-h' { $s="v$($Step.d).h = vasr(v$($Step.s).h,r$($Step.t))" }
+        'vasl-h' { $s="v$($Step.d).h = vasl(v$($Step.s).h,r$($Step.t))" }
+        'vsplat-h' { $s="v$($Step.d).h = vsplat(r$($Step.s))" }
         'vlut16' { $s="v$($Step.d+1):$($Step.d).h = vlut16(v$($Step.s).b,v$($Step.v).h,r$($Step.x))" }
         'vlut16-or' { $s="v$($Step.d+1):$($Step.d).h |= vlut16(v$($Step.s).b,v$($Step.v).h,r$($Step.x))" }
         'vmpy-sf-qf32'   { $s = "v$($Step.d).qf32 = vmpy(v$($Step.s).sf,v$($Step.t).sf)" }
