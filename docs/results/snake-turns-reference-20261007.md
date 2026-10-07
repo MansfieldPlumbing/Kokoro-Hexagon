@@ -37,8 +37,8 @@ Reports: `build/snake-turns-{q24,halfword,table}-20261007.json`.
 
 `src/emit/Hexagon.ps1` gains `vmpy(Vu.h,Vv.h):<<1:rnd:sat`, `vadd.h`, `vadd.h:sat`, `vsub.h`,
 `vabs.h:sat`, `vasr.h`, `vasl.h` and `vsplat.h`. Each matches SDK 6.4.0.2 `hexagon-llvm-mc`
-(+hvxv73, 128B) bytes for two register sets (16/16) and decodes back to the same form. Their
-arithmetic semantics are not yet exercised in the V73 simulator.
+(+hvxv73, 128B) bytes for two register sets (16/16) and decodes back to the same form; their
+arithmetic is exercised by the emitted body below.
 
 Reproduce: `pwsh -File tools/reference/Measure-KokoroSnakeTurns.ps1 -CaptureDirectory <af>,<am>
 -MaxFrames 2000 [-CosHalfword | -CosTable] -ReportPath build/<new>.json`.
