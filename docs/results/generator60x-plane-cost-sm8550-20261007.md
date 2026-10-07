@@ -49,7 +49,7 @@ stand-ins (the stage's coefficient records), so the output is not the stock tens
 HVX and HMX timing here has no data-dependent branches. Skel `6703D881…`, SDK bytes match; the
 unchanged stage still emits `11F85FEE…`.
 
-| Variant (SM8550, same fixture and session) | Region ticks (runs) | Median |
+| Variant (SM8550, same fixture; baseline from the earlier session today) | Region ticks (runs) | Median |
 |---|---|---:|
 | Unchanged stage (above) | 1,647,920 / 1,652,143 / 1,656,000 | 86.05 ms |
 | Phase-turns body + 1 extra HMX pass + two-plane stores + merge | 1,103,156 / 1,116,103 / 1,111,759 | **57.90 ms** |
