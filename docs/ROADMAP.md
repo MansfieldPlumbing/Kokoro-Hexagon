@@ -32,8 +32,12 @@ SM8550 grants 8 MiB, SM8635 grants 4 MiB, for every application ID tried.
   the next conv's input, skip connections rotate pointers).
 
 A short first breath group fits entirely on both phones, so the first job takes the
-fast path. Open: whether SM8635's 4 MiB is the hardware or a reservation
-(cross-check with QNN's `QnnDevice_getPlatformInfo`, `tools/Invoke-QnnPlatformInfoProbe.ps1`).
+fast path. SM8635's 4 MiB is the platform value (ExecuTorch's Qualcomm SoC table lists
+SM8635 and SM7675 as V73 with 4 MB; SM8550, SM8650, SM8750 and SM8850 have 8 MB).
+Planner contract: the runtime query is authoritative; at 8 MiB or more use the
+large-resident path where liveness permits; at 4 MiB the tiled path is required and the
+resident path applies only to groups that fit. Whether one V73 binary runs unchanged on
+V75 and later is a separate claim that needs its own phone receipts.
 
 ## Campaign 1 (Windows characterization)
 

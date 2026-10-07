@@ -18,5 +18,13 @@ All query, power, acquire and release return codes were 0, and every granted poi
 was non-null. The SDK header says an application ID not defined in the device tree
 selects the primary partition, so identical results for IDs 1 to 8 show no larger
 partition is reachable this way; they do not prove the silicon holds only 4 MiB.
-`/proc/device-tree` on both phones has no VTCM nodes. Not yet run: the QNN runtime's
-own report (`QnnHtpDevice_OnChipDeviceInfoExtension_t.vtcmSize`).
+`/proc/device-tree` on both phones has no VTCM nodes.
+
+Independent source: ExecuTorch's Qualcomm backend SoC table
+(`backends/qualcomm/serialization/qc_schema.py`, `_soc_info_table`, read at commit
+`adc0bccadc06ea5facda3c332c14f9612ea59494`) lists `SM8550 HtpInfo(V73, 8)`,
+`SM8635 HtpInfo(V73, 4)`, `SM7675 HtpInfo(V73, 4)`, `SM8650 HtpInfo(V75, 8)`,
+`SM8750 HtpInfo(V79, 8)`, `SM8850 HtpInfo(V81, 8)` (VTCM in MB). The measured
+values match: SM8635 is a 4 MB VTCM part, not a reservation on this phone.
+Not yet run: the QNN runtime's own on-device report
+(`QnnHtpDevice_OnChipDeviceInfoExtension_t.vtcmSize`, `tools/Invoke-QnnPlatformInfoProbe.ps1`).
