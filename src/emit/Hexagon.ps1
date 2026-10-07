@@ -115,6 +115,7 @@ $script:HexagonForms = @{
     'store-h'        = '10100ii1010sssssPPitttttiiiiiiii'
     'max'            = '11010101110sssssPP0ttttt000ddddd'
     'min'            = '11010101101tttttPP0sssss000ddddd'
+    'asr-i'          = '10001100000sssssPP0iiiii000ddddd'
 }
 
 function ConvertTo-HexagonWord {
@@ -179,7 +180,7 @@ function New-HexagonInstruction {
                 $fields.i=[long]$Step.i
             }
         }
-        { $_ -in 'lsr-i','asl-i' } {
+        { $_ -in 'lsr-i','asl-i','asr-i' } {
             if ($Step.i -lt 0 -or $Step.i -gt 31) { throw 'Word shift out of range' }
             $fields.i=[long]$Step.i
         }
@@ -466,6 +467,7 @@ function ConvertTo-HexagonAssembly {
         'store-h'        { $s = "memh(r$($Step.s)+#$($Step.Offset)) = r$($Step.t)" }
         'max'            { $s = "r$($Step.d) = max(r$($Step.s),r$($Step.t))" }
         'min'            { $s = "r$($Step.d) = min(r$($Step.s),r$($Step.t))" }
+        'asr-i'          { $s = "r$($Step.d) = asr(r$($Step.s),#$($Step.i))" }
         'hmx-pair' {
             $act = @{ 'act-hf'='activation.hf'; 'act-ub'='activation.ub'; 'act-ub-cm'='activation.ub'; 'act-ub-single'='activation.ub' }[$Step.Act]
             $actSuffix = @{ 'act-hf'=''; 'act-ub'=''; 'act-ub-cm'=':cm'; 'act-ub-single'=':single' }[$Step.Act]
