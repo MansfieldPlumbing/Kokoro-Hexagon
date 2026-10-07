@@ -29,12 +29,12 @@ The [256-channel integer operators](docs/results/generator-c256-integer-simulato
 have separate simulator evidence.
 
 The combined three-branch worker and native-layout mean match SDK assembly,
-pass malformed-input checks, and pass full-group V73 arithmetic simulation:
-all 19 stages complete with exact meaningful output lanes and live AdaIN
-coefficients. The combined output matches the separately checked branch
-mean byte for byte. The separate LeakyReLU has simulator evidence. Next is
-to run that same combined ELF on the phone before advancing to the remaining
-generator stages.
+pass malformed-input checks, and pass both full-group V73 arithmetic simulation
+and 3/3 runs on the attached SM8550: all 19 stages complete with exact meaningful
+output lanes and live AdaIN coefficients (see [combined 60x receipt](docs/results/generator60x-combined-sm8550-20261006.md)).
+The combined output matches the separately checked branch mean byte for byte.
+The separate LeakyReLU has simulator evidence. Next is to join LeakyReLU, conv_post,
+magnitude/phase nonlinearities, and the 20-point iSTFT to produce waveform PCM.
 
 Whole-generator execution, source synthesis, spectral output/iSTFT and the
 front half still require integration. Phoneme-to-PCM speaker playback,
