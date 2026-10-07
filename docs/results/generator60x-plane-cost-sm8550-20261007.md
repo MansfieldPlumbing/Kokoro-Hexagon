@@ -39,3 +39,21 @@ captured outputs `build/generator60x-costprobe{0,1,2}-SM8550-output-20261007.bin
 SM8635: the probe needs 5.24 MB of VTCM and the unchanged stage 4.65 MB; SM8635 grants 4 MiB, so
 both need the tiled path first. Two-plane arithmetic correctness inside the stage (this probe keeps
 the frozen arithmetic). Energy.
+
+## Phase-turns body in the stage (timing only)
+
+`-CostProbePasses 1 -CostProbeTurnsBody`: the old fused body is replaced by
+`Kokoro.AdaInSnakeTurns.ps1` (both conv-input planes from one call, `docs/results/snake-turns-reference-20261007.md`),
+plus one extra HMX pass with two-plane stores and the HVX merge. Its per-channel constants are
+stand-ins (the stage's coefficient records), so the output is not the stock tensor (`Passed=False`);
+HVX and HMX timing here has no data-dependent branches. Skel `6703D881…`, SDK bytes match; the
+unchanged stage still emits `11F85FEE…`.
+
+| Variant (SM8550, same fixture and session) | Region ticks (runs) | Median |
+|---|---|---:|
+| Unchanged stage (above) | 1,647,920 / 1,652,143 / 1,656,000 | 86.05 ms |
+| Phase-turns body + 1 extra HMX pass + two-plane stores + merge | 1,103,156 / 1,116,103 / 1,111,759 | **57.90 ms** |
+
+Not included: 16-bit moments, residual and mean passes, and extra weight-plane passes (1.9 ms per
+stage-wide HMX pass, above). Unpacked: one instruction per packet, one HVX thread.
+Receipt: `build/generator60x-costprobe1turns-emission-20261007/KokoroGenerator60xResidentRun/device-receipt-SM8550-b3efde90….txt`.

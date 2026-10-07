@@ -45,9 +45,13 @@ function New-KokoroGenerator60xResidentRunSteps {
     # CostProbePasses > 0 times the work of byte-plane precision without changing the output:
     # a second fused AdaIN+Snake pass into WindowLow, CostProbePasses extra HMX passes per conv
     # with two-plane stores into scratch, and an HVX merge of the scratch planes. Measurement only.
-    param([ValidateRange(2,32768)][int]$Frames=7801,[ValidateRange(1,64)][int]$BatchTiles=16,[ValidateRange(0,3)][int]$CostProbePasses=0)
+    # CostProbeTurnsBody (with CostProbePasses > 0) replaces the fused body by the phase-turns body
+    # (Kokoro.AdaInSnakeTurns.ps1), which writes the high plane to Window and the low plane to WindowLow
+    # in one call; its constants are stand-ins, so the output is not the stock tensor. Timing only.
+    param([ValidateRange(2,32768)][int]$Frames=7801,[ValidateRange(1,64)][int]$BatchTiles=16,[ValidateRange(0,3)][int]$CostProbePasses=0,[switch]$CostProbeTurnsBody)
+    if($CostProbeTurnsBody -and $CostProbePasses -lt 1){throw 'CostProbeTurnsBody needs CostProbePasses >= 1'}
     . (Join-Path $PSScriptRoot 'Kokoro.ResBlockRun.ps1')
-    foreach($file in 'Kokoro.HmxConv.ps1','Kokoro.AdaInInteger.ps1','Kokoro.ResidualInteger.ps1','Kokoro.AdaInSnakeInteger.ps1','Kokoro.AdaInStatisticsAccumulate.ps1','Kokoro.DmaCopy.ps1','Kokoro.BranchAverageInteger.ps1') { . (Join-Path $PSScriptRoot $file) }
+    foreach($file in 'Kokoro.HmxConv.ps1','Kokoro.AdaInInteger.ps1','Kokoro.ResidualInteger.ps1','Kokoro.AdaInSnakeInteger.ps1','Kokoro.AdaInSnakeTurns.ps1','Kokoro.AdaInStatisticsAccumulate.ps1','Kokoro.DmaCopy.ps1','Kokoro.BranchAverageInteger.ps1') { . (Join-Path $PSScriptRoot $file) }
     $layout=Get-KokoroGenerator60xResidentLayout -Frames $Frames -BatchTiles $BatchTiles -CostProbe:($CostProbePasses -gt 0)
     $tiles=$layout.Tiles; $tensorBytes=$layout.TensorBytes; $batch=$BatchTiles
     $offResidual=$layout.Regions.Residual.Offset; $offConvOutput=$layout.Regions.ConvOutput.Offset; $offWindow=$layout.Regions.Window.Offset; $offStaging=$layout.Regions.Staging.Offset; $offWeights=$layout.Regions.Weights.Offset
@@ -175,16 +179,23 @@ function New-KokoroGenerator60xResidentRunSteps {
                     $first=[math]::Max(0,$start-1);$last=[math]::Min($tiles,$start+$count+1)
                     if($start -eq 0){ & $fill $offWindow 1 }
                     if($start+$count -eq $tiles){ & $fill ($offWindow+($count+1)*8192) 1 }
-                    & $ptr 0 18 ($source+$first*8192); & $ptr 1 18 ($offWindow+($first-$start+1)*8192); & $ptr 2 18 ($offCoefficients+($b*6+$st)*1024); & $ptr 3 18 ($offParameters+2048); & $imm 4 ($last-$first)
-                    & $call 'body_fused'
+                    if($CostProbeTurnsBody){
+                        & $ptr 0 18 ($source+$first*8192); & $ptr 1 18 ($offWindow+($first-$start+1)*8192); & $ptr 2 18 ($layout.Regions.WindowLow.Offset+($first-$start+1)*8192); & $ptr 3 18 ($offCoefficients+($b*6+$st)*1024); & $imm 4 ($last-$first)
+                        & $call 'body_turns'
+                    } else {
+                        & $ptr 0 18 ($source+$first*8192); & $ptr 1 18 ($offWindow+($first-$start+1)*8192); & $ptr 2 18 ($offCoefficients+($b*6+$st)*1024); & $ptr 3 18 ($offParameters+2048); & $imm 4 ($last-$first)
+                        & $call 'body_fused'
+                    }
                     if($last -eq $tiles -and $Frames%32){ & $edge ($offWindow+($tiles-$start)*8192) }
                     $output=if($half -eq 0){$offConvOutput+$start*8192}else{$offStaging}
                     & $ptr 0 18 ($offWindow+8192); & $ptr 1 18 $offWeights; & $ptr 2 18 $output; & $ptr 3 18 ($offParameters+4096); & $imm 4 $count
                     & $call $convLabel
                     if($CostProbePasses -gt 0){
                         $L=$layout.Regions
-                        & $ptr 0 18 ($source+$first*8192); & $ptr 1 18 ($L.WindowLow.Offset+($first-$start+1)*8192); & $ptr 2 18 ($offCoefficients+($b*6+$st)*1024); & $ptr 3 18 ($offParameters+2048); & $imm 4 ($last-$first)
-                        & $call 'body_fused'
+                        if(-not $CostProbeTurnsBody){
+                            & $ptr 0 18 ($source+$first*8192); & $ptr 1 18 ($L.WindowLow.Offset+($first-$start+1)*8192); & $ptr 2 18 ($offCoefficients+($b*6+$st)*1024); & $ptr 3 18 ($offParameters+2048); & $imm 4 ($last-$first)
+                            & $call 'body_fused'
+                        }
                         for($pass=0;$pass -lt $CostProbePasses;$pass++){
                             & $ptr 0 18 ($L.WindowLow.Offset+8192); & $ptr 1 18 $offWeights; & $ptr 2 18 $L.ProbeHigh.Offset; & $ptr 3 18 ($offParameters+4096); & $imm 4 $count; & $ptr 5 18 $L.ProbeLow.Offset
                             & $call "body_convp_b${b}_d$(if($half -eq 0){$dilation}else{1})"
@@ -241,6 +252,7 @@ function New-KokoroGenerator60xResidentRunSteps {
 
     $bodies=[Collections.Generic.List[object]]::new()
     $bodies.Add(@('body_fused',@(New-KokoroAdaInSnakeIntegerSteps)))
+    if($CostProbeTurnsBody){ $bodies.Add(@('body_turns',@(New-KokoroAdaInSnakeTurnsSteps))) }
     $bodies.Add(@('body_statsacc',@(New-KokoroAdaInStatisticsAccumulateSteps)))
     $bodies.Add(@('body_coeff',@(New-KokoroAdaInIntegerCoefficientsSteps)))
     $bodies.Add(@('body_residual',@(New-KokoroResidualIntegerSteps)))
