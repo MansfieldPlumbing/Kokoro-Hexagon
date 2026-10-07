@@ -76,6 +76,9 @@ $script:HexagonForms = @{
     # Q31 multiply pair (vmpye then accumulating vmpyo); d of the accumulating form is read and written.
     'vmpye-w-uh' = '00011111111tttttPP0sssss101ddddd'
     'vmpyo-acc-w-h-rnd-sat-shift' = '00011100001tttttPP1sssss111ddddd'
+    # Widening 16x16 multiply-accumulate into a vector pair (d even): Vdd.w += vmpy(Vu.h, Vv.h | Rt.h).
+    'vmpy-acc-ww-h-h' = '00011100000tttttPP1sssss111ddddd'
+    'vmpy-acc-ww-h-r' = '00011001101tttttPP1sssss110ddddd'
     'vlut16'         = '00011011vvvvvxxxPP1sssss110ddddd'
     'vlut16-or'      = '00011011vvvvvxxxPP1sssss111ddddd'
     'valign'         = '00011011tttttxxxPP0sssss000ddddd'
@@ -445,6 +448,8 @@ function ConvertTo-HexagonAssembly {
         'vsplat-h' { $s="v$($Step.d).h = vsplat(r$($Step.s))" }
         'vmpye-w-uh' { $s="v$($Step.d).w = vmpye(v$($Step.s).w,v$($Step.t).uh)" }
         'vmpyo-acc-w-h-rnd-sat-shift' { $s="v$($Step.d).w += vmpyo(v$($Step.s).w,v$($Step.t).h):<<1:rnd:sat:shift" }
+        'vmpy-acc-ww-h-h' { if ($Step.d % 2) { throw 'Vector pair register must be even' }; $s="v$($Step.d+1):$($Step.d).w += vmpy(v$($Step.s).h,v$($Step.t).h)" }
+        'vmpy-acc-ww-h-r' { if ($Step.d % 2) { throw 'Vector pair register must be even' }; $s="v$($Step.d+1):$($Step.d).w += vmpy(v$($Step.s).h,r$($Step.t).h)" }
         'vlut16' { $s="v$($Step.d+1):$($Step.d).h = vlut16(v$($Step.s).b,v$($Step.v).h,r$($Step.x))" }
         'vlut16-or' { $s="v$($Step.d+1):$($Step.d).h |= vlut16(v$($Step.s).b,v$($Step.v).h,r$($Step.x))" }
         'vmpy-sf-qf32'   { $s = "v$($Step.d).qf32 = vmpy(v$($Step.s).sf,v$($Step.t).sf)" }

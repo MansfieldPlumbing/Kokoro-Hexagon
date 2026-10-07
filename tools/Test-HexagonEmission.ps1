@@ -4,7 +4,7 @@
 param(
     [string] $OutputDirectory = (Join-Path $PSScriptRoot '..\build\hexagon-emission\emitted'),
     [string] $ToolRoot = '/home/scott/hexagon/Hexagon_SDK/6.4.0.2/tools/HEXAGON_Tools/19.0.04/Tools/bin',
-    [ValidateSet('Probe','KokoroAffine','KokoroAdaIn','KokoroAdaInResBlock','KokoroAdaInStatistics','KokoroAdaInIntegerCoefficients','KokoroAdaInIntegerAffine','KokoroSnakeInteger','KokoroResidualInteger','KokoroAlbertSoftmax3','KokoroAlbertAttention3','KokoroAlbertAttentionOutput3','KokoroAlbertConnectedAttention3','KokoroConvTile','KokoroLinearTile','KokoroR0Sub0','KokoroHmxLock','KokoroHmxMatrix','KokoroHmxConv','KokoroHmxConvRun','KokoroResBlockRun','KokoroBranchAverageInteger','KokoroGenerator60xRun','KokoroLeakyReluInteger','KokoroVtcmQuery','KokoroDmaCopy','KokoroDmaBench','KokoroAdaInSnakeInteger','KokoroAdaInSnakeTurns','KokoroGenerator60xResidentRun','KokoroGeneratorTailRun')][string] $Kernel='Probe',
+    [ValidateSet('Probe','KokoroAffine','KokoroAdaIn','KokoroAdaInResBlock','KokoroAdaInStatistics','KokoroAdaInIntegerCoefficients','KokoroAdaInIntegerAffine','KokoroSnakeInteger','KokoroResidualInteger','KokoroAlbertSoftmax3','KokoroAlbertAttention3','KokoroAlbertAttentionOutput3','KokoroAlbertConnectedAttention3','KokoroConvTile','KokoroLinearTile','KokoroR0Sub0','KokoroHmxLock','KokoroHmxMatrix','KokoroHmxConv','KokoroHmxConvPlanes','KokoroPlaneCombine','KokoroAdaInMoments16','KokoroAdaInTurnsCoefficients','KokoroHmxConvRun','KokoroResBlockRun','KokoroBranchAverageInteger','KokoroGenerator60xRun','KokoroLeakyReluInteger','KokoroVtcmQuery','KokoroDmaCopy','KokoroDmaBench','KokoroAdaInSnakeInteger','KokoroAdaInSnakeTurns','KokoroGenerator60xResidentRun','KokoroGeneratorTailRun')][string] $Kernel='Probe',
     [ValidateRange(2, 32768)][int] $ResBlockFrames = 7801,
     [ValidateSet(3,7,11)][int] $ResBlockKernel = 3,
     [ValidateSet(128,256)][int] $IntegerChannels = 128,
@@ -13,6 +13,8 @@ param(
     [ValidateSet(3, 7, 11)][int] $ConvKernel = 3,
     [ValidateSet(1, 3, 5)][int] $ConvDilation = 1,
     [switch] $ConvOutputPlanes,
+    [ValidateSet(1,2)][int] $ConvWeightPlanes = 1,
+    [ValidateSet('Conv','Residual')][string] $CombineMode = 'Conv',
     [ValidateRange(0,3)][int] $ResidentCostProbePasses = 0,
     [switch] $ResidentCostProbeTurnsBody,
     [ValidateRange(2, 2048)][int] $AdaInFrames = 64,
@@ -34,7 +36,7 @@ $output=[IO.Path]::GetFullPath((Join-Path $OutputDirectory $Kernel))
 $result=& (Join-Path $PSScriptRoot 'Emit-HexagonProbe.ps1') -OutputDirectory $output `
     -Kernel $Kernel -ResBlockFrames $ResBlockFrames -ResBlockKernel $ResBlockKernel -IntegerChannels $IntegerChannels -LinearRows $LinearRows -LinearInputChannels $LinearInputChannels `
     -LinearOutputChannels $LinearOutputChannels -LinearVectorOutputTiles:$LinearVectorOutputTiles `
-    -AdaInFrames $AdaInFrames -AdaInChannels $AdaInChannels -AdaInVectorConvolution:$AdaInVectorConvolution -ConvChannels $ConvChannels -ConvKernel $ConvKernel -ConvDilation $ConvDilation -ConvOutputPlanes:$ConvOutputPlanes -ResidentCostProbePasses $ResidentCostProbePasses -ResidentCostProbeTurnsBody:$ResidentCostProbeTurnsBody -ConvTiles $ConvTiles -RegionBody:$RegionBody `
+    -AdaInFrames $AdaInFrames -AdaInChannels $AdaInChannels -AdaInVectorConvolution:$AdaInVectorConvolution -ConvChannels $ConvChannels -ConvKernel $ConvKernel -ConvDilation $ConvDilation -ConvOutputPlanes:$ConvOutputPlanes -ConvWeightPlanes $ConvWeightPlanes -CombineMode $CombineMode -ResidentCostProbePasses $ResidentCostProbePasses -ResidentCostProbeTurnsBody:$ResidentCostProbeTurnsBody -ConvTiles $ConvTiles -RegionBody:$RegionBody `
     -ProfileBreakdown:$ProfileBreakdown -BypassAdaInCoefficients:$BypassAdaInCoefficients -BypassStatisticsAndCoefficients:$BypassStatisticsAndCoefficients -BypassHmxCompute:$BypassHmxCompute -Force:$Force
 $wslOutput=(& wsl.exe --exec wslpath -a $output 2>$null | Select-Object -Last 1).Trim()
 if($LASTEXITCODE -ne 0 -or -not $wslOutput.StartsWith('/')) { throw 'Cannot resolve output directory in WSL' }
