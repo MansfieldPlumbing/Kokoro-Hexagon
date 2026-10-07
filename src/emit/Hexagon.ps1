@@ -87,6 +87,9 @@ $script:HexagonForms = @{
     'trap0'          = '0101010000000000PP0iiiii000iii00'
     'pcycle'         = '0110111100011110PP000000000ddddd'
     'hwticks'        = '0110100000011110PP000000000ddddd'
+    # User cycle counter UPCYCLE (c15:14): SDK 6.4.0.2 hexagon-llvm-mc (V73) r7:6 = upcycle -> 0x680EC006.
+    # V73 PRM 80-N2040-53 Rev. AB section 2.2.9: reads return zero unless the RTOS enables user access.
+    'upcycle'        = '0110100000001110PP000000000ddddd'
     'store-d'        = '10100ii1110sssssPPitttttiiiiiiii'
     'mxclracc'       = '1010011011100000PP00000000010001'
     'mxclracc.hf'    = '1010011011100000PP00000000010011'
@@ -264,7 +267,7 @@ function New-HexagonInstruction {
             if ($Step.i -lt 0 -or $Step.i -gt 255) { throw 'Trap0 immediate out of range (0..255)' }
             $fields.i = [long]$Step.i
         }
-        { $_ -in 'pcycle', 'hwticks' } {
+        { $_ -in 'pcycle', 'hwticks', 'upcycle' } {
             if ($Step.d % 2 -ne 0 -or $Step.d -lt 0 -or $Step.d -gt 30) { throw 'Pcycle/Hwticks destination register pair must be even and 0..30' }
             $fields.d = [long]$Step.d
         }
@@ -467,6 +470,7 @@ function ConvertTo-HexagonAssembly {
         'trap0'          { $s = "trap0(#$($Step.i))" }
         'pcycle'         { $s = "r$($Step.d + 1):$($Step.d) = pcycle" }
         'hwticks'        { $s = "r$($Step.d + 1):$($Step.d) = c31:30" }
+        'upcycle'        { $s = "r$($Step.d + 1):$($Step.d) = upcycle" }
         'store-d'        { $s = "memd(r$($Step.s)+#$($Step.Offset)) = r$($Step.t + 1):$($Step.t)" }
         'mxclracc'       { $s = "mxclracc" }
         'mxclracc.hf'    { $s = "mxclracc.hf" }

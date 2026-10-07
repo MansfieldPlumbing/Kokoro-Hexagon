@@ -48,7 +48,10 @@ function New-KokoroGenerator60xResidentRunSteps {
     # CostProbeTurnsBody (with CostProbePasses > 0) replaces the fused body by the phase-turns body
     # (Kokoro.AdaInSnakeTurns.ps1), which writes the high plane to Window and the low plane to WindowLow
     # in one call; its constants are stand-ins, so the output is not the stock tensor. Timing only.
-    param([ValidateRange(2,32768)][int]$Frames=7801,[ValidateRange(1,64)][int]$BatchTiles=16,[ValidateRange(0,3)][int]$CostProbePasses=0,[switch]$CostProbeTurnsBody)
+    # PmuEvents (eight hardware event selects) adds a performance-counter record; without it the
+    # emitted bytes are unchanged. See the PMU block below for the record layout.
+    param([ValidateRange(2,32768)][int]$Frames=7801,[ValidateRange(1,64)][int]$BatchTiles=16,[ValidateRange(0,3)][int]$CostProbePasses=0,[switch]$CostProbeTurnsBody,
+        [ValidateCount(8,8)][ValidateRange(0,1023)][int[]]$PmuEvents)
     if($CostProbeTurnsBody -and $CostProbePasses -lt 1){throw 'CostProbeTurnsBody needs CostProbePasses >= 1'}
     . (Join-Path $PSScriptRoot 'Kokoro.ResBlockRun.ps1')
     foreach($file in 'Kokoro.HmxConv.ps1','Kokoro.AdaInInteger.ps1','Kokoro.ResidualInteger.ps1','Kokoro.AdaInSnakeInteger.ps1','Kokoro.AdaInSnakeTurns.ps1','Kokoro.AdaInStatisticsAccumulate.ps1','Kokoro.DmaCopy.ps1','Kokoro.BranchAverageInteger.ps1') { . (Join-Path $PSScriptRoot $file) }
@@ -76,25 +79,45 @@ function New-KokoroGenerator60xResidentRunSteps {
     $uid=0
     $label={ $script:__u++; "r60_$($script:__u)" }
     $script:__u=0
+    # Performance counters (PmuEvents). Record at DDR workspace r25 + 2*stride, the branch-2 slot
+    # this resident stage never writes:
+    #   +0 magic 'PMU1'; +4 qurt_hvx_get_units(); +8 and +12 reserved (zero); +16 PMUCFG, +20 PMUEVTCFG, +24 PMUEVTCFG1 as written;
+    #   +28 OR of the counter-read return codes; +64 previous snapshot, +128 current snapshot
+    #   (8 x u32 counters, u64 UTIMER ticks at +32, u64 UPCYCLE at +40);
+    #   +256 + 64*category: 8 x u32 counter deltas, u64 ticks at +32, u64 cycles at +40, u32 marks at +48.
+    # A mark charges the counts since the previous mark to the named category. Register packing of
+    # the eight event selects follows llama.cpp ad2156533102a0d3c4e5fbdf422dc25fba4d03ba
+    # ggml/src/ggml-hexagon/htp/main.c htp_iface_profiler; register ids and process classes from
+    # SDK 6.4.0.2 rtos/qurt/computev73/include/qurt/qurt_pmu.h and qurt_consts.h.
+    $pmuCategories=@('Setup','Dma','Coefficients','AdaInSnake','HmxConv','Moments','Residual','Average','Sync','TileFix','CostProbe')
+    $pmuOffset=2L*$stride
+    $mark={param([string]$category)
+        if(-not $PmuEvents){return}
+        $c=[array]::IndexOf($pmuCategories,$category); if($c -lt 0){throw "Unknown PMU category $category"}
+        & $ptr 0 25 ($pmuOffset+256+64*$c); & $call 'body_pmu_mark'
+    }
     # DMA dest <- src, length bytes; r24 holds two 64-byte aligned descriptor slots in DDR.
     $dma={param([int]$destBase,[long]$destOff,[int]$srcBase,[long]$srcOff,[long]$length)
         if($length -lt 2 -or $length -ge 2*16777215){throw 'DMA length out of range'}
         & $ptr 1 $srcBase $srcOff; & $ptr 2 $destBase $destOff; & $imm 3 $length; $s.Add(@{Op='addi';d=0;s=24;i=0})
         foreach($step in @(New-KokoroDmaCopySteps -NoReturn)){$s.Add($step)}
+        & $mark 'Dma'
     }
     # HVX stores and HMX output stores complete before DMA or another unit reads them.
-    $sync={ $s.Add(@{Op='syncht'}) }
+    $sync={ $s.Add(@{Op='syncht'}); & $mark 'Sync' }
     $fill={param([long]$off,[int]$count) # VTCM tiles <- zero point 128 in every odd byte
         & $ptr 4 18 $off; & $imm 6 0x80008000L; $s.Add(@{Op='vsplat';d=0;s=6}); & $imm 5 ($count*64); $s.Add(@{Op='imm';d=7;i=0})
         $n=& $label; $s.Add(@{Op='label';Name=$n});$s.Add(@{Op='vstore';s=4;t=0;Offset=0});$s.Add(@{Op='addi';d=4;s=4;i=128});$s.Add(@{Op='addi';d=5;s=5;i=-1});$s.Add(@{Op='gtu';d=0;s=5;t=7});$s.Add(@{Op='jump-p';u=0;Label=$n})
+        & $mark 'TileFix'
     }
     $copyTile={param([long]$destOff,[long]$srcOff)
         & $ptr 4 18 $srcOff; & $ptr 5 18 $destOff; $s.Add(@{Op='imm';d=6;i=64}); $s.Add(@{Op='imm';d=7;i=0})
         $n=& $label; $s.Add(@{Op='label';Name=$n});$s.Add(@{Op='vload';d=0;s=4;Offset=0});$s.Add(@{Op='vstore';s=5;t=0;Offset=0})
         $s.Add(@{Op='addi';d=4;s=4;i=128});$s.Add(@{Op='addi';d=5;s=5;i=128});$s.Add(@{Op='addi';d=6;s=6;i=-1});$s.Add(@{Op='gtu';d=0;s=6;t=7});$s.Add(@{Op='jump-p';u=0;Label=$n})
+        & $mark 'TileFix'
     }
-    $zeroMoments={param([long]$off) & $ptr 4 18 $off; $s.Add(@{Op='vxor';d=0;s=0;t=0}); for($k=0;$k -lt 8;$k++){$s.Add(@{Op='vstore';s=4;t=0;Offset=(128*$k)})} }
-    $copyMoments={param([long]$destOff,[long]$srcOff) & $ptr 4 18 $srcOff; & $ptr 5 18 $destOff; for($k=0;$k -lt 8;$k++){$s.Add(@{Op='vload';d=$k;s=4;Offset=(128*$k)})}; for($k=0;$k -lt 8;$k++){$s.Add(@{Op='vstore';s=5;t=$k;Offset=(128*$k)})} }
+    $zeroMoments={param([long]$off) & $ptr 4 18 $off; $s.Add(@{Op='vxor';d=0;s=0;t=0}); for($k=0;$k -lt 8;$k++){$s.Add(@{Op='vstore';s=4;t=0;Offset=(128*$k)})}; & $mark 'TileFix' }
+    $copyMoments={param([long]$destOff,[long]$srcOff) & $ptr 4 18 $srcOff; & $ptr 5 18 $destOff; for($k=0;$k -lt 8;$k++){$s.Add(@{Op='vload';d=$k;s=4;Offset=(128*$k)})}; for($k=0;$k -lt 8;$k++){$s.Add(@{Op='vstore';s=5;t=$k;Offset=(128*$k)})}; & $mark 'TileFix' }
     # Frozen padded-row mask (Kokoro.ResBlockRun.ps1): rows >= Frames of the tile at
     # VTCM offset tileOff become u8 zero; the other row sharing each word is preserved.
     $mask={param([long]$tileOff)
@@ -109,6 +132,7 @@ function New-KokoroGenerator60xResidentRunSteps {
                 $s.Add(@{Op='addi';d=4;s=4;i=4});$s.Add(@{Op='addi';d=5;s=5;i=-1});$s.Add(@{Op='gtu';d=0;s=5;t=7});$s.Add(@{Op='jump-p';u=0;Label=$n})
             }
         }
+        & $mark 'TileFix'
     }
     # Frozen conv-input edge (Kokoro.ResBlockRun.ps1): rows >= Frames of the window tile at
     # tileOff become zero point 128.
@@ -121,8 +145,9 @@ function New-KokoroGenerator60xResidentRunSteps {
                 $s.Add(@{Op='label';Name=$n});$s.Add(@{Op='load';d=0;s=4;Offset=0});$s.Add(@{Op='and';d=0;s=0;t=6});$s.Add(@{Op='or';d=0;s=0;t=8});$s.Add(@{Op='store';s=4;t=0;Offset=0});$s.Add(@{Op='addi';d=4;s=4;i=4});$s.Add(@{Op='addi';d=5;s=5;i=-1});$s.Add(@{Op='gtu';d=0;s=5;t=7});$s.Add(@{Op='jump-p';u=0;Label=$n})
             }
         }
+        & $mark 'TileFix'
     }
-    $statsAcc={param([long]$srcOff,[int]$count) & $ptr 0 18 $srcOff; & $ptr 1 18 $offMoments; & $imm 2 $count; & $call 'body_statsacc' }
+    $statsAcc={param([long]$srcOff,[int]$count) & $ptr 0 18 $srcOff; & $ptr 1 18 $offMoments; & $imm 2 $count; & $call 'body_statsacc'; & $mark 'Moments' }
 
     # Checked resource wrapper of the frozen K=11 resblock runner, with admission sizes and
     # the VTCM request changed. Its connected_job call target keeps its PC (same length).
@@ -154,6 +179,24 @@ function New-KokoroGenerator60xResidentRunSteps {
     $s.Add(@{Op='addi';d=24;s=29;i=(64+63)}); & $imm 0 -64; $s.Add(@{Op='and';d=24;s=24;t=0})
     $s.Add(@{Op='addi';d=25;s=23;i=191}); & $imm 0 -128; $s.Add(@{Op='and';d=25;s=25;t=0})
     $s.Add(@{Op='hwticks';d=26})
+    if($PmuEvents){
+        $evtcfg=0L;$evtcfg1=0L;$pmucfg=0L
+        for($i=0;$i -lt 4;$i++){ $evtcfg=$evtcfg -bor (([long]$PmuEvents[$i] -band 0xff) -shl (8*$i)); $evtcfg1=$evtcfg1 -bor (([long]$PmuEvents[$i+4] -band 0xff) -shl (8*$i)) }
+        for($i=0;$i -lt 8;$i++){ $pmucfg=$pmucfg -bor ((([long]$PmuEvents[$i] -shr 8) -band 3) -shl (2*$i)) }
+        & $ptr 4 25 $pmuOffset; $s.Add(@{Op='vxor';d=0;s=0;t=0}); for($k=0;$k -lt 8;$k++){$s.Add(@{Op='vstore';s=4;t=0;Offset=(128*$k)})}
+        # The QuRT calls are libqurt.a trap stubs (SDK 6.4.0.2 rtos/qurt/computev73/lib/pic/libqurt.a,
+        # SHA-256 8e0ba5fd2e9fc8c075722241cb314cac5a06319460c2e876ae786617a3931670), emitted inline like
+        # qurt_hvx_lock; the DSP image does not export them to this library.
+        # qurt_hvx_get_units: r5 = #2; trap0(#0x55); r0 = units.
+        $s.Add(@{Op='imm';d=5;i=2}); $s.Add(@{Op='trap0';i=0x55}); & $ptr 2 25 $pmuOffset; $s.Add(@{Op='store';s=2;t=0;Offset=4})
+        # qurt_pmu_set(reg, value): r0 = reg, r1 = value, r2 = #1; trap0(#0x4a) (qurt_pmu_ctrl).
+        # QURT_PMUCFG 4, QURT_PMUEVTCFG 5, QURT_PMUEVTCFG1 10 (qurt_consts.h).
+        foreach($w in @(@(4,$pmucfg),@(5,$evtcfg),@(10,$evtcfg1))){ $s.Add(@{Op='imm';d=0;i=$w[0]}); & $imm 1 $w[1]; $s.Add(@{Op='imm';d=2;i=1}); $s.Add(@{Op='trap0';i=0x4a}) }
+        # qurt_pmu_enable(1): r0 = #0, r1 = enable, r2 = #0; trap0(#0x4a).
+        $s.Add(@{Op='imm';d=0;i=0}); $s.Add(@{Op='imm';d=1;i=1}); $s.Add(@{Op='imm';d=2;i=0}); $s.Add(@{Op='trap0';i=0x4a})
+        & $ptr 2 25 $pmuOffset; & $imm 4 $pmucfg; $s.Add(@{Op='store';s=2;t=4;Offset=16}); & $imm 4 $evtcfg; $s.Add(@{Op='store';s=2;t=4;Offset=20}); & $imm 4 $evtcfg1; $s.Add(@{Op='store';s=2;t=4;Offset=24})
+        & $mark 'Setup'
+    }
     for($b=0;$b -lt 3;$b++){
         $kernel=$kernels[$b]
         & $dma 18 $offResidual 20 0 $tensorBytes
@@ -170,7 +213,7 @@ function New-KokoroGenerator60xResidentRunSteps {
                     if($b -eq 0){ & $zeroMoments $offMoments; & $statsAcc $offResidual $tiles; & $copyMoments $offInputMoments $offMoments }
                     else { & $copyMoments $offMoments $offInputMoments }
                 }
-                & $ptr 0 18 $offMoments; & $ptr 1 18 $offParameters; & $ptr 2 18 ($offCoefficients+($b*6+$st)*1024); & $imm 3 $Frames; & $call 'body_coeff'
+                & $ptr 0 18 $offMoments; & $ptr 1 18 $offParameters; & $ptr 2 18 ($offCoefficients+($b*6+$st)*1024); & $imm 3 $Frames; & $call 'body_coeff'; & $mark 'Coefficients'
                 if(-not ($half -eq 1 -and $p -eq 2)){ & $zeroMoments $offMoments }
                 $source=if($half -eq 0){$offResidual}else{$offConvOutput}
                 $convLabel="body_conv_b${b}_d$(if($half -eq 0){$dilation}else{1})"
@@ -181,15 +224,15 @@ function New-KokoroGenerator60xResidentRunSteps {
                     if($start+$count -eq $tiles){ & $fill ($offWindow+($count+1)*8192) 1 }
                     if($CostProbeTurnsBody){
                         & $ptr 0 18 ($source+$first*8192); & $ptr 1 18 ($offWindow+($first-$start+1)*8192); & $ptr 2 18 ($layout.Regions.WindowLow.Offset+($first-$start+1)*8192); & $ptr 3 18 ($offCoefficients+($b*6+$st)*1024); & $imm 4 ($last-$first)
-                        & $call 'body_turns'
+                        & $call 'body_turns'; & $mark 'AdaInSnake'
                     } else {
                         & $ptr 0 18 ($source+$first*8192); & $ptr 1 18 ($offWindow+($first-$start+1)*8192); & $ptr 2 18 ($offCoefficients+($b*6+$st)*1024); & $ptr 3 18 ($offParameters+2048); & $imm 4 ($last-$first)
-                        & $call 'body_fused'
+                        & $call 'body_fused'; & $mark 'AdaInSnake'
                     }
                     if($last -eq $tiles -and $Frames%32){ & $edge ($offWindow+($tiles-$start)*8192) }
                     $output=if($half -eq 0){$offConvOutput+$start*8192}else{$offStaging}
                     & $ptr 0 18 ($offWindow+8192); & $ptr 1 18 $offWeights; & $ptr 2 18 $output; & $ptr 3 18 ($offParameters+4096); & $imm 4 $count
-                    & $call $convLabel
+                    & $call $convLabel; & $mark 'HmxConv'
                     if($CostProbePasses -gt 0){
                         $L=$layout.Regions
                         if(-not $CostProbeTurnsBody){
@@ -205,6 +248,7 @@ function New-KokoroGenerator60xResidentRunSteps {
                         & $ptr 4 18 $L.ProbeHigh.Offset; & $ptr 5 18 $L.ProbeLow.Offset; & $ptr 6 18 $L.ProbeMerged.Offset; & $imm 7 ($count*64); $s.Add(@{Op='imm';d=8;i=0}); & $imm 9 0xff00ff00L; $s.Add(@{Op='vsplat';d=3;s=9}); $s.Add(@{Op='imm';d=9;i=8})
                         $n=& $label; $s.Add(@{Op='label';Name=$n}); $s.Add(@{Op='vload';d=0;s=4;Offset=0}); $s.Add(@{Op='vload';d=1;s=5;Offset=0}); $s.Add(@{Op='vand';d=0;s=0;t=3}); $s.Add(@{Op='vlsr-uw';d=1;s=1;t=9}); $s.Add(@{Op='vor';d=0;s=0;t=1}); $s.Add(@{Op='vstore';s=6;t=0;Offset=0})
                         $s.Add(@{Op='addi';d=4;s=4;i=128});$s.Add(@{Op='addi';d=5;s=5;i=128});$s.Add(@{Op='addi';d=6;s=6;i=128});$s.Add(@{Op='addi';d=7;s=7;i=-1});$s.Add(@{Op='gtu';d=0;s=7;t=8});$s.Add(@{Op='jump-p';u=0;Label=$n})
+                        & $mark 'CostProbe'
                     }
                     & $sync
                     $hasLast=($start+$count -eq $tiles)
@@ -215,11 +259,11 @@ function New-KokoroGenerator60xResidentRunSteps {
                         $normal=if($hasLast){$count-1}else{$count}
                         if($normal -gt 0){
                             & $ptr 0 18 ($offResidual+$start*8192); & $ptr 1 18 $offStaging; & $ptr 2 18 ($offResidual+$start*8192); & $ptr 3 18 ($offParameters+5120); & $imm 4 $normal
-                            & $call 'body_residual'
+                            & $call 'body_residual'; & $mark 'Residual'
                         }
                         if($hasLast){
                             & $ptr 0 18 $offSaved; & $ptr 1 18 ($offStaging+($count-1)*8192); & $ptr 2 18 ($offResidual+($tiles-1)*8192); & $ptr 3 18 ($offParameters+5120); & $imm 4 1
-                            & $call 'body_residual'
+                            & $call 'body_residual'; & $mark 'Residual'
                         }
                         if($p -lt 2){
                             if($hasLast){ & $copyTile $offSaved ($offResidual+($tiles-1)*8192); & $mask ($offResidual+($tiles-1)*8192) }
@@ -240,10 +284,14 @@ function New-KokoroGenerator60xResidentRunSteps {
         & $dma 18 $offConvOutput 25 ($j*$chunk*8192) ($chunkTiles*8192)
         & $dma 18 ($offConvOutput+$chunk*8192) 25 ($stride+$j*$chunk*8192) ($chunkTiles*8192)
         & $ptr 0 18 $offConvOutput; & $ptr 1 18 ($offConvOutput+$chunk*8192); & $ptr 2 18 ($offResidual+$j*$chunk*8192); & $ptr 3 18 $offConvOutput; & $ptr 4 18 $offMeanParameters; & $imm 5 $chunkTiles
-        & $call 'body_average'; & $sync
+        & $call 'body_average'; & $mark 'Average'; & $sync
         & $dma 25 ($finalOffset+$j*$chunk*8192) 18 $offConvOutput ($chunkTiles*8192)
     }
     & $dma 25 ($finalOffset+$tensorBytes) 18 $offCoefficients 18432
+    if($PmuEvents){
+        $s.Add(@{Op='imm';d=0;i=0}); $s.Add(@{Op='imm';d=1;i=0}); $s.Add(@{Op='imm';d=2;i=0}); $s.Add(@{Op='trap0';i=0x4a})
+        & $ptr 2 25 $pmuOffset; & $imm 4 0x31554D50L; $s.Add(@{Op='store';s=2;t=4;Offset=0})
+    }
     $s.Add(@{Op='hwticks';d=0});$s.Add(@{Op='store-d';s=23;t=26;Offset=0});$s.Add(@{Op='store-d';s=23;t=0;Offset=8})
     $s.Add(@{Op='sub';d=0;s=25;t=23});& $imm 1 $finalOffset;$s.Add(@{Op='add';d=0;s=0;t=1});$s.Add(@{Op='store';s=23;t=0;Offset=40})
     $s.Add(@{Op='imm';d=0;i=19});$s.Add(@{Op='store';s=23;t=0;Offset=44})
@@ -260,6 +308,29 @@ function New-KokoroGenerator60xResidentRunSteps {
     for($b=0;$b -lt 3;$b++){foreach($d in 1,3,5){$bodies.Add(@("body_conv_b${b}_d$d",@(New-KokoroHmxConvSteps -Kernel $kernels[$b] -Dilation $d -LabelPrefix "resident_b${b}_d$d")))}}
     if($CostProbePasses -gt 0){ for($b=0;$b -lt 3;$b++){foreach($d in 1,3,5){$bodies.Add(@("body_convp_b${b}_d$d",@(New-KokoroHmxConvSteps -Kernel $kernels[$b] -Dilation $d -OutputPlanes -LabelPrefix "probe_b${b}_d$d")))}} }
     foreach($pair in $bodies){$s.Add(@{Op='label';Name=$pair[0]});foreach($step in $pair[1]){$s.Add($step)}}
+    if($PmuEvents){
+        # body_pmu_mark: r0 = category accumulator. Snapshot the counters, then add current minus
+        # previous into the category. Clobbers caller-saved r0..r15 like any call; the job keeps
+        # its state in r16..r27.
+        $s.Add(@{Op='label';Name='body_pmu_mark'}); $s.Add(@{Op='allocframe';Bytes=16}); $s.Add(@{Op='store';s=29;t=0;Offset=0})
+        # qurt_pmu_get_pmucnt: r5 = #0; trap0(#0x63); r0 = rc, r1..r8 = PMUCNT0..7.
+        $s.Add(@{Op='imm';d=5;i=0}); $s.Add(@{Op='trap0';i=0x63})
+        & $ptr 9 25 ($pmuOffset+128); for($k=0;$k -lt 8;$k++){ $s.Add(@{Op='store';s=9;t=(1+$k);Offset=(4*$k)}) }
+        & $ptr 2 25 $pmuOffset; $s.Add(@{Op='load';d=4;s=2;Offset=28}); $s.Add(@{Op='or';d=4;s=4;t=0}); $s.Add(@{Op='store';s=2;t=4;Offset=28})
+        & $ptr 2 25 ($pmuOffset+128); & $ptr 3 25 ($pmuOffset+64); $s.Add(@{Op='load';d=1;s=29;Offset=0})
+        $s.Add(@{Op='hwticks';d=6}); $s.Add(@{Op='store-d';s=2;t=6;Offset=32})
+        $s.Add(@{Op='upcycle';d=6}); $s.Add(@{Op='store-d';s=2;t=6;Offset=40})
+        for($k=0;$k -lt 8;$k++){
+            $s.Add(@{Op='load';d=4;s=2;Offset=(4*$k)}); $s.Add(@{Op='load';d=5;s=3;Offset=(4*$k)}); $s.Add(@{Op='sub';d=6;s=4;t=5})
+            $s.Add(@{Op='load';d=7;s=1;Offset=(4*$k)}); $s.Add(@{Op='add';d=7;s=7;t=6}); $s.Add(@{Op='store';s=1;t=7;Offset=(4*$k)}); $s.Add(@{Op='store';s=3;t=4;Offset=(4*$k)})
+        }
+        foreach($o in 32,40){
+            $s.Add(@{Op='load-d';d=4;s=2;Offset=$o}); $s.Add(@{Op='load-d';d=6;s=3;Offset=$o}); $s.Add(@{Op='sub-d';d=8;s=4;t=6})
+            $s.Add(@{Op='load-d';d=10;s=1;Offset=$o}); $s.Add(@{Op='add-d';d=10;s=10;t=8}); $s.Add(@{Op='store-d';s=1;t=10;Offset=$o}); $s.Add(@{Op='store-d';s=3;t=4;Offset=$o})
+        }
+        $s.Add(@{Op='load';d=4;s=1;Offset=48}); $s.Add(@{Op='addi';d=4;s=4;i=1}); $s.Add(@{Op='store';s=1;t=4;Offset=48})
+        $s.Add(@{Op='dealloc-return'})
+    }
     $labels=@{};$pcs=[Collections.Generic.Dictionary[object,long]]::new();$pc=0L;$isa=Get-InstructionSet
     foreach($step in $s){if($step.Op -eq 'label'){if($labels.ContainsKey($step.Name)){throw "Duplicate label $($step.Name)"};$labels[$step.Name]=$pc};$pcs[$step]=$pc;$pc+=& $isa.Length $step}
     foreach($c in $calls){$delta=[uint32](($labels[$c.label]-$pcs[$c.pc]) -band 0xffffffffL);$c.low.i=$delta -band 65535;$c.high.i=$delta -shr 16}

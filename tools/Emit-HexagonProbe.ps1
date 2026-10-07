@@ -16,6 +16,7 @@ param(
     [ValidateSet(2,3)][int] $CombineGroups = 2,
     [ValidateRange(0,3)][int] $ResidentCostProbePasses = 0,
     [switch] $ResidentCostProbeTurnsBody,
+    [ValidateCount(8,8)][ValidateRange(0,1023)][int[]] $ResidentPmuEvents,
     [ValidateRange(2, 2048)][int] $AdaInFrames = 64,
     [ValidateRange(1, 128)][int] $AdaInChannels = 128,
     [switch] $AdaInVectorConvolution,
@@ -243,7 +244,8 @@ if($Kernel -eq 'KokoroR0Sub0') {
     Write-NewOrIdenticalFile (Join-Path $OutputDirectory 'runner-layout.json') ([Text.Encoding]::UTF8.GetBytes(($run.Layout | ConvertTo-Json -Depth 6))) -AllowOverwrite:$Force
 } elseif($Kernel -eq 'KokoroGenerator60xResidentRun') {
     . (Join-Path $PSScriptRoot '..\src\emit\Kokoro.Generator60xResidentRun.ps1')
-    $run=New-KokoroGenerator60xResidentRunSteps -Frames $ResBlockFrames -CostProbePasses $ResidentCostProbePasses -CostProbeTurnsBody:$ResidentCostProbeTurnsBody
+    $pmu=if($ResidentPmuEvents){@{PmuEvents=$ResidentPmuEvents}}else{@{}}
+    $run=New-KokoroGenerator60xResidentRunSteps -Frames $ResBlockFrames -CostProbePasses $ResidentCostProbePasses -CostProbeTurnsBody:$ResidentCostProbeTurnsBody @pmu
     $steps=@($run.Steps)
     $symbol='kokoro_resblock_run_skel_handle_invoke'; $soname='libkokoro_resblock_run_skel.so'
     Write-NewOrIdenticalFile (Join-Path $OutputDirectory 'runner-layout.json') ([Text.Encoding]::UTF8.GetBytes(($run.Layout | ConvertTo-Json -Depth 6))) -AllowOverwrite:$Force

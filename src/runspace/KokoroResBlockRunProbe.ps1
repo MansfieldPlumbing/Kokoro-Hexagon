@@ -120,6 +120,23 @@ try {
             $meanCoeff = [BitConverter]::ToUInt64($out, $finalOffset + 24)
             $lines.Add("ProfileMean MeanParamCopy=$meanParam MeanBody=$meanBody FinalCoeffCopy=$meanCoeff")
         }
+        # Performance-counter record of the resident stage (Kokoro.Generator60xResidentRun.ps1
+        # -PmuEvents): DDR workspace + 2*stride, present when the magic 'PMU1' is set.
+        if ($generator) {
+            $pmuAt = $offset - $finalOffset + 2 * [int]($finalOffset / 3)
+            if ($pmuAt + 1024 -le $out.Length -and [BitConverter]::ToUInt32($out, $pmuAt) -eq 0x31554D50) {
+                $units = [BitConverter]::ToUInt32($out, $pmuAt + 4)
+                $lines.Add("Pmu HvxUnitsRaw=0x$($units.ToString('X8')) Hvx128B=$(($units -shr 8) -band 0xff) PmuCfg=0x$([BitConverter]::ToUInt32($out, $pmuAt + 16).ToString('X')) EvtCfg=0x$([BitConverter]::ToUInt32($out, $pmuAt + 20).ToString('X8')) EvtCfg1=0x$([BitConverter]::ToUInt32($out, $pmuAt + 24).ToString('X8')) ReadRc=$([BitConverter]::ToInt32($out, $pmuAt + 28))")
+                $pmuCategories = @('Setup','Dma','Coefficients','AdaInSnake','HmxConv','Moments','Residual','Average','Sync','TileFix','CostProbe')
+                for ($c = 0; $c -lt $pmuCategories.Count; $c++) {
+                    $at = $pmuAt + 256 + 64 * $c
+                    $marks = [BitConverter]::ToUInt32($out, $at + 48)
+                    if ($marks -eq 0) { continue }
+                    $counts = for ($k = 0; $k -lt 8; $k++) { "C$k=$([BitConverter]::ToUInt32($out, $at + 4 * $k))" }
+                    $lines.Add("PmuCategory Name=$($pmuCategories[$c]) Marks=$marks Ticks=$([BitConverter]::ToUInt64($out, $at + 32)) Cycles=$([BitConverter]::ToUInt64($out, $at + 40)) $($counts -join ' ')")
+                }
+            }
+        }
         & { [IO.File]::WriteAllLines($receipt, $lines) }
         if ($rc -ne 0 -or $stageReached -lt 6) { break }
     }
