@@ -1,6 +1,6 @@
 /* hexagon-sim harness for the PowerShell-emitted plane combine (src/emit/Kokoro.PlaneCombine.ps1).
  * Random byte planes A1 high/low, A2 high/low (odd bytes), per-channel Q15 ratio and residual R.
- * Model: w = high << 8 | low, v = sat16((w1 - 32768) + (w2 - 32768));
+ * Model: w = high << 8 | low, v = sat16(sum of (w_g - 32768)) over GROUPS (2, or 3 with planes 4 and 5);
  *   Conv:     out = v;  Residual: out = sat16(R + q15(v, ratio_c)).  Output stored biased (u16 = out + 32768).
  * Build with -DRES=<0|1> -include <emitted_code.h>. Test tool only. */
 #include <stdint.h>
@@ -11,6 +11,9 @@ static unsigned cfg(int off){ unsigned b; __asm__ volatile("%0 = cfgbase":"=r"(b
 #define OB (CH / 32)
 #define NT 3
 #define STRIDE (NT * OB * 2048)
+#ifndef GROUPS
+#define GROUPS 2
+#endif
 #define IDX(i, j) (64 * ((i) / 2) + 2 * (j) + ((i) % 2))
 typedef void (*fn_t)(const void* planes, void* out, const void* ratio, unsigned tiles);
 static uint32_t lcg = 99;
@@ -21,8 +24,8 @@ static int16_t R[NT * 32][CH];
 int main(void) {
   unsigned char* v = (unsigned char*)(cfg(0x38) << 16);
   unsigned r; __asm__ volatile("%0 = ssr":"=r"(r)); r |= 1u << 26; __asm__ volatile("ssr = %0; isync"::"r"(r));
-  unsigned char *planes = v, *out = v + 262144; int32_t* ratio = (int32_t*)(v + 393216);
-  for (size_t i = 0; i < 4 * (size_t)STRIDE; i++) planes[i] = (unsigned char)rnd(0, 255);
+  unsigned char *planes = v, *out = v + 393216; int32_t* ratio = (int32_t*)(v + 524288);
+  for (size_t i = 0; i < 6 * (size_t)STRIDE; i++) planes[i] = (unsigned char)rnd(0, 255);
   for (int c = 0; c < CH; c++) ratio[c] = rnd(8000, 32767);
   for (int t = 0; t < NT * 32; t++) for (int c = 0; c < CH; c++) {
     R[t][c] = (int16_t)rnd(-30000, 30000);
@@ -34,11 +37,13 @@ int main(void) {
   for (int t = 0; t < NT * 32; t++) for (int c = 0; c < CH; c++) {
     size_t at = ((size_t)(t / 32) * OB + c / 32) * 2048 + 2 * IDX(t % 32, c % 32);
     int w1 = planes[at + 1] << 8 | planes[STRIDE + at + 1], w2 = planes[2 * STRIDE + at + 1] << 8 | planes[3 * STRIDE + at + 1];
+    int w3 = planes[4 * STRIDE + at + 1] << 8 | planes[5 * STRIDE + at + 1];
     int16_t val = sat16((w1 - 32768) + (w2 - 32768));
+    if (GROUPS == 3) val = sat16(val + (w3 - 32768));
     int16_t o = RES ? sat16(R[t][c] + q15(val, (int16_t)ratio[c])) : val;
     int got = (int)(out[at] | out[at + 1] << 8) - 32768;
     if (got != o) { bad++; if (shown++ < 6) printf("t=%d c=%d w1=%d w2=%d R=%d expected %d got %d\n", t, c, w1, w2, R[t][c], o, got); }
   }
-  printf("plane-combine %s C=%d tiles=%d mismatches=%d/%d %s\n", RES ? "residual" : "conv", CH, NT, bad, NT * 32 * CH, bad ? "FAIL" : "PASS");
+  printf("plane-combine %s groups=%d C=%d tiles=%d mismatches=%d/%d %s\n", RES ? "residual" : "conv", GROUPS, CH, NT, bad, NT * 32 * CH, bad ? "FAIL" : "PASS");
   return bad != 0;
 }

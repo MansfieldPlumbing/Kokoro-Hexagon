@@ -14,7 +14,7 @@ convs1 and conv_post outputs feed the next stage wide, and only stored tensors
 --greedy-target D: start every conv at x2/x2/x2 and drop single planes, least
 harmful first, while every capture stays at or above D dB.
 """
-import argparse, hashlib, importlib, json, pathlib, sys, time, types
+import argparse, hashlib, importlib, json, os, pathlib, sys, time, types
 
 ROOT = pathlib.Path(__file__).resolve().parents[2]
 def digest(p): return hashlib.sha256(pathlib.Path(p).read_bytes()).hexdigest().upper()
@@ -28,6 +28,8 @@ parser.add_argument('--clip', choices=('absmax', 'mse'), default='absmax',
                     help='single-plane activation scale: absmax/127, or the per-tensor clip minimizing MSE')
 parser.add_argument('--greedy-target', type=float,
                     help='run the greedy plane reduction to this PCM SNR (dB) instead of the global/leave-one-out sweep')
+parser.add_argument('--drop-low-cross', action='store_true',
+                    help='where a conv has two input and two weight planes, omit the low x low product, as the two-group HMX conv does')
 parser.add_argument('--render-plan', type=pathlib.Path,
                     help='report.json of a greedy run: write stock and plan WAVs per capture instead of searching')
 args = parser.parse_args()
@@ -124,12 +126,28 @@ class Capture:
                 n = cfg[name]['i']
                 return (planes(x, amax[name+'.i1'] if n == 1 else amax[name+'.i']/127, n),) if n else None
             def post(mod, a, y, name=name):
+                changed = False
+                if args.drop_low_cross and cfg[name]['i'] == 2 and cfg[name]['w'].n == 2:
+                    # The quantized input and weight are hi + lo; the low parts reproduce planes()'s split.
+                    x2 = a[0]; s1 = amax[name+'.i']/127
+                    x_lo = x2 - torch.round(x2/s1)*s1
+                    w2 = mod.weight; wp = cfg[name]['w']
+                    dims = [d for d in range(w2.dim()) if d != wp.axis]
+                    sw = torch.clamp(w2.abs().amax(dim=dims, keepdim=True), min=1e-12)/127
+                    w_lo = w2 - torch.round(w2/sw)*sw
+                    if isinstance(mod, torch.nn.ConvTranspose1d):
+                        cross = torch.nn.functional.conv_transpose1d(x_lo, w_lo, None, mod.stride, mod.padding, mod.output_padding, mod.groups, mod.dilation)
+                    else:
+                        cross = mod._conv_forward(x_lo, w_lo, None)
+                    if os.environ.get('KOKORO_CROSS_DEBUG'):
+                        print(f'cross {name}: {10*torch.log10(torch.sum(cross*cross)/torch.sum(y*y)).item():.1f} dB, x_lo/x {10*torch.log10(torch.sum(x_lo*x_lo)/torch.sum(x2*x2)).item():.1f} dB, w_lo/w {10*torch.log10(torch.sum(w_lo*w_lo)/torch.sum(w2*w2)).item():.1f} dB')
+                    y = y - cross; changed = True
                 if flags['calibrating']:
                     w = mod.weight; k = w.shape[2]
                     frames = a[0].shape[2] if isinstance(mod, torch.nn.ConvTranspose1d) else y.shape[2]
                     macs[name] = int(w.shape[0]*w.shape[1]*k*frames)
                 r = role(name)
-                if r == 'wide': return None
+                if r == 'wide': return y if changed else None
                 if r == 'residual':
                     # Stock adds x = xt + x after convs2; quantize that stored sum, return q - x_prev.
                     b = name.rsplit('.convs2.', 1)[0]; prev = track[b]; s = y + prev
@@ -138,11 +156,11 @@ class Capture:
                     n = cfg[name]['o']
                     q = planes(s, amax[name+'.o1'] if n == 1 else amax[name+'.o']/127, n) if n else s
                     track[b] = q
-                    return (q - prev) if n else None
+                    return (q - prev) if n else (y if changed else None)
                 if flags['calibrating']:
                     amax[name+'.o'] = max(float(y.abs().max()), 1e-12); amax[name+'.o1'] = single_scale(y, amax[name+'.o'])
                 n = cfg[name]['o']
-                return planes(y, amax[name+'.o1'] if n == 1 else amax[name+'.o']/127, n) if n else None
+                return planes(y, amax[name+'.o1'] if n == 1 else amax[name+'.o']/127, n) if n else (y if changed else None)
             m.register_forward_pre_hook(pre); m.register_forward_hook(post)
         flags['calibrating'] = True
         self.base = self.run(lambda n: (0, 0, 0))
@@ -171,7 +189,7 @@ caps = [Capture(p) for p in args.spec]
 names = [n for n, _ in caps[0].convs]
 report = dict(scope='Reference only. Stock generator with byte-plane quantization at every conv; stock AdaIN, '
     'Snake, residual arithmetic and tail in float. Activation scales calibrated on the same utterance.',
-    toolSHA256=digest(__file__), model=args.model, singlePlaneActivationScale=args.clip,
+    toolSHA256=digest(__file__), model=args.model, dropLowCross=args.drop_low_cross, singlePlaneActivationScale=args.clip,
     captures=[dict(spec=str(c.spec_path), voice=c.spec['voice'], seed=c.spec['seed'], phonemes=c.spec['phonemes'],
                    samples=int(c.base.numel()), stockReplayExact=True) for c in caps],
     convMacs=caps[0].macs)

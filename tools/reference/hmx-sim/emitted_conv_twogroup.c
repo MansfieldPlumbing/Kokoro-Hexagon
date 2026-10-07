@@ -1,6 +1,6 @@
 /* hexagon-sim harness for the PowerShell-emitted two-group HMX conv (src/emit/Kokoro.HmxConvPlanes.ps1).
  * Inputs: high window h (u8, zero point 128) and low window l (u8, zero point 0); weights Wh [, Wl].
- *   A1 = sum (h - 128) * Wh,  A2 = sum l * Wh [+ sum (h - 128) * Wl]
+ *   A1 = sum (h - 128) * Wh,  A2 = sum l * Wh [+ sum (h - 128) * Wl],  A3 = sum l * Wl (WP == 2)
  * Each group is checked as two exact bytes of a 16-bit window: a = A + 2^(L+15),
  * high = sat(floor(a / 2^(L+8))), low = floor(a / 2^L) mod 256, with L = LA for A1 and LB for A2.
  * Build with -DCH -DKK -DDD -DWP=<1|2> -DLA -DLB -include <emitted_code.h>. Test tool only. */
@@ -16,10 +16,11 @@ static unsigned cfg(int off){ unsigned b; __asm__ volatile("%0 = cfgbase":"=r"(b
 #define T (NT * 32)
 #define PAD 1
 #define STRIDE (NT * OB * 2048)
+#define GROUPS (WP == 2 ? 3 : 2)
 typedef void (*conv_fn)(void* hi, void* lo, const void* wh, const void* tbl, unsigned tiles, void* planes);
 static int8_t Xh[T][CH], Wh[KK][CH][CH], Wl[KK][CH][CH];
 static uint8_t Xl[T][CH];
-static int RefHi[4][T][CH], RefLo[4][T][CH];
+static int RefHi[3][T][CH], RefLo[3][T][CH];
 static uint32_t lcg = 4242;
 static int rnd(int lo, int hi) { lcg = lcg * 1103515245u + 12345u; return lo + (int)((lcg >> 8) % (unsigned)(hi - lo + 1)); }
 static long long floordiv(long long a, long long b) { long long q = a / b; return (a % b != 0 && ((a < 0) != (b < 0))) ? q - 1 : q; }
@@ -44,40 +45,41 @@ int main(void){
     hi[at] = (unsigned char)(Xh[t][c] + 128); lo[at] = Xl[t][c];
   }
   pack_weights(wh, Wh); pack_weights(wl, Wl);
-  const int L[4] = { LA, LA, LB, LB };
+  const int L[6] = { LA, LA, LB, LB, LB, LB };
   for (int ob = 0; ob < OB; ob++) for (int cc = 0; cc < 32; cc++) {
     int o = 32 * ob + cc; long long sh = 0, sl = 0;
     for (int k = 0; k < KK; k++) for (int i = 0; i < CH; i++) { sh += Wh[k][o][i]; sl += Wl[k][o][i]; }
-    long long bias1 = -128 * sh + (1LL << (LA + 15)), bias2 = (WP == 2 ? -128 * sl : 0) + (1LL << (LB + 15));
-    for (int p = 0; p < 4; p++) {
-      uint32_t* t32 = tbl + 256 * ob + 64 * p;
+    long long bias1 = -128 * sh + (1LL << (LA + 15)), bias2 = (WP == 2 ? -128 * sl : 0) + (1LL << (LB + 15)), bias3 = 1LL << (LB + 15);
+    for (int p = 0; p < 2 * GROUPS; p++) {
+      uint32_t* t32 = tbl + 128 * GROUPS * ob + 64 * p;
       t32[cc] = (uint32_t)(((p & 1 ? 9 : 1) - L[p] + 15) << 10);    /* 2^(1-L) high, 2^(9-L) low */
-      t32[32 + cc] = (uint32_t)(p < 2 ? bias1 : bias2);
+      t32[32 + cc] = (uint32_t)(p < 2 ? bias1 : p < 4 ? bias2 : bias3);
     }
   }
   for (int t = 0; t < T; t++) for (int o = 0; o < CH; o++) {
-    long long a1 = 0, a2 = 0;
+    long long a1 = 0, a2 = 0, a3 = 0;
     for (int k = 0; k < KK; k++) { int ts = t + DD * (k - half); if (ts < 0 || ts >= T) continue;
       for (int i = 0; i < CH; i++) { a1 += (long long)Xh[ts][i] * Wh[k][o][i]; a2 += (long long)Xl[ts][i] * Wh[k][o][i];
-        if (WP == 2) a2 += (long long)Xh[ts][i] * Wl[k][o][i]; } }
-    long long acc[2] = { a1, a2 };
-    for (int grp = 0; grp < 2; grp++) {
+        if (WP == 2) { a2 += (long long)Xh[ts][i] * Wl[k][o][i]; a3 += (long long)Xl[ts][i] * Wl[k][o][i]; } } }
+    long long acc[3] = { a1, a2, a3 };
+    for (int grp = 0; grp < GROUPS; grp++) {
       int Lg = grp ? LB : LA; long long a = acc[grp] + (1LL << (Lg + 15));
       long long h = floordiv(a, 1LL << (Lg + 8)); RefHi[grp][t][o] = h < 0 ? 0 : h > 255 ? 255 : (int)h;
       RefLo[grp][t][o] = (int)(floordiv(a, 1LL << Lg) & 255);
     }
   }
-  memset(planes, 0, (size_t)4 * STRIDE);
+  memset(planes, 0, (size_t)6 * STRIDE);
   conv_fn f = (conv_fn)(uintptr_t)EMITTED_CODE;
   f(hi + (size_t)PAD * CB * 2048, lo + (size_t)PAD * CB * 2048, wh, tbl, NT, planes);
-  int bad[4] = {0, 0, 0, 0}, sat = 0;
-  for (int t = 0; t < T; t++) for (int o = 0; o < CH; o++) for (int grp = 0; grp < 2; grp++) {
+  int bad[6] = {0, 0, 0, 0, 0, 0}, sat = 0;
+  for (int t = 0; t < T; t++) for (int o = 0; o < CH; o++) for (int grp = 0; grp < GROUPS; grp++) {
     size_t at = ((size_t)(t / 32) * OB + o / 32) * 2048 + 2 * IDX(t % 32, o % 32) + 1;
     unsigned char ph = planes[(size_t)(2 * grp) * STRIDE + at], pl = planes[(size_t)(2 * grp + 1) * STRIDE + at];
     if (ph != RefHi[grp][t][o]) bad[2 * grp]++;
     if (RefHi[grp][t][o] == 0 || RefHi[grp][t][o] == 255) sat++; else if (pl != RefLo[grp][t][o]) bad[2 * grp + 1]++;
   }
-  printf("emitted two-group C=%d K=%d D=%d WP=%d LA=%d LB=%d mismatches A1h=%d A1l=%d A2h=%d A2l=%d /%d saturated=%d %s\n",
-         CH, KK, DD, WP, LA, LB, bad[0], bad[1], bad[2], bad[3], T * CH, sat, (bad[0] || bad[1] || bad[2] || bad[3]) ? "FAIL" : "PASS");
-  return (bad[0] || bad[1] || bad[2] || bad[3]) != 0;
+  int any = bad[0] || bad[1] || bad[2] || bad[3] || bad[4] || bad[5];
+  printf("emitted conv planes C=%d K=%d D=%d WP=%d groups=%d LA=%d LB=%d mismatches A1h=%d A1l=%d A2h=%d A2l=%d A3h=%d A3l=%d /%d saturated=%d %s\n",
+         CH, KK, DD, WP, GROUPS, LA, LB, bad[0], bad[1], bad[2], bad[3], bad[4], bad[5], T * CH, sat, any ? "FAIL" : "PASS");
+  return any != 0;
 }

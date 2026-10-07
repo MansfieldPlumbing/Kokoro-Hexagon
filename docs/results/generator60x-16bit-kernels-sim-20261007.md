@@ -16,7 +16,17 @@ register sets each; exercised by the moments kernel). The coefficients contract 
 `|Ka| N / root < 2^31`; the first harness draw violated it on one channel (true K about 4.9e9), where
 the kernel saturates at 2^31 - 1 and the model wrapped; the harness now draws Ka from an in-range K.
 
-The two-group conv omits the low-input x low-weight product where both planes are kept; its effect
-on PCM is measured separately with `Measure-KokoroGeneratorPlaneDepth.py --drop-low-cross`.
+## Low x low product
+
+Omitting the low-input x low-weight product where both planes are kept was measured with
+`Measure-KokoroGeneratorPlaneDepth.py --drop-low-cross` on the frozen 42 dB plan and the untouched
+sentence captures: 42.02 -> 40.72 dB (af_heart) and 41.65 -> 40.53 dB (am_michael). With absmax
+scales the low planes are only 18-27 dB (inputs) and 35-40 dB (weights) below their signals, so the
+per-conv cross term is -60 to -70 dB and about a dozen such convs add up. The conv now keeps it as a
+third accumulator group `A3 = sum l * Wl` with `-WeightPlanes 2`, and the combine adds a third window
+(`-Groups 3`); the combine passes 0 / 12,288 with two and with three groups (residual mode), and the
+conv passes with all six planes exact: K11 D5 W8x2 and K7 D3 W8x2 (three groups), K3 D1 W8x1 (two
+groups), 0 / 12,288 on every plane.
+Reports: `build/generator-plane-greedy42-sentence{,-dropcross}-20261007/report.json`.
 
 Not covered: the connected 16-bit stage, its padded-row handling, SM8550 timing.

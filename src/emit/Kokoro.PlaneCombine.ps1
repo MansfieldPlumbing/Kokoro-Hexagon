@@ -1,7 +1,8 @@
 #requires -Version 7.4
 # Combine the four byte planes of a two-group HMX conv (Kokoro.HmxConvPlanes.ps1) into 16-bit values.
 # Design: docs/generator60x-16bit-design.md ("Combine"). Each group's planes rebuild its biased 16-bit
-# window w = high << 8 | low (bias 32768); the value is (w1 - 32768) + (w2 - 32768), saturated to int16.
+# window w = high << 8 | low (bias 32768); the value is the sum of the signed windows (two groups, or three
+# with the low x low group of -WeightPlanes 2), saturated to int16.
 #   -Mode Conv:     store the value biased (u16 = v + 32768): conv1 output C.
 #   -Mode Residual: O = v * ratio_c (Q15 rounding multiply, per channel), R = sat(R + O), stored biased:
 #                   conv2 output added into the residual stream in one pass.
@@ -14,6 +15,7 @@ function New-KokoroPlaneCombineSteps {
     param(
         [ValidateSet('Conv','Residual')][string] $Mode = 'Conv',
         [ValidateSet(128,256)][int] $Channels = 128,
+        [ValidateSet(2,3)][int] $Groups = 2,
         [Parameter(Mandatory)][ValidateRange(2048, 1073741824)][long] $PlaneStride,
         [string] $LabelPrefix = 'planecombine',
         [switch] $NoReturn
@@ -49,7 +51,13 @@ function New-KokoroPlaneCombineSteps {
         $s.Add(@{Op='add';d=11;s=0;t=10}); $s.Add(@{Op='vload';d=1;s=11;Offset=0})
         $s.Add(@{Op='add';d=11;s=11;t=10}); $s.Add(@{Op='vload';d=2;s=11;Offset=0})
         $s.Add(@{Op='add';d=11;s=11;t=10}); $s.Add(@{Op='vload';d=3;s=11;Offset=0})
-        foreach ($g in @(@(0,1),@(2,3))) {
+        $pairs = @(@(0,1),@(2,3))
+        if ($Groups -eq 3) {
+            $s.Add(@{Op='add';d=11;s=11;t=10}); $s.Add(@{Op='vload';d=6;s=11;Offset=0})
+            $s.Add(@{Op='add';d=11;s=11;t=10}); $s.Add(@{Op='vload';d=7;s=11;Offset=0})
+            $pairs += ,@(6,7)
+        }
+        foreach ($g in $pairs) {
             $s.Add(@{Op='vand';d=$g[0];s=$g[0];t=31})                 # high byte stays in the odd position
             $s.Add(@{Op='vlsr-uw';d=$g[1];s=$g[1];t=8})
             $s.Add(@{Op='vand';d=$g[1];s=$g[1];t=30})                 # low byte to the even position
@@ -57,6 +65,7 @@ function New-KokoroPlaneCombineSteps {
             $s.Add(@{Op='vxor';d=$g[0];s=$g[0];t=29})                 # signed window
         }
         $s.Add(@{Op='vadd-h-sat';d=4;s=0;t=2})                        # value, int16
+        if ($Groups -eq 3) { $s.Add(@{Op='vadd-h-sat';d=4;s=4;t=6}) }
         if ($Mode -eq 'Residual') {
             $s.Add(@{Op='vmpy-h-rnd-sat';d=4;s=4;t=(20+$b)})          # O = v * ratio_c
             $s.Add(@{Op='vload';d=5;s=1;Offset=0})

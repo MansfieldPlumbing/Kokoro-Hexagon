@@ -13,6 +13,7 @@ param(
     [switch] $ConvOutputPlanes,
     [ValidateSet(1,2)][int] $ConvWeightPlanes = 1,
     [ValidateSet('Conv','Residual')][string] $CombineMode = 'Conv',
+    [ValidateSet(2,3)][int] $CombineGroups = 2,
     [ValidateRange(0,3)][int] $ResidentCostProbePasses = 0,
     [switch] $ResidentCostProbeTurnsBody,
     [ValidateRange(2, 2048)][int] $AdaInFrames = 64,
@@ -259,7 +260,7 @@ if($Kernel -eq 'KokoroR0Sub0') {
     $symbol='kokoro_hmx_conv_planes'; $soname='libkokoro_hmx_conv_planes.so'
 } elseif($Kernel -eq 'KokoroPlaneCombine') {
     . (Join-Path $PSScriptRoot '..' 'src' 'emit' 'Kokoro.PlaneCombine.ps1')
-    $steps=@(New-KokoroPlaneCombineSteps -Mode $CombineMode -Channels $ConvChannels -PlaneStride (3*($ConvChannels/32)*2048))
+    $steps=@(New-KokoroPlaneCombineSteps -Mode $CombineMode -Channels $ConvChannels -Groups $CombineGroups -PlaneStride (3*($ConvChannels/32)*2048))
     $symbol='kokoro_plane_combine'; $soname='libkokoro_plane_combine.so'
 } elseif($Kernel -eq 'KokoroAdaInMoments16') {
     . (Join-Path $PSScriptRoot '..' 'src' 'emit' 'Kokoro.AdaInMoments16.ps1')
