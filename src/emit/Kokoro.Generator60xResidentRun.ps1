@@ -17,7 +17,7 @@
 # Rows past the frame count follow the frozen worker exactly: zero for moments, zero point
 # 128 at the conv input, and the residual skip keeps its unmasked padded rows (saved tile S).
 function Get-KokoroGenerator60xResidentLayout {
-    param([ValidateRange(2,32768)][int]$Frames=7801,[ValidateRange(1,64)][int]$BatchTiles=16,[ValidateSet(2048,65536)][int]$RegionAlign=65536)
+    param([ValidateRange(2,32768)][int]$Frames=7801,[ValidateRange(1,64)][int]$BatchTiles=16,[ValidateSet(2048,65536)][int]$RegionAlign=65536,[switch]$CostProbe)
     $tiles=[int][math]::Ceiling($Frames/32); $bytes=$tiles*8192
     $al={param([long]$v) [long]([math]::Ceiling($v/$RegionAlign)*$RegionAlign)}
     $small=[ordered]@{Parameters=0;Moments=8192;InputMoments=9216;MeanParameters=10240;SavedTile=16384;Coefficients=24576}
@@ -28,19 +28,27 @@ function Get-KokoroGenerator60xResidentLayout {
     # straddles a 4 MiB VTCM boundary faults (exception 0x26), while HMX output stores and
     # weight reads across it do not. The conv-input window therefore sits inside one 4 MiB
     # page: small regions first, then the two resident tensors (HVX-only reads).
-    foreach($r in @(@('Window',(($BatchTiles+2)*8192)),@('Staging',($BatchTiles*8192)),@('Weights',180224),@('Small',$smallBytes),@('Residual',$bytes),@('ConvOutput',$bytes))){
+    $list=@(,@('Window',(($BatchTiles+2)*8192)))
+    if($CostProbe){ $list+=,@('WindowLow',(($BatchTiles+2)*8192)) }
+    $list+=@(@('Staging',($BatchTiles*8192)),@('Weights',180224),@('Small',$smallBytes),@('Residual',$bytes),@('ConvOutput',$bytes))
+    if($CostProbe){ $list+=@(@('ProbeHigh',($BatchTiles*8192)),@('ProbeLow',($BatchTiles*8192)),@('ProbeMerged',($BatchTiles*8192))) }
+    foreach($r in $list){
         $regions[$r[0]]=[ordered]@{Offset=$at;Bytes=[long]$r[1]}; $at+=& $al $r[1]
     }
-    $page=4194304; $window=$regions.Window
-    if([math]::Floor($window.Offset/$page) -ne [math]::Floor(($window.Offset+$window.Bytes-1)/$page)){throw 'Conv-input window crosses a 4 MiB VTCM boundary'}
+    $page=4194304
+    foreach($name in @('Window','WindowLow')){ if(-not $regions.Contains($name)){continue}; $window=$regions[$name]
+        if([math]::Floor($window.Offset/$page) -ne [math]::Floor(($window.Offset+$window.Bytes-1)/$page)){throw 'Conv-input window crosses a 4 MiB VTCM boundary'} }
     [pscustomobject]@{Frames=$Frames;Tiles=$tiles;TensorBytes=$bytes;BatchTiles=$BatchTiles;RegionAlign=$RegionAlign;Regions=$regions;Small=$small;VtcmBytes=$at}
 }
 
 function New-KokoroGenerator60xResidentRunSteps {
-    param([ValidateRange(2,32768)][int]$Frames=7801,[ValidateRange(1,64)][int]$BatchTiles=16)
+    # CostProbePasses > 0 times the work of byte-plane precision without changing the output:
+    # a second fused AdaIN+Snake pass into WindowLow, CostProbePasses extra HMX passes per conv
+    # with two-plane stores into scratch, and an HVX merge of the scratch planes. Measurement only.
+    param([ValidateRange(2,32768)][int]$Frames=7801,[ValidateRange(1,64)][int]$BatchTiles=16,[ValidateRange(0,3)][int]$CostProbePasses=0)
     . (Join-Path $PSScriptRoot 'Kokoro.ResBlockRun.ps1')
     foreach($file in 'Kokoro.HmxConv.ps1','Kokoro.AdaInInteger.ps1','Kokoro.ResidualInteger.ps1','Kokoro.AdaInSnakeInteger.ps1','Kokoro.AdaInStatisticsAccumulate.ps1','Kokoro.DmaCopy.ps1','Kokoro.BranchAverageInteger.ps1') { . (Join-Path $PSScriptRoot $file) }
-    $layout=Get-KokoroGenerator60xResidentLayout -Frames $Frames -BatchTiles $BatchTiles
+    $layout=Get-KokoroGenerator60xResidentLayout -Frames $Frames -BatchTiles $BatchTiles -CostProbe:($CostProbePasses -gt 0)
     $tiles=$layout.Tiles; $tensorBytes=$layout.TensorBytes; $batch=$BatchTiles
     $offResidual=$layout.Regions.Residual.Offset; $offConvOutput=$layout.Regions.ConvOutput.Offset; $offWindow=$layout.Regions.Window.Offset; $offStaging=$layout.Regions.Staging.Offset; $offWeights=$layout.Regions.Weights.Offset
     $offSmall=$layout.Regions.Small.Offset
@@ -173,6 +181,20 @@ function New-KokoroGenerator60xResidentRunSteps {
                     $output=if($half -eq 0){$offConvOutput+$start*8192}else{$offStaging}
                     & $ptr 0 18 ($offWindow+8192); & $ptr 1 18 $offWeights; & $ptr 2 18 $output; & $ptr 3 18 ($offParameters+4096); & $imm 4 $count
                     & $call $convLabel
+                    if($CostProbePasses -gt 0){
+                        $L=$layout.Regions
+                        & $ptr 0 18 ($source+$first*8192); & $ptr 1 18 ($L.WindowLow.Offset+($first-$start+1)*8192); & $ptr 2 18 ($offCoefficients+($b*6+$st)*1024); & $ptr 3 18 ($offParameters+2048); & $imm 4 ($last-$first)
+                        & $call 'body_fused'
+                        for($pass=0;$pass -lt $CostProbePasses;$pass++){
+                            & $ptr 0 18 ($L.WindowLow.Offset+8192); & $ptr 1 18 $offWeights; & $ptr 2 18 $L.ProbeHigh.Offset; & $ptr 3 18 ($offParameters+4096); & $imm 4 $count; & $ptr 5 18 $L.ProbeLow.Offset
+                            & $call "body_convp_b${b}_d$(if($half -eq 0){$dilation}else{1})"
+                        }
+                        & $sync
+                        # HVX merge stand-in: high | low >> 8 into a scratch halfword tile.
+                        & $ptr 4 18 $L.ProbeHigh.Offset; & $ptr 5 18 $L.ProbeLow.Offset; & $ptr 6 18 $L.ProbeMerged.Offset; & $imm 7 ($count*64); $s.Add(@{Op='imm';d=8;i=0}); & $imm 9 0xff00ff00L; $s.Add(@{Op='vsplat';d=3;s=9}); $s.Add(@{Op='imm';d=9;i=8})
+                        $n=& $label; $s.Add(@{Op='label';Name=$n}); $s.Add(@{Op='vload';d=0;s=4;Offset=0}); $s.Add(@{Op='vload';d=1;s=5;Offset=0}); $s.Add(@{Op='vand';d=0;s=0;t=3}); $s.Add(@{Op='vlsr-uw';d=1;s=1;t=9}); $s.Add(@{Op='vor';d=0;s=0;t=1}); $s.Add(@{Op='vstore';s=6;t=0;Offset=0})
+                        $s.Add(@{Op='addi';d=4;s=4;i=128});$s.Add(@{Op='addi';d=5;s=5;i=128});$s.Add(@{Op='addi';d=6;s=6;i=128});$s.Add(@{Op='addi';d=7;s=7;i=-1});$s.Add(@{Op='gtu';d=0;s=7;t=8});$s.Add(@{Op='jump-p';u=0;Label=$n})
+                    }
                     & $sync
                     $hasLast=($start+$count -eq $tiles)
                     if($half -eq 0){
@@ -224,6 +246,7 @@ function New-KokoroGenerator60xResidentRunSteps {
     $bodies.Add(@('body_residual',@(New-KokoroResidualIntegerSteps)))
     $bodies.Add(@('body_average',@(New-KokoroBranchAverageIntegerSteps)))
     for($b=0;$b -lt 3;$b++){foreach($d in 1,3,5){$bodies.Add(@("body_conv_b${b}_d$d",@(New-KokoroHmxConvSteps -Kernel $kernels[$b] -Dilation $d -LabelPrefix "resident_b${b}_d$d")))}}
+    if($CostProbePasses -gt 0){ for($b=0;$b -lt 3;$b++){foreach($d in 1,3,5){$bodies.Add(@("body_convp_b${b}_d$d",@(New-KokoroHmxConvSteps -Kernel $kernels[$b] -Dilation $d -OutputPlanes -LabelPrefix "probe_b${b}_d$d")))}} }
     foreach($pair in $bodies){$s.Add(@{Op='label';Name=$pair[0]});foreach($step in $pair[1]){$s.Add($step)}}
     $labels=@{};$pcs=[Collections.Generic.Dictionary[object,long]]::new();$pc=0L;$isa=Get-InstructionSet
     foreach($step in $s){if($step.Op -eq 'label'){if($labels.ContainsKey($step.Name)){throw "Duplicate label $($step.Name)"};$labels[$step.Name]=$pc};$pcs[$step]=$pc;$pc+=& $isa.Length $step}

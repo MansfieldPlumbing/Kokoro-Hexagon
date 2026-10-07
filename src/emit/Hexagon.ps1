@@ -94,6 +94,10 @@ $script:HexagonForms = @{
     'act-ub-single'  = '10010010000sssssPP0ttttt11110000'
     'wt-b-deep'      = '10010010000uuuuuPP1vvvvv11101000'
     'mxmem-after-sat-ub' = '10100110111sssssPP0ttttt00000100'
+    # Accumulator byte stores (non-cm): SDK 6.4.0.2 hexagon-llvm-mc (+hmxv73), registers (12,9), (3,17), (30,0).
+    # :retain keeps the accumulator for a second store; .ub without :sat wraps modulo 256.
+    'mxmem-after-retain-sat-ub' = '10100110111sssssPP0ttttt00001100'
+    'mxmem-after-ub' = '10100110111sssssPP0ttttt00000110'
     # Calls through the GOT and stack frames, bit patterns from SDK 6.4.0.2 hexagon-llvm-mc (V73).
     'immext'         = '0000iiiiiiiiiiiiPPiiiiiiiiiiiiii'
     'add-pc'         = '0110101001001001PP0iiiiii00ddddd'
@@ -308,7 +312,7 @@ function New-HexagonInstruction {
             [Array]::Copy([BitConverter]::GetBytes($w1), 0, $bytes, 4, 4)
             return $bytes
         }
-        { $_ -in 'mxmem-cvt','mxmem-after-hf','mxmem-after-retain-cm-ub','mxmem-after-sat-ub' } {
+        { $_ -in 'mxmem-cvt','mxmem-after-hf','mxmem-after-retain-cm-ub','mxmem-after-sat-ub','mxmem-after-retain-sat-ub','mxmem-after-ub' } {
             if ($Step.s -lt 0 -or $Step.s -gt 31) { throw 'Mxmem-cvt base register out of range (0..31)' }
             if ($Step.t -lt 0 -or $Step.t -gt 31) { throw 'Mxmem-cvt stride register out of range (0..31)' }
             $fields.s = [long]$Step.s
@@ -447,6 +451,8 @@ function ConvertTo-HexagonAssembly {
         'mxmem-after-hf' { $s = "mxmem(r$($Step.s),r$($Step.t)):after.hf = acc" }
         'mxmem-after-retain-cm-ub' { $s = "mxmem(r$($Step.s),r$($Step.t)):after:retain:cm.ub = acc" }
         'mxmem-after-sat-ub' { $s = "mxmem(r$($Step.s),r$($Step.t)):after:sat.ub = acc" }
+        'mxmem-after-retain-sat-ub' { $s = "mxmem(r$($Step.s),r$($Step.t)):after:retain:sat.ub = acc" }
+        'mxmem-after-ub' { $s = "mxmem(r$($Step.s),r$($Step.t)):after.ub = acc" }
         'got-call' {
             # Delta (GOT slot - pc) is filled in after layout by the emitter for independent assembly.
             if ($null -eq $Step.Delta) { throw 'got-call assembly needs the resolved Delta' }

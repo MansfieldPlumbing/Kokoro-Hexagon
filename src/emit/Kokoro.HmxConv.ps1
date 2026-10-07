@@ -10,6 +10,11 @@
 #   r2 = output tile 0 (VTCM), crouton (tb, ob) at (tb*OB + ob)*2048, byte 2*IDX(row, c) + 1.
 #   r3 = column tables, 256 B per output block ob: words 0..31 fp16 scale, words 32..63 int32 bias.
 #   r4 = number of 32-row output tiles (>= 1).
+#   With -OutputPlanes: r3 holds two tables per output block at 512*ob (high plane, then low plane),
+#   and r5 = low-plane output tile 0, same crouton addressing as r2. The high store keeps the
+#   accumulator (:retain:sat.ub); the low store wraps (.ub). With power-of-two scales 2^(1-L) and
+#   2^(9-L) both stores are exact bytes of the same biased accumulator: high = sat(floor(a/2^(L+8))),
+#   low = floor(a/2^L) mod 256 (onnxsim 0dd9980a scripts/android/hmx_gemm/README.md:297-311).
 # Activation u8 = x + 128; the table's int32 must carry -128*sum(w) for the zero point.
 function New-KokoroHmxConvSteps {
     param(
@@ -18,6 +23,8 @@ function New-KokoroHmxConvSteps {
         [ValidateSet(3, 7, 11)][int] $Kernel = 3,
         [ValidateSet(1, 3, 5)][int] $Dilation = 1,
         [string] $LabelPrefix = 'hmxconv',
+        # Two accumulator byte planes per output (see calling convention).
+        [switch] $OutputPlanes,
         # Fall through instead of returning, for inlining into a caller.
         [switch] $NoReturn
     )
@@ -48,14 +55,28 @@ function New-KokoroHmxConvSteps {
         }
         foreach ($h in 0, 1) {
             $o = 2 * $g + $h
-            $s.Add(@{Op='addi'; d=11; s=3; i=(256 * $o)})
-            $s.Add(@{Op='bias-mxmem2'; s=11})
-            $s.Add(@{Op='addi'; d=12; s=2; i=(2048 * $o)})
-            $s.Add(@{Op='mxmem-after-sat-ub'; s=12; t=9})
+            if ($OutputPlanes) {
+                # Retained stores repeat this half; the final non-retaining store moves to the next
+                # (onnxsim 0dd9980a scripts/android/hmx_gemm/hmx_qconv.h:226-234).
+                $s.Add(@{Op='addi'; d=11; s=3; i=(512 * $o)})
+                $s.Add(@{Op='bias-mxmem2'; s=11})
+                $s.Add(@{Op='addi'; d=12; s=2; i=(2048 * $o)})
+                $s.Add(@{Op='mxmem-after-retain-sat-ub'; s=12; t=9})
+                $s.Add(@{Op='addi'; d=11; s=3; i=(512 * $o + 256)})
+                $s.Add(@{Op='bias-mxmem2'; s=11})
+                $s.Add(@{Op='addi'; d=12; s=5; i=(2048 * $o)})
+                $s.Add(@{Op='mxmem-after-ub'; s=12; t=9})
+            } else {
+                $s.Add(@{Op='addi'; d=11; s=3; i=(256 * $o)})
+                $s.Add(@{Op='bias-mxmem2'; s=11})
+                $s.Add(@{Op='addi'; d=12; s=2; i=(2048 * $o)})
+                $s.Add(@{Op='mxmem-after-sat-ub'; s=12; t=9})
+            }
         }
     }
     $s.Add(@{Op='addi'; d=0; s=0; i=$dy})             # next input tile
     $s.Add(@{Op='addi'; d=2; s=2; i=($ob * 2048)})    # next output tile
+    if ($OutputPlanes) { $s.Add(@{Op='addi'; d=5; s=5; i=($ob * 2048)}) }
     $s.Add(@{Op='addi'; d=4; s=4; i=-1})
     $s.Add(@{Op='gtu'; d=0; s=4; t=9})
     $s.Add(@{Op='jump-p'; u=0; Label="${LabelPrefix}_tile"})

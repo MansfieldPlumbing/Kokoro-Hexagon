@@ -10,6 +10,8 @@ param(
     [ValidateSet(128, 256)][int] $ConvChannels = 128,
     [ValidateSet(3, 7, 11)][int] $ConvKernel = 3,
     [ValidateSet(1, 3, 5)][int] $ConvDilation = 1,
+    [switch] $ConvOutputPlanes,
+    [ValidateRange(0,3)][int] $ResidentCostProbePasses = 0,
     [ValidateRange(2, 2048)][int] $AdaInFrames = 64,
     [ValidateRange(1, 128)][int] $AdaInChannels = 128,
     [switch] $AdaInVectorConvolution,
@@ -209,7 +211,7 @@ if($Kernel -eq 'KokoroR0Sub0') {
     $symbol='kokoro_residual_integer'; $soname='libkokoro_residual_integer.so'
 } elseif($Kernel -eq 'KokoroHmxConv') {
     . (Join-Path $PSScriptRoot '..\src\emit\Kokoro.HmxConv.ps1')
-    $steps=@(New-KokoroHmxConvSteps -InputChannels $ConvChannels -OutputChannels $ConvChannels -Kernel $ConvKernel -Dilation $ConvDilation)
+    $steps=@(New-KokoroHmxConvSteps -InputChannels $ConvChannels -OutputChannels $ConvChannels -Kernel $ConvKernel -Dilation $ConvDilation -OutputPlanes:$ConvOutputPlanes)
     $symbol='kokoro_hmx_conv'; $soname='libkokoro_hmx_conv.so'
 } elseif($Kernel -eq 'KokoroLeakyReluInteger') {
     . (Join-Path $PSScriptRoot '..\src\emit\Kokoro.LeakyReluInteger.ps1')
@@ -233,7 +235,7 @@ if($Kernel -eq 'KokoroR0Sub0') {
     Write-NewOrIdenticalFile (Join-Path $OutputDirectory 'runner-layout.json') ([Text.Encoding]::UTF8.GetBytes(($run.Layout | ConvertTo-Json -Depth 6))) -AllowOverwrite:$Force
 } elseif($Kernel -eq 'KokoroGenerator60xResidentRun') {
     . (Join-Path $PSScriptRoot '..\src\emit\Kokoro.Generator60xResidentRun.ps1')
-    $run=New-KokoroGenerator60xResidentRunSteps -Frames $ResBlockFrames
+    $run=New-KokoroGenerator60xResidentRunSteps -Frames $ResBlockFrames -CostProbePasses $ResidentCostProbePasses
     $steps=@($run.Steps)
     $symbol='kokoro_resblock_run_skel_handle_invoke'; $soname='libkokoro_resblock_run_skel.so'
     Write-NewOrIdenticalFile (Join-Path $OutputDirectory 'runner-layout.json') ([Text.Encoding]::UTF8.GetBytes(($run.Layout | ConvertTo-Json -Depth 6))) -AllowOverwrite:$Force
