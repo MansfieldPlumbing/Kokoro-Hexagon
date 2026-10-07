@@ -39,6 +39,17 @@ large-resident path where liveness permits; at 4 MiB the tiled path is required 
 resident path applies only to groups that fit. Whether one V73 binary runs unchanged on
 V75 and later is a separate claim that needs its own phone receipts.
 
+Generator 60x liveness (stock `AdaINResBlock1.forward` and the three-resblock mean,
+`istftnet.py` at `dfb907a0`; 128 channels, u8, 998,528 B per tensor at 7,801 frames,
+conv weights up to 180 KB at K=11). Three tensors must be resident: the residual
+stream, the conv input and the conv output (a conv cannot overwrite its own input
+because it reads neighboring frames). The stage input and the three-way mean can stay
+in DDR: the input is re-read once per resblock and the mean is accumulated by DMA after
+each resblock, about 8 MB of DDR traffic per group against 79 MB today. Three resident
+tensors need about 3.2 MB, so 7,801-frame groups stay resident on SM8635 with about
+1 MB spare (limit about 9,900 frames); SM8550 can keep four tensors resident (limit
+about 15,600 frames). Longer groups take the tiled path.
+
 ## Campaign 1 (Windows characterization)
 
 One corpus: WikipediaHomographData at `8f008f021e88f8b71118a27ae655f1f3121162bc`
