@@ -2,7 +2,7 @@
 [CmdletBinding()]
 param(
     [string] $OutputDirectory = (Join-Path $PSScriptRoot '..\build\hexagon-emission\emitted'),
-    [ValidateSet('Probe','KokoroAffine','KokoroAdaIn','KokoroAdaInResBlock','KokoroAdaInStatistics','KokoroAdaInIntegerCoefficients','KokoroAdaInIntegerAffine','KokoroSnakeInteger','KokoroResidualInteger','KokoroAlbertSoftmax3','KokoroAlbertAttention3','KokoroAlbertAttentionOutput3','KokoroAlbertConnectedAttention3','KokoroConvTile','KokoroLinearTile','KokoroR0Sub0','KokoroHmxLock','KokoroHmxMatrix','KokoroHmxConv','KokoroHmxConvRun','KokoroResBlockRun','KokoroBranchAverageInteger','KokoroGenerator60xRun','KokoroLeakyReluInteger','KokoroVtcmQuery','KokoroDmaCopy','KokoroDmaBench','KokoroAdaInSnakeInteger','KokoroGenerator60xResidentRun','KokoroGeneratorTailRun')][string] $Kernel='Probe',
+    [ValidateSet('Probe','KokoroAffine','KokoroAdaIn','KokoroAdaInResBlock','KokoroAdaInStatistics','KokoroAdaInIntegerCoefficients','KokoroAdaInIntegerAffine','KokoroSnakeInteger','KokoroResidualInteger','KokoroAlbertSoftmax3','KokoroAlbertAttention3','KokoroAlbertAttentionOutput3','KokoroAlbertConnectedAttention3','KokoroConvTile','KokoroLinearTile','KokoroR0Sub0','KokoroHmxLock','KokoroHmxMatrix','KokoroHmxConv','KokoroHmxConvRun','KokoroResBlockRun','KokoroBranchAverageInteger','KokoroGenerator60xRun','KokoroLeakyReluInteger','KokoroVtcmQuery','KokoroDmaCopy','KokoroDmaBench','KokoroAdaInSnakeInteger','KokoroAdaInSnakeTurns','KokoroGenerator60xResidentRun','KokoroGeneratorTailRun')][string] $Kernel='Probe',
     [ValidateRange(2, 32768)][int] $ResBlockFrames = 7801,
     [ValidateSet(3,7,11)][int] $ResBlockKernel = 3,
     [ValidateSet(128,256)][int] $IntegerChannels = 128,
@@ -201,6 +201,10 @@ if($Kernel -eq 'KokoroR0Sub0') {
     . (Join-Path $PSScriptRoot '..\src\emit\Kokoro.AdaInSnakeInteger.ps1')
     $steps=@(New-KokoroAdaInSnakeIntegerSteps)
     $symbol='kokoro_adain_snake_integer'; $soname='libkokoro_adain_snake_integer.so'
+} elseif($Kernel -eq 'KokoroAdaInSnakeTurns') {
+    . (Join-Path $PSScriptRoot '..\src\emit\Kokoro.AdaInSnakeTurns.ps1')
+    $steps=@(New-KokoroAdaInSnakeTurnsSteps)
+    $symbol='kokoro_adain_snake_turns'; $soname='libkokoro_adain_snake_turns.so'
 } elseif($Kernel -eq 'KokoroSnakeInteger') {
     . (Join-Path $PSScriptRoot '..\src\emit\Kokoro.SnakeInteger.ps1')
     $steps=@(New-KokoroSnakeIntegerSteps -Channels $IntegerChannels)

@@ -73,6 +73,9 @@ $script:HexagonForms = @{
     'vasr-h' = '00011001011tttttPP0sssss110ddddd'
     'vasl-h' = '00011001100tttttPP0sssss000ddddd'
     'vsplat-h' = '00011001110sssssPP000000001ddddd'
+    # Q31 multiply pair (vmpye then accumulating vmpyo); d of the accumulating form is read and written.
+    'vmpye-w-uh' = '00011111111tttttPP0sssss101ddddd'
+    'vmpyo-acc-w-h-rnd-sat-shift' = '00011100001tttttPP1sssss111ddddd'
     'vlut16'         = '00011011vvvvvxxxPP1sssss110ddddd'
     'vlut16-or'      = '00011011vvvvvxxxPP1sssss111ddddd'
     'valign'         = '00011011tttttxxxPP0sssss000ddddd'
@@ -440,6 +443,8 @@ function ConvertTo-HexagonAssembly {
         'vasr-h' { $s="v$($Step.d).h = vasr(v$($Step.s).h,r$($Step.t))" }
         'vasl-h' { $s="v$($Step.d).h = vasl(v$($Step.s).h,r$($Step.t))" }
         'vsplat-h' { $s="v$($Step.d).h = vsplat(r$($Step.s))" }
+        'vmpye-w-uh' { $s="v$($Step.d).w = vmpye(v$($Step.s).w,v$($Step.t).uh)" }
+        'vmpyo-acc-w-h-rnd-sat-shift' { $s="v$($Step.d).w += vmpyo(v$($Step.s).w,v$($Step.t).h):<<1:rnd:sat:shift" }
         'vlut16' { $s="v$($Step.d+1):$($Step.d).h = vlut16(v$($Step.s).b,v$($Step.v).h,r$($Step.x))" }
         'vlut16-or' { $s="v$($Step.d+1):$($Step.d).h |= vlut16(v$($Step.s).b,v$($Step.v).h,r$($Step.x))" }
         'vmpy-sf-qf32'   { $s = "v$($Step.d).qf32 = vmpy(v$($Step.s).sf,v$($Step.t).sf)" }

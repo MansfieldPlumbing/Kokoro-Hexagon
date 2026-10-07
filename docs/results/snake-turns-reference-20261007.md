@@ -42,3 +42,22 @@ arithmetic semantics are not yet exercised in the V73 simulator.
 
 Reproduce: `pwsh -File tools/reference/Measure-KokoroSnakeTurns.ps1 -CaptureDirectory <af>,<am>
 -MaxFrames 2000 [-CosHalfword | -CosTable] -ReportPath build/<new>.json`.
+
+## Emitted body, V73 simulation
+
+`src/emit/Kokoro.AdaInSnakeTurns.ps1` emits the halfword-polynomial form as one HVX body: biased
+16-bit input in native croutons, per-channel K, M, S, and both conv-input byte planes out (high
+`(out >> 8) + 128`, low `out & 255`, odd bytes). 70 instructions per 128-byte vector (64 values),
+unpacked; 1,524 code bytes, matching SDK assembly. Harness
+`tools/reference/hmx-sim/adain_snake_turns.c` models the integer contract lane by lane.
+
+| Check (128 channels, 2 tiles, random x, K, M, S) | Result |
+|---|---|
+| High plane vs integer model | 0 / 8,192 mismatches |
+| Low plane vs integer model | 0 / 8,192 mismatches |
+| 16-bit output vs double-precision Snake of the same constants | 86.22 dB |
+
+This confirms the simulator semantics of the Q31 multiply pair (`vmpye` + accumulating
+`vmpyo:<<1:rnd:sat:shift`), the Q15 rounding multiply and the halfword add, subtract, abs and
+shifts as modeled. Not yet connected to the resident stage (its 16-bit residual, moments and
+coefficient generation), and not timed.
