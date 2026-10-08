@@ -29,15 +29,17 @@ function Get-KokoroGeneratorTail16Layout {
         Samples=(5*($Frames-1));PcmOffset=256;OutputBytes=(256+$pcmBytes);PlaneStride=([long]$BatchTiles*4096)}
 }
 
-function New-KokoroGeneratorTail16RunSteps {
-    param([ValidateRange(2,32768)][int]$Frames=7801,[ValidateRange(1,64)][int]$BatchTiles=16)
-    . (Join-Path $PSScriptRoot 'Kokoro.ResBlockRun.ps1')
-    foreach($file in 'Kokoro.HmxConvPlanes.ps1','Kokoro.PlaneCombine.ps1','Kokoro.LeakyRelu16.ps1','Kokoro.TailSpectrum16.ps1','Kokoro.DmaCopy.ps1') { . (Join-Path $PSScriptRoot $file) }
+# The tail job portion, appended to a caller's step list: DMA of the input tensor, weights and parameters into
+# VTCM (r18) from the given base registers and offsets, the three phases, PCM int16 to PcmBase + PcmOffset.
+# Uses r0..r15 only; the caller provides r18 (VTCM) and r24 (DMA descriptor slots) and keeps r16..r27.
+function Add-KokoroGeneratorTail16JobSteps {
+    param([Parameter(Mandatory)][AllowEmptyCollection()][Collections.Generic.List[hashtable]]$Steps,[Parameter(Mandatory)][AllowEmptyCollection()][Collections.Generic.List[object]]$Calls,
+        [ValidateRange(2,32768)][int]$Frames=7801,[ValidateRange(1,64)][int]$BatchTiles=16,
+        [int]$InputBase=20,[long]$InputOffset=0,[int]$WeightsBase=21,[long]$WeightsOffset=0,[int]$TablesBase=22,[long]$TablesOffset=0,
+        [int]$PcmBase=23,[long]$PcmOffset=256)
     $layout=Get-KokoroGeneratorTail16Layout -Frames $Frames -BatchTiles $BatchTiles
-    $tiles=$layout.Tiles; $batch=$BatchTiles; $reg=$layout.Regions; $planeStride=$layout.PlaneStride
-    $weightBytes=172032; $parameterBytes=16384
-    $s=[Collections.Generic.List[hashtable]]::new()
-    $calls=[Collections.Generic.List[object]]::new()
+    $tiles=$layout.Tiles; $batch=$BatchTiles; $reg=$layout.Regions
+    $s=$Steps; $calls=$Calls
     $imm={param([int]$r,[long]$v) $u=[uint32]($v -band 0xffffffffL);$s.Add(@{Op='lo';x=$r;i=($u -band 65535)});$s.Add(@{Op='hi';x=$r;i=($u -shr 16)})}
     $ptr={param([int]$r,[int]$baseReg,[long]$offset) $offsetReg=if($r -eq $baseReg){15}else{$r}; & $imm $offsetReg $offset;$s.Add(@{Op='add';d=$r;s=$baseReg;t=$offsetReg}) }
     $call={param([string]$label) $pc=@{Op='add-pc';d=14;i=0};$lo=@{Op='lo';x=15;i=0};$hi=@{Op='hi';x=15;i=0};$s.Add($pc);$s.Add($lo);$s.Add($hi);$s.Add(@{Op='add';d=14;s=14;t=15});$s.Add(@{Op='callr';s=14});$calls.Add(@{pc=$pc;low=$lo;high=$hi;label=$label})}
@@ -74,37 +76,11 @@ function New-KokoroGeneratorTail16RunSteps {
         $s.Add(@{Op='mpy-d';d=10;s=8;t=9}); $s.Add(@{Op='imm';d=14;i=8192}); $s.Add(@{Op='imm';d=15;i=0})
         $s.Add(@{Op='add-d';d=10;s=10;t=14}); $s.Add(@{Op='asr-d-i';d=10;s=10;i=14})
         & $imm 12 -32768; & $imm 13 32767; $s.Add(@{Op='max';d=10;s=10;t=12}); $s.Add(@{Op='min';d=10;s=10;t=13})
-        & $ptr 5 23 ($layout.PcmOffset+2*$sampleIndex); $s.Add(@{Op='store-h';s=5;t=10;Offset=0})
+        & $ptr 5 $PcmBase ($PcmOffset+2*$sampleIndex); $s.Add(@{Op='store-h';s=5;t=10;Offset=0})
     }
-
-    # Checked resource wrapper of the frozen K=11 resblock runner (as Kokoro.GeneratorTailRun.ps1).
-    $wrapperSource=New-KokoroResBlockRunSteps -Frames $Frames -Kernel 11
-    $base=@($wrapperSource.Steps);$start=-1
-    for($i=0;$i -lt $base.Count;$i++){if($base[$i].Op -eq 'label' -and $base[$i].Name -eq 'connected_job'){$start=$i;break}}
-    if($start -lt 0){throw 'Connected wrapper anchor changed'}
-    $minimum=@(4,$layout.InputBytes,$weightBytes,$parameterBytes,$layout.OutputBytes)
-    $oldVtcm=[long]$wrapperSource.Layout.VtcmBytes; $patched=@{request=0;check=0}
-    for($i=0;$i -lt $start;$i++){
-        $step=$base[$i].Clone()
-        if($step.Op -eq 'lo' -and $step.x -eq 1 -and $i -ge 2 -and $base[$i-1].Op -eq 'load' -and $base[$i-1].s -eq 3){$a=[int](($base[$i-1].Offset-4)/8);$v=$minimum[$a]-1;$step.i=$v -band 65535;$base[$i+1]=$base[$i+1].Clone();$base[$i+1].i=$v -shr 16}
-        elseif($step.Op -eq 'lo' -and $i+1 -lt $start -and $base[$i+1].Op -eq 'hi' -and $base[$i+1].x -eq $step.x){
-            $value=[long]$step.i -bor ([long]$base[$i+1].i -shl 16); $new=$null
-            if($step.x -eq 1 -and $value -eq $oldVtcm){$new=$layout.VtcmBytes;$patched.request++}
-            elseif($step.x -eq 15 -and $value -eq $oldVtcm-1){$new=$layout.VtcmBytes-1;$patched.check++}
-            if($null -ne $new){$step.i=$new -band 65535;$base[$i+1]=$base[$i+1].Clone();$base[$i+1].i=$new -shr 16}
-        }
-        $s.Add($step)
-    }
-    if($patched.request -ne 1 -or $patched.check -ne 1){throw "VTCM size anchors changed ($($patched.request),$($patched.check))"}
-
-    # Job. r18 VTCM, r20 input, r21 weights, r22 parameters, r23 output, r24 descriptors, r26:27 start ticks.
-    $s.Add(@{Op='label';Name='connected_job'});$s.Add(@{Op='allocframe';Bytes=256})
-    foreach($r in 16,18,20,22,24,26){$s.Add(@{Op='store-d';s=29;t=$r;Offset=(($r-16)*4)})}
-    $s.Add(@{Op='addi';d=24;s=29;i=(64+63)}); & $imm 0 -64; $s.Add(@{Op='and';d=24;s=24;t=0})
-    $s.Add(@{Op='hwticks';d=26})
-    & $dma 18 $reg.Input.Offset 20 0 $layout.InputBytes
-    & $dma 18 $reg.Weights.Offset 21 0 $weightBytes
-    & $dma 18 $reg.Tables.Offset 22 0 $parameterBytes
+    & $dma 18 $reg.Input.Offset $InputBase $InputOffset $layout.InputBytes
+    & $dma 18 $reg.Weights.Offset $WeightsBase $WeightsOffset 172032
+    & $dma 18 $reg.Tables.Offset $TablesBase $TablesOffset 16384
     # conv_post per batch.
     for($startTile=0;$startTile -lt $tiles;$startTile+=$batch){
         $count=[math]::Min($batch,$tiles-$startTile)
@@ -138,7 +114,7 @@ function New-KokoroGeneratorTail16RunSteps {
         & $call 'body_combine'
         $s.Add(@{Op='syncht'})
         # Copy: frame m, lane r (word lane r of the row pair holds frames m (low) and m + 1 (high)) -> samples 5m + r.
-        & $ptr 4 18 $reg.Pcm.Offset; & $ptr 5 23 ($layout.PcmOffset+320L*$startTile); & $imm 12 0x80008000L
+        & $ptr 4 18 $reg.Pcm.Offset; & $ptr 5 $PcmBase ($PcmOffset+320L*$startTile); & $imm 12 0x80008000L
         & $imm 6 $count; $s.Add(@{Op='imm';d=8;i=0})
         $tl=& $label; $pl=& $label
         $s.Add(@{Op='label';Name=$tl}); $s.Add(@{Op='imm';d=7;i=16})
@@ -157,18 +133,64 @@ function New-KokoroGeneratorTail16RunSteps {
             for($r=0;$r -lt 5;$r++){ & $edgeSample ($reg.Pcm.Offset+$pairOff+4*$r) ([bool]($lastFrame%2)) (5+$r) (5L*$lastFrame+$r) }
         }
     }
-    $s.Add(@{Op='hwticks';d=0});$s.Add(@{Op='store-d';s=23;t=26;Offset=0});$s.Add(@{Op='store-d';s=23;t=0;Offset=8})
-    $s.Add(@{Op='imm';d=0;i=1});$s.Add(@{Op='store';s=23;t=0;Offset=44})
-    foreach($r in 16,18,20,22,24,26){$s.Add(@{Op='load-d';d=$r;s=29;Offset=(($r-16)*4)})}
-    $s.Add(@{Op='dealloc-return'})
+}
 
+function Get-KokoroGeneratorTail16Bodies {
+    param([Parameter(Mandatory)][long]$PlaneStride)
+    $planeStride=$PlaneStride
     $bodies=@(
         @('body_leaky',@(New-KokoroLeakyRelu16Steps)),
         @('body_conv_post',@(New-KokoroHmxConvPlanesSteps -InputChannels 128 -OutputChannels 64 -Kernel 7 -Dilation 1 -WeightPlanes 2 -PlaneStride $planeStride -LabelPrefix 't16post')),
         @('body_combine',@(New-KokoroPlaneCombineSteps -Mode Conv -Channels 64 -Groups 3 -PlaneStride $planeStride -LabelPrefix 't16combine')),
         @('body_spectrum',@(New-KokoroTailSpectrum16Steps)),
         @('body_conv_istft',@(New-KokoroHmxConvPlanesSteps -InputChannels 64 -OutputChannels 64 -Kernel 7 -Dilation 1 -WeightPlanes 2 -PlaneStride $planeStride -LabelPrefix 't16istft')))
-    foreach($pair in $bodies){$s.Add(@{Op='label';Name=$pair[0]});foreach($step in $pair[1]){$s.Add($step)}}
+    $bodies
+}
+
+function New-KokoroGeneratorTail16RunSteps {
+    param([ValidateRange(2,32768)][int]$Frames=7801,[ValidateRange(1,64)][int]$BatchTiles=16)
+    . (Join-Path $PSScriptRoot 'Kokoro.ResBlockRun.ps1')
+    foreach($file in 'Kokoro.HmxConvPlanes.ps1','Kokoro.PlaneCombine.ps1','Kokoro.LeakyRelu16.ps1','Kokoro.TailSpectrum16.ps1','Kokoro.DmaCopy.ps1') { . (Join-Path $PSScriptRoot $file) }
+    $layout=Get-KokoroGeneratorTail16Layout -Frames $Frames -BatchTiles $BatchTiles
+    $tiles=$layout.Tiles; $batch=$BatchTiles; $reg=$layout.Regions; $planeStride=$layout.PlaneStride
+    $weightBytes=172032; $parameterBytes=16384
+    $s=[Collections.Generic.List[hashtable]]::new()
+    $calls=[Collections.Generic.List[object]]::new()
+    $imm={param([int]$r,[long]$v) $u=[uint32]($v -band 0xffffffffL);$s.Add(@{Op='lo';x=$r;i=($u -band 65535)});$s.Add(@{Op='hi';x=$r;i=($u -shr 16)})}
+    $script:__t16=0
+
+    # Checked resource wrapper of the frozen K=11 resblock runner (as Kokoro.GeneratorTailRun.ps1).
+    $wrapperSource=New-KokoroResBlockRunSteps -Frames $Frames -Kernel 11
+    $base=@($wrapperSource.Steps);$start=-1
+    for($i=0;$i -lt $base.Count;$i++){if($base[$i].Op -eq 'label' -and $base[$i].Name -eq 'connected_job'){$start=$i;break}}
+    if($start -lt 0){throw 'Connected wrapper anchor changed'}
+    $minimum=@(4,$layout.InputBytes,$weightBytes,$parameterBytes,$layout.OutputBytes)
+    $oldVtcm=[long]$wrapperSource.Layout.VtcmBytes; $patched=@{request=0;check=0}
+    for($i=0;$i -lt $start;$i++){
+        $step=$base[$i].Clone()
+        if($step.Op -eq 'lo' -and $step.x -eq 1 -and $i -ge 2 -and $base[$i-1].Op -eq 'load' -and $base[$i-1].s -eq 3){$a=[int](($base[$i-1].Offset-4)/8);$v=$minimum[$a]-1;$step.i=$v -band 65535;$base[$i+1]=$base[$i+1].Clone();$base[$i+1].i=$v -shr 16}
+        elseif($step.Op -eq 'lo' -and $i+1 -lt $start -and $base[$i+1].Op -eq 'hi' -and $base[$i+1].x -eq $step.x){
+            $value=[long]$step.i -bor ([long]$base[$i+1].i -shl 16); $new=$null
+            if($step.x -eq 1 -and $value -eq $oldVtcm){$new=$layout.VtcmBytes;$patched.request++}
+            elseif($step.x -eq 15 -and $value -eq $oldVtcm-1){$new=$layout.VtcmBytes-1;$patched.check++}
+            if($null -ne $new){$step.i=$new -band 65535;$base[$i+1]=$base[$i+1].Clone();$base[$i+1].i=$new -shr 16}
+        }
+        $s.Add($step)
+    }
+    if($patched.request -ne 1 -or $patched.check -ne 1){throw "VTCM size anchors changed ($($patched.request),$($patched.check))"}
+
+    # Job. r18 VTCM, r20 input, r21 weights, r22 parameters, r23 output, r24 descriptors, r26:27 start ticks.
+    $s.Add(@{Op='label';Name='connected_job'});$s.Add(@{Op='allocframe';Bytes=256})
+    foreach($r in 16,18,20,22,24,26){$s.Add(@{Op='store-d';s=29;t=$r;Offset=(($r-16)*4)})}
+    $s.Add(@{Op='addi';d=24;s=29;i=(64+63)}); & $imm 0 -64; $s.Add(@{Op='and';d=24;s=24;t=0})
+    $s.Add(@{Op='hwticks';d=26})
+    Add-KokoroGeneratorTail16JobSteps -Steps $s -Calls $calls -Frames $Frames -BatchTiles $BatchTiles
+    $s.Add(@{Op='hwticks';d=0});$s.Add(@{Op='store-d';s=23;t=26;Offset=0});$s.Add(@{Op='store-d';s=23;t=0;Offset=8})
+    $s.Add(@{Op='imm';d=0;i=1});$s.Add(@{Op='store';s=23;t=0;Offset=44})
+    foreach($r in 16,18,20,22,24,26){$s.Add(@{Op='load-d';d=$r;s=29;Offset=(($r-16)*4)})}
+    $s.Add(@{Op='dealloc-return'})
+
+    foreach($pair in (Get-KokoroGeneratorTail16Bodies -PlaneStride $planeStride)){$s.Add(@{Op='label';Name=$pair[0]});foreach($step in $pair[1]){$s.Add($step)}}
     $labels=@{};$pcs=[Collections.Generic.Dictionary[object,long]]::new();$pc=0L;$isa=Get-InstructionSet
     foreach($step in $s){if($step.Op -eq 'label'){if($labels.ContainsKey($step.Name)){throw "Duplicate label $($step.Name)"};$labels[$step.Name]=$pc};$pcs[$step]=$pc;$pc+=& $isa.Length $step}
     foreach($c in $calls){$delta=[uint32](($labels[$c.label]-$pcs[$c.pc]) -band 0xffffffffL);$c.low.i=$delta -band 65535;$c.high.i=$delta -shr 16}
