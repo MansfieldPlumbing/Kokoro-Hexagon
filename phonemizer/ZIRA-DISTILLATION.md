@@ -1,7 +1,7 @@
 # Zira observations, contextual selection and Kokoro speech
 
 The executable entrypoint is
-`phonemizer/Dev.MansfieldPlumbing.English.Phonemizer.ps1`.
+`phonemizer/Invoke-EnglishPhonemizer.ps1`.
 It streams a UTF-8 text corpus into one compact PSD1 intermediary, projects
 validated records into typed observations, and lowers pronunciation knowledge
 and selection logic into a managed assembly. Stock Kokoro is the Windows audio
@@ -10,29 +10,29 @@ reference. The standalone pronunciation driver references only
 
 ## One entrypoint and one intermediary
 
-Run from `C:\Dev\PSPerception`:
+Run from the repository root, after `tools/Get-KokoroModelInput.ps1` (config.json) and `tools/Get-PhonemizerInput.ps1` (pinned PSLowering):
 
 ```powershell
 # Six contextual examples; replace this input with a larger sentence corpus.
-pwsh -NoProfile -File phonemizer/Dev.MansfieldPlumbing.English.Phonemizer.ps1 -Zira -CorpusPath phonemizer/corpora/record-context-smoke.txt
+pwsh -NoProfile -File phonemizer/Invoke-EnglishPhonemizer.ps1 -Zira -CorpusPath phonemizer/corpora/record-context-smoke.txt
 
 # Embed observations with their timing and reference graph, without admitting rules.
-pwsh -NoProfile -File phonemizer/Dev.MansfieldPlumbing.English.Phonemizer.ps1 -LowerCorpus
+pwsh -NoProfile -File phonemizer/Invoke-EnglishPhonemizer.ps1 -LowerCorpus
 
 # Admit contextual choices using separate construction and held-out examples.
-pwsh -NoProfile -File phonemizer/Dev.MansfieldPlumbing.English.Phonemizer.ps1 -Distill
+pwsh -NoProfile -File phonemizer/Invoke-EnglishPhonemizer.ps1 -Distill
 
 # Check target token parity and canonical standalone behavior.
-pwsh -NoProfile -File phonemizer/Dev.MansfieldPlumbing.English.Phonemizer.ps1 -Parity
-pwsh -NoProfile -File phonemizer/Dev.MansfieldPlumbing.English.Phonemizer.ps1 -VerifyDriver
+pwsh -NoProfile -File phonemizer/Invoke-EnglishPhonemizer.ps1 -Parity
+pwsh -NoProfile -File phonemizer/Invoke-EnglishPhonemizer.ps1 -VerifyDriver
 
 # Synthesize and play through the compiled pronunciation driver.
-pwsh -NoProfile -File phonemizer/Dev.MansfieldPlumbing.English.Phonemizer.ps1 -Speak -Text 'Play the record.'
-pwsh -NoProfile -File phonemizer/Dev.MansfieldPlumbing.English.Phonemizer.ps1 -Speak -Text 'Please record it.'
+pwsh -NoProfile -File phonemizer/Invoke-EnglishPhonemizer.ps1 -Speak -Text 'Play the record.'
+pwsh -NoProfile -File phonemizer/Invoke-EnglishPhonemizer.ps1 -Speak -Text 'Please record it.'
 ```
 
 The default intermediary is
-`%LOCALAPPDATA%\Build\PSPerception\english\zira-corpus.psd1`.
+`build\phonemizer\english\zira-corpus.psd1`.
 `-ObservationPath` selects another output in the project build directory.
 Corpus capture reads one nonblank line at a time and flushes each observation
 to a temporary file. A completed run replaces the destination, retaining a

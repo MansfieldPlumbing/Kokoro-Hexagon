@@ -9,18 +9,30 @@ Developed in PSPerception and imported from GitHub `MansfieldPlumbing/PSPercepti
 
 | File here | Source path | Blob | Check |
 | --- | --- | --- | --- |
-| `phonemizer/Dev.MansfieldPlumbing.English.Phonemizer.ps1` | `phonemizer/Dev.MansfieldPlumbing.English.Phonemizer.ps1` | `45946de23bd062e075b3607112b75f954992c0aa` | verified |
+| `phonemizer/Invoke-EnglishPhonemizer.ps1` | `phonemizer/Dev.MansfieldPlumbing.English.Phonemizer.ps1` | `45946de23bd062e075b3607112b75f954992c0aa` | verified at import; since renamed and edited here (build paths) |
 | `phonemizer/corpora/english-pronunciation-challenges.txt` | `phonemizer/corpora/english-pronunciation-challenges.txt` | `fbfeb7d03fc4a936aab3f36800becc393ce4bf96` | verified |
 | `phonemizer/corpora/record-context-smoke.txt` | `phonemizer/corpora/record-context-smoke.txt` | `0b0af5d958e98a03a52a4252bb65d2d778fea9f7` | verified |
-| `phonemizer/ZIRA-DISTILLATION.md` | `docs/ZIRA-DISTILLATION.md` | `3c1a22252294fbae4b2a3091214a69105e6bb053` | verified |
+| `phonemizer/ZIRA-DISTILLATION.md` | `docs/ZIRA-DISTILLATION.md` | `3c1a22252294fbae4b2a3091214a69105e6bb053` | verified at import; since edited here (paths) |
 
 Not imported: `phonemizer/GetSmaPhonemes.ps1` (the earlier SMA path, which depends on PSPerception's
 `experiments/` and `src/`).
 
-Reported by the PSPerception workflow (Windows; not yet measured on the phone): 73 utterances captured (332 word
-events, 1,272 phone events); 1,292 symbols mapped to Kokoro IDs with none dropped, all 114 vocabulary IDs checked;
-4 admitted choices, 3 retained rejections, 6 held-out checks; 26 fixtures and 11 teacher-backed token checks; warm
-latency about 120 us per sentence (2 us for phone mapping), excluding startup. Misaki parity is a separate gate.
+## Build and run here
 
-Follow-ups for this repository: the script's default paths still point at `%LOCALAPPDATA%\Build\PSPerception`
-(generated files belong in this repository's ignored `build/`), and its PSLowering compiler input is pinned there.
+Generated files go under `build/phonemizer` (lexicon reference, Zira captures, typed corpora, driver). Inputs:
+`tools/Get-KokoroModelInput.ps1` (Kokoro `config.json`), `tools/Get-PhonemizerInput.ps1` (PSLowering at the commit
+and blob ids pinned in `lib/manifest.json`); Moby data is fetched SHA-256 pinned by `-Build`.
+
+```powershell
+pwsh -NoProfile -File phonemizer/Invoke-EnglishPhonemizer.ps1 -Build
+pwsh -NoProfile -File phonemizer/Invoke-EnglishPhonemizer.ps1 -BuildDriver
+pwsh -NoProfile -File tools/Invoke-PhonemizerProbe.ps1 -DriverPath <driver dll> -Soc SM8550
+```
+
+The product interface is `CoreDriver.Run(text).SymbolIds` (Kokoro vocabulary IDs, without the BOS/EOS zeros),
+valid only when `Complete` is true. Measured in this repository: all Windows gates pass; on SM8550 the driver
+loads in 15 ms, takes 25 ms on its first call and 39 us warm per sentence, with IDs identical to Windows; 22 of
+the 73 challenge sentences are complete. See `docs/results/phonemizer-driver-sm8550-20261008.md`.
+
+Gaps before end-to-end text input: inflected forms (`-s`, `-ed`, `-ing`), numerals, units, currency, dates and
+acronyms, and a default for heteronyms the grammar leaves unresolved. Misaki parity is not measured.

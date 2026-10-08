@@ -122,6 +122,22 @@
       }
     ]
   },
+  "psLowering": {
+    "repo": "https://github.com/MansfieldPlumbing/PSLowering",
+    "commit": "1afabe056235a570da29e268824784557d4f6cdd",
+    "role": "Host-side compiler that lowers the phonemizer's PowerShell classes to a CoreLib-only assembly; never an APK dependency.",
+    "files": [
+      { "path": "src/Ast/AstLoweringVisitor.ps1", "bytes": 59073, "blob": "ca8a7024574554f58be25c9bac0ac0e743591b9b" },
+      { "path": "src/Ast/AstTypeResolver.ps1", "bytes": 4041, "blob": "499a53a71bde70c21b0c4b9035786f7d91a6e9c2" },
+      { "path": "src/Ast/AstValidator.ps1", "bytes": 2280, "blob": "4e36cf43bc185f1737e8318bdf249fe5210381e5" },
+      { "path": "src/Ast/ClassModel.ps1", "bytes": 14304, "blob": "f4315eaa0588bda7a231c4b24b6344cca97827be" },
+      { "path": "src/Dev.MansfieldPlumbing.PowerShell.Lowering.psd1", "bytes": 818, "blob": "9f002e7a398bb60b1b0a88710ced73a5a1bed491" },
+      { "path": "src/Dev.MansfieldPlumbing.PowerShell.Lowering.psm1", "bytes": 12669, "blob": "3cfa9060898beb75d955d25bb7b5751fdc35b0ab" },
+      { "path": "src/Emitter/IlEmitter.ps1", "bytes": 35046, "blob": "8734a99f5882b26e67014b5bdc659d9ee48ab3eb" },
+      { "path": "src/Packaging/AssemblyBuilder.ps1", "bytes": 5369, "blob": "851b4167d44546238329ed8d0de9509c52eee4c6" },
+      { "path": "src/Packaging/DeterministicMvid.ps1", "bytes": 3073, "blob": "328f0101eddde9002f294197c5a86ee7249efd3c" }
+    ]
+  },
   "speechFrontEnd": {
     "package": "phonemizer",
     "version": "1.2.1",

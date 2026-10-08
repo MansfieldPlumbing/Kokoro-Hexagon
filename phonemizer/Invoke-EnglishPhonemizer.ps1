@@ -21,21 +21,24 @@ param(
     [switch]$NoPlayback,
     [Parameter(ParameterSetName='Speak')][switch]$UseZira,
     [string]$SpeechAssemblyPath=(Join-Path $PSHOME 'System.Speech.dll'),
-    [string]$KokoroDirectory=(Join-Path $env:LOCALAPPDATA 'Build\PSPerception\kokoro'),
+    [string]$KokoroDirectory=(Join-Path $PSScriptRoot '..\build\inputs\kokoro'),
     [string]$PythonPath='C:\bin\micromamba\envs\mono\python.exe',
     [string]$DotnetPath='dotnet',
     [string]$CorpusPath='',
-    [string]$ObservationPath=(Join-Path $env:LOCALAPPDATA 'Build\PSPerception\english\zira-corpus.psd1'),
+    [string]$ObservationPath=(Join-Path $PSScriptRoot '..\build\phonemizer\english\zira-corpus.psd1'),
     [string]$ValidationCorpusPath='',
-    [string]$CorrectionPath=(Join-Path $env:LOCALAPPDATA 'Build\PSPerception\english\zira-corrections.psd1'),
+    [string]$CorrectionPath=(Join-Path $PSScriptRoot '..\build\phonemizer\english\zira-corrections.psd1'),
     [ValidateSet('Proof','Moby','MobyOnly')][string]$LexicalSource='Moby',
-    [string]$AssemblyPath=(Join-Path $env:LOCALAPPDATA 'Build\PSPerception\english\Dev.MansfieldPlumbing.English.Phonemizer.dll')
+    [string]$AssemblyPath=(Join-Path $PSScriptRoot '..\build\phonemizer\english\Dev.MansfieldPlumbing.English.Phonemizer.dll')
 )
 Set-StrictMode -Version Latest
 $ErrorActionPreference='Stop'
 $script:EnglishReferenceCache=@{}
 $script:EnglishCorrectionCache=@{}
 $script:EnglishCoreCache=@{}
+# Generated files stay under this repository's ignored build/ (AGENTS.md, Repository).
+$script:EnglishBuildRoot=[IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..\build\phonemizer'))
+$script:EnglishModelRoot=[IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..\build\inputs\kokoro\f3ff3571791e39611d31c381e3a41a3af07b4987'))
 
 class EnglishZiraPhone {
     EnglishZiraPhone() {}
@@ -112,7 +115,7 @@ function Write-EnglishBuildReceipt {
 }
 
 function Get-EnglishKokoroSpecification {
-    $path=Join-Path $env:LOCALAPPDATA 'Build\PSPerception\kokoro-config.json'
+    $path=Join-Path $script:EnglishModelRoot 'config.json'
     if((Get-FileHash -LiteralPath $path).Hash -cne '5ABB01E2403B072BF03D04FDE160443E209D7A0DAD49A423BE15196B9B43C17F'){throw 'Pinned Kokoro specification integrity failure.'}
     $vocab=[Collections.Generic.Dictionary[string,int]]::new([StringComparer]::Ordinal);$reading=$false
     foreach($line in [IO.File]::ReadAllLines($path)){
@@ -129,7 +132,7 @@ function Get-EnglishKokoroSpecification {
 }
 
 function Import-EnglishLowering {
-    $compiler=Join-Path $env:LOCALAPPDATA 'Build\PSPerception\inputs\pslowering-1afabe056235a570da29e268824784557d4f6cdd'
+    $compiler=Join-Path $script:EnglishBuildRoot 'inputs\pslowering-1afabe056235a570da29e268824784557d4f6cdd'
     $manifest=Import-Csv -LiteralPath (Join-Path $compiler 'verified-source.tsv') -Delimiter "`t"
     if($manifest.Count -ne 9){throw 'Pinned lowering source count failure.'}
     foreach($row in $manifest){
@@ -165,7 +168,7 @@ function Get-EnglishTypedArrayLiteral {
 
 function Save-EnglishZiraObservation {
     param([Parameter(Mandatory)][object]$Capture,[switch]$SourceOnly)
-    $directory=Join-Path $env:LOCALAPPDATA 'Build\PSPerception\english\zira-captures'
+    $directory=Join-Path $script:EnglishBuildRoot 'english\zira-captures'
     [void][IO.Directory]::CreateDirectory($directory)
     $path=Join-Path $directory ($Capture.Identity+'-'+[guid]::NewGuid().ToString('N')+'.psd1')
     $b=[Text.StringBuilder]::new()
@@ -298,7 +301,7 @@ function Export-EnglishZiraCorpus {
     param([object[]]$Captures,[object[]]$Entries=@(),[string]$Pointer='')
     $source=New-EnglishZiraDataSource -Captures $Captures -Entries $Entries
     $identity=[Convert]::ToHexString([Security.Cryptography.SHA256]::HashData([Text.Encoding]::UTF8.GetBytes($source)))
-    $directory=Join-Path $env:LOCALAPPDATA ('Build\PSPerception\english\typed-corpora\'+$identity)
+    $directory=Join-Path $script:EnglishBuildRoot ('english\typed-corpora\'+$identity)
     [void][IO.Directory]::CreateDirectory($directory)
     $input=Join-Path $directory 'observations.ps1';$output=Join-Path $directory ('Dev.MansfieldPlumbing.English.Zira.'+$identity.Substring(0,16)+'.dll')
     Import-EnglishLowering
@@ -340,7 +343,7 @@ function Export-EnglishZiraCorpus {
         }
     }
     if($Pointer){
-        $root=[IO.Path]::GetFullPath((Join-Path $env:LOCALAPPDATA 'Build\PSPerception'))+'\';$Pointer=[IO.Path]::GetFullPath($Pointer)
+        $root=[IO.Path]::GetFullPath(($script:EnglishBuildRoot))+'\';$Pointer=[IO.Path]::GetFullPath($Pointer)
         if(-not $Pointer.StartsWith($root,[StringComparison]::OrdinalIgnoreCase)){throw 'Typed corpus pointer outside build root.'}
         if(Test-Path -LiteralPath $Pointer){Copy-Item -LiteralPath $Pointer -Destination ($Pointer+'.'+[guid]::NewGuid().ToString('N')+'.before')}
         Write-EnglishBuildReceipt -Path $Pointer -Data $data
@@ -351,7 +354,7 @@ function Export-EnglishZiraCorpus {
 function Import-EnglishZiraCorpus {
     param([Parameter(Mandatory)][string]$Path)
     $receipt=Import-PowerShellDataFile -LiteralPath $Path
-    $root=[IO.Path]::GetFullPath((Join-Path $env:LOCALAPPDATA 'Build\PSPerception'))+'\'
+    $root=[IO.Path]::GetFullPath(($script:EnglishBuildRoot))+'\'
     if($receipt.CompilerCommit -cne '1afabe056235a570da29e268824784557d4f6cdd' -or -not ([IO.Path]::GetFullPath($receipt.Assembly)).StartsWith($root,[StringComparison]::OrdinalIgnoreCase) -or -not ([IO.Path]::GetFullPath($receipt.Source)).StartsWith($root,[StringComparison]::OrdinalIgnoreCase)){throw 'Typed corpus source provenance failure.'}
     if((Get-FileHash -LiteralPath $receipt.Assembly).Hash -cne $receipt.Sha256 -or (Get-FileHash -LiteralPath $receipt.Source).Hash -cne $receipt.SourceSha256){throw 'Typed corpus integrity failure.'}
     $assembly=[Reflection.Assembly]::LoadFrom($receipt.Assembly)
@@ -368,7 +371,7 @@ function Import-EnglishZiraCorpus {
 function Write-EnglishZiraCorpus {
     param([Parameter(Mandatory)][string]$InputPath,[string]$OutputPath=$ObservationPath)
     $input=[IO.Path]::GetFullPath($InputPath);$output=[IO.Path]::GetFullPath($OutputPath)
-    $root=[IO.Path]::GetFullPath((Join-Path $env:LOCALAPPDATA 'Build\PSPerception'))+'\'
+    $root=[IO.Path]::GetFullPath(($script:EnglishBuildRoot))+'\'
     if(-not $output.StartsWith($root,[StringComparison]::OrdinalIgnoreCase) -or $input -ceq $output -or [IO.Path]::GetExtension($output) -ine '.psd1'){throw 'Observation output must be a separate PSD1 under project build root.'}
     [void][IO.Directory]::CreateDirectory([IO.Path]::GetDirectoryName($output))
     if(Test-Path -LiteralPath $output){Copy-Item -LiteralPath $output -Destination ($output+'.'+[guid]::NewGuid().ToString('N')+'.before')}
@@ -444,7 +447,7 @@ function ConvertFrom-MobyPronunciation {
 
 function Get-EnglishMobyFacts {
     param([switch]$WithoutAuthoredOverrides)
-    $root=Join-Path $env:LOCALAPPDATA 'Build\PSPerception\inputs\public-domain-moby'
+    $root=Join-Path $script:EnglishBuildRoot 'inputs\public-domain-moby'
     [void][IO.Directory]::CreateDirectory($root)
     $commit='0a780d8d6a83909f9538b01aba8c6848b6689935'
     $sources=@(
@@ -609,7 +612,7 @@ function Build-EnglishReference {
     [CmdletBinding()]
     param([string]$OutputPath,[ValidateSet('Proof','Moby','MobyOnly')][string]$Source='Moby')
     $authorSourceSha=(Get-FileHash -LiteralPath $PSCommandPath -Algorithm SHA256).Hash
-    $root=[IO.Path]::GetFullPath((Join-Path $env:LOCALAPPDATA 'Build\PSPerception'))+'\'
+    $root=[IO.Path]::GetFullPath(($script:EnglishBuildRoot))+'\'
     $OutputPath=[IO.Path]::GetFullPath($OutputPath)
     if(-not $OutputPath.StartsWith($root,[StringComparison]::OrdinalIgnoreCase)){throw 'Assembly output must remain in the project build directory.'}
     if([IO.Path]::GetFileName($OutputPath) -cne 'Dev.MansfieldPlumbing.English.Phonemizer.dll'){throw 'Unexpected product assembly identity.'}
@@ -621,7 +624,7 @@ function Build-EnglishReference {
         if(-not $inputFile.StartsWith($compiler+'\',[StringComparison]::OrdinalIgnoreCase) -or $row.Commit -cne '1afabe056235a570da29e268824784557d4f6cdd' -or (Get-FileHash -LiteralPath $inputFile -Algorithm SHA256).Hash -cne $row.Sha256){throw 'Pinned compiler integrity failure.'}
     }
     Import-Module (Join-Path $compiler 'src\Dev.MansfieldPlumbing.PowerShell.Lowering.psd1') -Force -ErrorAction Stop
-    $configPath=Join-Path $root 'kokoro-config.json'
+    $configPath=Join-Path $script:EnglishModelRoot 'config.json'
     if((Get-FileHash -LiteralPath $configPath -Algorithm SHA256).Hash -cne '5ABB01E2403B072BF03D04FDE160443E209D7A0DAD49A423BE15196B9B43C17F'){throw 'Kokoro target specification integrity failure.'}
     # Build-only target vocabulary specification; no language dictionary ingestion.
     $vocab=(Get-EnglishKokoroSpecification).vocab
@@ -1635,7 +1638,7 @@ function Import-EnglishCoreDriver {
     foreach($key in $table.Keys){foreach($ch in $table[$key].ToCharArray()){if($reference.SymbolId.Invoke($ch) -lt 0){throw 'Correction outside Kokoro vocabulary.'}}}
     $source+="`n"+$knowledge+"`n"+(Get-EnglishCoreTemplate).Replace('[Collections.Generic.','[System.Collections.Generic.').Replace('[void]','').Replace('@REFERENCE@',$reference.Assembly.GetName().Name)
     $identity=[Convert]::ToHexString([Security.Cryptography.SHA256]::HashData([Text.Encoding]::UTF8.GetBytes($source)))
-    $directory=Join-Path $env:LOCALAPPDATA ('Build\PSPerception\english\driver\'+$identity)
+    $directory=Join-Path $script:EnglishBuildRoot ('english\driver\'+$identity)
     $name='Dev.MansfieldPlumbing.English.Driver.'+$identity.Substring(0,16)
     $output=Join-Path $directory ($name+'.dll');$receiptPath=Join-Path $directory 'driver-receipt.psd1'
     if(-not(Test-Path -LiteralPath $receiptPath)){
@@ -1865,7 +1868,7 @@ function Initialize-EnglishKokoro {
     param([string]$Directory=$KokoroDirectory,[string]$VoiceName=$Voice)
     if(-not $IsWindows){throw 'The stock Kokoro reference adapter requires Windows.'}
     if($VoiceName -cnotin @('af_heart','am_michael')){throw 'Voice is not in the pinned stock input set.'}
-    $root=[IO.Path]::GetFullPath((Join-Path $env:LOCALAPPDATA 'Build\PSPerception'))+'\'
+    $root=[IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..\build'))+'\'
     $Directory=[IO.Path]::GetFullPath($Directory)
     if(-not $Directory.StartsWith($root,[StringComparison]::OrdinalIgnoreCase)){throw 'Kokoro acquisition must stay under the project build directory.'}
     [void][IO.Directory]::CreateDirectory($Directory)
@@ -1873,7 +1876,7 @@ function Initialize-EnglishKokoro {
     $pins=@{'kokoro-v1_0.pth'='496DBA118D1A58F5F3DB2EFC88DBDC216E0483FC89FE6E47EE1F2C53F18AD1E4';'config.json'='5ABB01E2403B072BF03D04FDE160443E209D7A0DAD49A423BE15196B9B43C17F';'voices/af_heart.pt'='0AB5709B8FFAB19BFD849CD11D98F75B60AF7733253AD0D67B12382A102CB4FF';'voices/am_michael.pt'='9A443B79A4B22489A5B0AB7C651A0BCD1A30BEF675C28333F06971ABBD47BD37'}
     $inputs=@{}
     foreach($name in @('kokoro-v1_0.pth','config.json',"voices/$VoiceName.pt")){
-        $local=Join-Path 'C:\models\Kokoro-82M' $name
+        $local=Join-Path $script:EnglishModelRoot $name
         $path=if(Test-Path -LiteralPath $local){$local}else{Join-Path $Directory $name}
         if(-not(Test-Path -LiteralPath $path)){
             [void][IO.Directory]::CreateDirectory([IO.Path]::GetDirectoryName($path))
@@ -2019,7 +2022,7 @@ print('Stock Kokoro WAV created: samples=' + str(len(audio)) + '; sample_rate=24
 }
 
 function New-EnglishZiraCorpus {
-    $directory=Join-Path $env:LOCALAPPDATA ('Build\PSPerception\english\corpora\'+[guid]::NewGuid().ToString('N'))
+    $directory=Join-Path $script:EnglishBuildRoot ('english\corpora\'+[guid]::NewGuid().ToString('N'))
     [void][IO.Directory]::CreateDirectory($directory)
     $construction=[Collections.Generic.List[string]]::new();$heldout=[Collections.Generic.List[string]]::new()
     foreach($noun in @('record','present','permit','book','song','music','door','clock','apple','orange','elephant','actor','hour','university','idea','computer','buffer','file','number','date','voice','window','pipe','team','teacher','leaf','key')){
@@ -2052,7 +2055,7 @@ function Test-EnglishZiraTokenParity {
     [CmdletBinding()]
     param([string]$Path=$CorpusPath)
     $driver=Import-EnglishCoreDriver
-    $configPath=Join-Path $env:LOCALAPPDATA 'Build\PSPerception\kokoro-config.json'
+    $configPath=Join-Path $script:EnglishModelRoot 'config.json'
     $configHash=(Get-FileHash -LiteralPath $configPath).Hash
     if($configHash -cne '5ABB01E2403B072BF03D04FDE160443E209D7A0DAD49A423BE15196B9B43C17F'){throw 'Kokoro vocabulary integrity failure.'}
     $config=Get-EnglishKokoroSpecification
@@ -2081,7 +2084,7 @@ function Test-EnglishZiraTokenParity {
             if($data.v -ne 1 -or $data.q -ne 1 -or $data.u.Count -gt 4096){throw 'Parity corpus contract failure.'}
             $captures=@(foreach($record in $data.u){$r=@{}+$record;$r.v=1;$r.q=1;$r.a=$data.a;$r.g=$data.g;Import-EnglishZiraObservation -Path $info.FullName -Data $r})
         }else{
-            $files=@(Get-ChildItem -LiteralPath (Join-Path $env:LOCALAPPDATA 'Build\PSPerception\english\zira-captures') -Filter '*.psd1' -File)
+            $files=@(Get-ChildItem -LiteralPath (Join-Path $script:EnglishBuildRoot 'english\zira-captures') -Filter '*.psd1' -File)
             if($files.Count -lt 1 -or $files.Count -gt 4096){throw 'Capture inventory bound exceeded.'}
             $captures=@(foreach($file in $files){Import-EnglishZiraObservation -Path $file.FullName})
         }
@@ -2114,7 +2117,7 @@ function Test-EnglishZiraTokenParity {
             }
         }
     }
-    $directory=Join-Path $env:LOCALAPPDATA ('Build\PSPerception\english\token-parity\'+[guid]::NewGuid().ToString('N'))
+    $directory=Join-Path $script:EnglishBuildRoot ('english\token-parity\'+[guid]::NewGuid().ToString('N'))
     [void][IO.Directory]::CreateDirectory($directory)
     $externalPath=Join-Path $directory 'standalone.psd1'
     & $DotnetPath $driver.Output --zira $rawCases[0] $externalPath
@@ -2186,7 +2189,7 @@ function Test-EnglishPronunciationCorpus {
             $rows.Add([pscustomobject]@{Sentence=$sentence;Word=$token.Word;Start=$token.SourceStart;End=$token.SourceEnd;Status=$token.Status;PronunciationSource=$token.PronunciationSource;StudentPhones=$token.Pron;TeacherPhones=$expected;TeacherAgreement=$agreement;SymbolEdits=$distance;Capture=$capture.CapturePath})
         }
     }
-    $directory=Join-Path $env:LOCALAPPDATA ('Build\PSPerception\english\audits\'+[guid]::NewGuid().ToString('N'))
+    $directory=Join-Path $script:EnglishBuildRoot ('english\audits\'+[guid]::NewGuid().ToString('N'))
     [void][IO.Directory]::CreateDirectory($directory)
         $detail=Join-Path $directory 'words.psd1'
     $b=[Text.StringBuilder]::new();[void]$b.AppendLine('@{v=1;r=@(')
