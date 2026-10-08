@@ -42,7 +42,13 @@ function New-KokoroGenerator60x16RunSteps {
         [ValidateSet('Stage','Windows','Planes')][string]$DumpPoint='Stage',
         # Then the 16-bit tail (Kokoro.GeneratorTail16Run.ps1) on the final tensor: PCM int16 in the output buffer;
         # tail weights and parameters follow the stage's in their buffers.
-        [switch]$Tail)
+        [switch]$Tail,
+        # Block kernel sizes: 3, 7, 11 (resblocks.3-5 and their mean), or one block alone (e.g. 11 for noise_res[1]),
+        # whose output is the final tensor. The fixture lists the same blocks (tools/New-KokoroGenerator60x16Fixture.ps1).
+        [ValidateCount(1,3)][ValidateSet(3,7,11)][int[]]$Kernels=@(3,7,11))
+    $branches=$Kernels.Count; $withMean=$branches -eq 3
+    if($branches -eq 2){throw 'Two blocks have no stock combination here.'}
+    if(-not $withMean -and $Tail){throw '-Tail follows the three-block stage'}
     . (Join-Path $PSScriptRoot 'Kokoro.ResBlockRun.ps1')
     foreach($file in 'Kokoro.GeneratorTail16Run.ps1','Kokoro.LeakyRelu16.ps1','Kokoro.TailSpectrum16.ps1','Kokoro.HmxConvPlanes.ps1','Kokoro.PlaneCombine.ps1','Kokoro.AdaInMoments16.ps1','Kokoro.AdaInTurnsCoefficients.ps1','Kokoro.AdaInSnakeTurns.ps1','Kokoro.BranchMean16.ps1','Kokoro.DmaCopy.ps1') { . (Join-Path $PSScriptRoot $file) }
     $layout=Get-KokoroGenerator60x16Layout -Frames $Frames -BatchTiles $BatchTiles
@@ -50,8 +56,9 @@ function New-KokoroGenerator60x16RunSteps {
     $offResidual=$R.Residual.Offset; $offConv=$R.ConvOutput.Offset; $offWin=$R.Window.Offset; $offLow=$R.WindowLow.Offset; $offPlanes=$R.Planes.Offset; $offWeights=$R.Weights.Offset
     $offSmall=$R.Small.Offset; $offParams=$offSmall+$layout.Small.Parameters; $offMoments=$offSmall+$layout.Small.Moments; $offInputMoments=$offSmall+$layout.Small.InputMoments; $offKms=$offSmall+$layout.Small.Kms
     $privateMoments=@(0,0,1,2) | ForEach-Object { $offSmall+$layout.Small.PrivateMoments+2048*$_ }
-    $kernels=@(3,7,11)
-    $branchWeights=@(0L,(6L*32768*3),(6L*32768*10)); $weightBytes=6L*32768*21; $parameterBytes=18*16384
+    $branchWeights=[long[]]::new($branches); $weightBytes=0L
+    for($b=0;$b -lt $branches;$b++){ $branchWeights[$b]=$weightBytes; $weightBytes+=6L*32768*$Kernels[$b] }
+    $parameterBytes=6*$branches*16384
     $stride=[int]([math]::Ceiling($tensorBytes/128)*128); $finalOffset=2*$stride; $coefOffset=$finalOffset+$tensorBytes
     $scratchOffset=[long]([math]::Ceiling(($coefOffset+18*1536)/4096)*4096); $outputBytes=192+$scratchOffset+131072
     $vtcmBytes=$layout.VtcmBytes; $stageWeightBytes=$weightBytes; $stageParameterBytes=$parameterBytes
@@ -228,8 +235,8 @@ function New-KokoroGenerator60x16RunSteps {
     }
     & $poolStart
     $stopped=$false
-    for($b=0;$b -lt 3 -and -not $stopped;$b++){
-        $K=$kernels[$b]
+    for($b=0;$b -lt $branches -and -not $stopped;$b++){
+        $K=$Kernels[$b]
         & $dma 18 $offResidual 20 0 $tensorBytes
         if($b -eq 0){ & $zeroRecord $offMoments; & $moments $offResidual $tiles; & $copyRecord $offInputMoments $offMoments }
         else { & $copyRecord $offMoments $offInputMoments }
@@ -277,10 +284,12 @@ function New-KokoroGenerator60x16RunSteps {
                 }
             }
         }
-        if($b -lt 2 -and -not $stopped){ & $sync; & $dma 25 ($b*$stride) 18 $offResidual $tensorBytes }
+        if($b -lt $branches-1 -and -not $stopped){ & $sync; & $dma 25 ($b*$stride) 18 $offResidual $tensorBytes }
     }
+    # One block: its output is the final tensor.
+    if(-not $stopped -and -not $withMean){ & $sync; & $dma 25 $finalOffset 18 $offResidual $tensorBytes }
     # Three-branch mean in two chunks: branches 0 and 1 come back from DDR into the free C region.
-    if(-not $stopped){
+    if(-not $stopped -and $withMean){
     & $sync
     $chunk=[int][math]::Ceiling($tiles/2)
     for($j=0;$j*$chunk -lt $tiles;$j++){
@@ -303,7 +312,7 @@ function New-KokoroGenerator60x16RunSteps {
     }
     $s.Add(@{Op='hwticks';d=0});$s.Add(@{Op='store-d';s=23;t=26;Offset=0});$s.Add(@{Op='store-d';s=23;t=0;Offset=8})
     $s.Add(@{Op='sub';d=0;s=25;t=23});& $imm 1 $finalOffset;$s.Add(@{Op='add';d=0;s=0;t=1});$s.Add(@{Op='store';s=23;t=0;Offset=40})
-    $s.Add(@{Op='imm';d=0;i=$(if($Tail){1}else{19})});$s.Add(@{Op='store';s=23;t=0;Offset=44})
+    $s.Add(@{Op='imm';d=0;i=$(if($Tail -or -not $withMean){1}else{19})});$s.Add(@{Op='store';s=23;t=0;Offset=44})
     foreach($r in 16,18,20,22,24,26){$s.Add(@{Op='load-d';d=$r;s=29;Offset=(($r-16)*4)})}
     $s.Add(@{Op='dealloc-return'})
 
@@ -311,10 +320,10 @@ function New-KokoroGenerator60x16RunSteps {
     $bodies.Add(@('body_turns',@(New-KokoroAdaInSnakeTurnsSteps -TurnsBits 22)))
     $bodies.Add(@('body_moments',@(New-KokoroAdaInMoments16Steps)))
     $bodies.Add(@('body_coeff',@(New-KokoroAdaInTurnsCoefficientsSteps)))
-    $bodies.Add(@('body_combine_conv',@(New-KokoroPlaneCombineSteps -Mode Conv -Groups 3 -PlaneStride $planeStride -LabelPrefix 'combineconv')))
-    $bodies.Add(@('body_combine_residual',@(New-KokoroPlaneCombineSteps -Mode Residual -Groups 3 -PlaneStride $planeStride -LabelPrefix 'combineresidual')))
+    $bodies.Add(@('body_combine_conv',@(New-KokoroPlaneCombineSteps -Mode Conv -Groups 3 -Group3Shifts -PlaneStride $planeStride -LabelPrefix 'combineconv')))
+    $bodies.Add(@('body_combine_residual',@(New-KokoroPlaneCombineSteps -Mode Residual -Groups 3 -Group3Shifts -PlaneStride $planeStride -LabelPrefix 'combineresidual')))
     $bodies.Add(@('body_mean',@(New-KokoroBranchMean16Steps)))
-    for($b=0;$b -lt 3;$b++){foreach($d in 1,3,5){$bodies.Add(@("body_conv_b${b}_d$d",@(New-KokoroHmxConvPlanesSteps -Kernel $kernels[$b] -Dilation $d -WeightPlanes 2 -PlaneStride $planeStride -LabelPrefix "g16_b${b}_d$d")))}}
+    for($b=0;$b -lt $branches;$b++){foreach($d in 1,3,5){$bodies.Add(@("body_conv_b${b}_d$d",@(New-KokoroHmxConvPlanesSteps -Kernel $Kernels[$b] -Dilation $d -WeightPlanes 2 -PlaneStride $planeStride -LabelPrefix "g16_b${b}_d$d")))}}
     if($Tail){ foreach($pair in (Get-KokoroGeneratorTail16Bodies -PlaneStride $tailLayout.PlaneStride)){ $bodies.Add($pair) } }
     foreach($pair in $bodies){$s.Add(@{Op='label';Name=$pair[0]});foreach($step in $pair[1]){$s.Add($step)}}
     if($HvxThreads -gt 1){
@@ -363,5 +372,5 @@ function New-KokoroGenerator60x16RunSteps {
     $labels=@{};$pcs=[Collections.Generic.Dictionary[object,long]]::new();$pc=0L;$isa=Get-InstructionSet
     foreach($step in $s){if($step.Op -eq 'label'){if($labels.ContainsKey($step.Name)){throw "Duplicate label $($step.Name)"};$labels[$step.Name]=$pc};$pcs[$step]=$pc;$pc+=& $isa.Length $step}
     foreach($c in $calls){$delta=[uint32](($labels[$c.label]-$pcs[$c.pc]) -band 0xffffffffL);$c.low.i=$delta -band 65535;$c.high.i=$delta -shr 16}
-    [pscustomobject]@{Steps=$s.ToArray();Layout=[ordered]@{Frames=$Frames;Tiles=$tiles;InputBytes=$tensorBytes;WeightBytes=$weightBytes;ParameterBytes=$parameterBytes;OutputBytes=$outputBytes;VtcmBytes=$vtcmBytes;Samples=(5*($Frames-1));PcmOffset=$(if($Tail){$pcmOffset}else{0});BranchStride=$stride;FinalWorkspaceOffset=$finalOffset;CoefficientOffset=$coefOffset;ScratchOffset=$scratchOffset;CompletedStages=19;BatchTiles=$batch;HvxThreads=$HvxThreads;Regions=$layout.Regions}}
+    [pscustomobject]@{Steps=$s.ToArray();Layout=[ordered]@{Frames=$Frames;Tiles=$tiles;InputBytes=$tensorBytes;WeightBytes=$weightBytes;ParameterBytes=$parameterBytes;OutputBytes=$outputBytes;VtcmBytes=$vtcmBytes;Samples=$(if($Tail){5*($Frames-1)}else{1});PcmOffset=$(if($Tail){$pcmOffset}else{256});BranchStride=$stride;FinalWorkspaceOffset=$finalOffset;CoefficientOffset=$coefOffset;ScratchOffset=$scratchOffset;CompletedStages=$(6*$branches+[int]$withMean);BatchTiles=$batch;HvxThreads=$HvxThreads;Regions=$layout.Regions}}
 }

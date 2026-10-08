@@ -3,7 +3,9 @@
 # Design: docs/generator60x-16bit-design.md ("Combine"). Groups 1 and 2 rebuild their biased 16-bit
 # window w = high << 8 | low (bias 32768); the value is the sum of the signed windows, saturated to int16.
 # -Groups 3 adds the low x low group of -WeightPlanes 2, whose window (shift L + 8, |w| < 128) is its low
-# plane alone, sign-extended (tools/New-KokoroGenerator60x16Fixture.ps1 tables).
+# plane alone, sign-extended (tools/New-KokoroGenerator60x16Fixture.ps1 tables). With -Group3Shifts that window
+# sits at shift L + 8 + g per channel (range +-127 * 2^g) and is sign-extended by a per-lane arithmetic shift of
+# 8 - g, from halfword vectors at r2 + 1024 (one per 32-channel block, both halfwords of a lane equal).
 #   -Mode Conv:     store the value biased (u16 = v + 32768): conv1 output C.
 #   -Mode Residual: O = v * ratio_c (Q15 rounding multiply, per channel), R = sat(R + O), stored biased:
 #                   conv2 output added into the residual stream in one pass.
@@ -17,6 +19,7 @@ function New-KokoroPlaneCombineSteps {
         [ValidateSet('Conv','Residual')][string] $Mode = 'Conv',
         [ValidateSet(64, 128, 256)][int] $Channels = 128,
         [ValidateSet(2,3)][int] $Groups = 2,
+        [switch] $Group3Shifts,
         [Parameter(Mandatory)][ValidateRange(2048, 1073741824)][long] $PlaneStride,
         [string] $LabelPrefix = 'planecombine',
         [switch] $NoReturn
@@ -40,6 +43,10 @@ function New-KokoroPlaneCombineSteps {
             $s.Add(@{Op='vor';d=(20+$b);s=24;t=25})
         }
     }
+    if ($Group3Shifts) {
+        if ($Groups -ne 3) { throw 'Group 3 shifts need three groups' }
+        for ($b = 0; $b -lt $ob; $b++) { $s.Add(@{Op='addi';d=6;s=2;i=(1024+128*$b)}); $s.Add(@{Op='vload';d=(16+$b);s=6;Offset=0}) }
+    }
     $s.Add(@{Op='addi';d=15;s=3;i=0})
     $tile = "${LabelPrefix}_tile"
     $s.Add(@{Op='label';Name=$tile})
@@ -56,7 +63,8 @@ function New-KokoroPlaneCombineSteps {
         if ($Groups -eq 3) {
             # Low x low group: only its low plane (r0+5S) is read; the byte is its whole signed window.
             $s.Add(@{Op='add';d=11;s=11;t=10}); $s.Add(@{Op='add';d=11;s=11;t=10}); $s.Add(@{Op='vload';d=6;s=11;Offset=0})
-            $s.Add(@{Op='vasr-h';d=6;s=6;t=8})                        # sign-extend the odd byte
+            if ($Group3Shifts) { $s.Add(@{Op='vasr-hv';d=6;s=6;t=(16+$b)}) }   # sign-extend, times 2^g
+            else { $s.Add(@{Op='vasr-h';d=6;s=6;t=8}) }                     # sign-extend the odd byte
         }
         foreach ($g in $pairs) {
             $s.Add(@{Op='vand';d=$g[0];s=$g[0];t=31})                 # high byte stays in the odd position

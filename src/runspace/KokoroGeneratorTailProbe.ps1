@@ -75,7 +75,8 @@ try {
     }
     if ($ticks.Count) { $sorted = $ticks.ToArray(); [Array]::Sort($sorted); $median = $sorted[[int][math]::Floor($sorted.Count / 2)]
         $lines.Add("MedianRegionTicks=$median MedianRegionMs=$(($median / 19200.0).ToString('F3', $inv)) AudioSeconds=$(($samples / 24000.0).ToString('F3', $inv))") }
-    if ($allOk -and $null -ne $pcm) {
+    # Diagnostic jobs without PCM declare Samples=1: nothing to play.
+    if ($allOk -and $null -ne $pcm -and $samples -gt 1) {
         $audio = & $load 'Audio.AAudio.psm1' @($abi)
         $stream = & $audio.Open 24000 1
         $floats = [float[]]::new($samples); for ($j = 0; $j -lt $samples; $j++) { $floats[$j] = [float]($pcm[$j] / 32768.0) }

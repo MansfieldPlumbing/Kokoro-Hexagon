@@ -123,7 +123,9 @@ phone measurements establish achieved speed and time to first audio.
   hello world at 38.07 dB PCM against stock in 2.97 ms on SM8550. See
   `docs/results/generator-tail16-sm8550-20261008.md`.
 - Stage and tail in one DSP job: captured resblocks.3 input to PCM at 45.70 dB in 32.12 ms on SM8550,
-  heard as hello world (fine/coarse magnitude windows; 37.67 dB before). See `docs/results/generator-stage16-tail-sm8550-20261008.md`.
+  heard as hello world (fine/coarse magnitude windows; 37.67 dB before).
+- noise_res[1] (one 16-bit resblock, kernel 11) at 54.87 dB in 11.00 ms on SM8550. See
+  `docs/results/noise-res1-16bit-sm8550-20261008.md`. See `docs/results/generator-stage16-tail-sm8550-20261008.md`.
 
 ## Product shape
 

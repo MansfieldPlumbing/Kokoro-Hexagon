@@ -22,12 +22,13 @@ function Read-KokoroResBlockCapture {
     # .conv/.weight/.bias/.alpha/.adain.fc.*/.adain.norm.*; stage s = 2p + half: adain1/convs1 then adain2/convs2
     # of dilation p). Directory is a per-block capture of that block, or a whole-generator capture
     # (tools/reference/capture_stock_generator.py names), whose tensors are mapped without copying.
-    param([Parameter(Mandatory)][string] $Directory, [Parameter(Mandatory)][ValidateRange(0,5)][int] $Block)
+    # -Module noise_res reads generator.noise_res.<Block> (whole-generator captures only).
+    param([Parameter(Mandatory)][string] $Directory, [Parameter(Mandatory)][ValidateRange(0,5)][int] $Block, [ValidateSet('resblocks','noise_res')][string] $Module = 'resblocks')
     $cap = Read-KokoroCapture -Directory $Directory
-    $name = "decoder.generator.resblocks.$Block"
+    $name = "decoder.generator.$Module.$Block"
     if ($cap.Json.block -ceq $name) { return $cap }
     if ($cap.Json.block -cne 'decoder.generator') { throw "Capture is neither $name nor the whole generator: $($cap.Root)" }
-    $t = $cap.Json.tensors; $pre = "generator.resblocks.$Block."; $map = @{ input = "${pre}input.0"; style = 'style'; output = "${pre}output" }
+    $t = $cap.Json.tensors; $pre = "generator.$Module.$Block."; $map = @{ input = "${pre}input.0"; style = 'style'; output = "${pre}output" }
     for ($s = 0; $s -lt 6; $s++) {
         $p = [math]::Floor($s / 2); $h = 1 + $s % 2
         $map["stage$s.input"] = "${pre}adain$h.$p.input.0"; $map["stage$s.adain"] = "${pre}adain$h.$p.output"
