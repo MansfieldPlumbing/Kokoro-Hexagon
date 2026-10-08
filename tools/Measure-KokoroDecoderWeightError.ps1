@@ -41,7 +41,15 @@ $rows = foreach ($name in $cap.Json.moduleContracts.Keys | Sort-Object) {
         $err = 0.0; for ($i = 0; $i -lt $y.Length; $i++) { $err += ($y[$i] - $ref[$i]) * ($y[$i] - $ref[$i]) }
         $snr[$m[0]] = [math]::Round(10 * [math]::Log10($sig / $err), 2)
     }
-    [pscustomobject]@{ Layer = $name; Shape = "$cout x $cin x $K"; Frames = $frames; Params = $w.Length; W8 = $snr.W8; W4 = $snr.W4; W4c = $snr.W4c }
+    # W4 with one scale per group of g consecutive weights along (cin, k) of an output channel.
+    foreach ($g in 128, 64, 32) {
+        $wq = & $quant $w ($w.Length / $g) $g 7 $false
+        $y = [double[]]::new($cout * $frames); (Get-Conv1dKernel).Invoke($x, $cin, $frames, $wq, $cout, $K, -[int][math]::Floor($K / 2), $y)
+        $err = 0.0; for ($i = 0; $i -lt $y.Length; $i++) { $err += ($y[$i] - $ref[$i]) * ($y[$i] - $ref[$i]) }
+        $snr["W4g$g"] = [math]::Round(10 * [math]::Log10($sig / $err), 2)
+    }
+    [pscustomobject]@{ Layer = $name; Shape = "$cout x $cin x $K"; Frames = $frames; Params = $w.Length; W8 = $snr.W8; W4 = $snr.W4; W4c = $snr.W4c
+        W4g128 = $snr.W4g128; W4g64 = $snr.W4g64; W4g32 = $snr.W4g32 }
 }
 $rows | Format-Table -AutoSize | Out-String -Width 160
 "Parameters: {0:N0}" -f ($rows | Measure-Object Params -Sum).Sum
