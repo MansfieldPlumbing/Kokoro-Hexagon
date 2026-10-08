@@ -11,6 +11,29 @@ DSP (HMX and HVX) through machine code this project emits itself.
 The scoreboard is end-to-end real-time factor and time to first audio on the
 SM8550 and SM8635 phones, against the best other Kokoro build on the same phone.
 
+## Where we stand (2026-10-08)
+
+Kokoro-Hexagon is a contender for the fastest Kokoro on mobile, and it is notable for how it is made: the model path is
+authored only in PowerShell, which emits the Hexagon machine code and ELF itself. No C, C++, LLVM or QNN produces any of it.
+
+Measured on SM8550, hello-world sentence (1.625 s of audio), receipts in `docs/results/`:
+
+| What runs on the DSP | vs stock PyTorch | DSP time | RTF of that part |
+| --- | ---: | ---: | ---: |
+| Whole generator with the harmonic source and STFT, one job, from decoder output and f0 | 37.24 dB PCM | 95.57 ms | 0.059 |
+| Whole generator, captured har | 42.05 dB PCM | 79.71 ms | 0.049 |
+| Harmonic source + STFT alone (f0 to har) | 64.62 dB | 3.95 ms | 0.002 |
+
+Stock against itself with only the source in float64 agrees at 40.83 dB PCM, so 37.24 dB is near what any faithful port
+can reach against stock's float32 output.
+
+The best published Kokoro on Android (kokoro-offline-tts-android, S24 Ultra, SM8650, QNN HTP): generator RTF 0.26-0.31 with
+the harmonic source and iSTFT on the CPU, first PCM median 950 ms. That is a different chip and a different split of the
+work, so it is an indication only; a claim of being faster needs both builds on the same phone.
+
+Not yet measured: the decoder, predictors, text encoder and ALBERT on the DSP; whole-model RTF; time to first audio;
+anything on SM8635.
+
 ## How it is built
 
 - PowerShell 7 is the language. It reads the checkpoint, quantizes and packs
