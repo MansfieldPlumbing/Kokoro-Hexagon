@@ -35,4 +35,5 @@ loads in 15 ms, takes 25 ms on its first call and 39 us warm per sentence, with 
 the 73 challenge sentences are complete. See `docs/results/phonemizer-driver-sm8550-20261008.md`.
 
 Gaps before end-to-end text input: inflected forms (`-s`, `-ed`, `-ing`), numerals, units, currency, dates and
-acronyms, and a default for heteronyms the grammar leaves unresolved. Misaki parity is not measured.
+acronyms, and a default for heteronyms the grammar leaves unresolved. Moby output also lacks stress on monosyllabic
+content words and US flaps; Zira's phone events carry no stress either. Planned: a hand-written polish pass.

@@ -60,5 +60,5 @@ the phone app in 15 ms, takes 25 ms on its first call and 39 µs warm per senten
 Windows ([phonemizer-driver](docs/results/phonemizer-driver-sm8550-20261008.md)). Only 22 of the 73 challenge
 sentences are complete: inflected forms, numbers, units, dates and acronyms, and unresolved heteronyms still fail.
 
-Kokoro was trained on misaki's phoneme conventions (stock `KPipeline` uses misaki `en.G2P`), so the target is
-misaki's symbol conventions, measured as misaki parity on a large held-out corpus; not yet measured.
+Direction: Moby lexicon and Zira-distilled choices, polished with hand-written rules (stress on content words, US flaps,
+function-word weak forms, morphology, numbers). Misaki is not used.
