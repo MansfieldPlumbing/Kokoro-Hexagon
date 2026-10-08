@@ -26,7 +26,10 @@ param(
     [Parameter(Mandatory)][string] $CaptureDirectory,
     [string[]] $CalibrationDirectory,
     [Parameter(Mandatory)][string] $OutputDirectory,
-    [ValidateRange(1.0, 4.0)][double] $Margin = 1.25
+    [ValidateRange(1.0, 4.0)][double] $Margin = 1.25,
+    # The 256-channel 10x stage fixture whose mean feeds ups[1] in one job (Kokoro.Generator60x16Run.ps1 -Whole): its
+    # OutputScales become the ups[1] input scales (LeakyReLU keeps each channel's scale) instead of calibrated ones.
+    [string] $UpInputScaleFixture
 )
 $ErrorActionPreference = 'Stop'
 $build = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '../build')) + [IO.Path]::DirectorySeparatorChar
@@ -55,6 +58,13 @@ $chanMax = { param([string]$name, [int]$ch) $m = [double[]]::new($ch); foreach (
 $sH = & $chanMax 'generator.noise_convs.1.input.0' 22; $sU = & $chanMax 'generator.ups.1.input.0' 256
 for ($i = 0; $i -lt 22; $i++) { $sH[$i] = [math]::Max($sH[$i], 1e-12) * $Margin / 32767 }
 for ($i = 0; $i -lt 256; $i++) { $sU[$i] = [math]::Max($sU[$i], 1e-12) * $Margin / 32767 }
+$upScaleDir = $null
+if ($UpInputScaleFixture) {
+    $upScaleDir = [IO.Path]::GetFullPath($UpInputScaleFixture)
+    $up = Get-Content -LiteralPath (Join-Path $upScaleDir 'fixture.json') -Raw | ConvertFrom-Json
+    if (@($up.OutputScales).Count -ne 256 -or $mIn -ne [int]$up.Frames) { throw 'The 10x stage fixture does not match ups[1] (256 channels, the same frames).' }
+    $sU = [double[]]@($up.OutputScales)
+}
 $oNoise = & $chanMax 'generator.noise_convs.1.output' 128; $oUp = & $chanMax 'generator.reflection_pad.output' 128
 
 # Two 16-bit byte planes (odd bytes) of x / s per channel, in croutons of C channels.
@@ -179,6 +189,6 @@ $expected = & $T $cap 'generator.resblocks.3.input.0'; $eb = [byte[]]::new(4 * $
 foreach ($f in @(@('inputs.bin', $inputs), @('weights.bin', $weights.ToArray()), @('tables.bin', $tables), @('expected-f32.bin', $eb))) { [IO.File]::WriteAllBytes((Join-Path $out $f[0]), $f[1]) }
 $files = @(Get-ChildItem -LiteralPath $out -File | ForEach-Object { [ordered]@{ Name = $_.Name; Bytes = $_.Length; SHA256 = (Get-FileHash $_.FullName).Hash } })
 [ordered]@{ Graph = 'GeneratorFront16'; Frames = $frames; Tiles = $tiles; UpFrames = $qFrames; UpTiles = $qTiles; OutputScales = $sR; Margin = $Margin
-    NoiseConvShifts = @($uN.L); UpShifts = @($uU.L); LowLowWindowMax = $g3Worst; StageFixture = $stageDir; NoiseResFixture = $noiseDir
+    NoiseConvShifts = @($uN.L); UpShifts = @($uU.L); LowLowWindowMax = $g3Worst; StageFixture = $stageDir; NoiseResFixture = $noiseDir; UpInputScaleFixture = $upScaleDir
     Capture = $cap.Root; CalibrationCaptures = @($cals | ForEach-Object { $_.Root }); Files = $files } | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath (Join-Path $out 'fixture.json') -Encoding utf8NoBOM
 [pscustomobject]@{ Directory = $out; InputBytes = $inputs.Length; WeightBytes = $weights.Count; LowLowWindowMax = ($g3Worst -join ','); NoiseShifts = (($uN.L | Measure-Object -Minimum -Maximum) | % { "$($_.Minimum)-$($_.Maximum)" }); UpShifts = (($uU.L | Measure-Object -Minimum -Maximum) | % { "$($_.Minimum)-$($_.Maximum)" }) }

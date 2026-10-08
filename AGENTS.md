@@ -134,6 +134,10 @@ phone measurements establish achieved speed and time to first audio.
 - The generator's 10x half (LeakyReLU(0.1), ups[0], noise_convs[0], noise_res[0], resblocks.0-2, mean) in one
   DSP job from captured decoder output and har: 58.56 dB in 31.67 ms on SM8550. See
   `docs/results/generator-10x-half-sm8550-20261008.md`. See `docs/results/generator-stage16-tail-sm8550-20261008.md`.
+- The whole generator in one DSP job, captured decoder output and har to PCM: 42.05 dB in 79.71 ms (1.625 s of
+  audio) on SM8550, played. See `docs/results/generator-whole-sm8550-20261008.md`.
+- The phonemizer driver runs in the phone app on SM8550 with token IDs identical to Windows, 39 us warm per
+  sentence; 22 of 73 challenge sentences complete. See `docs/results/phonemizer-driver-sm8550-20261008.md`.
 
 ## Product shape
 

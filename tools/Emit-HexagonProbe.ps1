@@ -2,7 +2,7 @@
 [CmdletBinding()]
 param(
     [string] $OutputDirectory = (Join-Path $PSScriptRoot '..\build\hexagon-emission\emitted'),
-    [ValidateSet('Probe','KokoroAffine','KokoroAdaIn','KokoroAdaInResBlock','KokoroAdaInStatistics','KokoroAdaInIntegerCoefficients','KokoroAdaInIntegerAffine','KokoroSnakeInteger','KokoroResidualInteger','KokoroAlbertSoftmax3','KokoroAlbertAttention3','KokoroAlbertAttentionOutput3','KokoroAlbertConnectedAttention3','KokoroConvTile','KokoroLinearTile','KokoroR0Sub0','KokoroHmxLock','KokoroHmxMatrix','KokoroHmxConv','KokoroHmxConvPlanes','KokoroPlaneCombine','KokoroAdaInMoments16','KokoroAdaInTurnsCoefficients','KokoroHmxConvRun','KokoroResBlockRun','KokoroBranchAverageInteger','KokoroGenerator60xRun','KokoroLeakyReluInteger','KokoroVtcmQuery','KokoroDmaCopy','KokoroDmaBench','KokoroAdaInSnakeInteger','KokoroAdaInSnakeTurns','KokoroGenerator60xResidentRun','KokoroGenerator60x16Run','KokoroGeneratorTailRun','KokoroGeneratorTail16Run','KokoroGeneratorStage16TailRun','KokoroResBlock16Run','KokoroGeneratorFrontStageTailRun','KokoroGeneratorFront10x16Run')][string] $Kernel='Probe',
+    [ValidateSet('Probe','KokoroAffine','KokoroAdaIn','KokoroAdaInResBlock','KokoroAdaInStatistics','KokoroAdaInIntegerCoefficients','KokoroAdaInIntegerAffine','KokoroSnakeInteger','KokoroResidualInteger','KokoroAlbertSoftmax3','KokoroAlbertAttention3','KokoroAlbertAttentionOutput3','KokoroAlbertConnectedAttention3','KokoroConvTile','KokoroLinearTile','KokoroR0Sub0','KokoroHmxLock','KokoroHmxMatrix','KokoroHmxConv','KokoroHmxConvPlanes','KokoroPlaneCombine','KokoroAdaInMoments16','KokoroAdaInTurnsCoefficients','KokoroHmxConvRun','KokoroResBlockRun','KokoroBranchAverageInteger','KokoroGenerator60xRun','KokoroLeakyReluInteger','KokoroVtcmQuery','KokoroDmaCopy','KokoroDmaBench','KokoroAdaInSnakeInteger','KokoroAdaInSnakeTurns','KokoroGenerator60xResidentRun','KokoroGenerator60x16Run','KokoroGeneratorTailRun','KokoroGeneratorTail16Run','KokoroGeneratorStage16TailRun','KokoroResBlock16Run','KokoroGeneratorFrontStageTailRun','KokoroGeneratorFront10x16Run','KokoroGeneratorWhole16Run')][string] $Kernel='Probe',
     [ValidateRange(2, 32768)][int] $ResBlockFrames = 7801,
     [ValidateSet(3,7,11)][int] $ResBlockKernel = 3,
     [ValidateSet(128,256)][int] $IntegerChannels = 128,
@@ -271,6 +271,13 @@ if($Kernel -eq 'KokoroR0Sub0') {
     $steps=@($run.Steps)
     $symbol='kokoro_generator_tail_skel_handle_invoke'; $soname='libkokoro_generator_tail_skel.so'
     Write-NewOrIdenticalFile (Join-Path $OutputDirectory 'runner-layout.json') ([Text.Encoding]::UTF8.GetBytes(($run.Layout | ConvertTo-Json -Depth 6))) -AllowOverwrite:$Force
+} elseif($Kernel -eq 'KokoroGeneratorWhole16Run') {
+    # The whole generator in one job: decoder output and har to PCM (tail harness plays the PCM).
+    . (Join-Path $PSScriptRoot '..\src\emit\Kokoro.Generator60x16Run.ps1')
+    $run=New-KokoroGenerator60x16RunSteps -Frames $ResBlockFrames -HvxThreads $ResidentHvxThreads -BatchTiles $ResidentBatchTiles -Whole
+    $steps=@($run.Steps)
+    $symbol='kokoro_generator_tail_skel_handle_invoke'; $soname='libkokoro_generator_tail_skel.so'
+    Write-NewOrIdenticalFile (Join-Path $OutputDirectory 'runner-layout.json') ([Text.Encoding]::UTF8.GetBytes(($run.Layout | ConvertTo-Json -Depth 6))) -AllowOverwrite:$Force
 } elseif($Kernel -eq 'KokoroGeneratorFront10x16Run') {
     # The 256-channel front and resblocks.0-2 with their mean, under the generic tail harness.
     . (Join-Path $PSScriptRoot '..\src\emit\Kokoro.Generator60x16Run.ps1')
@@ -355,7 +362,7 @@ if ($RegionBody) {
     $symbol+='_encoding_only'; $soname=$soname.Replace('_skel.so','_region_encoding_only.so')
 }
 $library=New-ElfCodeLibrary -Soname $soname -Needed @() -Functions ([ordered]@{$symbol=$steps}) -PageSize 4096
-if($Kernel -in 'KokoroResBlockRun','KokoroGenerator60xRun','KokoroGenerator60xResidentRun','KokoroGenerator60x16Run','KokoroGeneratorTailRun','KokoroGeneratorTail16Run','KokoroGeneratorStage16TailRun','KokoroResBlock16Run','KokoroGeneratorFrontStageTailRun','KokoroGeneratorFront10x16Run') {
+if($Kernel -in 'KokoroResBlockRun','KokoroGenerator60xRun','KokoroGenerator60xResidentRun','KokoroGenerator60x16Run','KokoroGeneratorTailRun','KokoroGeneratorTail16Run','KokoroGeneratorStage16TailRun','KokoroResBlock16Run','KokoroGeneratorFrontStageTailRun','KokoroGeneratorFront10x16Run','KokoroGeneratorWhole16Run') {
     Write-NewOrIdenticalFile (Join-Path $OutputDirectory 'runner-link.json') ([Text.Encoding]::UTF8.GetBytes((@{Entry=$library.Exports[$symbol];Got=$library.GotSlots} | ConvertTo-Json -Depth 4))) -AllowOverwrite:$Force
 }
 $path=Join-Path $OutputDirectory $soname

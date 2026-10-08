@@ -30,6 +30,7 @@ checked against the SDK 6.4.0.2 assembler.
 
 | Job | SNR vs stock | DSP time | Receipt |
 |---|---:|---:|---|
+| **Whole generator in one job** (10x half, LeakyReLU(0.1) into ups[1] on the DSP, 60x half, tail), from captured decoder output and har | **42.05 dB PCM** | **79.71 ms** | [generator-whole](docs/results/generator-whole-sm8550-20261008.md) |
 | Generator 60x half (noise_convs[1], noise_res[1], ups[1], resblocks.3-5, mean) + tail (LeakyReLU, conv_post, exp/sin, iSTFT) in one job, from captured ups[1] input and har | **42.71 dB PCM** | **46.48 ms** | [generator-front-stage-tail](docs/results/generator-front-stage-tail-sm8550-20261008.md) |
 | resblocks.3-5 + mean + tail, from captured resblocks.3 input | 45.70 dB PCM | 32.12 ms | [generator-stage16-tail](docs/results/generator-stage16-tail-sm8550-20261008.md) |
 | Tail alone | 46.03 dB PCM | 3.06 ms | [generator-tail16](docs/results/generator-tail16-sm8550-20261008.md) |
@@ -41,24 +42,23 @@ checked against the SDK 6.4.0.2 assembler.
 The 60x half plus tail is RTF 0.029 for that part of the model. PCM from these
 jobs plays on the phone speaker as "hello world".
 
-Together the two generator jobs take 78 ms for 1.625 s of audio (RTF about 0.05,
-two separate runs). Next: the two halves chained in one job (the 10x mean through
-LeakyReLU(0.1) into ups[1]), then the harmonic source and its STFT on the DSP. After that the decoder (planned at W4 weights), the prosody and
-duration predictors, the text encoder and ALBERT. Whole-model RTF, time to
-first audio, and SM8635 results are not yet measured.
+The whole generator runs as one job in 79.71 ms for 1.625 s of audio (generator
+RTF 0.049). Only har (the STFT of the harmonic source) is still captured. Next:
+the harmonic source and its STFT on the DSP, then the decoder (W4A8 per layer
+where the error allows), the prosody and duration predictors, the text encoder
+and ALBERT. Whole-model RTF, time to first audio, and SM8635 results are not yet
+measured.
 
 ## Phonemizer
 
 Text to Kokoro token IDs, distilled from Windows SAPI Zira (contextual
 pronunciation choices such as noun/verb `record`) into a compact PSD1 and a
 CoreLib-only assembly, with the selection logic compiled alongside the data.
-Developed in PSPerception and imported here at a pinned commit (see [phonemizer/README.md](phonemizer/README.md)). Reported by
-its workflow (Windows; not yet measured on the phone):
+Developed in PSPerception and imported here at a pinned commit (see [phonemizer/README.md](phonemizer/README.md)); it now
+builds under `build/phonemizer` from pinned inputs and all its Windows gates pass. On SM8550 the driver loads in
+the phone app in 15 ms, takes 25 ms on its first call and 39 µs warm per sentence, with token IDs identical to
+Windows ([phonemizer-driver](docs/results/phonemizer-driver-sm8550-20261008.md)). Only 22 of the 73 challenge
+sentences are complete: inflected forms, numbers, units, dates and acronyms, and unresolved heteronyms still fail.
 
-- Corpus: 73 utterances, 332 word events, 1,272 phone events.
-- Token parity: 1,292 mapped symbols, none dropped; all 114 Kokoro vocabulary IDs checked.
-- Distillation: 4 admitted choices, 3 retained rejections, 6 held-out checks passed.
-- 26 fixtures and 11 teacher-backed token checks passed; no SMA dependency.
-- Warm latency about 120 µs per sentence for the full phonemizer (2 µs for phone mapping), excluding startup.
-
-Misaki parity is a separate gate: Kokoro was trained on misaki phonemes.
+Kokoro was trained on misaki's phoneme conventions (stock `KPipeline` uses misaki `en.G2P`), so the target is
+misaki's symbol conventions, measured as misaki parity on a large held-out corpus; not yet measured.
