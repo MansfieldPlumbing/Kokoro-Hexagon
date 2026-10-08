@@ -51,7 +51,7 @@ function New-KokoroGenerator60xResidentRunSteps {
     # PmuEvents (eight hardware event selects) adds a performance-counter record; without it the
     # emitted bytes are unchanged. See the PMU block below for the record layout.
     param([ValidateRange(2,32768)][int]$Frames=7801,[ValidateRange(1,64)][int]$BatchTiles=16,[ValidateRange(0,3)][int]$CostProbePasses=0,[switch]$CostProbeTurnsBody,
-        [ValidateCount(8,8)][ValidateRange(0,1023)][int[]]$PmuEvents,[ValidateRange(1,4)][int]$HvxThreads=1)
+        [ValidateCount(8,8)][ValidateRange(0,1023)][int[]]$PmuEvents,[ValidateRange(1,4)][int]$HvxThreads=1,[ValidateSet('Fused','Moments')][string[]]$PackBodies=@())
     if($CostProbeTurnsBody -and $CostProbePasses -lt 1){throw 'CostProbeTurnsBody needs CostProbePasses >= 1'}
     . (Join-Path $PSScriptRoot 'Kokoro.ResBlockRun.ps1')
     foreach($file in 'Kokoro.HmxConv.ps1','Kokoro.AdaInInteger.ps1','Kokoro.ResidualInteger.ps1','Kokoro.AdaInSnakeInteger.ps1','Kokoro.AdaInSnakeTurns.ps1','Kokoro.AdaInStatisticsAccumulate.ps1','Kokoro.DmaCopy.ps1','Kokoro.BranchAverageInteger.ps1') { . (Join-Path $PSScriptRoot $file) }
@@ -105,7 +105,8 @@ function New-KokoroGenerator60xResidentRunSteps {
     #   +0 dispatch sequence, +4 quit, +8 'POOL', +12 HvxThreads;
     #   +64*k worker k: +0..+16 r0..r4 (absolute addresses or values), +20 completed sequence,
     #   +24 thread id, +28 qurt_thread_create rc, +32 pool block address, +36 exit status,
-    #   +40 qurt_thread_join rc, +44 body address, +48 tile count (0: nothing to do);
+    #   +40 qurt_thread_join rc, +44 body address, +48 tile count (0: nothing to do),
+    #   +52 the worker's qurt_hvx_lock rc (non-zero: the worker skips its part and the job thread runs it);
     #   +512 + 64*k: qurt_thread_attr_t (SDK 6.4.0.2 computev73 qurt_thread.h: name[16], tcb 0,
     #   stid 0, priority 127 at +18 (QURT_THREAD_ATTR_PRIORITY_DEFAULT/2, as the SDK
     #   multithreading example), bus priority 255 at +21, timetest -2 at +22, stack size at +24,
@@ -151,6 +152,12 @@ function New-KokoroGenerator60xResidentRunSteps {
             $s.Add(@{Op='eq';d=0;s=8;t=9}); $s.Add(@{Op='jump-p';u=0;Label=$done})
             $s.Add(@{Op='addi';d=6;s=6;i=20}); & $futexWait 6 8; & $jump $wait
             $s.Add(@{Op='label';Name=$done})
+            # A worker without an HVX context left its part: run it here.
+            $ran=& $label
+            & $ptr 6 25 ($poolOffset+64*$k); $s.Add(@{Op='imm';d=9;i=0}); $s.Add(@{Op='load';d=8;s=6;Offset=52}); $s.Add(@{Op='eq';d=0;s=8;t=9}); $s.Add(@{Op='jump-p';u=0;Label=$ran})
+            $s.Add(@{Op='load';d=8;s=6;Offset=48}); $s.Add(@{Op='eq';d=0;s=8;t=9}); $s.Add(@{Op='jump-p';u=0;Label=$ran})
+            foreach($q in 0..4){ $s.Add(@{Op='load';d=$q;s=6;Offset=(4*$q)}) }; & $call $body
+            $s.Add(@{Op='label';Name=$ran})
         }
         if($Moments){
             & $ptr 4 18 $off[1]
@@ -392,9 +399,11 @@ function New-KokoroGenerator60xResidentRunSteps {
     $s.Add(@{Op='dealloc-return'})
 
     $bodies=[Collections.Generic.List[object]]::new()
-    $bodies.Add(@('body_fused',@(New-KokoroAdaInSnakeIntegerSteps)))
+    # PackBodies: VLIW packets from Hexagon.Packets.ps1 for those bodies (measurement option).
+    $pack={param([string]$name,[object[]]$steps) if($name -in $PackBodies){ . (Join-Path $PSScriptRoot 'Hexagon.Packets.ps1'); ,@(Optimize-HexagonPackets $steps) } else { ,$steps } }
+    $bodies.Add(@('body_fused',(& $pack 'Fused' @(New-KokoroAdaInSnakeIntegerSteps))))
     if($CostProbeTurnsBody){ $bodies.Add(@('body_turns',@(New-KokoroAdaInSnakeTurnsSteps))) }
-    $bodies.Add(@('body_statsacc',@(New-KokoroAdaInStatisticsAccumulateSteps)))
+    $bodies.Add(@('body_statsacc',(& $pack 'Moments' @(New-KokoroAdaInStatisticsAccumulateSteps))))
     $bodies.Add(@('body_coeff',@(New-KokoroAdaInIntegerCoefficientsSteps)))
     $bodies.Add(@('body_residual',@(New-KokoroResidualIntegerSteps)))
     $bodies.Add(@('body_average',@(New-KokoroBranchAverageIntegerSteps)))
@@ -403,16 +412,20 @@ function New-KokoroGenerator60xResidentRunSteps {
     foreach($pair in $bodies){$s.Add(@{Op='label';Name=$pair[0]});foreach($step in $pair[1]){$s.Add($step)}}
     if($HvxThreads -gt 1){
         # hvx_worker(r0 = its pool slot): r16 slot, r17 pool block, r18 last sequence seen, r19 zero,
-        # r20 body address.
-        $loop=& $label; $idle=& $label; $done=& $label; $quit=& $label
+        # r20 body address, r22 all ones when this thread holds an HVX context, else zero.
+        $loop=& $label; $idle=& $label; $done=& $label; $quit=& $label; $locked=& $label; $lockKnown=& $label
         $s.Add(@{Op='label';Name='hvx_worker'})
         $s.Add(@{Op='addi';d=16;s=0;i=0}); $s.Add(@{Op='load';d=17;s=16;Offset=32}); $s.Add(@{Op='imm';d=18;i=0}); $s.Add(@{Op='imm';d=19;i=0})
         $s.Add(@{Op='imm';d=0;i=1}); $s.Add(@{Op='imm';d=5;i=0}); $s.Add(@{Op='trap0';i=0x55})
+        $s.Add(@{Op='store';s=16;t=0;Offset=52}); $s.Add(@{Op='eq';d=0;s=0;t=19}); $s.Add(@{Op='jump-p';u=0;Label=$locked})
+        $s.Add(@{Op='imm';d=22;i=0}); & $jump $lockKnown
+        $s.Add(@{Op='label';Name=$locked}); $s.Add(@{Op='imm';d=22;i=-1})
+        $s.Add(@{Op='label';Name=$lockKnown})
         $s.Add(@{Op='label';Name=$loop})
         $s.Add(@{Op='load';d=0;s=17;Offset=0}); $s.Add(@{Op='eq';d=0;s=0;t=18}); $s.Add(@{Op='jump-p';u=0;Label=$idle})
         $s.Add(@{Op='addi';d=18;s=0;i=0})
         $s.Add(@{Op='load';d=1;s=17;Offset=4}); $s.Add(@{Op='gtu';d=0;s=1;t=19}); $s.Add(@{Op='jump-p';u=0;Label=$quit})
-        $s.Add(@{Op='load';d=5;s=16;Offset=48}); $s.Add(@{Op='eq';d=0;s=5;t=19}); $s.Add(@{Op='jump-p';u=0;Label=$done})
+        $s.Add(@{Op='load';d=5;s=16;Offset=48}); $s.Add(@{Op='and';d=5;s=5;t=22}); $s.Add(@{Op='eq';d=0;s=5;t=19}); $s.Add(@{Op='jump-p';u=0;Label=$done})
         foreach($k in 0..4){ $s.Add(@{Op='load';d=$k;s=16;Offset=(4*$k)}) }
         $s.Add(@{Op='load';d=20;s=16;Offset=44}); $s.Add(@{Op='callr';s=20})
         $s.Add(@{Op='syncht'})

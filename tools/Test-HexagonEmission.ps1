@@ -20,6 +20,8 @@ param(
     [switch] $ResidentCostProbeTurnsBody,
     [ValidateCount(8,8)][ValidateRange(0,1023)][int[]] $ResidentPmuEvents,
     [ValidateRange(1,4)][int] $ResidentHvxThreads = 1,
+    [ValidateRange(1,64)][int] $ResidentBatchTiles = 16,
+    [ValidateSet('Fused','Moments')][string[]] $ResidentPackBodies = @(),
     [ValidateRange(2, 2048)][int] $AdaInFrames = 64,
     [ValidateRange(1, 128)][int] $AdaInChannels = 128,
     [switch] $AdaInVectorConvolution,
@@ -41,7 +43,7 @@ $result=& (Join-Path $PSScriptRoot 'Emit-HexagonProbe.ps1') -OutputDirectory $ou
     -Kernel $Kernel -ResBlockFrames $ResBlockFrames -ResBlockKernel $ResBlockKernel -IntegerChannels $IntegerChannels -LinearRows $LinearRows -LinearInputChannels $LinearInputChannels `
     -LinearOutputChannels $LinearOutputChannels -LinearVectorOutputTiles:$LinearVectorOutputTiles `
     -AdaInFrames $AdaInFrames -AdaInChannels $AdaInChannels -AdaInVectorConvolution:$AdaInVectorConvolution -ConvChannels $ConvChannels -ConvKernel $ConvKernel -ConvDilation $ConvDilation -ConvOutputPlanes:$ConvOutputPlanes -ConvWeightPlanes $ConvWeightPlanes -CombineMode $CombineMode -CombineGroups $CombineGroups -ResidentCostProbePasses $ResidentCostProbePasses -ResidentCostProbeTurnsBody:$ResidentCostProbeTurnsBody -ConvTiles $ConvTiles -RegionBody:$RegionBody `
-    -ProfileBreakdown:$ProfileBreakdown -BypassAdaInCoefficients:$BypassAdaInCoefficients -BypassStatisticsAndCoefficients:$BypassStatisticsAndCoefficients -BypassHmxCompute:$BypassHmxCompute -Force:$Force -ResidentHvxThreads $ResidentHvxThreads @pmuArgs
+    -ProfileBreakdown:$ProfileBreakdown -BypassAdaInCoefficients:$BypassAdaInCoefficients -BypassStatisticsAndCoefficients:$BypassStatisticsAndCoefficients -BypassHmxCompute:$BypassHmxCompute -Force:$Force -ResidentHvxThreads $ResidentHvxThreads -ResidentBatchTiles $ResidentBatchTiles -ResidentPackBodies $ResidentPackBodies @pmuArgs
 $wslOutput=(& wsl.exe --exec wslpath -a $output 2>$null | Select-Object -Last 1).Trim()
 if($LASTEXITCODE -ne 0 -or -not $wslOutput.StartsWith('/')) { throw 'Cannot resolve output directory in WSL' }
 $assembler="$ToolRoot/hexagon-llvm-mc"

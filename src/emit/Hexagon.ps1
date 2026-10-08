@@ -1,7 +1,7 @@
 # Hexagon V73 singleton-packet encoders.
 # Source: 80-N2040-53 Rev. AB, pp. 145, 157, 163, 189, 206, 214, 242, 304.
 # PDF SHA256: 44EBAFD1119F725BD3C6FFB87499232520DF9A0A6E3E3DC6EA329B15DAED11A8
-# Each instruction ends its own packet. No duplexes, extenders or scheduling yet.
+# Each instruction ends its own packet unless Hexagon.Packets.ps1 marks it Packed. No duplexes.
 $script:HexagonForms = @{
     'imm'    = '01111000ii-iiiiiPPiiiiiiiiiddddd'
     'lo'     = '01110001ii1xxxxxPPiiiiiiiiiiiiii'
@@ -186,7 +186,8 @@ function Read-HexagonWord {
 function New-HexagonInstruction {
     param([hashtable] $Step, [long] $Pc, [long] $Target)
     if ($Step.Op -eq 'label') { return }
-    $fields = @{ P=3 }
+    # Parse bits: 11 ends a packet, 01 continues it (Optimize-HexagonPackets sets Packed).
+    $fields = @{ P=$(if ($Step.Packed) { 1 } else { 3 }) }
     foreach ($key in 'd','s','t','x','u','e') { if ($Step.ContainsKey($key)) { $fields[$key] = $Step[$key] } }
     switch ($Step.Op) {
         { $_ -in 'mpyu-d','mpy-d','add-d','sub-d','gtu-d','asr-d-i' } {

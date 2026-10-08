@@ -142,7 +142,7 @@ try {
             $poolAt = $offset - $finalOffset + 2 * [int]($finalOffset / 3) + 4096
             if ($poolAt + 1024 -le $out.Length -and [BitConverter]::ToUInt32($out, $poolAt + 8) -eq 0x4C4F4F50) {
                 $n = [BitConverter]::ToUInt32($out, $poolAt + 12)
-                $w = for ($k = 1; $k -lt $n; $k++) { "W$k=Create:$([BitConverter]::ToInt32($out, $poolAt + 64 * $k + 28)),Join:$([BitConverter]::ToInt32($out, $poolAt + 64 * $k + 40)),Status:$([BitConverter]::ToInt32($out, $poolAt + 64 * $k + 36)),Done:$([BitConverter]::ToUInt32($out, $poolAt + 64 * $k + 20))" }
+                $w = for ($k = 1; $k -lt $n; $k++) { "W$k=Create:$([BitConverter]::ToInt32($out, $poolAt + 64 * $k + 28)),Join:$([BitConverter]::ToInt32($out, $poolAt + 64 * $k + 40)),Status:$([BitConverter]::ToInt32($out, $poolAt + 64 * $k + 36)),Done:$([BitConverter]::ToUInt32($out, $poolAt + 64 * $k + 20)),HvxLock:$([BitConverter]::ToInt32($out, $poolAt + 64 * $k + 52))" }
                 $lines.Add("Pool HvxThreads=$n Dispatches=$([BitConverter]::ToUInt32($out, $poolAt)) $($w -join ' ')")
             }
         }

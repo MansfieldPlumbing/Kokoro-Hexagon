@@ -18,6 +18,8 @@ param(
     [switch] $ResidentCostProbeTurnsBody,
     [ValidateCount(8,8)][ValidateRange(0,1023)][int[]] $ResidentPmuEvents,
     [ValidateRange(1,4)][int] $ResidentHvxThreads = 1,
+    [ValidateRange(1,64)][int] $ResidentBatchTiles = 16,
+    [ValidateSet('Fused','Moments')][string[]] $ResidentPackBodies = @(),
     [ValidateRange(2, 2048)][int] $AdaInFrames = 64,
     [ValidateRange(1, 128)][int] $AdaInChannels = 128,
     [switch] $AdaInVectorConvolution,
@@ -246,7 +248,7 @@ if($Kernel -eq 'KokoroR0Sub0') {
 } elseif($Kernel -eq 'KokoroGenerator60xResidentRun') {
     . (Join-Path $PSScriptRoot '..\src\emit\Kokoro.Generator60xResidentRun.ps1')
     $pmu=if($ResidentPmuEvents){@{PmuEvents=$ResidentPmuEvents}}else{@{}}
-    $run=New-KokoroGenerator60xResidentRunSteps -Frames $ResBlockFrames -CostProbePasses $ResidentCostProbePasses -CostProbeTurnsBody:$ResidentCostProbeTurnsBody -HvxThreads $ResidentHvxThreads @pmu
+    $run=New-KokoroGenerator60xResidentRunSteps -Frames $ResBlockFrames -CostProbePasses $ResidentCostProbePasses -CostProbeTurnsBody:$ResidentCostProbeTurnsBody -HvxThreads $ResidentHvxThreads -BatchTiles $ResidentBatchTiles -PackBodies $ResidentPackBodies @pmu
     $steps=@($run.Steps)
     $symbol='kokoro_resblock_run_skel_handle_invoke'; $soname='libkokoro_resblock_run_skel.so'
     Write-NewOrIdenticalFile (Join-Path $OutputDirectory 'runner-layout.json') ([Text.Encoding]::UTF8.GetBytes(($run.Layout | ConvertTo-Json -Depth 6))) -AllowOverwrite:$Force
@@ -320,7 +322,15 @@ foreach($step in $steps) {
     $pcAt+=& $isaLength $step
 }
 $asm=@('.text','.p2align 2',".global $symbol",".type $symbol,@function","${symbol}:")
-$asm+=@($steps | ForEach-Object {ConvertTo-HexagonAssembly $_})
+# Multi-instruction packets (steps marked Packed by Hexagon.Packets.ps1) share one pair of braces.
+$open=$false
+$asm+=@(foreach($step in $steps) {
+    $line=ConvertTo-HexagonAssembly $step
+    if(-not ($step.Packed -or $open)) { $line; continue }
+    $inner=$line -replace '^\{ (.*) \}$','$1'
+    if(-not $open) { $open=$true; "{ $inner" } elseif($step.Packed) { "  $inner" } else { $open=$false; "  $inner }" }
+})
+if($open) { throw 'Unterminated packet' }
 Write-NewOrIdenticalFile (Join-Path $OutputDirectory 'probe-reference.s') ([Text.Encoding]::UTF8.GetBytes(($asm -join "`n")+"`n")) -AllowOverwrite:$Force
 $codeStart=[int]$library.Exports[$symbol]
 $isa=Get-InstructionSet
