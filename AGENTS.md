@@ -13,7 +13,7 @@ SM8550 and SM8635 phones, against the best other Kokoro build on the same phone.
 
 ## Where we stand (2026-10-08)
 
-The goal is the fastest Kokoro in the world, and Kokoro-Hexagon is a contender for it. It is also notable for how it is made: the model path is
+Kokoro-Hexagon is notable for how it is made: the model path is
 authored only in PowerShell, which emits the Hexagon machine code and ELF itself. No C, C++, LLVM or QNN produces any of it.
 
 Measured on SM8550, hello-world sentence (1.625 s of audio), receipts in `docs/results/`:
