@@ -23,6 +23,7 @@ param(
     [ValidateRange(-1,17)][int] $Stage16StopAfter = -1,
     [switch] $TailDumpLogits,
     [ValidateCount(1,3)][int[]] $Stage16Kernels = @(3,7,11),
+    [ValidateSet(128,256)][int] $Stage16Channels = 128,
     [ValidateSet('Stage','Windows','Planes')][string] $Stage16DumpPoint = 'Stage',
     [ValidateRange(2, 2048)][int] $AdaInFrames = 64,
     [ValidateRange(1, 128)][int] $AdaInChannels = 128,
@@ -259,7 +260,7 @@ if($Kernel -eq 'KokoroR0Sub0') {
 } elseif($Kernel -eq 'KokoroResBlock16Run') {
     # One or more 16-bit resblocks without the tail, under the generic tail harness (completion word 1 for one block).
     . (Join-Path $PSScriptRoot '..\src\emit\Kokoro.Generator60x16Run.ps1')
-    $run=New-KokoroGenerator60x16RunSteps -Frames $ResBlockFrames -HvxThreads $ResidentHvxThreads -BatchTiles $ResidentBatchTiles -Kernels $Stage16Kernels
+    $run=New-KokoroGenerator60x16RunSteps -Frames $ResBlockFrames -HvxThreads $ResidentHvxThreads -BatchTiles $ResidentBatchTiles -Kernels $Stage16Kernels -Channels $Stage16Channels -GenericHarness -StopAfterStage $Stage16StopAfter -DumpPoint $Stage16DumpPoint
     $steps=@($run.Steps)
     $symbol='kokoro_generator_tail_skel_handle_invoke'; $soname='libkokoro_generator_tail_skel.so'
     Write-NewOrIdenticalFile (Join-Path $OutputDirectory 'runner-layout.json') ([Text.Encoding]::UTF8.GetBytes(($run.Layout | ConvertTo-Json -Depth 6))) -AllowOverwrite:$Force

@@ -24,6 +24,7 @@ param(
     [switch] $ResidentCompactOutput,
     [ValidateRange(-1,17)][int] $Stage16StopAfter = -1,
     [ValidateCount(1,3)][int[]] $Stage16Kernels = @(3,7,11),
+    [ValidateSet(128,256)][int] $Stage16Channels = 128,
     [ValidateRange(2, 2048)][int] $AdaInFrames = 64,
     [ValidateRange(1, 128)][int] $AdaInChannels = 128,
     [switch] $AdaInVectorConvolution,
@@ -45,7 +46,7 @@ $result=& (Join-Path $PSScriptRoot 'Emit-HexagonProbe.ps1') -OutputDirectory $ou
     -Kernel $Kernel -ResBlockFrames $ResBlockFrames -ResBlockKernel $ResBlockKernel -IntegerChannels $IntegerChannels -LinearRows $LinearRows -LinearInputChannels $LinearInputChannels `
     -LinearOutputChannels $LinearOutputChannels -LinearVectorOutputTiles:$LinearVectorOutputTiles `
     -AdaInFrames $AdaInFrames -AdaInChannels $AdaInChannels -AdaInVectorConvolution:$AdaInVectorConvolution -ConvChannels $ConvChannels -ConvKernel $ConvKernel -ConvDilation $ConvDilation -ConvOutputPlanes:$ConvOutputPlanes -ConvWeightPlanes $ConvWeightPlanes -CombineMode $CombineMode -CombineGroups $CombineGroups -ResidentCostProbePasses $ResidentCostProbePasses -ResidentCostProbeTurnsBody:$ResidentCostProbeTurnsBody -ConvTiles $ConvTiles -RegionBody:$RegionBody `
-    -ProfileBreakdown:$ProfileBreakdown -BypassAdaInCoefficients:$BypassAdaInCoefficients -BypassStatisticsAndCoefficients:$BypassStatisticsAndCoefficients -BypassHmxCompute:$BypassHmxCompute -Force:$Force -ResidentHvxThreads $ResidentHvxThreads -ResidentBatchTiles $ResidentBatchTiles -ResidentCompactOutput:$ResidentCompactOutput -Stage16StopAfter $Stage16StopAfter -Stage16Kernels $Stage16Kernels @pmuArgs
+    -ProfileBreakdown:$ProfileBreakdown -BypassAdaInCoefficients:$BypassAdaInCoefficients -BypassStatisticsAndCoefficients:$BypassStatisticsAndCoefficients -BypassHmxCompute:$BypassHmxCompute -Force:$Force -ResidentHvxThreads $ResidentHvxThreads -ResidentBatchTiles $ResidentBatchTiles -ResidentCompactOutput:$ResidentCompactOutput -Stage16StopAfter $Stage16StopAfter -Stage16Kernels $Stage16Kernels -Stage16Channels $Stage16Channels @pmuArgs
 $wslOutput=(& wsl.exe --exec wslpath -a $output 2>$null | Select-Object -Last 1).Trim()
 if($LASTEXITCODE -ne 0 -or -not $wslOutput.StartsWith('/')) { throw 'Cannot resolve output directory in WSL' }
 $assembler="$ToolRoot/hexagon-llvm-mc"

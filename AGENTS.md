@@ -128,7 +128,9 @@ phone measurements establish achieved speed and time to first audio.
   `docs/results/noise-res1-16bit-sm8550-20261008.md`.
 - The generator's 60x half (noise branch, ups[1], resblocks.3-5) and tail in one DSP job: captured ups[1] input
   and har to PCM at 42.71 dB in 46.48 ms (1.625 s of audio) on SM8550. See
-  `docs/results/generator-front-stage-tail-sm8550-20261008.md`. See `docs/results/generator-stage16-tail-sm8550-20261008.md`.
+  `docs/results/generator-front-stage-tail-sm8550-20261008.md`.
+- resblocks.0-2 and their mean at 256 channels: 64.14 dB in 23.24 ms on SM8550. See
+  `docs/results/generator-resblocks012-16bit-sm8550-20261008.md`. See `docs/results/generator-stage16-tail-sm8550-20261008.md`.
 
 ## Product shape
 

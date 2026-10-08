@@ -26,6 +26,10 @@ function New-KokoroPlaneCombineSteps {
     )
     if ($PlaneStride % 2048 -ne 0) { throw 'Plane stride must keep 2 KB tile alignment' }
     $ob = $Channels / 32
+    # Per-block vector registers: residual ratios from v20 and group 3 shifts from v16 for up to four blocks; with eight
+    # blocks (256 channels) a residual combine keeps ratios in v16..v23 and shifts in v8..v15 (v24, v25 are setup temps).
+    $ratioBase = if ($ob -gt 4) { 16 } else { 20 }
+    $shiftBase = if ($ob -gt 4 -and $Mode -eq 'Residual') { 8 } else { 16 }
     $s = [Collections.Generic.List[hashtable]]::new()
     $imm = { param([int]$r,[long]$v) $u=[uint32]($v -band 0xffffffffL); $s.Add(@{Op='lo';x=$r;i=($u -band 65535)}); $s.Add(@{Op='hi';x=$r;i=($u -shr 16)}) }
     & $imm 13 0xFF00FF00L; $s.Add(@{Op='vsplat';d=31;s=13})
@@ -37,15 +41,15 @@ function New-KokoroPlaneCombineSteps {
         # Per-channel Q15 ratio in both halfwords of each word lane, one vector per block.
         for ($b = 0; $b -lt $ob; $b++) {
             $s.Add(@{Op='addi';d=6;s=2;i=(128*$b)})
-            $s.Add(@{Op='vload';d=(20+$b);s=6;Offset=0})
-            $s.Add(@{Op='vasl-w';d=24;s=(20+$b);t=9})                # low halfword into the high one
+            $s.Add(@{Op='vload';d=($ratioBase+$b);s=6;Offset=0})
+            $s.Add(@{Op='vasl-w';d=24;s=($ratioBase+$b);t=9})                # low halfword into the high one
             $s.Add(@{Op='vlsr-uw';d=25;s=24;t=9})                    # and back down: clear any high bits
-            $s.Add(@{Op='vor';d=(20+$b);s=24;t=25})
+            $s.Add(@{Op='vor';d=($ratioBase+$b);s=24;t=25})
         }
     }
     if ($Group3Shifts) {
         if ($Groups -ne 3) { throw 'Group 3 shifts need three groups' }
-        for ($b = 0; $b -lt $ob; $b++) { $s.Add(@{Op='addi';d=6;s=2;i=(1024+128*$b)}); $s.Add(@{Op='vload';d=(16+$b);s=6;Offset=0}) }
+        for ($b = 0; $b -lt $ob; $b++) { $s.Add(@{Op='addi';d=6;s=2;i=(1024+128*$b)}); $s.Add(@{Op='vload';d=($shiftBase+$b);s=6;Offset=0}) }
     }
     $s.Add(@{Op='addi';d=15;s=3;i=0})
     $tile = "${LabelPrefix}_tile"
@@ -63,7 +67,7 @@ function New-KokoroPlaneCombineSteps {
         if ($Groups -eq 3) {
             # Low x low group: only its low plane (r0+5S) is read; the byte is its whole signed window.
             $s.Add(@{Op='add';d=11;s=11;t=10}); $s.Add(@{Op='add';d=11;s=11;t=10}); $s.Add(@{Op='vload';d=6;s=11;Offset=0})
-            if ($Group3Shifts) { $s.Add(@{Op='vasr-hv';d=6;s=6;t=(16+$b)}) }   # sign-extend, times 2^g
+            if ($Group3Shifts) { $s.Add(@{Op='vasr-hv';d=6;s=6;t=($shiftBase+$b)}) }   # sign-extend, times 2^g
             else { $s.Add(@{Op='vasr-h';d=6;s=6;t=8}) }                     # sign-extend the odd byte
         }
         foreach ($g in $pairs) {
@@ -76,7 +80,7 @@ function New-KokoroPlaneCombineSteps {
         $s.Add(@{Op='vadd-h-sat';d=4;s=0;t=2})                        # value, int16
         if ($Groups -eq 3) { $s.Add(@{Op='vadd-h-sat';d=4;s=4;t=6}) }
         if ($Mode -eq 'Residual') {
-            $s.Add(@{Op='vmpy-h-rnd-sat';d=4;s=4;t=(20+$b)})          # O = v * ratio_c
+            $s.Add(@{Op='vmpy-h-rnd-sat';d=4;s=4;t=($ratioBase+$b)})          # O = v * ratio_c
             $s.Add(@{Op='vload';d=5;s=1;Offset=0})
             $s.Add(@{Op='vxor';d=5;s=5;t=29})
             $s.Add(@{Op='vadd-h-sat';d=4;s=5;t=4})                    # R + O
