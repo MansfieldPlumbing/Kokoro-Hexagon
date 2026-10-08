@@ -96,13 +96,16 @@ function New-KokoroGenerator60xResidentRunSteps {
         $c=[array]::IndexOf($pmuCategories,$category); if($c -lt 0){throw "Unknown PMU category $category"}
         & $ptr 0 25 ($pmuOffset+256+64*$c); & $call 'body_pmu_mark'
     }
-    # HVX worker threads (HvxThreads > 1). Each fused AdaIN+Snake call splits its tiles into
-    # HvxThreads contiguous parts; the job thread runs part 0, workers 1..HvxThreads-1 the rest.
+    # HVX worker threads (HvxThreads > 1). A parallel call splits its tiles into HvxThreads
+    # contiguous parts; the job thread runs part 0, workers 1..HvxThreads-1 the rest. Used for the
+    # per-tile bodies: fused AdaIN+Snake, residual, and moments (each worker into its own zeroed
+    # 1024-byte moments buffer in VTCM, added into the job's buffer after the join; the sums are
+    # wrapping uint32, so the order of addition does not change the bits).
     # Pool block at DDR workspace r25 + 2*stride + 4096:
     #   +0 dispatch sequence, +4 quit, +8 'POOL', +12 HvxThreads;
-    #   +64*k worker k: +0 source, +4 destination, +8 coefficients, +12 parameters (absolute),
-    #   +16 tile count, +20 completed sequence, +24 thread id, +28 qurt_thread_create rc,
-    #   +32 pool block address, +36 exit status, +40 qurt_thread_join rc;
+    #   +64*k worker k: +0..+16 r0..r4 (absolute addresses or values), +20 completed sequence,
+    #   +24 thread id, +28 qurt_thread_create rc, +32 pool block address, +36 exit status,
+    #   +40 qurt_thread_join rc, +44 body address, +48 tile count (0: nothing to do);
     #   +512 + 64*k: qurt_thread_attr_t (SDK 6.4.0.2 computev73 qurt_thread.h: name[16], tcb 0,
     #   stid 0, priority 127 at +18 (QURT_THREAD_ATTR_PRIORITY_DEFAULT/2, as the SDK
     #   multithreading example), bus priority 255 at +21, timetest -2 at +22, stack size at +24,
@@ -117,23 +120,30 @@ function New-KokoroGenerator60xResidentRunSteps {
     $addr={param([int]$r,[string]$target) $pc=@{Op='add-pc';d=$r;i=0};$lo=@{Op='lo';x=15;i=0};$hi=@{Op='hi';x=15;i=0};$s.Add($pc);$s.Add($lo);$s.Add($hi);$s.Add(@{Op='add';d=$r;s=$r;t=15});$calls.Add(@{pc=$pc;low=$lo;high=$hi;label=$target})}
     $jump={param([string]$target) $s.Add(@{Op='eq';d=0;s=0;t=0}); $s.Add(@{Op='jump-p';u=0;Label=$target}) }
     $futexWait={param([int]$addrReg,[int]$valueReg) $s.Add(@{Op='addi';d=1;s=$valueReg;i=0}); $s.Add(@{Op='addi';d=0;s=$addrReg;i=0}); $s.Add(@{Op='imm';d=3;i=0}); $s.Add(@{Op='imm';d=4;i=-1}); $s.Add(@{Op='imm';d=5;i=-1}); $s.Add(@{Op='trap0';i=0x20}) }
-    $fused={param([long]$src,[long]$dst,[long]$coef,[long]$prm,[int]$count)
-        if($HvxThreads -eq 1){ & $ptr 0 18 $src; & $ptr 1 18 $dst; & $ptr 2 18 $coef; & $ptr 3 18 $prm; & $imm 4 $count; & $call 'body_fused'; return }
+    $privateMoments=@(0,11264,12288,13312) | ForEach-Object { $offSmall+$_ }
+    $parallel={param([string]$body,[long[]]$off,[bool[]]$perTile,[int]$count,[switch]$Moments)
+        $n=$off.Count
+        if($HvxThreads -eq 1){ for($i=0;$i -lt $n;$i++){ & $ptr $i 18 $off[$i] }; & $imm $n $count; & $call $body; return }
         $chunk=[int][math]::Ceiling($count/$HvxThreads)
         for($k=1;$k -lt $HvxThreads;$k++){
             $o=$k*$chunk; $c=[math]::Max(0,[math]::Min($chunk,$count-$o))
+            if($c -gt 0 -and $Moments){ & $ptr 4 18 $privateMoments[$k]; $s.Add(@{Op='vxor';d=0;s=0;t=0}); for($v=0;$v -lt 8;$v++){$s.Add(@{Op='vstore';s=4;t=0;Offset=(128*$v)})} }
             & $ptr 6 25 ($poolOffset+64*$k)
             if($c -gt 0){
-                & $ptr 0 18 ($src+$o*8192); $s.Add(@{Op='store';s=6;t=0;Offset=0}); & $ptr 0 18 ($dst+$o*8192); $s.Add(@{Op='store';s=6;t=0;Offset=4})
-                & $ptr 0 18 $coef; $s.Add(@{Op='store';s=6;t=0;Offset=8}); & $ptr 0 18 $prm; $s.Add(@{Op='store';s=6;t=0;Offset=12})
+                for($i=0;$i -lt $n;$i++){
+                    $value=if($Moments -and $i -eq 1){$privateMoments[$k]}elseif($perTile[$i]){$off[$i]+$o*8192}else{$off[$i]}
+                    & $ptr 0 18 $value; $s.Add(@{Op='store';s=6;t=0;Offset=(4*$i)})
+                }
+                & $imm 0 $c; $s.Add(@{Op='store';s=6;t=0;Offset=(4*$n)})
+                & $addr 0 $body; $s.Add(@{Op='store';s=6;t=0;Offset=44})
             }
-            & $imm 0 $c; $s.Add(@{Op='store';s=6;t=0;Offset=16})
+            & $imm 0 $c; $s.Add(@{Op='store';s=6;t=0;Offset=48})
         }
         # Earlier HVX/HMX stores and the arguments complete before the workers start.
         $s.Add(@{Op='syncht'})
         & $ptr 6 25 $poolOffset; $s.Add(@{Op='load';d=0;s=6;Offset=0}); $s.Add(@{Op='addi';d=0;s=0;i=1}); $s.Add(@{Op='store';s=6;t=0;Offset=0})
         $s.Add(@{Op='addi';d=0;s=6;i=0}); & $imm 1 ($HvxThreads-1); $s.Add(@{Op='trap0';i=0x11})
-        & $ptr 0 18 $src; & $ptr 1 18 $dst; & $ptr 2 18 $coef; & $ptr 3 18 $prm; & $imm 4 ([math]::Min($chunk,$count)); & $call 'body_fused'
+        for($i=0;$i -lt $n;$i++){ & $ptr $i 18 $off[$i] }; & $imm $n ([math]::Min($chunk,$count)); & $call $body
         for($k=1;$k -lt $HvxThreads;$k++){
             $wait=& $label; $done=& $label
             $s.Add(@{Op='label';Name=$wait})
@@ -142,7 +152,16 @@ function New-KokoroGenerator60xResidentRunSteps {
             $s.Add(@{Op='addi';d=6;s=6;i=20}); & $futexWait 6 8; & $jump $wait
             $s.Add(@{Op='label';Name=$done})
         }
+        if($Moments){
+            & $ptr 4 18 $off[1]
+            for($k=1;$k -lt $HvxThreads;$k++){
+                if($k*$chunk -ge $count){ continue }
+                & $ptr 5 18 $privateMoments[$k]
+                for($v=0;$v -lt 8;$v++){ $s.Add(@{Op='vload';d=0;s=4;Offset=(128*$v)}); $s.Add(@{Op='vload';d=1;s=5;Offset=(128*$v)}); $s.Add(@{Op='vadd-w';d=0;s=0;t=1}); $s.Add(@{Op='vstore';s=4;t=0;Offset=(128*$v)}) }
+            }
+        }
     }
+    $fused={param([long]$src,[long]$dst,[long]$coef,[long]$prm,[int]$count) & $parallel 'body_fused' @($src,$dst,$coef,$prm) @($true,$true,$false,$false) $count }
     $poolStart={
         if($HvxThreads -eq 1){return}
         & $ptr 4 25 $poolOffset; $s.Add(@{Op='vxor';d=0;s=0;t=0}); for($k=0;$k -lt 8;$k++){$s.Add(@{Op='vstore';s=4;t=0;Offset=(128*$k)})}
@@ -219,7 +238,7 @@ function New-KokoroGenerator60xResidentRunSteps {
         }
         & $mark 'TileFix'
     }
-    $statsAcc={param([long]$srcOff,[int]$count) & $ptr 0 18 $srcOff; & $ptr 1 18 $offMoments; & $imm 2 $count; & $call 'body_statsacc'; & $mark 'Moments' }
+    $statsAcc={param([long]$srcOff,[int]$count) & $parallel 'body_statsacc' @($srcOff,$offMoments) @($true,$false) $count -Moments; & $mark 'Moments' }
 
     # Checked resource wrapper of the frozen K=11 resblock runner, with admission sizes and
     # the VTCM request changed. Its connected_job call target keeps its PC (same length).
@@ -331,8 +350,8 @@ function New-KokoroGenerator60xResidentRunSteps {
                     } else {
                         $normal=if($hasLast){$count-1}else{$count}
                         if($normal -gt 0){
-                            & $ptr 0 18 ($offResidual+$start*8192); & $ptr 1 18 $offStaging; & $ptr 2 18 ($offResidual+$start*8192); & $ptr 3 18 ($offParameters+5120); & $imm 4 $normal
-                            & $call 'body_residual'; & $mark 'Residual'
+                            & $parallel 'body_residual' @(($offResidual+$start*8192),$offStaging,($offResidual+$start*8192),($offParameters+5120)) @($true,$true,$true,$false) $normal
+                            & $mark 'Residual'
                         }
                         if($hasLast){
                             & $ptr 0 18 $offSaved; & $ptr 1 18 ($offStaging+($count-1)*8192); & $ptr 2 18 ($offResidual+($tiles-1)*8192); & $ptr 3 18 ($offParameters+5120); & $imm 4 1
@@ -383,7 +402,8 @@ function New-KokoroGenerator60xResidentRunSteps {
     if($CostProbePasses -gt 0){ for($b=0;$b -lt 3;$b++){foreach($d in 1,3,5){$bodies.Add(@("body_convp_b${b}_d$d",@(New-KokoroHmxConvSteps -Kernel $kernels[$b] -Dilation $d -OutputPlanes -LabelPrefix "probe_b${b}_d$d")))}} }
     foreach($pair in $bodies){$s.Add(@{Op='label';Name=$pair[0]});foreach($step in $pair[1]){$s.Add($step)}}
     if($HvxThreads -gt 1){
-        # hvx_worker(r0 = its pool slot): r16 slot, r17 pool block, r18 last sequence seen, r19 zero.
+        # hvx_worker(r0 = its pool slot): r16 slot, r17 pool block, r18 last sequence seen, r19 zero,
+        # r20 body address.
         $loop=& $label; $idle=& $label; $done=& $label; $quit=& $label
         $s.Add(@{Op='label';Name='hvx_worker'})
         $s.Add(@{Op='addi';d=16;s=0;i=0}); $s.Add(@{Op='load';d=17;s=16;Offset=32}); $s.Add(@{Op='imm';d=18;i=0}); $s.Add(@{Op='imm';d=19;i=0})
@@ -392,9 +412,9 @@ function New-KokoroGenerator60xResidentRunSteps {
         $s.Add(@{Op='load';d=0;s=17;Offset=0}); $s.Add(@{Op='eq';d=0;s=0;t=18}); $s.Add(@{Op='jump-p';u=0;Label=$idle})
         $s.Add(@{Op='addi';d=18;s=0;i=0})
         $s.Add(@{Op='load';d=1;s=17;Offset=4}); $s.Add(@{Op='gtu';d=0;s=1;t=19}); $s.Add(@{Op='jump-p';u=0;Label=$quit})
+        $s.Add(@{Op='load';d=5;s=16;Offset=48}); $s.Add(@{Op='eq';d=0;s=5;t=19}); $s.Add(@{Op='jump-p';u=0;Label=$done})
         foreach($k in 0..4){ $s.Add(@{Op='load';d=$k;s=16;Offset=(4*$k)}) }
-        $s.Add(@{Op='eq';d=0;s=4;t=19}); $s.Add(@{Op='jump-p';u=0;Label=$done})
-        & $call 'body_fused'
+        $s.Add(@{Op='load';d=20;s=16;Offset=44}); $s.Add(@{Op='callr';s=20})
         $s.Add(@{Op='syncht'})
         $s.Add(@{Op='label';Name=$done})
         $s.Add(@{Op='store';s=16;t=18;Offset=20}); $s.Add(@{Op='addi';d=0;s=16;i=20}); $s.Add(@{Op='imm';d=1;i=1}); $s.Add(@{Op='trap0';i=0x11})
