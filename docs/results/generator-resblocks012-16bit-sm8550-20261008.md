@@ -20,3 +20,12 @@ Fixture: tables.bin 553B66E25E10C68C; weights.bin 24A1FFCF53BD723A.
 | Blocks | SNR vs stock (mean) | Max abs error | DSP region median (3 runs, identical) | Per audio second |
 | --- | ---: | ---: | ---: | ---: |
 | resblocks.0-2 + mean, 256 ch | **64.14 dB** | 0.0218 | **23.24 ms** | 14.3 ms |
+## noise_res[0] (same day)
+
+`generator.noise_res[0]` (AdaINResBlock1, 256 channels, kernel 7) from the captured noise_convs[0] output:
+`-Module noise_res -Blocks 0` fixture, `-Kernels 7 -Channels 256`. Skel SHA-256
+`6C128C4328F23738AB6249D511452C552320C57F1443D2A62F739CB27D26CB46`; instruction bytes match SDK 6.4.0.2.
+
+| Block | SNR vs stock | Max abs error | DSP region median (3 runs, identical) |
+| --- | ---: | ---: | ---: |
+| noise_res[0], 256 ch | **74.81 dB** | 0.043 | **7.74 ms** |
