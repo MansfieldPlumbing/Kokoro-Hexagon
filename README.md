@@ -30,7 +30,9 @@ checked against the SDK 6.4.0.2 assembler.
 
 | Job | SNR vs stock | DSP time | Receipt |
 |---|---:|---:|---|
-| **Whole generator in one job** (10x half, LeakyReLU(0.1) into ups[1] on the DSP, 60x half, tail), from captured decoder output and har | **42.05 dB PCM** | **79.71 ms** | [generator-whole](docs/results/generator-whole-sm8550-20261008.md) |
+| **Whole generator with the harmonic source and STFT in one job**, from captured decoder output, f0 and noise draws (stock against itself with the source in float64: 40.83 dB) | **37.24 dB PCM** | **95.57 ms** | [generator-whole-source](docs/results/generator-whole-source-sm8550-20261008.md) |
+| Harmonic source + STFT alone, f0 to har | 64.62 dB (har magnitude) | 3.95 ms | [harmonic-source](docs/results/harmonic-source-sm8550-20261008.md) |
+| Whole generator in one job (10x half, LeakyReLU(0.1) into ups[1] on the DSP, 60x half, tail), from captured decoder output and har | **42.05 dB PCM** | **79.71 ms** | [generator-whole](docs/results/generator-whole-sm8550-20261008.md) |
 | Generator 60x half (noise_convs[1], noise_res[1], ups[1], resblocks.3-5, mean) + tail (LeakyReLU, conv_post, exp/sin, iSTFT) in one job, from captured ups[1] input and har | **42.71 dB PCM** | **46.48 ms** | [generator-front-stage-tail](docs/results/generator-front-stage-tail-sm8550-20261008.md) |
 | resblocks.3-5 + mean + tail, from captured resblocks.3 input | 45.70 dB PCM | 32.12 ms | [generator-stage16-tail](docs/results/generator-stage16-tail-sm8550-20261008.md) |
 | Tail alone | 46.03 dB PCM | 3.06 ms | [generator-tail16](docs/results/generator-tail16-sm8550-20261008.md) |
@@ -42,9 +44,9 @@ checked against the SDK 6.4.0.2 assembler.
 The 60x half plus tail is RTF 0.029 for that part of the model. PCM from these
 jobs plays on the phone speaker as "hello world".
 
-The whole generator runs as one job in 79.71 ms for 1.625 s of audio (generator
-RTF 0.049). Only har (the STFT of the harmonic source) is still captured. Next:
-the harmonic source and its STFT on the DSP, then the decoder (W4A8 per layer
+The whole generator, its harmonic source and STFT included, runs as one job in
+95.57 ms for 1.625 s of audio (generator RTF 0.059) from the decoder output and f0.
+Next: the decoder (W4A8 per layer
 where the error allows), the prosody and duration predictors, the text encoder
 and ALBERT. Whole-model RTF, time to first audio, and SM8635 results are not yet
 measured.
