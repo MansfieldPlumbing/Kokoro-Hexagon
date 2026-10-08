@@ -59,7 +59,8 @@ function New-KokoroGenerator60x16RunSteps {
         # Completion word 1 (src/runspace/KokoroGeneratorTailProbe.ps1) instead of the stage count the resblock harness checks.
         [switch]$GenericHarness)
     $branches=$Kernels.Count; $withMean=$branches -eq 3
-    if($Channels -ne 128 -and ($Front -or $Tail)){throw '-Front and -Tail are 128-channel'}
+    if($Channels -ne 128 -and $Tail){throw '-Tail is 128-channel'}
+    $front10=$Front -and $Channels -eq 256
     if($branches -eq 2){throw 'Two blocks have no stock combination here.'}
     if(-not $withMean -and $Tail){throw '-Tail follows the three-block stage'}
     . (Join-Path $PSScriptRoot 'Kokoro.ResBlockRun.ps1')
@@ -78,7 +79,24 @@ function New-KokoroGenerator60x16RunSteps {
     $scratchOffset=[long]([math]::Ceiling(($coefOffset+18*$kmsBytes)/4096)*4096); $outputBytes=192+$scratchOffset+131072
     $vtcmBytes=$layout.VtcmBytes; $stageWeightBytes=$weightBytes; $stageParameterBytes=$parameterBytes; $inputBytes=$tensorBytes
     $r0Base=20; $r0Offset=0L
-    if($Front){
+    if($front10){
+        # 256-channel front (tools/New-KokoroGeneratorFront10x16Fixture.ps1): input buffer = decoder output (512-channel
+        # croutons), then phase-major har high and low planes (256-channel tiles).
+        if(-not $withMean -or $StopAfterStage -ge 0){throw '-Front feeds the whole three-block stage'}
+        $decFrames=[int]($Frames/10); if(10*$decFrames -ne $Frames){throw 'Frames is not 10 m'}
+        $decTiles=[int][math]::Ceiling($decFrames/32); $qPairs=[int][math]::Ceiling(($decFrames+1)/2); $decBytes=$decTiles*32768L
+        $inputBytes=$decBytes+2L*$tiles*$tileBytes
+        $al64={param([long]$v) [long]([math]::Ceiling($v/65536)*65536)}
+        $offFrontWeights=& $al64 $layout.VtcmBytes; $offFrontTables=$offFrontWeights+786432; $offUpA=$offFrontTables+163840; $offUpB=$offUpA+$decTiles*16384L
+        $vtcmBytes=[math]::Max($vtcmBytes,(& $al64 ($offUpB+$decTiles*16384L)))
+        $upHi=$R.Residual.Offset; $upLo=$upHi+($decTiles+2)*32768L
+        if($upLo+($decTiles+2)*32768L -gt $R.Residual.Offset+$R.Residual.Bytes){throw 'ups[0] input planes exceed the residual region'}
+        if([math]::Floor($upHi/4194304) -ne [math]::Floor(($upLo+($decTiles+2)*32768L-1)/4194304)){throw 'ups[0] input planes cross a 4 MiB VTCM boundary'}
+        if((10*$qPairs+5)/16 -gt [math]::Floor((& $al64 $tensorBytes)/$tileBytes)){throw 'The interleave writes past the target region'}
+        $noiseSlot=[long]([math]::Ceiling(($scratchOffset+131072)/4096)*4096); $r0Slot=$noiseSlot+[long]([math]::Ceiling($tensorBytes/4096)*4096)
+        $outputBytes=192+$r0Slot+$tensorBytes; $r0Base=25; $r0Offset=$r0Slot
+    }
+    elseif($Front){
         if(-not $withMean -or $StopAfterStage -ge 0){throw '-Front feeds the whole three-block stage'}
         if($batch % 2){throw '-Front needs an even batch (ups[1] batches are half as many 256-channel tiles)'}
         $upFrames=[int](($Frames-1)/6)+1; if(6*($upFrames-1)+1 -ne $Frames){throw 'Frames is not 6 m + 1'}
@@ -99,7 +117,9 @@ function New-KokoroGenerator60x16RunSteps {
         $vtcmBytes=[math]::Max($vtcmBytes,$tailLayout.VtcmBytes); $weightBytes+=172032; $parameterBytes+=16384
         $pcmOffset=[long]([math]::Ceiling($outputBytes/256)*256); $outputBytes=$pcmOffset+$tailLayout.OutputBytes-256
     }
-    if($Front){ $noiseWeightOffset=$weightBytes; $weightBytes+=6L*32768*11; $frontWeightOffset=$weightBytes; $weightBytes+=1228800
+    if($front10){ $noiseWeightOffset=$weightBytes; $weightBytes+=6L*2*256*256*7; $frontWeightOffset=$weightBytes; $weightBytes+=196608L*2+10*786432L
+        $noiseParameterOffset=$parameterBytes; $parameterBytes+=6*$recordBytes; $frontParameterOffset=$parameterBytes; $parameterBytes+=163840 }
+    elseif($Front){ $noiseWeightOffset=$weightBytes; $weightBytes+=6L*32768*11; $frontWeightOffset=$weightBytes; $weightBytes+=1228800
         $noiseParameterOffset=$parameterBytes; $parameterBytes+=6*16384; $frontParameterOffset=$parameterBytes; $parameterBytes+=65536 }
 
     $s=[Collections.Generic.List[hashtable]]::new()
@@ -319,17 +339,56 @@ function New-KokoroGenerator60x16RunSteps {
         & $padRows ($offResidual+($tiles-1)*8192) 0x8000
         & $sync; & $dma 25 $r0Slot 18 $offResidual $tensorBytes
     }
+    $front10Noise={
+        & $fill $offResidual $tiles 0x80008000L
+        & $dma 18 $offFrontWeights 21 $frontWeightOffset 393216
+        & $dma 18 $offFrontTables 22 $frontParameterOffset 163840
+        for($start=0;$start -lt $tiles;$start+=$batch){
+            $count=[math]::Min($batch,$tiles-$start); $first=[math]::Max(0,$start-1); $last=[math]::Min($tiles,$start+$count+1)
+            if($start -eq 0){ & $fill $offWin 1 0x80008000L; & $fill $offLow 1 0 }
+            if($start+$count -eq $tiles){ & $fill ($offWin+($count+1)*$tileBytes) 1 0x80008000L; & $fill ($offLow+($count+1)*$tileBytes) 1 0 }
+            & $dma 18 ($offWin+($first-$start+1)*$tileBytes) 20 ($decBytes+$first*[long]$tileBytes) (($last-$first)*[long]$tileBytes)
+            & $dma 18 ($offLow+($first-$start+1)*$tileBytes) 20 ($decBytes+$tiles*[long]$tileBytes+$first*[long]$tileBytes) (($last-$first)*[long]$tileBytes)
+            & $ptr 0 18 ($offWin+$tileBytes); & $ptr 1 18 ($offLow+$tileBytes); & $ptr 2 18 $offFrontWeights; & $ptr 3 18 $offFrontTables; & $imm 4 $count; & $ptr 5 18 $offPlanes
+            & $call 'body_conv_front10_noise'; & $mark 'HmxConv'; & $sync
+            & $parallel 'body_combine_residual' @($offPlanes,($offResidual+$start*$tileBytes),($offFrontTables+12288)) @($true,$true,$false) $count
+            & $mark 'Combine'
+        }
+        & $padRows ($offResidual+($tiles-1)*$tileBytes) 0x8000
+    }
+    $front10Ups={
+        & $sync; & $dma 25 $noiseSlot 18 $offResidual $tensorBytes
+        # Decoder output into the C region, LeakyReLU(0.1) into the ups[0] input planes (zero halo tiles).
+        & $dma 18 $offConv 20 0 $decBytes
+        & $fill $upHi 2 0x80008000L; & $fill ($upHi+($decTiles+1)*32768L) 2 0x80008000L; & $fill $upLo 2 0; & $fill ($upLo+($decTiles+1)*32768L) 2 0
+        & $ptr 0 18 $offConv; & $ptr 1 18 ($upHi+32768); & $ptr 2 18 ($upLo+32768); & $imm 3 ($decTiles*256)
+        & $call 'body_leaky_up'; & $sync
+        for($r=0;$r -lt 10;$r++){
+            & $dma 18 $offFrontWeights 21 ($frontWeightOffset+393216+$r*786432L) 786432
+            & $ptr 0 18 ($upHi+32768); & $ptr 1 18 ($upLo+32768); & $ptr 2 18 $offFrontWeights; & $ptr 3 18 ($offFrontTables+16384+12288*$r); & $imm 4 $decTiles; & $ptr 5 18 $offPlanes
+            & $call 'body_conv_front10_up'; & $mark 'HmxConv'; & $sync
+            & $parallel 'body_combine_conv' @($offPlanes,$(if($r%2){$offUpB}else{$offUpA}),($offFrontTables+139264+1024*$r-1024)) @($true,$true,$false) $decTiles
+            & $mark 'Combine'
+            if($r%2){ & $sync; & $ptr 0 18 $offUpA; & $ptr 1 18 $offConv; & $imm 2 (($r-1)/2); & $imm 3 $qPairs; & $ptr 4 18 $offUpB; & $call 'body_front10_interleave'; & $mark 'Combine'; & $sync }
+        }
+        & $dma 18 $offResidual 25 $noiseSlot $tensorBytes
+        & $ptr 0 18 $offConv; & $ptr 1 18 $offResidual; & $ptr 2 18 ($offFrontTables+149504); & $imm 3 $tiles
+        & $call 'body_front10_add'; & $mark 'Combine'
+        & $padRows ($offResidual+($tiles-1)*$tileBytes) 0x8000
+        & $sync; & $dma 25 $r0Slot 18 $offResidual $tensorBytes
+    }
     & $poolStart
     $stopped=$false
     # Blocks: noise_res[1] first with -Front (index -1: its own weights and records, input computed in VTCM, kernel 11
     # bodies of branch 2), then the stage's branches.
     $blocks=[Collections.Generic.List[object]]::new()
-    if($Front){ $blocks.Add(@{B=-1;K=11;W=$noiseWeightOffset;P=$noiseParameterOffset;Body=2}) }
+    if($front10){ $blocks.Add(@{B=-1;K=7;W=$noiseWeightOffset;P=$noiseParameterOffset;Body=1}) }
+    elseif($Front){ $blocks.Add(@{B=-1;K=11;W=$noiseWeightOffset;P=$noiseParameterOffset;Body=2}) }
     for($bb=0;$bb -lt $branches;$bb++){ $blocks.Add(@{B=$bb;K=$Kernels[$bb];W=$branchWeights[$bb];P=$bb*6L*$recordBytes;Body=$bb}) }
     foreach($blk in $blocks){
         if($stopped){break}
         $b=$blk.B; $K=$blk.K
-        if($b -lt 0){ & $frontNoise } else { & $dma 18 $offResidual $r0Base $r0Offset $tensorBytes }
+        if($b -lt 0 -and $front10){ & $front10Noise } elseif($b -lt 0){ & $frontNoise } else { & $dma 18 $offResidual $r0Base $r0Offset $tensorBytes }
         if($b -le 0){ & $zeroRecord $offMoments; & $moments $offResidual $tiles; if($b -eq 0){ & $copyRecord $offInputMoments $offMoments } }
         else { & $copyRecord $offMoments $offInputMoments }
         for($p=0;$p -lt 3 -and -not $stopped;$p++){
@@ -376,7 +435,8 @@ function New-KokoroGenerator60x16RunSteps {
                 }
             }
         }
-        if($b -lt 0 -and -not $stopped){ & $frontUps }
+        if($b -lt 0 -and -not $stopped -and $front10){ & $front10Ups }
+        elseif($b -lt 0 -and -not $stopped){ & $frontUps }
         elseif($b -lt $branches-1 -and -not $stopped){ & $sync; & $dma 25 ($b*$stride) 18 $offResidual $tensorBytes }
     }
     # One block: its output is the final tensor.
@@ -417,7 +477,14 @@ function New-KokoroGenerator60x16RunSteps {
     $bodies.Add(@('body_combine_residual',@(New-KokoroPlaneCombineSteps -Mode Residual -Channels $Channels -Groups 3 -Group3Shifts -PlaneStride $planeStride -LabelPrefix 'combineresidual')))
     $bodies.Add(@('body_mean',@(New-KokoroBranchMean16Steps -Channels $Channels)))
     for($b=0;$b -lt $branches;$b++){foreach($d in 1,3,5){$bodies.Add(@("body_conv_b${b}_d$d",@(New-KokoroHmxConvPlanesSteps -InputChannels $Channels -OutputChannels $Channels -Kernel $Kernels[$b] -Dilation $d -WeightPlanes 2 -PlaneStride $planeStride -LabelPrefix "g16_b${b}_d$d")))}}
-    if($Front){
+    if($front10){
+        $bodies.Add(@('body_conv_front10_noise',@(New-KokoroHmxConvPlanesSteps -InputChannels 256 -OutputChannels 256 -Kernel 3 -Dilation 1 -WeightPlanes 2 -PlaneStride $planeStride -LabelPrefix 'g16tn')))
+        $bodies.Add(@('body_conv_front10_up',@(New-KokoroHmxConvPlanesSteps -InputChannels 512 -OutputChannels 256 -Kernel 3 -Dilation 1 -WeightPlanes 2 -PlaneStride $planeStride -LabelPrefix 'g16tu')))
+        $bodies.Add(@('body_leaky_up',@(New-KokoroLeakyRelu16Steps -Slope 0.1 -LabelPrefix 'leakyup')))
+        $bodies.Add(@('body_front10_interleave',@(New-KokoroPhaseInterleaveSteps -Phases 10 -Channels 256)))
+        $bodies.Add(@('body_front10_add',@(New-KokoroResidualAdd16Steps -Channels 256)))
+    }
+    elseif($Front){
         $bodies.Add(@('body_conv_front_noise',@(New-KokoroHmxConvPlanesSteps -InputChannels 64 -OutputChannels 128 -Kernel 3 -Dilation 1 -WeightPlanes 2 -PlaneStride $planeStride -LabelPrefix 'g16fn')))
         $bodies.Add(@('body_conv_front_up',@(New-KokoroHmxConvPlanesSteps -InputChannels 256 -OutputChannels 256 -Kernel 3 -Dilation 1 -WeightPlanes 2 -PlaneStride $planeStride -LabelPrefix 'g16fu')))
         $bodies.Add(@('body_combine_conv256',@(New-KokoroPlaneCombineSteps -Mode Conv -Channels 256 -Groups 3 -Group3Shifts -PlaneStride $planeStride -LabelPrefix 'combine256')))

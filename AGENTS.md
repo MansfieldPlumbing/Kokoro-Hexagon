@@ -130,7 +130,10 @@ phone measurements establish achieved speed and time to first audio.
   and har to PCM at 42.71 dB in 46.48 ms (1.625 s of audio) on SM8550. See
   `docs/results/generator-front-stage-tail-sm8550-20261008.md`.
 - resblocks.0-2 and their mean at 256 channels: 64.14 dB in 23.24 ms, noise_res[0] 74.81 dB in 7.74 ms, on SM8550. See
-  `docs/results/generator-resblocks012-16bit-sm8550-20261008.md`. See `docs/results/generator-stage16-tail-sm8550-20261008.md`.
+  `docs/results/generator-resblocks012-16bit-sm8550-20261008.md`.
+- The generator's 10x half (LeakyReLU(0.1), ups[0], noise_convs[0], noise_res[0], resblocks.0-2, mean) in one
+  DSP job from captured decoder output and har: 58.56 dB in 31.67 ms on SM8550. See
+  `docs/results/generator-10x-half-sm8550-20261008.md`. See `docs/results/generator-stage16-tail-sm8550-20261008.md`.
 
 ## Product shape
 

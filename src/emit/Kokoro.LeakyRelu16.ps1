@@ -8,12 +8,14 @@
 # r0 input vectors (biased u16, x + 32768), r1 high-plane vectors, r2 low-plane vectors, r3 vector count >= 1
 # (64 per 128-channel tile). Caller-saved registers only.
 function New-KokoroLeakyRelu16Steps {
-    param([string]$LabelPrefix='leakyrelu16',[switch]$NoReturn)
+    # -Slope: the negative slope as a Q15 multiplier (0.01 for the tail, 0.1 for the generator's upsampling inputs).
+    param([string]$LabelPrefix='leakyrelu16',[ValidateRange(0.0,0.5)][double]$Slope=0.01,[switch]$NoReturn)
+    $q15=[long][math]::Round($Slope*32768)
     $s = [Collections.Generic.List[hashtable]]::new()
     $imm = { param([int]$r,[long]$v) $u=[uint32]($v -band 0xffffffffL); $s.Add(@{Op='lo';x=$r;i=($u -band 65535)}); $s.Add(@{Op='hi';x=$r;i=($u -shr 16)}) }
     & $imm 13 0x80008000L; $s.Add(@{Op='vsplat';d=31;s=13})
     & $imm 13 0xFF00FF00L; $s.Add(@{Op='vsplat';d=30;s=13})
-    & $imm 13 0x01480148L; $s.Add(@{Op='vsplat';d=29;s=13})       # 328 = round(0.01 * 32768) per halfword
+    & $imm 13 (($q15 -shl 16) -bor $q15); $s.Add(@{Op='vsplat';d=29;s=13})   # round(slope * 32768) per halfword
     $s.Add(@{Op='vxor';d=28;s=28;t=28})                             # zero
     $s.Add(@{Op='imm';d=8;i=8}); $s.Add(@{Op='imm';d=7;i=0})
     $loop = "${LabelPrefix}_v"

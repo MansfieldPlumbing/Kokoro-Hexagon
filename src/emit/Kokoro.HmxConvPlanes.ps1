@@ -21,7 +21,7 @@
 #   With -WeightPlanes 2, Wl follows Wh directly (r2 + groups*Kernel*CB*2048), same order.
 function New-KokoroHmxConvPlanesSteps {
     param(
-        [ValidateSet(64, 128, 256)][int] $InputChannels = 128,
+        [ValidateSet(64, 128, 256, 512)][int] $InputChannels = 128,
         [ValidateSet(64, 128, 256)][int] $OutputChannels = 128,
         [ValidateSet(3, 7, 11)][int] $Kernel = 3,
         [ValidateSet(1, 3, 5)][int] $Dilation = 1,
@@ -83,7 +83,8 @@ function New-KokoroHmxConvPlanesSteps {
             }
         }
     }
-    $s.Add(@{Op='addi'; d=0; s=0; i=$dy}); $s.Add(@{Op='addi'; d=1; s=1; i=$dy})
+    if ($dy -le 32767) { $s.Add(@{Op='addi'; d=0; s=0; i=$dy}); $s.Add(@{Op='addi'; d=1; s=1; i=$dy}) }
+    else { & $imm 15 $dy; $s.Add(@{Op='add'; d=0; s=0; t=15}); $s.Add(@{Op='add'; d=1; s=1; t=15}) }   # 512-channel tiles: 32 KB
     $s.Add(@{Op='addi'; d=5; s=5; i=($ob * 2048)})
     $s.Add(@{Op='addi'; d=4; s=4; i=-1})
     $s.Add(@{Op='gtu'; d=0; s=4; t=11})
