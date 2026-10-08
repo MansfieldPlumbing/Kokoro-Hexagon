@@ -62,13 +62,25 @@ function New-KokoroGenerator60x16RunSteps {
         # (Frames - 1)/6 frames) from decoder output and har, then the 128-channel 60x section and the tail, its ups[1] input
         # planes LeakyReLU(0.1) of the 10x mean in VTCM. Each section's inputs, weights, records and DDR workspace follow the
         # previous section's; bodies are emitted per section (labels suffixed with the channel count); one worker pool.
-        [switch]$Whole)
+        [switch]$Whole,
+        # With -Whole: the harmonic source and its STFT first (Kokoro.HarmonicSource16Run.ps1, from f0 and z in the input
+        # buffer after the decoder output), har written to the DDR workspace in both layouts (the 60x planes, and the 10x
+        # phase-major planes by Kokoro.HarPhaseMajor16.ps1); both fronts read har there. Inputs, weights and records of the
+        # source follow the sections'.
+        [switch]$Source)
     . (Join-Path $PSScriptRoot 'Kokoro.ResBlockRun.ps1')
-    foreach($file in 'Kokoro.GeneratorFront16.ps1','Kokoro.GeneratorTail16Run.ps1','Kokoro.LeakyRelu16.ps1','Kokoro.TailSpectrum16.ps1','Kokoro.HmxConvPlanes.ps1','Kokoro.PlaneCombine.ps1','Kokoro.AdaInMoments16.ps1','Kokoro.AdaInTurnsCoefficients.ps1','Kokoro.AdaInSnakeTurns.ps1','Kokoro.BranchMean16.ps1','Kokoro.DmaCopy.ps1') { . (Join-Path $PSScriptRoot $file) }
+    foreach($file in 'Kokoro.GeneratorFront16.ps1','Kokoro.GeneratorTail16Run.ps1','Kokoro.LeakyRelu16.ps1','Kokoro.TailSpectrum16.ps1','Kokoro.HmxConvPlanes.ps1','Kokoro.PlaneCombine.ps1','Kokoro.AdaInMoments16.ps1','Kokoro.AdaInTurnsCoefficients.ps1','Kokoro.AdaInSnakeTurns.ps1','Kokoro.BranchMean16.ps1','Kokoro.DmaCopy.ps1','Kokoro.StftWindow16.ps1','Kokoro.StftPolar16.ps1','Kokoro.HarmonicStft16Run.ps1','Kokoro.HarmonicSource16.ps1','Kokoro.HarmonicSource16Run.ps1','Kokoro.HarPhaseMajor16.ps1') { . (Join-Path $PSScriptRoot $file) }
     if($Whole){
         if($StopAfterStage -ge 0 -or $Kernels.Count -ne 3){throw '-Whole runs both whole sections'}
         $upFramesWhole=[int](($Frames-1)/6); if(6*$upFramesWhole+1 -ne $Frames){throw 'Frames is not 6 m + 1'}
         $sections=@(@{Channels=256;Frames=$upFramesWhole;Front=$true;Tail=$false;Chained=$false;Suffix='_c256'},@{Channels=128;Frames=$Frames;Front=$true;Tail=$true;Chained=$true;Suffix='_c128'})
+        if($Source){
+            $sourceFrames=$Frames; $sourceLayout=Get-KokoroHarmonicSource16Layout -Frames $sourceFrames
+            $tiles60=$sourceLayout.Tiles; $tiles10=[int][math]::Ceiling(($upFramesWhole+1)/32)
+            $har60At=0L; $harPmAt=[long]([math]::Ceiling(2L*$tiles60*4096/4096)*4096); $sourceDdrBytes=[long]([math]::Ceiling(($harPmAt+2L*$tiles10*16384)/4096)*4096)
+            $sections[0].HarReg=25; $sections[0].HarAt=$harPmAt; $sections[1].HarReg=25; $sections[1].HarAt=$har60At
+        }
+    } elseif($Source){ throw '-Source needs -Whole'
     } else { $sections=@(,@{Channels=$Channels;Frames=$Frames;Front=[bool]$Front;Tail=[bool]$Tail;Chained=$false;Suffix=''}) }
     # Binds one section's sizes and offsets in this scope (dot-sourced). Inputs, weights and records start at the given
     # bases; the DDR workspace offsets (r25-relative, 4096-aligned base) are absolute.
@@ -80,6 +92,7 @@ function New-KokoroGenerator60x16RunSteps {
     if($branches -eq 2){throw 'Two blocks have no stock combination here.'}
     if(-not $withMean -and $Tail){throw '-Tail follows the three-block stage'}
     $layout=Get-KokoroGenerator60x16Layout -Frames $Frames -BatchTiles $BatchTiles -Channels $Channels
+    $harFromInput=-not $sec.ContainsKey('HarReg')
     $tileBytes=$layout.TileBytes; $recordBytes=$layout.RecordBytes; $blocksPerTile=$Channels/32; $kmsBytes=12*$Channels; $momentVectors=$Channels/8
     $tablesAt=32*$Channels; $ratiosAt=80*$Channels
     $tiles=$layout.Tiles; $tensorBytes=$layout.TensorBytes; $batch=$BatchTiles; $R=$layout.Regions; $planeStride=$layout.PlaneStride
@@ -99,7 +112,8 @@ function New-KokoroGenerator60x16RunSteps {
         if(-not $withMean -or $StopAfterStage -ge 0){throw '-Front feeds the whole three-block stage'}
         $decFrames=[int]($Frames/10); if(10*$decFrames -ne $Frames){throw 'Frames is not 10 m'}
         $decTiles=[int][math]::Ceiling($decFrames/32); $qPairs=[int][math]::Ceiling(($decFrames+1)/2); $decBytes=$decTiles*32768L
-        $inputBytes=$inBase+$decBytes+2L*$tiles*$tileBytes
+        $inputBytes=$inBase+$decBytes+$(if($harFromInput){2L*$tiles*$tileBytes}else{0L})
+        if($harFromInput){ $harReg=20; $harAt=$inBase+$decBytes } else { $harReg=$sec.HarReg; $harAt=$sec.HarAt }
         $al64={param([long]$v) [long]([math]::Ceiling($v/65536)*65536)}
         $offFrontWeights=& $al64 $layout.VtcmBytes; $offFrontTables=$offFrontWeights+786432; $offUpA=$offFrontTables+163840; $offUpB=$offUpA+$decTiles*16384L
         $vtcmBytes=[math]::Max($vtcmBytes,(& $al64 ($offUpB+$decTiles*16384L)))
@@ -116,7 +130,8 @@ function New-KokoroGenerator60x16RunSteps {
         $upFrames=[int](($Frames-1)/6)+1; if(6*($upFrames-1)+1 -ne $Frames){throw 'Frames is not 6 m + 1'}
         $upTiles=[int][math]::Ceiling($upFrames/32); $upBatch=$batch/2
         # Chained (-Whole): the ups[1] input planes come from the 10x section, not the input buffer.
-        $inputBytes=$inBase+2L*$tiles*4096+$(if($chained){0L}else{2L*$upTiles*16384})
+        $inputBytes=$inBase+$(if($harFromInput){2L*$tiles*4096}else{0L})+$(if($chained){0L}else{2L*$upTiles*16384})
+        if($harFromInput){ $harReg=20; $harAt=$inBase } else { $harReg=$sec.HarReg; $harAt=$sec.HarAt }
         $al64={param([long]$v) [long]([math]::Ceiling($v/65536)*65536)}
         $offFrontWeights=& $al64 $layout.VtcmBytes; $offFrontTables=$offFrontWeights+393216; $offUpPhase=$offFrontTables+65536
         $vtcmBytes=[math]::Max($vtcmBytes,(& $al64 ($offUpPhase+$upTiles*16384L)))
@@ -138,13 +153,20 @@ function New-KokoroGenerator60x16RunSteps {
         $noiseParameterOffset=$parameterBytes; $parameterBytes+=6*16384; $frontParameterOffset=$parameterBytes; $parameterBytes+=65536 }
     }
     # Place each section after the previous one, then bind the first. VTCM is shared: the job requests the largest.
-    $bases=[Collections.Generic.List[long[]]]::new(); $ddrAt=0L; $inAt=0L; $wAt=0L; $pAt=0L; $vtcmTotal=0L
+    $bases=[Collections.Generic.List[long[]]]::new(); $ddrAt=$(if($Source){$sourceDdrBytes}else{0L}); $inAt=0L; $wAt=0L; $pAt=0L; $vtcmTotal=0L
     foreach($sec in $sections){
         $bases.Add([long[]]@($ddrAt,$inAt,$wAt,$pAt)); . $configure $sec $ddrAt $inAt $wAt $pAt
         $vtcmTotal=[math]::Max($vtcmTotal,$vtcmBytes)
         $ddrAt=[long]([math]::Ceiling(($outputBytes-192)/4096)*4096); $inAt=$inputBytes; $wAt=$weightBytes; $pAt=$parameterBytes
     }
     $totalInput=$inputBytes; $totalWeights=$weightBytes; $totalParameters=$parameterBytes; $totalOutput=$outputBytes
+    if($Source){
+        $sourceIn=$totalInput; $sourceW=$totalWeights; $sourceP=$totalParameters
+        $totalInput+=$sourceLayout.InputBytes; $totalWeights+=$sourceLayout.WeightBytes; $totalParameters+=$sourceLayout.ParameterBytes
+        # The phase-major gather uses VTCM from 0: both 60x har planes, then both phase-major planes.
+        $gHi=0L; $gLo=[long]([math]::Ceiling($tiles60*4096/65536)*65536); $gPmHi=2*$gLo; $gPmLo=$gPmHi+[long]([math]::Ceiling($tiles10*16384/65536)*65536)
+        $vtcmTotal=[math]::Max($vtcmTotal,[math]::Max($sourceLayout.VtcmBytes,$gPmLo+$tiles10*16384L))
+    }
     $bind={param([int]$i) $q=$bases[$i]; . $configure $sections[$i] $q[0] $q[1] $q[2] $q[3]}
     . $bind 0
     $vtcmBytes=$vtcmTotal
@@ -328,8 +350,8 @@ function New-KokoroGenerator60x16RunSteps {
             $count=[math]::Min($batch,$tiles-$start); $first=[math]::Max(0,$start-1); $last=[math]::Min($tiles,$start+$count+1)
             if($start -eq 0){ & $fillVectors $offWin 32 0x80008000L; & $fillVectors $offLow 32 0 }
             if($start+$count -eq $tiles){ & $fillVectors ($offWin+($count+1)*4096) 32 0x80008000L; & $fillVectors ($offLow+($count+1)*4096) 32 0 }
-            & $dma 18 ($offWin+($first-$start+1)*4096) 20 ($inBase+$first*4096L) (($last-$first)*4096L)
-            & $dma 18 ($offLow+($first-$start+1)*4096) 20 ($inBase+$tiles*4096L+$first*4096L) (($last-$first)*4096L)
+            & $dma 18 ($offWin+($first-$start+1)*4096) $harReg ($harAt+$first*4096L) (($last-$first)*4096L)
+            & $dma 18 ($offLow+($first-$start+1)*4096) $harReg ($harAt+$tiles*4096L+$first*4096L) (($last-$first)*4096L)
             & $ptr 0 18 ($offWin+4096); & $ptr 1 18 ($offLow+4096); & $ptr 2 18 $offFrontWeights; & $ptr 3 18 $offFrontTables; & $imm 4 $count; & $ptr 5 18 $offPlanes
             & $call 'body_conv_front_noise'; & $mark 'HmxConv'; & $sync
             & $parallel "body_combine_residual$sfx" @($offPlanes,($offResidual+$start*8192),($offFrontTables+8192)) @($true,$true,$false) $count
@@ -383,8 +405,8 @@ function New-KokoroGenerator60x16RunSteps {
             $count=[math]::Min($batch,$tiles-$start); $first=[math]::Max(0,$start-1); $last=[math]::Min($tiles,$start+$count+1)
             if($start -eq 0){ & $fill $offWin 1 0x80008000L; & $fill $offLow 1 0 }
             if($start+$count -eq $tiles){ & $fill ($offWin+($count+1)*$tileBytes) 1 0x80008000L; & $fill ($offLow+($count+1)*$tileBytes) 1 0 }
-            & $dma 18 ($offWin+($first-$start+1)*$tileBytes) 20 ($inBase+$decBytes+$first*[long]$tileBytes) (($last-$first)*[long]$tileBytes)
-            & $dma 18 ($offLow+($first-$start+1)*$tileBytes) 20 ($inBase+$decBytes+$tiles*[long]$tileBytes+$first*[long]$tileBytes) (($last-$first)*[long]$tileBytes)
+            & $dma 18 ($offWin+($first-$start+1)*$tileBytes) $harReg ($harAt+$first*[long]$tileBytes) (($last-$first)*[long]$tileBytes)
+            & $dma 18 ($offLow+($first-$start+1)*$tileBytes) $harReg ($harAt+$tiles*[long]$tileBytes+$first*[long]$tileBytes) (($last-$first)*[long]$tileBytes)
             & $ptr 0 18 ($offWin+$tileBytes); & $ptr 1 18 ($offLow+$tileBytes); & $ptr 2 18 $offFrontWeights; & $ptr 3 18 $offFrontTables; & $imm 4 $count; & $ptr 5 18 $offPlanes
             & $call 'body_conv_front10_noise'; & $mark 'HmxConv'; & $sync
             & $parallel "body_combine_residual$sfx" @($offPlanes,($offResidual+$start*$tileBytes),($offFrontTables+12288)) @($true,$true,$false) $count
@@ -415,6 +437,20 @@ function New-KokoroGenerator60x16RunSteps {
     }
     & $poolStart
     $stopped=$false
+    if($Source){
+        Add-KokoroHarmonicSource16JobSteps -Steps $s -Calls $calls -Frames $sourceFrames -InputBase 20 -InputOffset $sourceIn -WeightsBase 21 -WeightsOffset $sourceW -TablesBase 22 -TablesOffset $sourceP -HarBase 25 -HarOffset $har60At
+        & $sync
+        & $dma 18 $gHi 25 $har60At ($tiles60*4096L); & $dma 18 $gLo 25 ($har60At+$tiles60*4096L) ($tiles60*4096L)
+        & $fillVectors $gPmHi ($tiles10*128) 0x80008000L; & $fillVectors $gPmLo ($tiles10*128) 0
+        & $sync
+        & $imm 0 $upFramesWhole; & $ptr 1 18 $gHi; & $ptr 2 18 $gLo; & $ptr 3 18 $gPmHi; & $ptr 4 18 $gPmLo; & $imm 5 0
+        & $call 'body_har_phase_major'
+        & $imm 0 1; & $ptr 1 18 $gHi; & $ptr 2 18 $gLo; & $ptr 3 18 $gPmHi; & $ptr 4 18 $gPmLo; & $imm 5 $upFramesWhole
+        & $call 'body_har_phase_major_last'
+        & $sync
+        & $dma 25 $harPmAt 18 $gPmHi ($tiles10*16384L); & $dma 25 ($harPmAt+$tiles10*16384L) 18 $gPmLo ($tiles10*16384L)
+        & $sync
+    }
     for($section=0;$section -lt $sections.Count;$section++){
     if($section -gt 0){ $chainOffset=$finalOffset; $chainTiles=$tiles; . $bind $section }
     # Blocks: noise_res[1] first with -Front (index -1: its own weights and records, input computed in VTCM, kernel 11
@@ -439,14 +475,14 @@ function New-KokoroGenerator60x16RunSteps {
                 & $ptr 0 18 $offMoments; & $ptr 1 18 $offParams; & $ptr 2 18 $offKms; & $imm 3 $Frames; & $call "body_coeff$sfx"; & $mark 'Coefficients'
                 if($b -ge 0){ & $dma 25 ($coefOffset+($b*6+$st)*$kmsBytes) 18 $offKms $kmsBytes }
                 & $zeroRecord $offMoments
-                $source=if($half -eq 0){$offResidual}else{$offConv}
+                $convSource=if($half -eq 0){$offResidual}else{$offConv}
                 $convLabel="body_conv_b$($blk.Body)_d$(if($half -eq 0){$dilation}else{1})$sfx"
                 for($start=0;$start -lt $tiles;$start+=$batch){
                     $count=[math]::Min($batch,$tiles-$start)
                     $first=[math]::Max(0,$start-1);$last=[math]::Min($tiles,$start+$count+1)
                     if($start -eq 0){ & $fill $offWin 1 0x80008000L; & $fill $offLow 1 0 }
                     if($start+$count -eq $tiles){ & $fill ($offWin+($count+1)*$tileBytes) 1 0x80008000L; & $fill ($offLow+($count+1)*$tileBytes) 1 0 }
-                    & $parallel "body_turns$sfx" @(($source+$first*$tileBytes),($offWin+($first-$start+1)*$tileBytes),($offLow+($first-$start+1)*$tileBytes),$offKms) @($true,$true,$true,$false) ($last-$first)
+                    & $parallel "body_turns$sfx" @(($convSource+$first*$tileBytes),($offWin+($first-$start+1)*$tileBytes),($offLow+($first-$start+1)*$tileBytes),$offKms) @($true,$true,$true,$false) ($last-$first)
                     & $mark 'AdaInSnake'
                     if($last -eq $tiles){ & $padRows ($offWin+($tiles-$start)*$tileBytes) 0x8000; & $padRows ($offLow+($tiles-$start)*$tileBytes) 0 }
                     & $sync
@@ -533,6 +569,11 @@ function New-KokoroGenerator60x16RunSteps {
         $bodies.Add(@('body_front_add',@(New-KokoroFrontAddSteps)))
     }
     if($Tail){ foreach($pair in (Get-KokoroGeneratorTail16Bodies -PlaneStride $tailLayout.PlaneStride)){ $bodies.Add($pair) } }
+    }
+    if($Source){
+        foreach($pair in (Get-KokoroHarmonicSource16Bodies -PlaneStride $sourceLayout.Stft.PlaneStride)){ $bodies.Add($pair) }
+        $bodies.Add(@('body_har_phase_major',@(New-KokoroHarPhaseMajor16Steps -Phases 6)))
+        $bodies.Add(@('body_har_phase_major_last',@(New-KokoroHarPhaseMajor16Steps -Phases 1 -LabelPrefix 'harphasemajor16last')))
     }
     foreach($pair in $bodies){$s.Add(@{Op='label';Name=$pair[0]});foreach($step in $pair[1]){$s.Add($step)}}
     if($HvxThreads -gt 1){

@@ -18,7 +18,11 @@ param(
     # tools/New-KokoroGeneratorStageTailFixture.ps1 output for the 60x half and tail, built from -FrontFixture.
     [Parameter(Mandatory)][string] $SixtyFixture,
     [Parameter(Mandatory)][string] $FrontFixture,
-    [Parameter(Mandatory)][string] $OutputDirectory
+    [Parameter(Mandatory)][string] $OutputDirectory,
+    # tools/New-KokoroHarmonicSource16Fixture.ps1 output (Kokoro.Generator60x16Run.ps1 -Whole -Source): the inputs are the
+    # decoder output, then f0 and z; har is computed on the DSP, so neither half's har planes are inputs. The source's
+    # weights and records follow the halves'.
+    [string] $SourceFixture
 )
 $ErrorActionPreference = 'Stop'
 $build = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '../build')) + [IO.Path]::DirectorySeparatorChar
@@ -41,11 +45,22 @@ $cat = { param([byte[]]$a, [byte[]]$b, [long]$bBytes) $c = [byte[]]::new($a.Leng
 $sixtyAct = & $read $sixtyDir 'activations.bin'
 if ($sixtyAct.Length -ne $harBytes + 2L * [int]$front.UpTiles * 16384) { throw 'Unexpected 60x input size.' }
 [void][IO.Directory]::CreateDirectory($out)
+if ($SourceFixture) {
+    $srcDir = [IO.Path]::GetFullPath($SourceFixture); $src = Get-Content -LiteralPath (Join-Path $srcDir 'fixture.json') -Raw | ConvertFrom-Json
+    foreach ($f in $src.Files) { if ((Get-FileHash (Join-Path $srcDir $f.Name)).Hash -ne $f.SHA256) { throw "Fixture file changed: $($f.Name)" } }
+    if ([int]$src.Frames -ne [int]$sixty.Frames) { throw 'The source fixture frames differ.' }
+    $decBytes = [long][math]::Ceiling([int]$ten.Frames / 10 / 32) * 32768
+    $tenAct = & $read $tenDir 'activations.bin'; $srcAct = & $read $srcDir 'activations.bin'
+    $actBytes = [byte[]]::new($decBytes + $srcAct.Length); [Array]::Copy($tenAct, $actBytes, $decBytes); [Array]::Copy($srcAct, 0, $actBytes, $decBytes, $srcAct.Length)
+    [IO.File]::WriteAllBytes((Join-Path $out 'activations.bin'), $actBytes)
+    foreach ($n in 'weights.bin', 'tables.bin') { $b = & $read $sixtyDir $n; $ab = & $cat (& $read $tenDir $n) $b $b.Length; $sb = & $read $srcDir $n; [IO.File]::WriteAllBytes((Join-Path $out $n), (& $cat $ab $sb $sb.Length)) }
+} else {
 [IO.File]::WriteAllBytes((Join-Path $out 'activations.bin'), (& $cat (& $read $tenDir 'activations.bin') $sixtyAct $harBytes))
 foreach ($n in 'weights.bin', 'tables.bin') { $b = & $read $sixtyDir $n; [IO.File]::WriteAllBytes((Join-Path $out $n), (& $cat (& $read $tenDir $n) $b $b.Length)) }
+}
 [IO.File]::WriteAllBytes((Join-Path $out 'expected-pcm-f32.bin'), (& $read $sixtyDir 'expected-pcm-f32.bin'))
 $files = @(Get-ChildItem -LiteralPath $out -File | ForEach-Object { [ordered]@{ Name = $_.Name; Bytes = $_.Length; SHA256 = (Get-FileHash $_.FullName).Hash } })
 [ordered]@{ Graph = 'Generator16Whole'; Frames = $sixty.Frames; Tiles = $sixty.Tiles; TenFrames = $ten.Frames; Samples = $sixty.Samples
-    TenFixture = $tenDir; SixtyFixture = $sixtyDir; FrontFixture = $frontDir; Files = $files } |
+    TenFixture = $tenDir; SixtyFixture = $sixtyDir; FrontFixture = $frontDir; SourceFixture = $(if ($SourceFixture) { [IO.Path]::GetFullPath($SourceFixture) } else { $null }); Files = $files } |
     ConvertTo-Json -Depth 4 | Set-Content -LiteralPath (Join-Path $out 'fixture.json') -Encoding utf8NoBOM
 [pscustomobject]@{ Directory = $out; Frames = $sixty.Frames; TenFrames = $ten.Frames }
