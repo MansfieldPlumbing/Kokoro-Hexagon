@@ -3,8 +3,10 @@
 Packs the 16-bit generator 60x stage (resblocks.3-5 and their mean) from verified stock captures.
 .DESCRIPTION
 Design: docs/generator60x-16bit-design.md. Build-time arithmetic only; all model math at run time is
-emitted DSP code. Scales come from the given captures (calibration on the evaluated sentence until a
-holdout is added). Outputs, in a new build/ directory:
+emitted DSP code. Scales (residual, conv input, conv output) come from -CalibrationDirectory captures, the
+evaluated sentence's captures when none are given; the stage input, voice style, frame count and expected
+output come from -CaptureDirectory. Either is three per-block captures (resblocks.3, .4, .5) or one
+whole-generator capture. Outputs, in a new build/ directory:
   activations.bin  stage input R0, biased u16 (x + 32768) in native croutons, padded rows 0x8000
   weights.bin      per branch b, stage s: Wh then Wl, HMX order (Kokoro.HmxConv.ps1), 32768*K bytes
   tables.bin       per (b, s) a 16384-byte record: phase-turns parameters (32 B per channel: Ka int64,
@@ -15,14 +17,19 @@ holdout is added). Outputs, in a new build/ directory:
   fixture.json     scales, shifts and provenance
 Conv arithmetic: x (16-bit, units sX) = 256 (h - 128) + l; Wq = 256 Wh + Wl (units sW_c, |Wq| <= 32512);
 sum x Wq = 65536 A1 + 256 A2 + A3, so conv = 256 sX sW_c (256 A1 + A2 + A3 / 256). Group g leaves HMX as a
-16-bit window at shift L_g (L1 = L - 8, L2 = L); their sum v is the conv in units 2^(L + 8) sX sW_c. Group 3 (low x low) is
-computed and not combined in this version. Stock conv bias is carried in group 2's table bias.
+16-bit window at shift L_g (L1 = L - 8, L2 = L, L3 = L + 8); their sum v is the conv in units 2^(L + 8) sX sW_c. Group 3's
+window (low x low, below 2^7 in these units) leaves through its low plane only, which the consumer sign-extends: its high
+plane would need table exponent 8 - L (< 1 for L > 7). Each group's table bias rounds to nearest (half its window LSB).
+Stock conv bias is carried in group 2's table bias.
 #>
 [CmdletBinding()]
 param(
     [Parameter(Mandatory)][string[]] $CaptureDirectory,
+    [string[]] $CalibrationDirectory,
     [Parameter(Mandatory)][string] $OutputDirectory,
-    [ValidateRange(1.0, 4.0)][double] $Margin = 1.25
+    [ValidateRange(1.0, 4.0)][double] $Margin = 1.25,
+    # Phase-turns fraction bits QT of Kokoro.AdaInSnakeTurns.ps1 -TurnsBits (Kokoro.Generator60x16Run.ps1 emits 22).
+    [ValidateSet(22, 24)][int] $TurnsBits = 22
 )
 $ErrorActionPreference = 'Stop'
 $clock = [Diagnostics.Stopwatch]::StartNew(); $timings = [ordered]@{}; $lap = { param([string]$n) $timings[$n] = [math]::Round($clock.Elapsed.TotalSeconds, 2); $clock.Restart() }
@@ -33,13 +40,22 @@ if (-not $out.StartsWith($build, [StringComparison]::OrdinalIgnoreCase) -or (Tes
 
 Import-Module (Join-Path $PSScriptRoot 'Kokoro.CaptureMath.psm1') -Force
 Import-Module (Join-Path $PSScriptRoot 'Kokoro.CaptureKernels.psm1') -Force
-$caps = foreach ($d in $CaptureDirectory) {
-    $cap = Read-KokoroCapture -Directory $d
-    if (-not $cap.Root.StartsWith($build, [StringComparison]::OrdinalIgnoreCase)) { throw 'Captures must be in build/.' }
-    $cap
+# One sentence: three per-block captures, or one whole-generator capture viewed as resblocks.3-5.
+function Read-StageCaptures([string[]]$Directories) {
+    if ($Directories.Count -ne 1 -and $Directories.Count -ne 3) { throw 'Give resblocks.3, .4 and .5 captures in that order, or one whole-generator capture.' }
+    $set = for ($b = 0; $b -lt 3; $b++) {
+        $cap = Read-KokoroResBlockCapture -Directory $Directories[[math]::Min($b, $Directories.Count - 1)] -Block (3 + $b)
+        if (-not $cap.Root.StartsWith($build, [StringComparison]::OrdinalIgnoreCase)) { throw 'Captures must be in build/.' }
+        $cap
+    }
+    if ($set[1].Json.tensors.input.sha256 -cne $set[0].Json.tensors.input.sha256 -or $set[2].Json.tensors.input.sha256 -cne $set[0].Json.tensors.input.sha256) { throw 'The three blocks must share one stage input.' }
+    , $set
 }
-for ($b = 0; $b -lt 3; $b++) { if ($caps[$b].Json.block -cne "decoder.generator.resblocks.$(3 + $b)") { throw "Capture $b is not resblocks.$(3 + $b)." } }
-if ($caps[1].Json.tensors.input.sha256 -cne $caps[0].Json.tensors.input.sha256 -or $caps[2].Json.tensors.input.sha256 -cne $caps[0].Json.tensors.input.sha256) { throw 'The three blocks must share one stage input.' }
+$caps = Read-StageCaptures $CaptureDirectory
+# Calibration sentences (with none given, the evaluated sentence).
+$cals = @(if ($CalibrationDirectory) { foreach ($d in $CalibrationDirectory) { , (Read-StageCaptures @($d)) } } else { , $caps })
+$holdout = [bool]$CalibrationDirectory
+if ($holdout) { foreach ($set in $cals) { if ($set[0].Json.tensors.input.sha256 -ceq $caps[0].Json.tensors.input.sha256) { throw 'A calibration capture is the evaluated sentence.' } } }
 
 function Read-Tensor([hashtable]$Cap, [string]$Name) { , (Read-KokoroCaptureTensor -Capture $Cap -Name $Name) }
 function Get-AbsMax([float[]]$v) { Get-KokoroAbsMax $v }
@@ -55,25 +71,25 @@ $N = $frames
 # per-tensor scale leaves quiet channels a few hundred LSB, and the per-LSB phase gain K then exceeds
 # the int32 contract of Kokoro.AdaInTurnsCoefficients.ps1.
 $sR = [double[]]::new(128)
-foreach ($cap in $caps) { foreach ($name in 'input', 'stage2.input', 'stage4.input', 'output') { $m = Get-ChannelAbsMax (Read-Tensor $cap $name) ([int]$cap.Json.tensors.input.shape[2]); for ($c = 0; $c -lt 128; $c++) { $sR[$c] = [math]::Max($sR[$c], $m[$c]) } } }
+foreach ($set in $cals) { foreach ($cap in $set) { foreach ($name in 'input', 'stage2.input', 'stage4.input', 'output') { $m = Get-ChannelAbsMax (Read-Tensor $cap $name) 0; for ($c = 0; $c -lt 128; $c++) { $sR[$c] = [math]::Max($sR[$c], $m[$c]) } } } }
 # The phase-turns gain K = Ka * sR_c / sigma_c (sigma_c: standard deviation of the AdaIN input) must stay
 # below 2^31. Where the margin would exceed that, sR_c is lowered to keep K <= 0.9 * 2^31 across every
 # branch and R-input stage, but never below the captured peak (no clipping on the calibration capture).
 $rBound = [double[]]::new(128); for ($c = 0; $c -lt 128; $c++) { $rBound[$c] = [double]::PositiveInfinity }
-for ($bb = 0; $bb -lt 3; $bb++) {
-    $cap = $caps[$bb]; $styleB = Read-Tensor $cap 'style'
+foreach ($set in $cals) { for ($bb = 0; $bb -lt 3; $bb++) {
+    $cap = $set[$bb]; $styleB = Read-Tensor $cap 'style'
     foreach ($ss in 0, 2, 4) {
         $pp = "stage$ss."
         $fcw = Read-Tensor $cap ($pp + 'adain.fc.weight'); $fcb = Read-Tensor $cap ($pp + 'adain.fc.bias'); $nw = Read-Tensor $cap ($pp + 'adain.norm.weight'); $alpha = Read-Tensor $cap ($pp + 'alpha')
         $xinStats = Get-KokoroChannelStats -Values (Read-Tensor $cap ($pp + 'input')) -Channels 128
         for ($c = 0; $c -lt 128; $c++) {
             $g = [double]$fcb[$c]; for ($j = 0; $j -lt 128; $j++) { $g += [double]$fcw[$c * 128 + $j] * $styleB[$j] }
-            $kaAbs = [math]::Abs((1 + $g) * $nw[$c] * $alpha[$c] * [math]::Pow(2, 39) / [math]::PI)
+            $kaAbs = [math]::Abs((1 + $g) * $nw[$c] * $alpha[$c] * [math]::Pow(2, $TurnsBits + 15) / [math]::PI)
             $sigma = [math]::Sqrt([math]::Max($xinStats.Variance[$c], 1e-30))
             if ($kaAbs -gt 0) { $rBound[$c] = [math]::Min($rBound[$c], 0.9 * [math]::Pow(2, 31) * $sigma / $kaAbs) }
         }
     }
-}
+} }
 & $lap 'ResidualScales'
 $rLowered = 0
 for ($c = 0; $c -lt 128; $c++) {
@@ -110,16 +126,16 @@ for ($b = 0; $b -lt 3; $b++) {
         $nw = Read-Tensor $cap ($p + 'adain.norm.weight'); $nb = Read-Tensor $cap ($p + 'adain.norm.bias'); $alpha = Read-Tensor $cap ($p + 'alpha')
         $h = [double[]]::new(256)
         for ($i = 0; $i -lt 256; $i++) { $h[$i] = $fcb[$i]; for ($j = 0; $j -lt 128; $j++) { $h[$i] += [double]$fcw[$i * 128 + $j] * $style[$j] } }
-        $snake = Read-Tensor $cap ($p + 'snake'); $sX = (Get-AbsMax $snake) * $Margin / 32767
+        $sX = 0.0; foreach ($set in $cals) { $sX = [math]::Max($sX, (Get-AbsMax (Read-Tensor $set[$b] ($p + 'snake')))) }; $sX *= $Margin / 32767
         # AdaIN input statistics for the K-range check (Kokoro.AdaInTurnsCoefficients.ps1 contract).
         $adainStats = Get-KokoroChannelStats -Values (Read-Tensor $cap ($p + 'input')) -Channels 128; $kMax = 0.0
         for ($c = 0; $c -lt 128; $c++) {
             $gainA = (1 + $h[$c]) * $nw[$c]; $offsetB = (1 + $h[$c]) * $nb[$c] + $h[128 + $c]; $al = [double]$alpha[$c]
             if ($al -eq 0) { throw 'Snake alpha is zero.' }
-            $Ka = [long](Get-Even ($gainA * $al * [math]::Pow(2, 39) / [math]::PI))
-            $Mb = Get-Even ($al * $offsetB * [math]::Pow(2, 24) / [math]::PI)
+            $Ka = [long](Get-Even ($gainA * $al * [math]::Pow(2, $TurnsBits + 15) / [math]::PI))
+            $Mb = Get-Even ($al * $offsetB * [math]::Pow(2, $TurnsBits) / [math]::PI)
             # Stock alpha may be negative (sin^2(a y) / a); S then is negative, a signed Q31 multiplier.
-            $outS = Get-Even (([math]::PI / $al) * 128 / $sX)
+            $outS = Get-Even (([math]::PI / $al) * [math]::Pow(2, 31 - $TurnsBits) / $sX)
             $epsD = Get-Even (1e-5 * $N * $N / ($inScale[$c] * $inScale[$c]))
             $var = $adainStats.Variance[$c] / ($inScale[$c] * $inScale[$c]) + $epsD / ($N * $N)
             $kMax = [math]::Max($kMax, [math]::Abs($Ka) / [math]::Sqrt($var))
@@ -131,7 +147,8 @@ for ($b = 0; $b -lt 3; $b++) {
         }
         # Conv: per-channel weight scale and output shift.
         $W = Read-Tensor $cap ($p + 'weight'); $bias = Read-Tensor $cap ($p + 'bias')
-        $outMax = Get-ChannelAbsMax (Read-Tensor $cap ($p + 'conv')) $frames
+        $outMax = [double[]]::new(128)
+        foreach ($set in $cals) { $m = Get-ChannelAbsMax (Read-Tensor $set[$b] ($p + 'conv')) 0; for ($o = 0; $o -lt 128; $o++) { $outMax[$o] = [math]::Max($outMax[$o], $m[$o]) } }
         $residual = ($s % 2) -eq 1
         $wAbsMax = (Get-KokoroChannelStats -Values $W -Channels 128).AbsMax
         $L = [int[]]::new(128); $sW = [double[]]::new(128); $vUnit = [double[]]::new(128)
@@ -162,16 +179,26 @@ for ($b = 0; $b -lt 3; $b++) {
         if ((Get-PackWeightPlanesKernel).Invoke($W, $K, $sW, $wh, $wl, $sumH, $sumL) -ne 0) { throw "Weight plane overflow b$b s$s" }
         [Buffer]::BlockCopy($wh, 0, $weights, $weightAt, $wh.Length); [Buffer]::BlockCopy($wl, 0, $weights, $weightAt + $wh.Length, $wl.Length)
         $weightAt += $wh.Length + $wl.Length
+        # Group 3 is read through its low plane alone: its window must stay a signed byte on every sentence here.
+        $dil = $(if ($residual) { 1 } else { @(1, 3, 5)[[int]($s / 2)] }); $lowLow = 0; $perO = [int[]]::new(128)
+        foreach ($set in @($cals) + , $caps) {
+            $xs = Read-Tensor $set[$b] ($p + 'snake')
+            $lowLow = [math]::Max($lowLow, (Get-LowLowWindowKernel).Invoke($xs, $xs.Length / 128, $sX, $W, $K, $dil, $sW, $L, $perO))
+        }
+        if ($lowLow -gt 127) { throw "Low x low window exceeds a signed byte at b$b s$s ($lowLow)",") sW=$($sW[0..1] -join ",") K=$K dil=$dil o=$($perO[0..7] -join ",")" }
         # Column tables: per output block ob, planes p = 0..5 (group g = p/2; high, low), 64 words each:
         # 32 scale words (fp16 exponent field: 2^(1 - Lg) high, 2^(9 - Lg) low, with the HMX 1/512),
-        # then 32 bias words. Group 3 reuses L2 (not combined).
+        # then 32 bias words: the window bias 2^(Lg + 15) (32768 window LSB; none for group 3, read through
+        # its low plane only) plus half a window LSB, 2^(Lg - 1), where that is a whole accumulator unit.
+        # Group 3's unused high plane gets exponent 2^(1 - L) (in range; its bytes are not read).
         for ($o = 0; $o -lt 128; $o++) {
             $ob = [int][math]::Floor($o / 32); $cc = $o % 32
-            $Lg = @(($L[$o] - 8), $L[$o], $L[$o])
+            $Lg = @(($L[$o] - 8), $L[$o], ($L[$o] + 8))
+            $half = foreach ($x in $Lg) { if ($x -ge 1) { [long][math]::Pow(2, $x - 1) } else { 0L } }
             $Bq = Get-Even ($bias[$o] / (256 * $sX * $sW[$o]))   # in A2 units: 256 sX sW_c
-            $biasG = @((-128L * $sumH[$o] + [math]::Pow(2, $Lg[0] + 15)), (-128L * $sumL[$o] + $Bq + [math]::Pow(2, $Lg[1] + 15)), ([math]::Pow(2, $Lg[2] + 15)))
+            $biasG = @((-128L * $sumH[$o] + [math]::Pow(2, $Lg[0] + 15) + $half[0]), (-128L * $sumL[$o] + $Bq + [math]::Pow(2, $Lg[1] + 15) + $half[1]), $half[2])
             for ($pl = 0; $pl -lt 6; $pl++) {
-                $g = [int][math]::Floor($pl / 2); $e = $(if ($pl % 2) { 9 } else { 1 }) - $Lg[$g] + 15
+                $g = [int][math]::Floor($pl / 2); $e = $(if ($pl % 2) { 9 } else { 1 }) - $(if ($pl -eq 4) { $L[$o] } else { $Lg[$g] }) + 15
                 if ($e -lt 1 -or $e -gt 30) { throw "Table exponent out of range b$b s$s c$o" }
                 if ($biasG[$g] -lt [int]::MinValue -or $biasG[$g] -gt [int]::MaxValue) { throw 'Table bias overflow.' }
                 $at = $rec + 4096 + (3 * $ob * 2 + $pl) * 256
@@ -184,7 +211,7 @@ for ($b = 0; $b -lt 3; $b++) {
                 [BitConverter]::GetBytes($ratio).CopyTo($tables, $rec + 10240 + 4 * $o)
             }
         }
-        $records.Add([ordered]@{ Branch = $b; Stage = $s; Kernel = $K; Dilation = $(if ($residual) { 1 } else { @(1, 3, 5)[[int]($s / 2)] }); InputScaleMax = ($inScale | Measure-Object -Maximum).Maximum; ConvInputScale = $sX; ShiftMin = ($L | Measure-Object -Minimum).Minimum; ShiftMax = ($L | Measure-Object -Maximum).Maximum; TurnsGainMax = $kMax; WeightBitsMin = [math]::Round((0..127 | ForEach-Object { [math]::Log($wAbsMax[$_] / $sW[$_], 2) + 1 } | Measure-Object -Minimum).Minimum, 2) })
+        $records.Add([ordered]@{ Branch = $b; Stage = $s; Kernel = $K; Dilation = $(if ($residual) { 1 } else { @(1, 3, 5)[[int]($s / 2)] }); InputScaleMax = ($inScale | Measure-Object -Maximum).Maximum; ConvInputScale = $sX; ShiftMin = ($L | Measure-Object -Minimum).Minimum; ShiftMax = ($L | Measure-Object -Maximum).Maximum; TurnsGainMax = $kMax; LowLowWindowMax = $lowLow; WeightBitsMin = [math]::Round((0..127 | ForEach-Object { [math]::Log($wAbsMax[$_] / $sW[$_], 2) + 1 } | Measure-Object -Minimum).Minimum, 2) })
         if ($kMax -ge [math]::Pow(2, 31)) { throw "Turns gain K exceeds the coefficients contract at b$b s$s ($kMax)" }
         # The next stage's AdaIN input: C (per-channel units) after conv1, R after conv2.
         for ($c = 0; $c -lt 128; $c++) { $inScale[$c] = $(if ($residual) { $sR[$c] } else { $vUnit[$c] }); $stageOut[($b * 6 + $s) * 128 + $c] = $inScale[$c] }
@@ -203,7 +230,10 @@ foreach ($f in @(@('stage-output-scales.bin', $stageOutBytes), @('activations.bi
 $files = @(Get-ChildItem -LiteralPath $out -File | ForEach-Object { [ordered]@{ Name = $_.Name; Bytes = $_.Length; SHA256 = (Get-FileHash $_.FullName).Hash } })
 [ordered]@{
     Graph = 'Generator60x16'; Frames = $frames; Tiles = $tiles; OutputScales = $sR; Margin = $Margin; ResidualChannelsBelowMargin = $rLowered
-    Calibration = 'scales from the evaluated captures (no holdout yet)'
+    Calibration = $(if ($holdout) { 'holdout: scales from the calibration captures only' } else { 'scales from the evaluated captures' })
+    CalibrationCaptures = @($cals | ForEach-Object { [ordered]@{ Directory = $_[0].Root; InputSHA256 = $_[0].Json.tensors.input.sha256 } })
+    TurnsBits = $TurnsBits
+    LowLowGroup = 'combined: low plane at shift L + 8, sign-extended'
     Captures = @($caps | ForEach-Object { [ordered]@{ Directory = $_.Root; Block = $_.Json.block; CaptureSHA256 = (Get-FileHash (Join-Path $_.Root 'capture.json')).Hash } })
     Stages = $records.ToArray(); Files = $files
 } | ConvertTo-Json -Depth 6 | Set-Content -LiteralPath (Join-Path $out 'fixture.json') -Encoding utf8NoBOM

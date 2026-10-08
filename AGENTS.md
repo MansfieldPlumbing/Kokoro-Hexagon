@@ -116,7 +116,9 @@ phone measurements establish achieved speed and time to first audio.
   `docs/results/generator60x-hvx-threads-sm8550-20261007.md`.
 - The 16-bit version of that stage runs in 29.40 ms on SM8550 at 66.68 dB SNR against the
   stock float output (scales calibrated on the same sentence). See
-  `docs/results/generator60x-16bit-sm8550-20261008.md`.
+  `docs/results/generator60x-16bit-sm8550-20261008.md`. With the low x low group, rounded table biases and
+  scales calibrated on two other sentences (holdout): 68.76 dB in 29.84 ms. See
+  `docs/results/generator60x-16bit-holdout-sm8550-20261008.md`.
 
 ## Product shape
 

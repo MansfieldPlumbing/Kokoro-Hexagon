@@ -17,13 +17,37 @@ function Read-KokoroCapture {
     @{ Root = $root; Json = $json }
 }
 
+function Read-KokoroResBlockCapture {
+    # One generator AdaINResBlock1 in the per-block naming (input, style, output, stage<s>.input/.adain/.snake/
+    # .conv/.weight/.bias/.alpha/.adain.fc.*/.adain.norm.*; stage s = 2p + half: adain1/convs1 then adain2/convs2
+    # of dilation p). Directory is a per-block capture of that block, or a whole-generator capture
+    # (tools/reference/capture_stock_generator.py names), whose tensors are mapped without copying.
+    param([Parameter(Mandatory)][string] $Directory, [Parameter(Mandatory)][ValidateRange(0,5)][int] $Block)
+    $cap = Read-KokoroCapture -Directory $Directory
+    $name = "decoder.generator.resblocks.$Block"
+    if ($cap.Json.block -ceq $name) { return $cap }
+    if ($cap.Json.block -cne 'decoder.generator') { throw "Capture is neither $name nor the whole generator: $($cap.Root)" }
+    $t = $cap.Json.tensors; $pre = "generator.resblocks.$Block."; $map = @{ input = "${pre}input.0"; style = 'style'; output = "${pre}output" }
+    for ($s = 0; $s -lt 6; $s++) {
+        $p = [math]::Floor($s / 2); $h = 1 + $s % 2
+        $map["stage$s.input"] = "${pre}adain$h.$p.input.0"; $map["stage$s.adain"] = "${pre}adain$h.$p.output"
+        $map["stage$s.snake"] = "${pre}convs$h.$p.input.0"; $map["stage$s.conv"] = "${pre}convs$h.$p.output"
+        $map["stage$s.weight"] = "${pre}convs$h.$p.weight"; $map["stage$s.bias"] = "${pre}convs$h.$p.bias"; $map["stage$s.alpha"] = "${pre}alpha$h.$p"
+        foreach ($f in 'fc.weight', 'fc.bias', 'norm.weight', 'norm.bias') { $map["stage$s.adain.$f"] = "${pre}adain$h.$p.$f" }
+    }
+    $view = @{}
+    foreach ($k in $map.Keys) { if (-not $t.ContainsKey($map[$k])) { throw "Whole-generator capture lacks $($map[$k])" }; $view[$k] = $t[$map[$k]] }
+    $json = @{} + $cap.Json; $json.block = $name; $json.tensors = $view
+    @{ Root = $cap.Root; Json = $json }
+}
+
 function Read-KokoroCaptureTensor {
     # Float32 values of one captured tensor; integrity-checked on first read, then served from cache.
     param([Parameter(Mandatory)][hashtable] $Capture, [Parameter(Mandatory)][string] $Name)
-    $key = $Capture.Root + '|' + $Name
-    if ($script:TensorCache.ContainsKey($key)) { return , $script:TensorCache[$key] }
     $e = $Capture.Json.tensors[$Name]
     if (-not $e -or $e.file -notmatch '^[a-zA-Z0-9_.]+\.f32$' -or $e.bytes -le 0 -or $e.bytes % 4) { throw "Bad capture tensor $Name" }
+    $key = $Capture.Root + '|' + $e.file
+    if ($script:TensorCache.ContainsKey($key)) { return , $script:TensorCache[$key] }
     $path = Join-Path $Capture.Root $e.file
     $bytes = [IO.File]::ReadAllBytes($path)
     if ($bytes.Length -ne $e.bytes -or [Convert]::ToHexString([Security.Cryptography.SHA256]::HashData($bytes)) -cne $e.sha256) { throw "Capture tensor integrity: $Name" }
@@ -51,4 +75,4 @@ function Get-KokoroChannelStats {
     [pscustomobject]@{ AbsMax = $absMax; Mean = $mean; Variance = $var; Frames = $frames }
 }
 
-Export-ModuleMember -Function Read-KokoroCapture, Read-KokoroCaptureTensor, Get-KokoroAbsMax, Get-KokoroChannelStats
+Export-ModuleMember -Function Read-KokoroCapture, Read-KokoroResBlockCapture, Read-KokoroCaptureTensor, Get-KokoroAbsMax, Get-KokoroChannelStats

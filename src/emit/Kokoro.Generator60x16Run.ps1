@@ -294,11 +294,11 @@ function New-KokoroGenerator60x16RunSteps {
     $s.Add(@{Op='dealloc-return'})
 
     $bodies=[Collections.Generic.List[object]]::new()
-    $bodies.Add(@('body_turns',@(New-KokoroAdaInSnakeTurnsSteps)))
+    $bodies.Add(@('body_turns',@(New-KokoroAdaInSnakeTurnsSteps -TurnsBits 22)))
     $bodies.Add(@('body_moments',@(New-KokoroAdaInMoments16Steps)))
     $bodies.Add(@('body_coeff',@(New-KokoroAdaInTurnsCoefficientsSteps)))
-    $bodies.Add(@('body_combine_conv',@(New-KokoroPlaneCombineSteps -Mode Conv -Groups 2 -PlaneStride $planeStride -LabelPrefix 'combineconv')))
-    $bodies.Add(@('body_combine_residual',@(New-KokoroPlaneCombineSteps -Mode Residual -Groups 2 -PlaneStride $planeStride -LabelPrefix 'combineresidual')))
+    $bodies.Add(@('body_combine_conv',@(New-KokoroPlaneCombineSteps -Mode Conv -Groups 3 -PlaneStride $planeStride -LabelPrefix 'combineconv')))
+    $bodies.Add(@('body_combine_residual',@(New-KokoroPlaneCombineSteps -Mode Residual -Groups 3 -PlaneStride $planeStride -LabelPrefix 'combineresidual')))
     $bodies.Add(@('body_mean',@(New-KokoroBranchMean16Steps)))
     for($b=0;$b -lt 3;$b++){foreach($d in 1,3,5){$bodies.Add(@("body_conv_b${b}_d$d",@(New-KokoroHmxConvPlanesSteps -Kernel $kernels[$b] -Dilation $d -WeightPlanes 2 -PlaneStride $planeStride -LabelPrefix "g16_b${b}_d$d")))}}
     foreach($pair in $bodies){$s.Add(@{Op='label';Name=$pair[0]});foreach($step in $pair[1]){$s.Add($step)}}

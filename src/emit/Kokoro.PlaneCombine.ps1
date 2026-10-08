@@ -1,8 +1,9 @@
 #requires -Version 7.4
 # Combine the four byte planes of a two-group HMX conv (Kokoro.HmxConvPlanes.ps1) into 16-bit values.
-# Design: docs/generator60x-16bit-design.md ("Combine"). Each group's planes rebuild its biased 16-bit
-# window w = high << 8 | low (bias 32768); the value is the sum of the signed windows (two groups, or three
-# with the low x low group of -WeightPlanes 2), saturated to int16.
+# Design: docs/generator60x-16bit-design.md ("Combine"). Groups 1 and 2 rebuild their biased 16-bit
+# window w = high << 8 | low (bias 32768); the value is the sum of the signed windows, saturated to int16.
+# -Groups 3 adds the low x low group of -WeightPlanes 2, whose window (shift L + 8, |w| < 128) is its low
+# plane alone, sign-extended (tools/New-KokoroGenerator60x16Fixture.ps1 tables).
 #   -Mode Conv:     store the value biased (u16 = v + 32768): conv1 output C.
 #   -Mode Residual: O = v * ratio_c (Q15 rounding multiply, per channel), R = sat(R + O), stored biased:
 #                   conv2 output added into the residual stream in one pass.
@@ -53,9 +54,9 @@ function New-KokoroPlaneCombineSteps {
         $s.Add(@{Op='add';d=11;s=11;t=10}); $s.Add(@{Op='vload';d=3;s=11;Offset=0})
         $pairs = @(@(0,1),@(2,3))
         if ($Groups -eq 3) {
-            $s.Add(@{Op='add';d=11;s=11;t=10}); $s.Add(@{Op='vload';d=6;s=11;Offset=0})
-            $s.Add(@{Op='add';d=11;s=11;t=10}); $s.Add(@{Op='vload';d=7;s=11;Offset=0})
-            $pairs += ,@(6,7)
+            # Low x low group: only its low plane (r0+5S) is read; the byte is its whole signed window.
+            $s.Add(@{Op='add';d=11;s=11;t=10}); $s.Add(@{Op='add';d=11;s=11;t=10}); $s.Add(@{Op='vload';d=6;s=11;Offset=0})
+            $s.Add(@{Op='vasr-h';d=6;s=6;t=8})                        # sign-extend the odd byte
         }
         foreach ($g in $pairs) {
             $s.Add(@{Op='vand';d=$g[0];s=$g[0];t=31})                 # high byte stays in the odd position

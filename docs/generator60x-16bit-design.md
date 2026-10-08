@@ -29,8 +29,10 @@ plan keeps a second weight plane. Two HMX accumulator groups per output tile:
     A1 = sum (h - 128) * Wh                       (one pass; table int32 carries -128 * sum Wh)
     A2 = sum l * Wh  [+ sum (h - 128) * Wl]       (one or two passes into the same accumulator)
 
-`A1 * 256 + A2` is the conv in units of `sX * sW_c / 65536` (`W8x1`: `sW_c / 256`). The lowest
-term `sum l * Wl` is omitted (below 2^-16 of the result). Each group leaves HMX as two exact
+`A1 * 256 + A2 + A3 / 256` is the conv in units of `sX * sW_c / 65536` (`W8x1`: `sW_c / 256`), with
+`A3 = sum l * Wl`. A3 leaves at shift `L + 8` through its low plane only (its high plane would need table
+exponent `8 - L`); its window stays a signed byte (peaks 45-59 on the captures; the fixture builder checks
+every capture it reads), and the combine sign-extends it. Each table bias rounds to nearest. Each group leaves HMX as two exact
 byte planes of a 16-bit window at a power-of-two shift (`docs/results/hmx-two-plane-output-sim-20261007.md`):
 `A1` at shift `L - 8`, `A2` at shift `L`. Their sum is the 16-bit output within two LSB.
 
@@ -55,9 +57,13 @@ From `S1`, `S2`, `N` and the voice-load style affine (stock AdaIN1d: `gamma`, `b
 norm weight and bias): `D = N S2 - S1^2 + round(eps N^2 / s^2)`, `G = A N / sqrt(D)` per LSB of the
 input, `H = B - G * S1 / N`. Then for the Snake body:
 
-    K = round(alpha * G * 2^39 / pi)       (Q31 multiplier of x * 2^16 -> Q24 turns)
-    M = round(alpha * H * 2^24 / pi)       (Q24 turns)
-    S = round((pi / alpha) * 2^7 / sX)     (Q31 multiplier of Q24 turns -> output LSB)
+    K = round(alpha * G * 2^37 / pi)       (Q31 multiplier of x * 2^16 -> Q22 turns)
+    M = round(alpha * H * 2^22 / pi)       (Q22 turns)
+    S = round((pi / alpha) * 2^9 / sX)     (Q31 multiplier of Q22 turns -> output LSB)
+
+Q22 rather than Q24 (`-TurnsBits 22`) gives K four times the int32 range: with Q24, one channel of
+resblocks.4 stage 0 had no room between its residual peak and the K bound across sentences
+(`docs/results/generator60x-16bit-holdout-sm8550-20261008.md`).
 
 `alpha`, `pi` and the scale factors fold into per-channel constants at voice load; only
 `G`, `H` depend on the group. Integer sqrt and division use exact 64-bit trial bits, as

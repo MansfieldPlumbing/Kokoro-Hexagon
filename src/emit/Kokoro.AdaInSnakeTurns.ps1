@@ -13,11 +13,16 @@
 # r0 input tiles: biased u16 per value (x + 32768).
 # r1 high-plane window tiles: u8 = (out >> 8) + 128 in the odd byte of each halfword.
 # r2 low-plane window tiles: u8 = out & 255 in the odd byte of each halfword.
-# r3 per-channel constants, int32 each: K[C] at 0 (Q31 multiplier of x*2^16, giving Q24 turns),
-#    M[C] at 4C (Q24 turns), S[C] at 8C (Q31 multiplier of Q24 turns giving the 16-bit output).
-# r4 tiles >= 1. out is clamped to int16 before the plane split. r16..r27 are untouched.
+# r3 per-channel constants, int32 each: K[C] at 0 (Q31 multiplier of x*2^16, giving QT turns),
+#    M[C] at 4C (QT turns), S[C] at 8C (Q31 multiplier of QT turns giving the 16-bit output).
+# r4 tiles >= 1. out is clamped to int16 before the plane split. r16..r27 are untouched (r28 is used).
+# -TurnsBits QT (24 above; 22 gives K four times the range, one input LSB up to 1/64 turn): the cos
+# argument stays the 16-bit fractional turn, bits QT-16..QT-1 of P.
 function New-KokoroAdaInSnakeTurnsSteps {
-    param([ValidateSet(128,256)][int]$Channels=128,[string]$LabelPrefix='adainsnaketurns',[switch]$NoReturn)
+    param([ValidateSet(128,256)][int]$Channels=128,[ValidateSet(22,24)][int]$TurnsBits=24,[string]$LabelPrefix='adainsnaketurns',[switch]$NoReturn)
+    # Shift registers: fraction of the even row (right, QT-16), of the odd row (left, 32-QT), and (1-cos)/(2 pi)
+    # from Q30 to QT (right, 30-QT); r9 = 8, r11 = 6, r28 = 10.
+    $sh = if ($TurnsBits -eq 24) { @{ Even = 9; Odd = 9; Cos = 11 } } else { @{ Even = 11; Odd = 28; Cos = 9 } }
     $q14 = foreach ($k in 1..5) {
         $f = 1.0; for ($i = 1; $i -le 2 * $k - 1; $i++) { $f *= $i }
         [int][math]::Round([math]::Pow(-1, $k - 1) * [math]::Pow([math]::PI / 2, 2 * $k - 1) / $f * 16384)
@@ -38,6 +43,7 @@ function New-KokoroAdaInSnakeTurnsSteps {
     & $splat 18 32767
     & $splat 17 -32768
     foreach ($kv in @(@(8,16),@(9,8),@(10,1),@(11,6),@(12,24),@(7,0))) { $s.Add(@{Op='imm';d=$kv[0];i=$kv[1]}) }
+    if ($TurnsBits -eq 22) { $s.Add(@{Op='imm';d=28;i=10}) }
     for ($block = 0; $block -lt ($Channels / 32); $block++) {
         $s.Add(@{Op='addi';d=6;s=3;i=($block*128)})
         $s.Add(@{Op='vload';d=14;s=6;Offset=0})
@@ -57,14 +63,14 @@ function New-KokoroAdaInSnakeTurnsSteps {
         $s.Add(@{Op='vxor';d=0;s=0;t=31})                       # signed halfwords
         $s.Add(@{Op='vasl-w';d=1;s=0;t=8})                      # even row x * 2^16
         $s.Add(@{Op='vand';d=2;s=0;t=30})                       # odd row  x * 2^16
-        foreach ($p in @(@(3,1),@(4,2))) {                      # P = K*x*2^16 >> 31 + M, Q24 turns
+        foreach ($p in @(@(3,1),@(4,2))) {                      # P = K*x*2^16 >> 31 + M, QT turns
             $s.Add(@{Op='vmpye-w-uh';d=$p[0];s=$p[1];t=14})
             $s.Add(@{Op='vmpyo-acc-w-h-rnd-sat-shift';d=$p[0];s=$p[1];t=14})
             $s.Add(@{Op='vadd-w';d=$p[0];s=$p[0];t=15})
         }
         # 16-bit fractional turn of both rows in one halfword vector.
-        $s.Add(@{Op='vlsr-uw';d=5;s=3;t=9}); $s.Add(@{Op='vand';d=5;s=5;t=29})
-        $s.Add(@{Op='vasl-w';d=6;s=4;t=9});  $s.Add(@{Op='vand';d=6;s=6;t=30})
+        $s.Add(@{Op='vlsr-uw';d=5;s=3;t=$sh.Even}); $s.Add(@{Op='vand';d=5;s=5;t=29})
+        $s.Add(@{Op='vasl-w';d=6;s=4;t=$sh.Odd});  $s.Add(@{Op='vand';d=6;s=6;t=30})
         $s.Add(@{Op='vor';d=5;s=5;t=6})
         $s.Add(@{Op='vabs-h-sat';d=5;s=5})                      # fold onto [0, 1/2) turn
         $s.Add(@{Op='vsub-h';d=5;s=5;t=28})
@@ -74,12 +80,12 @@ function New-KokoroAdaInSnakeTurnsSteps {
         foreach ($c in 25,24,23) { $s.Add(@{Op='vmpy-h-rnd-sat';d=7;s=7;t=6}); $s.Add(@{Op='vadd-h';d=7;s=7;t=$c}) }
         $s.Add(@{Op='vmpy-h-rnd-sat';d=7;s=7;t=5})              # sin(pi/2 u), Q14
         $s.Add(@{Op='vadd-h-sat';d=7;s=7;t=28})                 # 1 - cos, Q14
-        # Back to words per row, scale (1 - cos)/(2 pi) into Q24 turns, add to P.
+        # Back to words per row, scale (1 - cos)/(2 pi) into QT turns, add to P.
         $s.Add(@{Op='vasl-w';d=8;s=7;t=8}); $s.Add(@{Op='vasr-w';d=8;s=8;t=8})
         $s.Add(@{Op='vasr-w';d=9;s=7;t=8})
         foreach ($p in @(@(8,3),@(9,4))) {
             $s.Add(@{Op='vmpyie-w-uh';d=$p[0];s=$p[0];t=22})
-            $s.Add(@{Op='vasr-w';d=$p[0];s=$p[0];t=11})
+            $s.Add(@{Op='vasr-w';d=$p[0];s=$p[0];t=$sh.Cos})
             $s.Add(@{Op='vadd-w';d=$p[1];s=$p[1];t=$p[0]})
         }
         foreach ($p in @(@(10,3),@(11,4))) {                    # out = V*S >> 31, clamped to int16
