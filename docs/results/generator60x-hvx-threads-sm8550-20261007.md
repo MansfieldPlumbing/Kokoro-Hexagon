@@ -39,3 +39,19 @@ does not change the output.
   HMX conv 2.0 ms, tile fixes 1.3 ms, mean 1.1 ms.
 
 Stage at four threads: 40.76 ms for 1.625 s of audio (86.05 ms before).
+
+## Residual and moments on the pool, batch size (four threads, event set A, 3 runs each)
+
+Commit `8de4969` puts the residual and moments bodies on the pool (moments per worker into
+private VTCM buffers, added after the join). `-BatchTiles` sets the tiles per batch; each
+window is BatchTiles + 2 tiles. All runs 0/999,424 output lanes, 0/18,432 coefficient bytes.
+
+| Batch tiles | Window split per thread | Skel SHA-256 | Stage median ms |
+| ---: | --- | --- | ---: |
+| 16 | 5, 5, 5, 3 | `6799A9595E33808FB53E907734F8EBC63595530838153DF605A908B71ADCC4CE` | 34.68 |
+| 14 | 4, 4, 4, 4 | `A0CA6DABBB4002D43165A0B22E430AE98A267300B7272F1CB362BB24E0362BFE` | 33.85 |
+| 22 | 6, 6, 6, 6 | `6011B2D791A523D447A6B37D41713A9BF4601D6EFDE115C2321F1656CEA64DFA` | **31.48** |
+
+At 22 tiles: AdaIN + Snake 19.3 ms, residual 2.4 ms, moments 2.1 ms, coefficients 2.4 ms,
+HMX conv 2.0 ms. Every worker's `qurt_hvx_lock` returned 0 (recorded since `506427d`).
+**Banked baseline: 31.48 ms per 1.625 s of audio, 8-bit stage, 86.05 ms single-thread.**

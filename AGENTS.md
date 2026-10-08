@@ -110,6 +110,10 @@ phone measurements establish achieved speed and time to first audio.
   3/3 SM8550 runs: 19 stages, zero output-lane and coefficient-byte mismatches
   (see `docs/results/generator60x-combined-sm8550-20261006.md`). Whole-generator
   speech and end-to-end timing are not proved.
+- The resident 128-channel stage (resblocks.3-5 and mean, 7,801 frames, 1.625 s of
+  audio) runs in 31.48 ms on SM8550 with four HVX worker threads and 22-tile batches,
+  output exact (86.05 ms on one thread). See
+  `docs/results/generator60x-hvx-threads-sm8550-20261007.md`.
 
 ## Product shape
 
