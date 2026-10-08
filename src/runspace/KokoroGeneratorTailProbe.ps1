@@ -46,7 +46,8 @@ try {
     $act = [IO.File]::ReadAllBytes([IO.Path]::Combine($dir, 'activations.bin'))
     $wts = [IO.File]::ReadAllBytes([IO.Path]::Combine($dir, 'weights.bin'))
     $tbl = [IO.File]::ReadAllBytes([IO.Path]::Combine($dir, 'tables.bin'))
-    if ($act.Length -ne $tiles * 8192) { throw 'Input length' }
+    $inputBytes = if ($kv.InputBytes) { [long]$kv.InputBytes } else { $tiles * 8192L }
+    if ($act.Length -ne $inputBytes) { throw 'Input length' }
     $config = [BitConverter]::GetBytes([uint32]$tiles)
     $ticks = [Collections.Generic.List[long]]::new(); $pcmHash = $null; $allOk = $true; $pcm = $null
     for ($run = 0; $run -lt $runs; $run++) {

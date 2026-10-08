@@ -38,7 +38,7 @@ $aaudio = Join-Path $PSScriptRoot '..\src\runspace\Audio.AAudio.psm1'
 foreach ($p in $harness, $binding, $aaudio) { $e = $null; $null = [Management.Automation.Language.Parser]::ParseFile($p, [ref]$null, [ref]$e); if ($e.Count) { throw "Does not parse: $p" } }
 $id = [Guid]::NewGuid().ToString('N')
 $spec = Join-Path $emission "tail-spec-$id.txt"
-[IO.File]::WriteAllLines($spec, @("Tiles=$($layout.Tiles)", "Runs=$Runs", "OutputBytes=$($layout.OutputBytes)", "PcmOffset=$($layout.PcmOffset)", "Samples=$($layout.Samples)"))
+[IO.File]::WriteAllLines($spec, @("Tiles=$($layout.Tiles)", "Runs=$Runs", "OutputBytes=$($layout.OutputBytes)", "PcmOffset=$($layout.PcmOffset)", "Samples=$($layout.Samples)", "InputBytes=$($layout.InputBytes)"))
 $temp = "/data/local/tmp/kokoro-tail-$id"
 $backup = "files/kokoro-fl/generator-tail-backup-$id"
 $target = 'files/kokoro-fl/generator-tail'

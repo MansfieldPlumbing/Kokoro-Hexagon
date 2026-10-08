@@ -131,6 +131,21 @@ function Get-PackWeightPlanesShapedKernel {
     $script:Kernels.PackWeightPlanesShaped = $kk; $kk
 }
 
+function Get-SplitPlanesKernel {
+    # (byte[] u16 biased halfwords, byte[] hi, byte[] lo): per halfword i, hi odd byte = high byte of u16 ((q >> 8) + 128),
+    # lo odd byte = low byte (q & 255); even bytes zero. The two HMX conv-input planes (Kokoro.AdaInSnakeTurns.ps1 layout).
+    if ($script:Kernels.ContainsKey('SplitPlanes')) { return $script:Kernels.SplitPlanes }
+    $E = [Expression]
+    $src = $E::Parameter([byte[]], 'src'); $hi = $E::Parameter([byte[]], 'hi'); $lo = $E::Parameter([byte[]], 'lo'); $i = $E::Variable([int], 'i')
+    $two = $E::Multiply((New-Int 2), $i); $odd = $E::Add($two, (New-Int 1))
+    $inner = $E::Block(
+        $E::Assign($E::ArrayAccess($hi, $odd), $E::ArrayIndex($src, $odd)),
+        $E::Assign($E::ArrayAccess($lo, $odd), $E::ArrayIndex($src, $two)))
+    $body = $E::Block([ParameterExpression[]]@($i), (New-For $i (New-Int 0) ($E::Divide($E::ArrayLength($src), (New-Int 2))) $inner))
+    $k = $E::Lambda([Action[byte[], byte[], byte[]]], $body, [ParameterExpression[]]@($src, $hi, $lo)).Compile()
+    $script:Kernels.SplitPlanes = $k; $k
+}
+
 function Get-Mean3Kernel {
     # (float[] a, float[] b, float[] c, float[] dst): dst = (a + b + c) / 3 in double, stored as float.
     if ($script:Kernels.ContainsKey('Mean3')) { return $script:Kernels.Mean3 }
@@ -262,6 +277,53 @@ function Get-LowLowWindowKernel {
     $script:Kernels.LowLowWindow = $k; $k
 }
 
+function Get-LowLowWindowShapedKernel {
+    # As Get-LowLowWindowKernel for cin inputs and cout outputs: (float[] x [i][t], int frames, double sX, float[] w [o][i][k],
+    # int cin, int cout, int K, int dilation, double[] sW, int[] L, int[] maxAbs) -> int: the low x low group of the 16-bit conv (tools/New-KokoroGenerator60x16Fixture.ps1)
+    # on real inputs. xq = clamp(round(x / sX), +-32767), l = xq & 255 (zero outside the frames, as the padded window);
+    # Wq = round(w / sW_o), Wl = Wq - 256 ((Wq + 128) >> 8); A3 = sum l Wl (same-padded dilated taps); window
+    # (A3 + 2^(L+7)) >> (L+8). maxAbs[o] = max |window| over frames; returns the maximum over o.
+    if ($script:Kernels.ContainsKey('LowLowWindowShaped')) { return $script:Kernels.LowLowWindowShaped }
+    $x = [Expression]::Parameter([float[]], 'x'); $frames = [Expression]::Parameter([int], 'frames'); $sX = [Expression]::Parameter([double], 'sX')
+    $w = [Expression]::Parameter([float[]], 'w'); $cin = [Expression]::Parameter([int], 'cin'); $cout = [Expression]::Parameter([int], 'cout'); $K = [Expression]::Parameter([int], 'K'); $dil = [Expression]::Parameter([int], 'dil')
+    $sW = [Expression]::Parameter([double[]], 'sW'); $L = [Expression]::Parameter([int[]], 'L'); $maxAbs = [Expression]::Parameter([int[]], 'maxAbs')
+    $v = @{}; foreach ($n in 'i','o','tap','ic','t','t0','t1','shift','q','ql','base','sh','win','m','all') { $v[$n] = [Expression]::Variable([int], $n) }
+    $lowByte = [Expression]::Variable([int[]], 'lowByte'); $acc = [Expression]::Variable([int[]], 'acc'); $hb = [Expression]::Variable([long], 'hb')
+    $round = [Math].GetMethod('Round', [Type[]]@([double])); $clamp = [Math].GetMethod('Clamp', [Type[]]@([int], [int], [int]))
+    $absI = [Math].GetMethod('Abs', [Type[]]@([int])); $maxI = [Math].GetMethod('Max', [Type[]]@([int], [int])); $minI = [Math].GetMethod('Min', [Type[]]@([int], [int]))
+    $E = [Expression]
+    $quantX = $E::Call($clamp, $E::Convert($E::Call($round, $E::Divide($E::Convert($E::ArrayIndex($x, $v.i), [double]), $sX)), [int]), (New-Int -32767), (New-Int 32767))
+    $fillL = New-For $v.i (New-Int 0) ($E::ArrayLength($x)) ($E::Assign($E::ArrayAccess($lowByte, $v.i), $E::And($quantX, (New-Int 255))))
+    $wq = $E::Convert($E::Call($round, $E::Divide($E::Convert($E::ArrayIndex($w, $E::Add($E::Multiply($E::Add($E::Multiply($v.o, $cin), $v.ic), $K), $v.tap)), [double]), $E::ArrayIndex($sW, $v.o))), [int])
+    $macT = New-For $v.t $v.t0 $v.t1 ($E::AddAssign($E::ArrayAccess($acc, $v.t), $E::Multiply($E::ArrayIndex($lowByte, $E::Add($v.base, $v.t)), $v.ql)))
+    $perIc = $E::Block(
+        $E::Assign($v.q, $wq),
+        $E::Assign($v.ql, $E::Subtract($v.q, $E::Multiply((New-Int 256), $E::RightShift($E::Add($v.q, (New-Int 128)), (New-Int 8))))),
+        $E::IfThen($E::NotEqual($v.ql, (New-Int 0)), $E::Block($E::Assign($v.base, $E::Add($E::Multiply($v.ic, $frames), $v.shift)), $macT)))
+    $perTap = $E::Block(
+        $E::Assign($v.shift, $E::Multiply($dil, $E::Subtract($v.tap, $E::Divide($E::Subtract($K, (New-Int 1)), (New-Int 2))))),
+        $E::Assign($v.t0, $E::Call($maxI, (New-Int 0), $E::Negate($v.shift))),
+        $E::Assign($v.t1, $E::Call($minI, $frames, $E::Subtract($frames, $v.shift))),
+        (New-For $v.ic (New-Int 0) $cin $perIc))
+    $window = $E::Convert($E::RightShift($E::Add($E::Convert($E::ArrayIndex($acc, $v.t), [long]), $hb), $v.sh), [int])
+    $perO = $E::Block(
+        (New-For $v.t (New-Int 0) $frames ($E::Assign($E::ArrayAccess($acc, $v.t), (New-Int 0)))),
+        (New-For $v.tap (New-Int 0) $K $perTap),
+        $E::Assign($v.sh, $E::Add($E::ArrayIndex($L, $v.o), (New-Int 8))),
+        $E::Assign($hb, $E::LeftShift($E::Constant(1L), $E::Subtract($v.sh, (New-Int 1)))),
+        $E::Assign($v.m, (New-Int 0)),
+        (New-For $v.t (New-Int 0) $frames ($E::Assign($v.m, $E::Call($maxI, $v.m, $E::Call($absI, $window))))),
+        $E::Assign($E::ArrayAccess($maxAbs, $v.o), $v.m),
+        $E::Assign($v.all, $E::Call($maxI, $v.all, $v.m)))
+    $vars = [ParameterExpression[]]@(@($v.Values) + $lowByte + $acc + $hb)
+    $body = $E::Block([int], $vars,
+        $E::Assign($lowByte, $E::NewArrayBounds([int], $E::ArrayLength($x))), $E::Assign($acc, $E::NewArrayBounds([int], $frames)),
+        $E::Assign($v.all, (New-Int 0)), $fillL,
+        (New-For $v.o (New-Int 0) $cout $perO), $v.all)
+    $k = $E::Lambda([Func[float[], int, double, float[], int, int, int, int, double[], int[], int[], int]], $body, [ParameterExpression[]]@($x, $frames, $sX, $w, $cin, $cout, $K, $dil, $sW, $L, $maxAbs)).Compile()
+    $script:Kernels.LowLowWindowShaped = $k; $k
+}
+
 function Get-Conv1dKernel {
     # (double[] x [i][t], int cin, int frames, double[] w [o][i][k], int cout, int K, int first, double[] y [o][t]):
     # y[o][t] = sum_i sum_k w[o][i][k] x[i][t + first + k], zero outside 0..frames-1. Build-time checks of
@@ -285,4 +347,4 @@ function Get-Conv1dKernel {
     $script:Kernels.Conv1d = $k; $k
 }
 
-Export-ModuleMember -Function Get-Conv1dKernel, Get-PackWeightPlanesShapedKernel, Get-LowLowWindowKernel, Get-QuantizeCroutons16Kernel, Get-PackWeightPlanesKernel, Get-Mean3Kernel, Get-Croutons16ErrorKernel, Get-ChannelStatsKernel, Get-DecodeCroutons16Kernel, Get-InterleavePlanesKernel
+Export-ModuleMember -Function Get-SplitPlanesKernel, Get-LowLowWindowShapedKernel, Get-Conv1dKernel, Get-PackWeightPlanesShapedKernel, Get-LowLowWindowKernel, Get-QuantizeCroutons16Kernel, Get-PackWeightPlanesKernel, Get-Mean3Kernel, Get-Croutons16ErrorKernel, Get-ChannelStatsKernel, Get-DecodeCroutons16Kernel, Get-InterleavePlanesKernel
