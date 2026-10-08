@@ -136,8 +136,9 @@ phone measurements establish achieved speed and time to first audio.
   `docs/results/generator-10x-half-sm8550-20261008.md`. See `docs/results/generator-stage16-tail-sm8550-20261008.md`.
 - The whole generator in one DSP job, captured decoder output and har to PCM: 42.05 dB in 79.71 ms (1.625 s of
   audio) on SM8550, played. See `docs/results/generator-whole-sm8550-20261008.md`.
-- The phonemizer driver runs in the phone app on SM8550 with token IDs identical to Windows, 39 us warm per
-  sentence; 22 of 73 challenge sentences complete. See `docs/results/phonemizer-driver-sm8550-20261008.md`.
+- The phonemizer driver with its polish pass (stress, flaps, weak forms, numbers, inflection) runs in the phone app
+  on SM8550 with token IDs identical to Windows, 57.8 us warm per sentence; 73 of 73 challenge and 149 of 153
+  held-out sentences complete. See `docs/results/phonemizer-polish-sm8550-20261008.md`.
 
 ## Product shape
 
