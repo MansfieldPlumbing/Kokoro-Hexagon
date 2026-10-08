@@ -10,7 +10,8 @@ Build-time arithmetic only. Integer contract:
   input      the 60x stage's final tensor: biased u16 croutons, per-channel scale sR (stage fixture.json).
   leaky      on the integers (Kokoro.LeakyRelu16.ps1); sR folds into conv_post's weights: W'[o][i] = W[o][i] sR_i.
   conv_post  three-group HMX conv (Kokoro.HmxConvPlanes.ps1, 128 -> 64, K 7), W8x2 per output channel, outputs
-             placed so magnitude bin k is channel k and phase bin k channel 32 + k; output units 2^(L+8) sW.
+             placed so magnitude bin k is channels k (fine) and 11 + k (coarse) and phase bin k channel 32 + k;
+             output units 2^(L+8) sW.
   spectrum   Kokoro.TailSpectrum16.ps1: Re, Im = exp(z) (cos, sin)(sin(z')) / sS, one scale sS.
   iSTFT      one HMX conv 64 -> 64 (outputs 0..4 used), K 7 with taps at frame shifts -1..2: output frame m,
              channel r is PCM sample 5m + r (= stock overlap-add position 5m + r + 10), in units 2^-15
@@ -27,7 +28,11 @@ param(
     [Parameter(Mandatory)][string] $CaptureDirectory,
     [string[]] $CalibrationDirectory,
     [Parameter(Mandatory)][string] $OutputDirectory,
-    [ValidateRange(1.0, 4.0)][double] $Margin = 1.25
+    [ValidateRange(1.0, 4.0)][double] $Margin = 1.25,
+    # Magnitude logits only feed exp(): their 16-bit window spans +-max(MagnitudeRange, margin * calibrated max)
+    # instead of their full negative range (stock reaches -60), for a finer LSB; a second, coarse copy covers the
+    # full range and is taken where the fine window saturates (Kokoro.TailSpectrum16.ps1).
+    [ValidateRange(4.0, 64.0)][double] $MagnitudeRange = 10
 )
 $ErrorActionPreference = 'Stop'
 $build = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '../build')) + [IO.Path]::DirectorySeparatorChar
@@ -58,10 +63,11 @@ $act = [byte[]]::new($tiles * 8192); $zero16 = [uint16[]]::new($tiles * 4096); [
 (Get-QuantizeCroutons16Kernel).Invoke($mean, $frames, $sR, $act)
 
 # Calibration ranges: per stock conv_post channel absmax; the largest spectrum magnitude.
-$outMax = [double[]]::new(22); $eMax = 0.0
+$outMax = [double[]]::new(22); $posMax = [double[]]::new(22); $eMax = 0.0
 foreach ($c in $cals) {
     $z = Read-KokoroCaptureTensor -Capture $c -Name 'generator.conv_post.output'; $st = Get-KokoroChannelStats -Values $z -Channels 22
     for ($o = 0; $o -lt 22; $o++) { $outMax[$o] = [math]::Max($outMax[$o], $st.AbsMax[$o]) }
+    for ($o = 0; $o -lt 11; $o++) { $seg = [float[]]::new($z.Length / 22); [Array]::Copy($z, $o * $seg.Length, $seg, 0, $seg.Length); $posMax[$o] = [math]::Max($posMax[$o], [Linq.Enumerable]::Max($seg)) }
     for ($o = 0; $o -lt 11; $o++) { $seg = [float[]]::new($z.Length / 22); [Array]::Copy($z, $o * $seg.Length, $seg, 0, $seg.Length); $eMax = [math]::Max($eMax, [math]::Exp([Linq.Enumerable]::Max($seg))) }
 }
 $sS = $eMax * $Margin / 32767
@@ -86,11 +92,12 @@ function Write-ColumnTables([byte[]]$Dest, [int]$At, [int[]]$Shift, [long[]]$Sum
 }
 $tables = [byte[]]::new(16384)
 
-# conv_post: 128 -> 64 placed channels, sR folded into the weights (input units: one integer LSB).
-$place = { param([int]$o) if ($o -lt 11) { $o } else { 32 + $o - 11 } }
+# conv_post: 128 -> 64 placed channels, sR folded into the weights (input units: one integer LSB). Magnitude bin k
+# goes to channel k (fine window, clipped) and channel 11 + k (coarse window, full range); phase bin k to 32 + k.
 $wPost = [float[]]::new(64 * 128 * 7); $wAbs = [double[]]::new(64); $biasPost = [double[]]::new(64); $maxPost = [double[]]::new(64)
-for ($o = 0; $o -lt 22; $o++) {
-    $p = & $place $o; $biasPost[$p] = $bias[$o]; $maxPost[$p] = $outMax[$o]
+$slots = foreach ($o in 0..21) { if ($o -lt 11) { , @($o, $o, [math]::Max($MagnitudeRange / $Margin, $posMax[$o])); , @($o, (11 + $o), $outMax[$o]) } else { , @($o, (32 + $o - 11), $outMax[$o]) } }
+foreach ($slot in $slots) {
+    $o = $slot[0]; $p = $slot[1]; $biasPost[$p] = $bias[$o]; $maxPost[$p] = $slot[2]
     for ($i = 0; $i -lt 128; $i++) { for ($k = 0; $k -lt 7; $k++) { $v = [double]$weight[($o * 128 + $i) * 7 + $k] * $sR[$i]; $wPost[($p * 128 + $i) * 7 + $k] = [float]$v; $wAbs[$p] = [math]::Max($wAbs[$p], [math]::Abs($v)) } }
 }
 $Lpost = [int[]]::new(64); $sWpost = [double[]]::new(64); $unitPost = [double[]]::new(64)
@@ -104,14 +111,16 @@ $whPost = [byte[]]::new(57344); $wlPost = [byte[]]::new(57344); $sumHPost = [lon
 if ((Get-PackWeightPlanesShapedKernel).Invoke($wPost, 64, 128, 7, $sWpost, $whPost, $wlPost, $sumHPost, $sumLPost) -ne 0) { throw 'conv_post weight plane overflow' }
 $bqPost = [long[]]::new(64); for ($p = 0; $p -lt 64; $p++) { $bqPost[$p] = [long](Get-Even ($biasPost[$p] / (256 * $sWpost[$p]))) }
 Write-ColumnTables $tables 0 $Lpost $sumHPost $sumLPost $bqPost 64
-
-# Spectrum constants (Kokoro.TailSpectrum16.ps1): per lane Ke, Be (block 0), Kp, Mp (block 1).
+# Spectrum constants (Kokoro.TailSpectrum16.ps1): per lane Ke, Be (fine), Kp, Mp (phase), and Kc, Bc (coarse, with
+# delta = 8 coarse LSB folded into Bc so that the fine value wins wherever both are valid).
 $spec = Get-KokoroTailSpectrumConstants
 for ($k = 0; $k -lt 11; $k++) {
     $ke = Get-Even ($unitPost[$k] * [math]::Log(2.718281828459045, 2) * [math]::Pow(2, 31))
     $be = Get-Even (-[math]::Log($sS, 2) * 65536)
     $kp = Get-Even ($unitPost[32 + $k] * [math]::Pow(2, 39) / (2 * [math]::PI))
-    foreach ($q in @(@(0, $ke), @(1, $be), @(2, $kp), @(3, 4194304))) {
+    $kc = Get-Even ($unitPost[11 + $k] * [math]::Log(2.718281828459045, 2) * [math]::Pow(2, 31))
+    $bc = Get-Even ((8 * $unitPost[11 + $k] * [math]::Log(2.718281828459045, 2) - [math]::Log($sS, 2)) * 65536)
+    foreach ($q in @(@(0, $ke), @(1, $be), @(2, $kp), @(3, 4194304), @(35, $kc), @(36, $bc))) {
         if ([math]::Abs($q[1]) -gt [int]::MaxValue) { throw "Spectrum constant out of range ($($q[0]), bin $k)" }
         [BitConverter]::GetBytes([int]$q[1]).CopyTo($spec, 128 * $q[0] + 4 * $k)
     }
@@ -172,7 +181,7 @@ foreach ($f in @(@('activations.bin', $act), @('weights.bin', $weights), @('tabl
 $files = @(Get-ChildItem -LiteralPath $out -File | ForEach-Object { [ordered]@{ Name = $_.Name; Bytes = $_.Length; SHA256 = (Get-FileHash $_.FullName).Hash } })
 $summary = [ordered]@{
     Graph = 'GeneratorTail16'; Frames = $frames; Tiles = $tiles; Samples = $samples; SpectrumScale = $sS; Margin = $Margin
-    FoldedSynthesisSnrDb = [math]::Round($foldedSnr, 2); ConvPostShifts = @($Lpost[0..10] + $Lpost[32..42]); IstftShifts = @($Listft[0..4])
+    FoldedSynthesisSnrDb = [math]::Round($foldedSnr, 2); ConvPostUnits = $unitPost; MagnitudeRange = $MagnitudeRange; ConvPostShifts = @($Lpost[0..21] + $Lpost[32..42]); IstftShifts = @($Listft[0..4])
     StageFixture = $stageDir; Capture = $cap.Root; CalibrationCaptures = @($cals | ForEach-Object { $_.Root }); Files = $files
 }
 $summary | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath (Join-Path $out 'fixture.json') -Encoding utf8NoBOM

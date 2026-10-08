@@ -36,7 +36,10 @@ function Add-KokoroGeneratorTail16JobSteps {
     param([Parameter(Mandatory)][AllowEmptyCollection()][Collections.Generic.List[hashtable]]$Steps,[Parameter(Mandatory)][AllowEmptyCollection()][Collections.Generic.List[object]]$Calls,
         [ValidateRange(2,32768)][int]$Frames=7801,[ValidateRange(1,64)][int]$BatchTiles=16,
         [int]$InputBase=20,[long]$InputOffset=0,[int]$WeightsBase=21,[long]$WeightsOffset=0,[int]$TablesBase=22,[long]$TablesOffset=0,
-        [int]$PcmBase=23,[long]$PcmOffset=256)
+        [int]$PcmBase=23,[long]$PcmOffset=256,
+        # Diagnosis: DMA the 16-bit logits (64-channel croutons) to DumpBase + DumpOffset after conv_post, then the
+        # spectrum high and low planes ((tiles + 2) * 4096 bytes each, halo tiles included) after them.
+        [int]$DumpBase=-1,[long]$DumpOffset=0)
     $layout=Get-KokoroGeneratorTail16Layout -Frames $Frames -BatchTiles $BatchTiles
     $tiles=$layout.Tiles; $batch=$BatchTiles; $reg=$layout.Regions
     $s=$Steps; $calls=$Calls
@@ -96,6 +99,7 @@ function Add-KokoroGeneratorTail16JobSteps {
         & $ptr 0 18 $reg.Planes.Offset; & $ptr 1 18 ($reg.Logits.Offset+$startTile*4096); & $imm 3 $count
         & $call 'body_combine'
     }
+    if($DumpBase -ge 0){ $s.Add(@{Op='syncht'}); & $dma $DumpBase $DumpOffset 18 $reg.Logits.Offset ($tiles*4096L) }
     # Spectrum, resident, with zero halo tiles and zero rows past the frames.
     & $fill $reg.Spectrum.Offset 32 0x80008000L; & $fill $reg.SpectrumLow.Offset 32 0
     & $fill ($reg.Spectrum.Offset+($tiles+1)*4096) 32 0x80008000L; & $fill ($reg.SpectrumLow.Offset+($tiles+1)*4096) 32 0
@@ -103,6 +107,7 @@ function Add-KokoroGeneratorTail16JobSteps {
     & $call 'body_spectrum'
     & $padRows ($reg.Spectrum.Offset+$tiles*4096) 0x8000; & $padRows ($reg.SpectrumLow.Offset+$tiles*4096) 0
     $s.Add(@{Op='syncht'})
+    if($DumpBase -ge 0){ & $dma $DumpBase ($DumpOffset+$tiles*4096L) 18 $reg.Spectrum.Offset (($tiles+2)*4096L); & $dma $DumpBase ($DumpOffset+$tiles*4096L+($tiles+2)*4096L) 18 $reg.SpectrumLow.Offset (($tiles+2)*4096L) }
     # iSTFT per batch, then PCM to DDR.
     $lastFrame=$Frames-2; $lastTile=[int][math]::Floor($lastFrame/32)
     for($startTile=0;$startTile -lt $tiles;$startTile+=$batch){
@@ -148,7 +153,8 @@ function Get-KokoroGeneratorTail16Bodies {
 }
 
 function New-KokoroGeneratorTail16RunSteps {
-    param([ValidateRange(2,32768)][int]$Frames=7801,[ValidateRange(1,64)][int]$BatchTiles=16)
+    # -DumpLogits: the output buffer also holds the logits after the PCM (Layout.LogitsOffset).
+    param([ValidateRange(2,32768)][int]$Frames=7801,[ValidateRange(1,64)][int]$BatchTiles=16,[switch]$DumpLogits)
     . (Join-Path $PSScriptRoot 'Kokoro.ResBlockRun.ps1')
     foreach($file in 'Kokoro.HmxConvPlanes.ps1','Kokoro.PlaneCombine.ps1','Kokoro.LeakyRelu16.ps1','Kokoro.TailSpectrum16.ps1','Kokoro.DmaCopy.ps1') { . (Join-Path $PSScriptRoot $file) }
     $layout=Get-KokoroGeneratorTail16Layout -Frames $Frames -BatchTiles $BatchTiles
@@ -164,7 +170,9 @@ function New-KokoroGeneratorTail16RunSteps {
     $base=@($wrapperSource.Steps);$start=-1
     for($i=0;$i -lt $base.Count;$i++){if($base[$i].Op -eq 'label' -and $base[$i].Name -eq 'connected_job'){$start=$i;break}}
     if($start -lt 0){throw 'Connected wrapper anchor changed'}
-    $minimum=@(4,$layout.InputBytes,$weightBytes,$parameterBytes,$layout.OutputBytes)
+    $outputBytes=$layout.OutputBytes; $logitsOffset=0L
+    if($DumpLogits){ $logitsOffset=[long]([math]::Ceiling($outputBytes/256)*256); $outputBytes=$logitsOffset+$tiles*4096L+2L*($tiles+2)*4096 }
+    $minimum=@(4,$layout.InputBytes,$weightBytes,$parameterBytes,$outputBytes)
     $oldVtcm=[long]$wrapperSource.Layout.VtcmBytes; $patched=@{request=0;check=0}
     for($i=0;$i -lt $start;$i++){
         $step=$base[$i].Clone()
@@ -184,7 +192,7 @@ function New-KokoroGeneratorTail16RunSteps {
     foreach($r in 16,18,20,22,24,26){$s.Add(@{Op='store-d';s=29;t=$r;Offset=(($r-16)*4)})}
     $s.Add(@{Op='addi';d=24;s=29;i=(64+63)}); & $imm 0 -64; $s.Add(@{Op='and';d=24;s=24;t=0})
     $s.Add(@{Op='hwticks';d=26})
-    Add-KokoroGeneratorTail16JobSteps -Steps $s -Calls $calls -Frames $Frames -BatchTiles $BatchTiles
+    Add-KokoroGeneratorTail16JobSteps -Steps $s -Calls $calls -Frames $Frames -BatchTiles $BatchTiles -DumpBase $(if($DumpLogits){23}else{-1}) -DumpOffset $logitsOffset
     $s.Add(@{Op='hwticks';d=0});$s.Add(@{Op='store-d';s=23;t=26;Offset=0});$s.Add(@{Op='store-d';s=23;t=0;Offset=8})
     $s.Add(@{Op='imm';d=0;i=1});$s.Add(@{Op='store';s=23;t=0;Offset=44})
     foreach($r in 16,18,20,22,24,26){$s.Add(@{Op='load-d';d=$r;s=29;Offset=(($r-16)*4)})}
@@ -194,5 +202,5 @@ function New-KokoroGeneratorTail16RunSteps {
     $labels=@{};$pcs=[Collections.Generic.Dictionary[object,long]]::new();$pc=0L;$isa=Get-InstructionSet
     foreach($step in $s){if($step.Op -eq 'label'){if($labels.ContainsKey($step.Name)){throw "Duplicate label $($step.Name)"};$labels[$step.Name]=$pc};$pcs[$step]=$pc;$pc+=& $isa.Length $step}
     foreach($c in $calls){$delta=[uint32](($labels[$c.label]-$pcs[$c.pc]) -band 0xffffffffL);$c.low.i=$delta -band 65535;$c.high.i=$delta -shr 16}
-    [pscustomobject]@{Steps=$s.ToArray();Layout=[ordered]@{Frames=$Frames;Tiles=$tiles;InputBytes=$layout.InputBytes;WeightBytes=$weightBytes;ParameterBytes=$parameterBytes;OutputBytes=$layout.OutputBytes;VtcmBytes=$layout.VtcmBytes;Samples=$layout.Samples;PcmOffset=$layout.PcmOffset;BatchTiles=$batch;Regions=$reg}}
+    [pscustomobject]@{Steps=$s.ToArray();Layout=[ordered]@{Frames=$Frames;Tiles=$tiles;InputBytes=$layout.InputBytes;WeightBytes=$weightBytes;ParameterBytes=$parameterBytes;LogitsOffset=$logitsOffset;OutputBytes=$outputBytes;VtcmBytes=$layout.VtcmBytes;Samples=$layout.Samples;PcmOffset=$layout.PcmOffset;BatchTiles=$batch;Regions=$reg}}
 }

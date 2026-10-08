@@ -4,10 +4,14 @@
 # istftnet.py Generator.forward and TorchSTFT.inverse), from 16-bit conv_post logits, as the two conv-input
 # byte planes of the iSTFT conv (Re_k in block 0 lane k, Im_k in block 1 lane k).
 #
-# conv_post's output channels are placed so magnitude bin k is channel k and phase bin k channel 32 + k
-# (tools/New-KokoroGeneratorTail16Fixture.ps1): both sit in lane k of the two blocks of a 64-channel tile.
+# conv_post's output channels are placed so magnitude bin k is channel k (fine: a window clipped to about +-10)
+# and channel 11 + k (coarse: the full calibrated range), and phase bin k channel 32 + k
+# (tools/New-KokoroGeneratorTail16Fixture.ps1). The coarse lanes are rotated onto lane k (valign by 44 bytes) and
+# w = min(w_fine, w_coarse + delta): in range the two agree within delta and the fine value wins; where the fine
+# window saturates, the true logit is below the clip and the coarse value (exp below a spectrum LSB) wins.
 # Per value (v = signed logit, units u_k per lane):
-#   w = (v * 2^16 * Ke_k) >> 31 + Be_k     Q16 of log2(spec / sS): Ke = u log2(e) 2^31, Be = -log2(sS) 2^16;
+#   w = (v * 2^16 * Ke_k) >> 31 + Be_k     Q16 of log2(spec / sS): Ke = u log2(e) 2^31, Be = -log2(sS) 2^16
+#                                          (fine; the coarse lane uses Kc_k, Bc_k with delta folded in);
 #                                          clamped to < 15 (spec / sS < 2^15)
 #   m = 2^frac(w)                          Q14, Taylor polynomial of 2^f - 1 (degree 6) in Q15
 #   P = (v' * 2^16 * Kp_k) >> 31 + Mp_k    Q24 turns of the phase logit plus a quarter turn
@@ -18,11 +22,11 @@
 # Lanes 11..31 carry no bins (their constants are zero; the iSTFT conv weights for them are zero).
 #
 # r0 logit tiles (64 channels, biased u16, 4096 B per tile), r1 high-plane tiles, r2 low-plane tiles (same
-# addressing), r3 constants (Get-KokoroTailSpectrumConstants: 48 vectors; per-lane Ke, Be, Kp, Mp first),
+# addressing), r3 constants (Get-KokoroTailSpectrumConstants: 48 vectors; per-lane Ke, Be, Kp, Mp at 0..3, Kc, Bc at 35, 36),
 # r4 tiles >= 1. Caller-saved registers only.
 
 function Get-KokoroTailSpectrumConstants {
-    # The 48-vector constant record with zero per-lane vectors 0..3 (the fixture writes those).
+    # The 48-vector constant record with zero per-lane vectors 0..3, 35, 36 (the fixture writes those).
     $v = [byte[]]::new(48 * 128)
     $word = { param([int]$index,[long]$value) $b = [BitConverter]::GetBytes([uint32]($value -band 0xffffffffL)); for ($i = 0; $i -lt 32; $i++) { [Array]::Copy($b, 0, $v, 128 * $index + 4 * $i, 4) } }
     $half = { param([int]$index,[int]$value) & $word $index ((([long]$value -band 0xffff) -shl 16) -bor ([long]$value -band 0xffff)) }
@@ -46,6 +50,7 @@ function New-KokoroTailSpectrum16Steps {
     $mpy = { param([int]$d,[int]$a,[int]$b) $s.Add(@{Op='vmpy-h-rnd-sat';d=$d;s=$a;t=$b}) }
     $s.Add(@{Op='addi';d=5;s=3;i=1024}); $s.Add(@{Op='addi';d=6;s=3;i=3072}); $s.Add(@{Op='addi';d=7;s=3;i=5120})
     foreach ($kv in @(@(8,16),@(9,8),@(10,1),@(11,15),@(13,0))) { $s.Add(@{Op='imm';d=$kv[0];i=$kv[1]}) }
+    $s.Add(@{Op='imm';d=3;i=44})                               # coarse lane k + 11 -> lane k (bytes)
     # Resident: v31 bias, v30 odd-halfword mask, v29 even mask, v28 16384, v27..v23 sin(pi/2 u) h4..h0,
     # v16 Ke, v17 Be, v18 Kp, v19 Mp, v20 32767, v21 word 1.
     & $c 31 26; & $c 30 27; & $c 29 28; & $c 28 29
@@ -67,8 +72,12 @@ function New-KokoroTailSpectrum16Steps {
     $s.Add(@{Op='vload';d=0;s=0;Offset=0})
     $s.Add(@{Op='addi';d=14;s=0;i=2048}); $s.Add(@{Op='vload';d=1;s=14;Offset=0})
     $s.Add(@{Op='vxor';d=0;s=0;t=31}); $s.Add(@{Op='vxor';d=1;s=1;t=31})
-    # Magnitude: w (v4 even row, v5 odd row), clamped below 15.
+    # Magnitude: w (v4 even row, v5 odd row) = min(fine, coarse + delta), clamped below 15.
     & $rows 0 16 17 4 5
+    $s.Add(@{Op='valign';d=10;s=0;t=0;r=3})
+    & $c 11 35; & $c 12 36
+    & $rows 10 11 12 6 7
+    $s.Add(@{Op='vmin-w';d=4;s=4;t=6}); $s.Add(@{Op='vmin-w';d=5;s=5;t=7})
     & $c 6 19; $s.Add(@{Op='vmin-w';d=4;s=4;t=6}); $s.Add(@{Op='vmin-w';d=5;s=5;t=6})
     # f = frac(w) in Q15 halfwords: even row (w >> 1) & 0x7FFF, odd row (w << 15) & 0x7FFF0000.
     $s.Add(@{Op='vlsr-uw';d=6;s=4;t=10}); & $c 7 17; $s.Add(@{Op='vand';d=6;s=6;t=7})

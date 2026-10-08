@@ -20,3 +20,20 @@ Skel SHA-256 `7D1FD0957E2DA2083CABFCC6ECC5F8DC648E07467D44334E6CD952DF2EFB0117`;
 
 PCM SHA-256 `0370FD0C8F4D415435711ADC2990FD0A17D66AB8C3485FBFA7A3ED1F7EEF3682`. 32.90 ms for 1.625 s of audio
 (real-time factor 0.020 for this part of the generator). The tail is the precision limit, not the stage.
+## Fine and coarse magnitude windows (same day)
+
+Diagnosis with logit and spectrum dumps (`-TailDumpLogits`): conv_post logits matched stock at 67-82 dB per channel
+and the spectrum body matched exact math on those logits, yet exact synthesis from the DSP logits gave 38.7 dB. Kokoro's
+spectra are large (|E| up to 20) and cancel in the overlap-add to PCM near 0.25, so the magnitude logits need a much
+finer LSB than their -60..3 range allowed. Each magnitude bin now has two conv_post channels: fine (window +-10,
+shift 7-8) and coarse (full range); the spectrum body takes min(fine, coarse + 8 coarse LSB), so a saturated fine
+window falls back to the coarse value (exp below a spectrum LSB there).
+
+| Job | PCM SNR vs stock | Max abs error | DSP region median | Skel SHA-256 |
+| --- | ---: | ---: | ---: | --- |
+| Tail alone | **46.03 dB** | 0.0155 | 3.06 ms | `4543EC1D…` |
+| Stage + tail | **45.70 dB** | 0.0152 | 32.12 ms | `B4C7166F…` |
+
+3/3 runs each, identical PCM, XRunCount 0. Stage + tail PCM SHA-256
+`DC23DB98377A82130578DEA24BD4864306127CC3CC4B4790CF4FE19A1913AACC`. The peak error is the one frame above the
+calibrated spectrum ceiling (E = 20.28 against 20.0).

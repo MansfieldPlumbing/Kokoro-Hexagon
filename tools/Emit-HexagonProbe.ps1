@@ -21,6 +21,7 @@ param(
     [ValidateRange(1,64)][int] $ResidentBatchTiles = 22,
     [switch] $ResidentCompactOutput,
     [ValidateRange(-1,17)][int] $Stage16StopAfter = -1,
+    [switch] $TailDumpLogits,
     [ValidateSet('Stage','Windows','Planes')][string] $Stage16DumpPoint = 'Stage',
     [ValidateRange(2, 2048)][int] $AdaInFrames = 64,
     [ValidateRange(1, 128)][int] $AdaInChannels = 128,
@@ -256,7 +257,7 @@ if($Kernel -eq 'KokoroR0Sub0') {
     Write-NewOrIdenticalFile (Join-Path $OutputDirectory 'runner-layout.json') ([Text.Encoding]::UTF8.GetBytes(($run.Layout | ConvertTo-Json -Depth 6))) -AllowOverwrite:$Force
 } elseif($Kernel -eq 'KokoroGeneratorTail16Run') {
     . (Join-Path $PSScriptRoot '..\src\emit\Kokoro.GeneratorTail16Run.ps1')
-    $run=New-KokoroGeneratorTail16RunSteps -Frames $ResBlockFrames
+    $run=New-KokoroGeneratorTail16RunSteps -Frames $ResBlockFrames -DumpLogits:$TailDumpLogits
     $steps=@($run.Steps)
     $symbol='kokoro_generator_tail_skel_handle_invoke'; $soname='libkokoro_generator_tail_skel.so'
     Write-NewOrIdenticalFile (Join-Path $OutputDirectory 'runner-layout.json') ([Text.Encoding]::UTF8.GetBytes(($run.Layout | ConvertTo-Json -Depth 6))) -AllowOverwrite:$Force
