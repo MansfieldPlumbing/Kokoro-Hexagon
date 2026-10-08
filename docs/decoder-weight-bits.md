@@ -38,6 +38,5 @@ Per-channel 4-bit weights move the waveform far from stock (16-19 dB); 8-bit wei
 The decoder runs once per breath group at 65 frames, so its 31 MB of W8 weights are streamed once per group. At the
 37-55 GB/s DDR-to-VTCM DMA measured on SM8550 (`docs/results/dma-copy-sm8550-sm8635-20261007.md`, possibly cache-assisted)
 that is about 0.6-0.9 ms; its ~2.2 GMAC of HMX work is of the same order. W4 would save at most about half the DMA
-(0.3-0.5 ms per group), less the HVX unpack, and nothing if the DMA already overlaps the HMX work [estimate, not measured]. Proposed: W8 per output channel for the decoder
-(W4 only if listening shows the 16 dB difference is inaudible and a measured DMA time makes it matter). Not yet decided by
-the team.
+(0.3-0.5 ms per group), less the HVX unpack, and nothing if the DMA already overlaps the HMX work [estimate, not measured]. Decided by the team, 2026-10-08: W8 per output channel for the decoder. W4 is revisited only if
+the decoder's phone profile shows it is bound by weight DMA.
