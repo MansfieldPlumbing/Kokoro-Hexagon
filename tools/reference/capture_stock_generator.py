@@ -152,6 +152,40 @@ def main():
     block.stft.transform = trace_transform
     block.stft.inverse = trace_inverse
 
+    # Harmonic source internals: SineGen's random draws (torch.rand for the initial phases, torch.randn_like for the
+    # noise) are recorded as the stock calls return them, inside l_sin_gen only; its outputs and l_linear's are saved.
+    # The calls themselves and their order are unchanged, so the RNG stream is the stock one.
+    source = block.m_source
+    random_state = {'active': False, 'rand': 0, 'randn': 0}
+    original_rand = torch.rand
+    original_randn_like = torch.randn_like
+    def trace_rand(*args, **kwargs):
+        result = original_rand(*args, **kwargs)
+        if random_state['active']:
+            save('generator.m_source.l_sin_gen.rand.' + str(random_state['rand']), result)
+            random_state['rand'] += 1
+        return result
+    def trace_randn_like(*args, **kwargs):
+        result = original_randn_like(*args, **kwargs)
+        if random_state['active']:
+            save('generator.m_source.l_sin_gen.randn.' + str(random_state['randn']), result)
+            random_state['randn'] += 1
+        return result
+    torch.rand = trace_rand
+    torch.randn_like = trace_randn_like
+    def sine_pre(module, inputs):
+        random_state['active'] = True
+        save_values('generator.m_source.l_sin_gen.input', inputs)
+    def sine_post(module, inputs, result):
+        random_state['active'] = False
+        save_values('generator.m_source.l_sin_gen.output', result)
+    handles.append(source.l_sin_gen.register_forward_pre_hook(sine_pre))
+    handles.append(source.l_sin_gen.register_forward_hook(sine_post))
+    handles.append(source.l_linear.register_forward_hook(
+        lambda mod, values, result: save('generator.m_source.l_linear.output', result)))
+    save('generator.m_source.l_linear.weight', source.l_linear.weight)
+    save('generator.m_source.l_linear.bias', source.l_linear.bias)
+
     class CaptureComplete(Exception):
         pass
 
@@ -167,6 +201,8 @@ def main():
         pass
     finally:
         torch.nn.functional.leaky_relu = original_leaky_relu
+        torch.rand = original_rand
+        torch.randn_like = original_randn_like
         for handle in handles:
             handle.remove()
     if 'output' not in tensors:
