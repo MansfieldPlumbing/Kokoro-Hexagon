@@ -20,7 +20,7 @@ Stock order, hexgrad/kokoro `dfb907a02bba8152ca444717ca5d78747ccb4bec`
 | 9 | `generator` source | `f0_upsamp`, `SourceModuleHnNSF` (harmonic sine generator, linear, tanh), STFT of the source, `noise_convs`, `noise_res` | none |
 | 10 | `generator` upsampling | `ups[0]`, `ups[1]` transposed convs, LeakyReLU | none |
 | 11 | `generator.resblocks` 0-2 | 256-channel `AdaINResBlock1` x 3 and mean | 256-channel integer pieces in simulator |
-| 12 | `generator.resblocks` 3-5 | 128-channel `AdaINResBlock1` x 3 and mean | resident stage on SM8550, exact vs simulator; 34.68 ms with 4 HVX threads |
+| 12 | `generator.resblocks` 3-5 | 128-channel `AdaINResBlock1` x 3 and mean | 16-bit stage on SM8550: 66.68 dB vs stock, 29.40 ms with 4 HVX threads |
 | 13 | `generator` tail | LeakyReLU, reflection pad, `conv_post`, exp/sin, iSTFT | 8-bit tail on both phones, PCM through AAudio |
 
 ## Order
@@ -36,6 +36,8 @@ with PCM from the phone speaker and an SNR against stock:
 3. Prosody (3-6) and text encoder (7): from captured ALBERT output.
 4. ALBERT (1-2): from phoneme tokens. Phonemes to speaker.
 5. Breath-group pipelining on the phone: render group n+1 while group n plays.
+6. Ship host: the Kokoro APK built from Pwsh at a pinned commit (`Dev.MansfieldPlumbing.Kokoro`), one FastRPC
+   setup and dspqueue jobs, AAudio playback.
 
 Speed work after each step uses the measured levers: HVX worker threads (3.09x on the
 AdaIN + Snake body), 16-bit data width (phase-turns body, 2.1x fewer HVX instructions),

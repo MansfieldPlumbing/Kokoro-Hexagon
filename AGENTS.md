@@ -114,6 +114,9 @@ phone measurements establish achieved speed and time to first audio.
   audio) runs in 31.48 ms on SM8550 with four HVX worker threads and 22-tile batches,
   output exact (86.05 ms on one thread). See
   `docs/results/generator60x-hvx-threads-sm8550-20261007.md`.
+- The 16-bit version of that stage runs in 29.40 ms on SM8550 at 66.68 dB SNR against the
+  stock float output (scales calibrated on the same sentence). See
+  `docs/results/generator60x-16bit-sm8550-20261008.md`.
 
 ## Product shape
 
