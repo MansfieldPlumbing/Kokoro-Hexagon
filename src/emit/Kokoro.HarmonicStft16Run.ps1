@@ -15,7 +15,8 @@ function Get-KokoroHarmonicStft16Layout {
     param([ValidateRange(2,32768)][int]$Frames=7801,[ValidateRange(2,64)][int]$BatchTiles=16)
     if ($BatchTiles % 2) { throw 'Window preparation works on tile pairs: use an even batch' }
     $tiles=[int][math]::Ceiling($Frames/32); $pairs=[int][math]::Ceiling($tiles/2)
-    $signalBytes=[long]($pairs*640+128)
+    # Signal buffer (Kokoro.StftWindow16.ps1): sample j at halfword 64 + j; the last pair reads 896 bytes from its start.
+    $signalBytes=[long]($pairs*640+256)
     $al={param([long]$v) [long]([math]::Ceiling($v/65536)*65536)}
     $regions=[ordered]@{}; $at=0L
     foreach($r in @(@('Window',(($BatchTiles+2)*4096)),@('WindowLow',(($BatchTiles+2)*4096)),@('Planes',(6L*$BatchTiles*4096)),@('Weights',24576),@('Tables',16384),
@@ -35,7 +36,9 @@ function Add-KokoroHarmonicStft16JobSteps {
     param([Parameter(Mandatory)][AllowEmptyCollection()][Collections.Generic.List[hashtable]]$Steps,[Parameter(Mandatory)][AllowEmptyCollection()][Collections.Generic.List[object]]$Calls,
         [ValidateRange(2,32768)][int]$Frames=7801,[ValidateRange(2,64)][int]$BatchTiles=16,
         [int]$InputBase=20,[long]$InputOffset=0,[int]$WeightsBase=21,[long]$WeightsOffset=0,[int]$TablesBase=22,[long]$TablesOffset=0,
-        [int]$HarBase=23,[long]$HarOffset=256)
+        [int]$HarBase=23,[long]$HarOffset=256,
+        # The signal buffer is already in VTCM (Kokoro.HarmonicSource16Run.ps1 writes it): no signal DMA.
+        [switch]$SignalInVtcm)
     $layout=Get-KokoroHarmonicStft16Layout -Frames $Frames -BatchTiles $BatchTiles
     $tiles=$layout.Tiles; $batch=$BatchTiles; $reg=$layout.Regions
     $s=$Steps; $calls=$Calls
@@ -63,7 +66,7 @@ function Add-KokoroHarmonicStft16JobSteps {
             $s.Add(@{Op='label';Name=$n});$s.Add(@{Op='load';d=0;s=4;Offset=0});$s.Add(@{Op='and';d=0;s=0;t=6});$s.Add(@{Op='or';d=0;s=0;t=8});$s.Add(@{Op='store';s=4;t=0;Offset=0});$s.Add(@{Op='addi';d=4;s=4;i=4});$s.Add(@{Op='addi';d=5;s=5;i=-1});$s.Add(@{Op='gtu';d=0;s=5;t=7});$s.Add(@{Op='jump-p';u=0;Label=$n})
         }
     }
-    & $dma 18 $reg.Signal.Offset $InputBase $InputOffset $layout.SignalBytes
+    if(-not $SignalInVtcm){ & $dma 18 $reg.Signal.Offset $InputBase $InputOffset $layout.SignalBytes }
     & $dma 18 $reg.Weights.Offset $WeightsBase $WeightsOffset 24576
     & $dma 18 $reg.Tables.Offset $TablesBase $TablesOffset 16384
     # har block 1 (channels 32..63) stays zero; block 0 is rewritten per batch.

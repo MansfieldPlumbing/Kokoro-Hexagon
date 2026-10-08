@@ -9,17 +9,20 @@
 #                 the crouton order (word lane j: even row low, odd row high)
 #   planes      = high (v & 0xFF00) ^ 0x8000, low v << 8 (each byte in the odd position of its halfword)
 # Two tiles (64 frames, 640 signal bytes, a whole number of vectors) per iteration, so every alignment is a constant.
-# r0 padded signal (int16 in the merge unit, 128-byte aligned, readable 128 bytes past the last pair), r1 high-plane
+# Signal buffer (Kokoro.HarmonicSource16Run.ps1): sample j at halfword 64 + j (128-byte aligned for the HVX source), the
+# reflect padding at 54..63 and from 64 + N; padded sample p = j + 10 is halfword p + 54, so frame t starts at byte
+# 10 t + SignalOffset (108).
+# r0 signal buffer (int16 in the merge unit, 128-byte aligned, readable 256 bytes past the last pair), r1 high-plane
 # tiles, r2 low-plane tiles (4096 B per tile), r3 tile pairs >= 1. Caller-saved registers only.
 function New-KokoroStftWindow16Steps {
-    param([string]$LabelPrefix='stftwindow16',[switch]$NoReturn)
+    param([string]$LabelPrefix='stftwindow16',[ValidateRange(0,127)][int]$SignalOffset=108,[switch]$NoReturn)
     $s = [Collections.Generic.List[hashtable]]::new()
     $imm = { param([int]$r,[long]$v) $u=[uint32]($v -band 0xffffffffL); $s.Add(@{Op='lo';x=$r;i=($u -band 65535)}); $s.Add(@{Op='hi';x=$r;i=($u -shr 16)}) }
     & $imm 6 0xFF00FF00L; $s.Add(@{Op='vsplat';d=30;s=6})
     & $imm 6 0x80008000L; $s.Add(@{Op='vsplat';d=31;s=6})
     $s.Add(@{Op='imm';d=7;i=-2}); $s.Add(@{Op='imm';d=8;i=8}); $s.Add(@{Op='imm';d=13;i=0})
     $s.Add(@{Op='label';Name="${LabelPrefix}_pair"})
-    for ($q = 0; $q -lt 6; $q++) { $s.Add(@{Op='vload';d=$q;s=0;Offset=(128*$q)}) }
+    for ($q = 0; $q -lt 7; $q++) { $s.Add(@{Op='vload';d=$q;s=0;Offset=(128*$q)}) }
     # One frame row into vector d: the 64 bytes at offset o of this pair's signal.
     $row = { param([int]$d,[int]$o)
         $q = [int][math]::Floor($o / 128); $sh = $o % 128
@@ -27,13 +30,14 @@ function New-KokoroStftWindow16Steps {
         else { $s.Add(@{Op='imm';d=6;i=$sh}); $s.Add(@{Op='valign';d=$d;s=($q+1);t=$q;r=6}) }
     }
     for ($rp = 0; $rp -lt 32; $rp++) {
-        & $row 6 (20 * $rp); & $row 7 (20 * $rp + 10)
-        $s.Add(@{Op='vshuff';d=8;s=7;t=6;r=7})
-        $s.Add(@{Op='vand';d=10;s=8;t=30}); $s.Add(@{Op='vxor';d=10;s=10;t=31})
-        $s.Add(@{Op='vasl-h';d=11;s=8;t=8})
+        # Source vectors are v0..v6; rows in v8 (even) and v9 (odd), the shuffled pair in v11:v10, planes in v12, v13.
+        & $row 8 (20 * $rp + $SignalOffset); & $row 9 (20 * $rp + 10 + $SignalOffset)
+        $s.Add(@{Op='vshuff';d=10;s=9;t=8;r=7})
+        $s.Add(@{Op='vand';d=12;s=10;t=30}); $s.Add(@{Op='vxor';d=12;s=12;t=31})
+        $s.Add(@{Op='vasl-h';d=13;s=10;t=8})
         $at = 4096 * [int][math]::Floor($rp / 16) + 128 * ($rp % 16)
-        & $imm 14 $at; $s.Add(@{Op='add';d=14;s=1;t=14}); $s.Add(@{Op='vstore';s=14;t=10;Offset=0})
-        & $imm 15 $at; $s.Add(@{Op='add';d=15;s=2;t=15}); $s.Add(@{Op='vstore';s=15;t=11;Offset=0})
+        & $imm 14 $at; $s.Add(@{Op='add';d=14;s=1;t=14}); $s.Add(@{Op='vstore';s=14;t=12;Offset=0})
+        & $imm 15 $at; $s.Add(@{Op='add';d=15;s=2;t=15}); $s.Add(@{Op='vstore';s=15;t=13;Offset=0})
     }
     & $imm 14 640; $s.Add(@{Op='add';d=0;s=0;t=14})
     & $imm 14 8192; $s.Add(@{Op='add';d=1;s=1;t=14}); $s.Add(@{Op='add';d=2;s=2;t=14})

@@ -8,7 +8,10 @@ param(
     [Parameter(Mandatory)][string] $OutputPath,
     [Parameter(Mandatory)][string] $FixtureDirectory,
     [string] $FrontFixture,
-    [ValidateRange(0, 1073741824)][long] $HarOffset = 256
+    [ValidateRange(0, 1073741824)][long] $HarOffset = 256,
+    # Kokoro.HarmonicSource16Run.ps1 outputs: the signal buffer (sample j at halfword 64 + j, Q15) at this offset, scored
+    # against the fixture's expected-merge-f32.bin.
+    [long] $SignalOffset = -1
 )
 $ErrorActionPreference = 'Stop'
 Import-Module (Join-Path $PSScriptRoot 'Kokoro.CaptureKernels.psm1') -Force
@@ -32,6 +35,12 @@ for ($k = 0; $k -lt 11; $k++) { for ($t = 0; $t -lt $frames; $t++) {
 } }
 for ($c = 22; $c -lt 64; $c++) { for ($t = 0; $t -lt $frames; $t++) { if ($q[$c * $frames + $t] -ne 0) { $nonzeroUnused++ } } }
 $result = [ordered]@{ Frames = $frames; MagnitudeSnrDb = [math]::Round(10 * [math]::Log10($ms / $me), 2); PhaseRmsRad = [math]::Sqrt($pe / $pw); PhaseCutFlips = $flips; NonzeroUnusedChannels = $nonzeroUnused }
+if ($SignalOffset -ge 0) {
+    $mb = [IO.File]::ReadAllBytes((Join-Path $FixtureDirectory 'expected-merge-f32.bin')); $merge = [float[]]::new($mb.Length / 4); [Buffer]::BlockCopy($mb, 0, $merge, 0, $mb.Length)
+    $ss = 0.0; $se = 0.0
+    for ($j = 0; $j -lt $merge.Length; $j++) { $v = [BitConverter]::ToInt16($out, [int]($SignalOffset + 128 + 2 * $j)) / 32768.0; $ss += [double]$merge[$j] * $merge[$j]; $se += ($v - $merge[$j]) * ($v - $merge[$j]) }
+    $result.MergeSnrDb = [math]::Round(10 * [math]::Log10($ss / $se), 2)
+}
 if ($FrontFixture) {
     $front = [IO.File]::ReadAllBytes((Join-Path $FrontFixture 'inputs.bin'))
     $f = & $decode $front 0 $planeBytes

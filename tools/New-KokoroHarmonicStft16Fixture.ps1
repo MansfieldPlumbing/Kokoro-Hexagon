@@ -19,7 +19,10 @@ param(
     [Parameter(Mandatory)][string] $CaptureDirectory,
     [string[]] $CalibrationDirectory,
     [Parameter(Mandatory)][string] $OutputDirectory,
-    [ValidateRange(1.0, 4.0)][double] $Margin = 1.25
+    [ValidateRange(1.0, 4.0)][double] $Margin = 1.25,
+    # The merge unit; by default calibrated (absmax * Margin / 32767). The DSP source (Kokoro.HarmonicSource16Run.ps1) writes
+    # the merged source in Q15, so its fixture uses 2^-15.
+    [double] $MergeUnit = 0
 )
 $ErrorActionPreference = 'Stop'
 $build = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '../build')) + [IO.Path]::DirectorySeparatorChar
@@ -45,7 +48,7 @@ $chanMax = { param([string]$name, [int]$ch) $m = [double[]]::new($ch); foreach (
 $sH = & $chanMax 'generator.noise_convs.1.input.0' 22
 for ($i = 0; $i -lt 22; $i++) { $sH[$i] = [math]::Max($sH[$i], 1e-12) * $Margin / 32767 }
 $mMax = 0.0; foreach ($c in $cals) { $mMax = [math]::Max($mMax, (Get-KokoroAbsMax -Values (& $Read $c 'generator.m_source.output.0'))) }
-$uM = $mMax * $Margin / 32767
+$uM = if ($MergeUnit -gt 0) { $MergeUnit } else { $mMax * $Margin / 32767 }
 $binMax = [double[]]::new(11); for ($k = 0; $k -lt 11; $k++) { $binMax[$k] = $sH[$k] * 32767 / $Margin }
 
 # Reflect-padded int16 signal (torch.stft centre, pad_mode reflect) and its frame windows as conv inputs [c][t].
@@ -55,7 +58,8 @@ $padded = { param([float[]]$x)
     , $p }
 $windows = { param([int16[]]$p) $f = ($p.Length - 20) / 5 + 1; $w = [float[]]::new(64 * $f); for ($c = 0; $c -lt 20; $c++) { for ($t = 0; $t -lt $f; $t++) { $w[$c * $f + $t] = $p[5 * $t + $c] } }; , $w }
 $sig = & $padded $merge
-$inputs = [byte[]]::new($layout.SignalBytes); [Buffer]::BlockCopy($sig, 0, $inputs, 0, 2 * $sig.Length)
+# Signal buffer: padded sample p at halfword p + 54 (sample j at 64 + j, Kokoro.StftWindow16.ps1).
+$inputs = [byte[]]::new($layout.SignalBytes); [Buffer]::BlockCopy($sig, 0, $inputs, 108, 2 * $sig.Length)
 
 # STFT conv weights (input unit uM folded), one unit per bin for Re and Im.
 $hann = [double[]]::new(20); for ($j = 0; $j -lt 20; $j++) { $hann[$j] = 0.5 - 0.5 * [math]::Cos(2 * [math]::PI * $j / 20) }
