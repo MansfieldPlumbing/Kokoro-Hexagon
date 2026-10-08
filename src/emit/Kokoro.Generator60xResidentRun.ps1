@@ -51,7 +51,7 @@ function New-KokoroGenerator60xResidentRunSteps {
     # PmuEvents (eight hardware event selects) adds a performance-counter record; without it the
     # emitted bytes are unchanged. See the PMU block below for the record layout.
     param([ValidateRange(2,32768)][int]$Frames=7801,[ValidateRange(1,64)][int]$BatchTiles=16,[ValidateRange(0,3)][int]$CostProbePasses=0,[switch]$CostProbeTurnsBody,
-        [ValidateCount(8,8)][ValidateRange(0,1023)][int[]]$PmuEvents,[ValidateRange(1,4)][int]$HvxThreads=1)
+        [ValidateCount(8,8)][ValidateRange(0,1023)][int[]]$PmuEvents,[ValidateRange(1,4)][int]$HvxThreads=1,[switch]$CompactOutput)
     if($CostProbeTurnsBody -and $CostProbePasses -lt 1){throw 'CostProbeTurnsBody needs CostProbePasses >= 1'}
     . (Join-Path $PSScriptRoot 'Kokoro.ResBlockRun.ps1')
     foreach($file in 'Kokoro.HmxConv.ps1','Kokoro.AdaInInteger.ps1','Kokoro.ResidualInteger.ps1','Kokoro.AdaInSnakeInteger.ps1','Kokoro.AdaInSnakeTurns.ps1','Kokoro.AdaInStatisticsAccumulate.ps1','Kokoro.DmaCopy.ps1','Kokoro.BranchAverageInteger.ps1') { . (Join-Path $PSScriptRoot $file) }
@@ -60,11 +60,22 @@ function New-KokoroGenerator60xResidentRunSteps {
     $offResidual=$layout.Regions.Residual.Offset; $offConvOutput=$layout.Regions.ConvOutput.Offset; $offWindow=$layout.Regions.Window.Offset; $offStaging=$layout.Regions.Staging.Offset; $offWeights=$layout.Regions.Weights.Offset
     $offSmall=$layout.Regions.Small.Offset
     $offParameters=$offSmall+$layout.Small.Parameters; $offMoments=$offSmall+$layout.Small.Moments; $offInputMoments=$offSmall+$layout.Small.InputMoments; $offMeanParameters=$offSmall+$layout.Small.MeanParameters; $offSaved=$offSmall+$layout.Small.SavedTile; $offCoefficients=$offSmall+$layout.Small.Coefficients
-    # Frozen output contract (Kokoro.Generator60xRun.ps1).
-    $branchOutputBytes=192+5*$tensorBytes+6144
-    $stride=[int]([math]::Ceiling($branchOutputBytes/128)*128)
-    $finalOffset=3*$stride
-    $outputBytes=192+$finalOffset+$tensorBytes+18432
+    # Output contract. Default: the frozen worker's (Kokoro.Generator60xRun.ps1), three 5-tensor branch slots,
+    # then the final tensor and coefficients; scratch (counters, worker pool, stacks) in the unused third slot.
+    # CompactOutput: only what this stage uses, relative to the DDR workspace r25: branch 0 and 1 outputs
+    # (one tensor each, read back for the mean), the final tensor, the coefficients, then 128 KiB scratch.
+    if($CompactOutput){
+        $stride=[int]([math]::Ceiling($tensorBytes/128)*128)
+        $finalOffset=2*$stride
+        $scratchOffset=[long]([math]::Ceiling(($finalOffset+$tensorBytes+18432)/4096)*4096)
+        $outputBytes=192+$scratchOffset+131072
+    } else {
+        $branchOutputBytes=192+5*$tensorBytes+6144
+        $stride=[int]([math]::Ceiling($branchOutputBytes/128)*128)
+        $finalOffset=3*$stride
+        $scratchOffset=2L*$stride
+        $outputBytes=192+$finalOffset+$tensorBytes+18432
+    }
     $weightOffsets=@(0,294912,983040);$weightBytes=2064384;$parameterBytes=147472
     $kernels=@(3,7,11)
 
@@ -79,8 +90,7 @@ function New-KokoroGenerator60xResidentRunSteps {
     $uid=0
     $label={ $script:__u++; "r60_$($script:__u)" }
     $script:__u=0
-    # Performance counters (PmuEvents). Record at DDR workspace r25 + 2*stride, the branch-2 slot
-    # this resident stage never writes:
+    # Performance counters (PmuEvents). Record at DDR workspace r25 + scratch offset:
     #   +0 magic 'PMU1'; +4 qurt_hvx_get_units(); +8 and +12 reserved (zero); +16 PMUCFG, +20 PMUEVTCFG, +24 PMUEVTCFG1 as written;
     #   +28 OR of the counter-read return codes; +64 previous snapshot, +128 current snapshot
     #   (8 x u32 counters, u64 UTIMER ticks at +32, u64 UPCYCLE at +40);
@@ -90,7 +100,7 @@ function New-KokoroGenerator60xResidentRunSteps {
     # ggml/src/ggml-hexagon/htp/main.c htp_iface_profiler; register ids and process classes from
     # SDK 6.4.0.2 rtos/qurt/computev73/include/qurt/qurt_pmu.h and qurt_consts.h.
     $pmuCategories=@('Setup','Dma','Coefficients','AdaInSnake','HmxConv','Moments','Residual','Average','Sync','TileFix','CostProbe')
-    $pmuOffset=2L*$stride
+    $pmuOffset=$scratchOffset
     $mark={param([string]$category)
         if(-not $PmuEvents){return}
         $c=[array]::IndexOf($pmuCategories,$category); if($c -lt 0){throw "Unknown PMU category $category"}
@@ -101,12 +111,12 @@ function New-KokoroGenerator60xResidentRunSteps {
     # per-tile bodies: fused AdaIN+Snake, residual, and moments (each worker into its own zeroed
     # 1024-byte moments buffer in VTCM, added into the job's buffer after the join; the sums are
     # wrapping uint32, so the order of addition does not change the bits).
-    # Pool block at DDR workspace r25 + 2*stride + 4096:
+    # Pool block at DDR workspace r25 + scratch offset + 4096:
     #   +0 dispatch sequence, +4 quit, +8 'POOL', +12 HvxThreads;
     #   +64*k worker k: +0..+16 r0..r4 (absolute addresses or values), +20 completed sequence,
     #   +24 thread id, +28 qurt_thread_create rc, +32 pool block address, +36 exit status,
     #   +40 qurt_thread_join rc, +44 body address, +48 tile count (0: nothing to do),
-    #   +52 the worker's qurt_hvx_lock rc (non-zero: the worker skips its part and the job thread runs it);
+    #   +52 the worker's qurt_hvx_lock rc;
     #   +512 + 64*k: qurt_thread_attr_t (SDK 6.4.0.2 computev73 qurt_thread.h: name[16], tcb 0,
     #   stid 0, priority 127 at +18 (QURT_THREAD_ATTR_PRIORITY_DEFAULT/2, as the SDK
     #   multithreading example), bus priority 255 at +21, timetest -2 at +22, stack size at +24,
@@ -116,8 +126,8 @@ function New-KokoroGenerator60xResidentRunSteps {
     # pic/libqurt.a 8e0ba5fd...): futex_wait r0 addr, r1 value, r3 = 0, r4 = r5 = -1,
     # trap0(#0x20); futex_wake r0 addr, r1 count, trap0(#0x11); hvx lock r0 = 1 (128 B),
     # r5 = 0, trap0(#0x55); unlock r0 = 3, r5 = 0, trap0(#0x55).
-    $poolOffset=2L*$stride+4096
-    $stackOffset=2L*$stride+65536
+    $poolOffset=$scratchOffset+4096
+    $stackOffset=$scratchOffset+65536
     $addr={param([int]$r,[string]$target) $pc=@{Op='add-pc';d=$r;i=0};$lo=@{Op='lo';x=15;i=0};$hi=@{Op='hi';x=15;i=0};$s.Add($pc);$s.Add($lo);$s.Add($hi);$s.Add(@{Op='add';d=$r;s=$r;t=15});$calls.Add(@{pc=$pc;low=$lo;high=$hi;label=$target})}
     $jump={param([string]$target) $s.Add(@{Op='eq';d=0;s=0;t=0}); $s.Add(@{Op='jump-p';u=0;Label=$target}) }
     $futexWait={param([int]$addrReg,[int]$valueReg) $s.Add(@{Op='addi';d=1;s=$valueReg;i=0}); $s.Add(@{Op='addi';d=0;s=$addrReg;i=0}); $s.Add(@{Op='imm';d=3;i=0}); $s.Add(@{Op='imm';d=4;i=-1}); $s.Add(@{Op='imm';d=5;i=-1}); $s.Add(@{Op='trap0';i=0x20}) }
@@ -152,12 +162,6 @@ function New-KokoroGenerator60xResidentRunSteps {
             $s.Add(@{Op='eq';d=0;s=8;t=9}); $s.Add(@{Op='jump-p';u=0;Label=$done})
             $s.Add(@{Op='addi';d=6;s=6;i=20}); & $futexWait 6 8; & $jump $wait
             $s.Add(@{Op='label';Name=$done})
-            # A worker without an HVX context left its part: run it here.
-            $ran=& $label
-            & $ptr 6 25 ($poolOffset+64*$k); $s.Add(@{Op='imm';d=9;i=0}); $s.Add(@{Op='load';d=8;s=6;Offset=52}); $s.Add(@{Op='eq';d=0;s=8;t=9}); $s.Add(@{Op='jump-p';u=0;Label=$ran})
-            $s.Add(@{Op='load';d=8;s=6;Offset=48}); $s.Add(@{Op='eq';d=0;s=8;t=9}); $s.Add(@{Op='jump-p';u=0;Label=$ran})
-            foreach($q in 0..4){ $s.Add(@{Op='load';d=$q;s=6;Offset=(4*$q)}) }; & $call $body
-            $s.Add(@{Op='label';Name=$ran})
         }
         if($Moments){
             & $ptr 4 18 $off[1]
@@ -410,20 +414,17 @@ function New-KokoroGenerator60xResidentRunSteps {
     foreach($pair in $bodies){$s.Add(@{Op='label';Name=$pair[0]});foreach($step in $pair[1]){$s.Add($step)}}
     if($HvxThreads -gt 1){
         # hvx_worker(r0 = its pool slot): r16 slot, r17 pool block, r18 last sequence seen, r19 zero,
-        # r20 body address, r22 all ones when this thread holds an HVX context, else zero.
-        $loop=& $label; $idle=& $label; $done=& $label; $quit=& $label; $locked=& $label; $lockKnown=& $label
+        # r20 body address.
+        $loop=& $label; $idle=& $label; $done=& $label; $quit=& $label
         $s.Add(@{Op='label';Name='hvx_worker'})
         $s.Add(@{Op='addi';d=16;s=0;i=0}); $s.Add(@{Op='load';d=17;s=16;Offset=32}); $s.Add(@{Op='imm';d=18;i=0}); $s.Add(@{Op='imm';d=19;i=0})
         $s.Add(@{Op='imm';d=0;i=1}); $s.Add(@{Op='imm';d=5;i=0}); $s.Add(@{Op='trap0';i=0x55})
-        $s.Add(@{Op='store';s=16;t=0;Offset=52}); $s.Add(@{Op='eq';d=0;s=0;t=19}); $s.Add(@{Op='jump-p';u=0;Label=$locked})
-        $s.Add(@{Op='imm';d=22;i=0}); & $jump $lockKnown
-        $s.Add(@{Op='label';Name=$locked}); $s.Add(@{Op='imm';d=22;i=-1})
-        $s.Add(@{Op='label';Name=$lockKnown})
+        $s.Add(@{Op='store';s=16;t=0;Offset=52})
         $s.Add(@{Op='label';Name=$loop})
         $s.Add(@{Op='load';d=0;s=17;Offset=0}); $s.Add(@{Op='eq';d=0;s=0;t=18}); $s.Add(@{Op='jump-p';u=0;Label=$idle})
         $s.Add(@{Op='addi';d=18;s=0;i=0})
         $s.Add(@{Op='load';d=1;s=17;Offset=4}); $s.Add(@{Op='gtu';d=0;s=1;t=19}); $s.Add(@{Op='jump-p';u=0;Label=$quit})
-        $s.Add(@{Op='load';d=5;s=16;Offset=48}); $s.Add(@{Op='and';d=5;s=5;t=22}); $s.Add(@{Op='eq';d=0;s=5;t=19}); $s.Add(@{Op='jump-p';u=0;Label=$done})
+        $s.Add(@{Op='load';d=5;s=16;Offset=48}); $s.Add(@{Op='eq';d=0;s=5;t=19}); $s.Add(@{Op='jump-p';u=0;Label=$done})
         foreach($k in 0..4){ $s.Add(@{Op='load';d=$k;s=16;Offset=(4*$k)}) }
         $s.Add(@{Op='load';d=20;s=16;Offset=44}); $s.Add(@{Op='callr';s=20})
         $s.Add(@{Op='syncht'})
