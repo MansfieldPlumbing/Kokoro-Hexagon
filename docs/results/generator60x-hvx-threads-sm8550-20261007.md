@@ -55,3 +55,14 @@ window is BatchTiles + 2 tiles. All runs 0/999,424 output lanes, 0/18,432 coeffi
 At 22 tiles: AdaIN + Snake 19.3 ms, residual 2.4 ms, moments 2.1 ms, coefficients 2.4 ms,
 HMX conv 2.0 ms. Every worker's `qurt_hvx_lock` returned 0 (recorded since `506427d`).
 **Banked baseline: 31.48 ms per 1.625 s of audio, 8-bit stage, 86.05 ms single-thread.**
+
+## Output buffer size (four threads, 22-tile batches, set A, 3 runs each, all exact)
+
+| Output layout | Skel SHA-256 | Region median ms | Invoke ms (runs) |
+| --- | --- | ---: | --- |
+| Frozen worker's (~32 MB) | `65CE73F9B52E37E77B8C532628178C224253BE68CF9F0AC58FDA46C1E67B33BE` | 31.41 | 51.49, 52.56, 51.01 |
+| `-CompactOutput` (~6 MB) | `4601AF95CEFE2EE642D7F31B3D052B0930464A1FA5F2C7F2C99DE788289BC53F` | 31.53 | 41.55, 38.52, 39.01 |
+
+The DSP region is unchanged; the host-side call shrinks by about 12.5 ms, leaving about 7.5 ms
+of call overhead outside the region (FastRPC invoke of a mapped-per-call buffer set; the product
+maps buffers once and dispatches through dspqueue).

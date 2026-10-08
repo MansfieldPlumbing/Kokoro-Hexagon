@@ -21,7 +21,8 @@ param(
     [string] $Package = 'dev.mansfieldplumbing.androidsma.preview',
     [ValidateRange(10, 600)][int] $TimeoutSeconds = 120,
     [ValidateSet('ResBlock','Generator60x')][string] $Graph = 'ResBlock',
-    [string] $CaptureOutputPath
+    [string] $CaptureOutputPath,
+    [switch] $CompactOutput
 )
 $ErrorActionPreference = 'Stop'
 if ($Package -notmatch '^[a-zA-Z0-9_.]+$') { throw 'Invalid Android package name' }
@@ -44,7 +45,7 @@ $harness = Join-Path $PSScriptRoot '..\src\runspace\KokoroResBlockRunProbe.ps1'
 $binding = Join-Path $PSScriptRoot '..\src\runspace\Native.Binding.psm1'
 foreach ($p in $harness, $binding) { $e = $null; $null = [Management.Automation.Language.Parser]::ParseFile($p, [ref]$null, [ref]$e); if ($e.Count) { throw "Does not parse: $p" } }
 $spec = Join-Path ([IO.Path]::GetTempPath()) ("hmx-conv-spec-" + [Guid]::NewGuid().ToString('N') + '.txt')
-[IO.File]::WriteAllLines($spec, @("Shape=$Shape", "Graph=$Graph", "Tiles=$Tiles", "Runs=$Runs", "Macs=$Macs", "CaptureOutput=$([int][bool]$CaptureOutputPath)"))
+[IO.File]::WriteAllLines($spec, @("Shape=$Shape", "Graph=$Graph", "Tiles=$Tiles", "Runs=$Runs", "Macs=$Macs", "CaptureOutput=$([int][bool]$CaptureOutputPath)", "Compact=$([int][bool]$CompactOutput)"))
 
 $id = [Guid]::NewGuid().ToString('N')
 $temp = "/data/local/tmp/kokoro-resblock-$id"

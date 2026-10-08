@@ -61,8 +61,17 @@ try {
     $generator=$kv.Graph -eq 'Generator60x'
     $coefficientBytes=if($generator){18432}else{6144}
     $coefficientOffset=if($generator){$expected.Length}else{5*$expected.Length}
-    $finalOffset=if($generator){3*[int]([math]::Ceiling((192+5*$expected.Length+6144)/128)*128)}else{0}
-    $outputBytes=if($generator){192+$finalOffset+$expected.Length+18432}else{192+5*$expected.Length+6144}
+    # Compact=1: Kokoro.Generator60xResidentRun.ps1 -CompactOutput (branch 0/1, final, coefficients, 128 KiB scratch).
+    $compact=$generator -and $kv.Compact -eq '1'
+    if($compact){
+        $finalOffset=2*[int]([math]::Ceiling($expected.Length/128)*128)
+        $scratchOffset=[int]([math]::Ceiling(($finalOffset+$expected.Length+18432)/4096)*4096)
+        $outputBytes=192+$scratchOffset+131072
+    } else {
+        $finalOffset=if($generator){3*[int]([math]::Ceiling((192+5*$expected.Length+6144)/128)*128)}else{0}
+        $scratchOffset=2*[int]($finalOffset/3)
+        $outputBytes=if($generator){192+$finalOffset+$expected.Length+18432}else{192+5*$expected.Length+6144}
+    }
     $completedStages=if($generator){19}else{6}
     $allowedWeights=if($generator){@(2064384)}else{@(294912,688128,1081344)}
     $parameterBytes=if($generator){147472}else{49152}
@@ -123,7 +132,7 @@ try {
         # Performance-counter record of the resident stage (Kokoro.Generator60xResidentRun.ps1
         # -PmuEvents): DDR workspace + 2*stride, present when the magic 'PMU1' is set.
         if ($generator) {
-            $pmuAt = $offset - $finalOffset + 2 * [int]($finalOffset / 3)
+            $pmuAt = $offset - $finalOffset + $scratchOffset
             if ($pmuAt + 1024 -le $out.Length -and [BitConverter]::ToUInt32($out, $pmuAt) -eq 0x31554D50) {
                 $units = [BitConverter]::ToUInt32($out, $pmuAt + 4)
                 $lines.Add("Pmu HvxUnitsRaw=0x$($units.ToString('X8')) Hvx128B=$(($units -shr 8) -band 0xff) PmuCfg=0x$([BitConverter]::ToUInt32($out, $pmuAt + 16).ToString('X')) EvtCfg=0x$([BitConverter]::ToUInt32($out, $pmuAt + 20).ToString('X8')) EvtCfg1=0x$([BitConverter]::ToUInt32($out, $pmuAt + 24).ToString('X8')) ReadRc=$([BitConverter]::ToInt32($out, $pmuAt + 28))")
@@ -139,7 +148,7 @@ try {
         }
         # HVX worker pool record (-HvxThreads > 1): DDR workspace + 2*stride + 4096, magic 'POOL'.
         if ($generator) {
-            $poolAt = $offset - $finalOffset + 2 * [int]($finalOffset / 3) + 4096
+            $poolAt = $offset - $finalOffset + $scratchOffset + 4096
             if ($poolAt + 1024 -le $out.Length -and [BitConverter]::ToUInt32($out, $poolAt + 8) -eq 0x4C4F4F50) {
                 $n = [BitConverter]::ToUInt32($out, $poolAt + 12)
                 $w = for ($k = 1; $k -lt $n; $k++) { "W$k=Create:$([BitConverter]::ToInt32($out, $poolAt + 64 * $k + 28)),Join:$([BitConverter]::ToInt32($out, $poolAt + 64 * $k + 40)),Status:$([BitConverter]::ToInt32($out, $poolAt + 64 * $k + 36)),Done:$([BitConverter]::ToUInt32($out, $poolAt + 64 * $k + 20)),HvxLock:$([BitConverter]::ToInt32($out, $poolAt + 64 * $k + 52))" }
