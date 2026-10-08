@@ -20,7 +20,7 @@ param(
     [string] $Adb = 'C:\backup\Android\platform-tools\adb.exe',
     [string] $Package = 'dev.mansfieldplumbing.androidsma.preview',
     [ValidateRange(10, 600)][int] $TimeoutSeconds = 120,
-    [ValidateSet('ResBlock','Generator60x')][string] $Graph = 'ResBlock',
+    [ValidateSet('ResBlock','Generator60x','Generator60x16')][string] $Graph = 'ResBlock',
     [string] $CaptureOutputPath,
     [switch] $CompactOutput
 )
@@ -61,7 +61,8 @@ try {
         @($binding, 'files/kokoro-fl/Native.Binding.psm1'),
         @($LibraryPath, 'files/kokoro-fl/qnn/libkokoro_resblock_run_skel.so'),
         @($spec, "$target/spec.txt"))
-    foreach ($n in 'activations.bin', 'weights.bin', 'tables.bin', 'expected.bin', 'expected-coefficients.bin') { $files += , @((Join-Path $FixtureDirectory $n), "$target/$n") }
+    $fixtureFiles = if ($Graph -eq 'Generator60x16') { @('activations.bin', 'weights.bin', 'tables.bin') } else { @('activations.bin', 'weights.bin', 'tables.bin', 'expected.bin', 'expected-coefficients.bin') }
+    foreach ($n in $fixtureFiles) { $files += , @((Join-Path $FixtureDirectory $n), "$target/$n") }
     foreach ($file in $files) {
         $name = Split-Path $file[1] -Leaf; $destination = $file[1]
         $null = & $run @('push', $file[0], "$temp/$name")

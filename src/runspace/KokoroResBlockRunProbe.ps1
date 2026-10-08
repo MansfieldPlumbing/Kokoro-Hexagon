@@ -56,16 +56,22 @@ try {
     $act = [IO.File]::ReadAllBytes([IO.Path]::Combine($dir, 'activations.bin'))
     $wts = [IO.File]::ReadAllBytes([IO.Path]::Combine($dir, 'weights.bin'))
     $tbl = [IO.File]::ReadAllBytes([IO.Path]::Combine($dir, 'tables.bin'))
-    $expected = [IO.File]::ReadAllBytes([IO.Path]::Combine($dir, 'expected.bin'))
-    $expectedCoefficients = [IO.File]::ReadAllBytes([IO.Path]::Combine($dir, 'expected-coefficients.bin'))
-    $generator=$kv.Graph -eq 'Generator60x'
-    $coefficientBytes=if($generator){18432}else{6144}
+    # Generator60x16 (Kokoro.Generator60x16Run.ps1): compact output with 18 K/M/S records; no byte-exact
+    # expectation (the result is scored against the stock float output on Windows from the capture).
+    $g16=$kv.Graph -eq 'Generator60x16'
+    if($g16){ $expected=[byte[]]::new($act.Length); $expectedCoefficients=[byte[]]::new(27648) }
+    else {
+        $expected = [IO.File]::ReadAllBytes([IO.Path]::Combine($dir, 'expected.bin'))
+        $expectedCoefficients = [IO.File]::ReadAllBytes([IO.Path]::Combine($dir, 'expected-coefficients.bin'))
+    }
+    $generator=$kv.Graph -in 'Generator60x','Generator60x16'
+    $coefficientBytes=if($g16){27648}elseif($generator){18432}else{6144}
     $coefficientOffset=if($generator){$expected.Length}else{5*$expected.Length}
     # Compact=1: Kokoro.Generator60xResidentRun.ps1 -CompactOutput (branch 0/1, final, coefficients, 128 KiB scratch).
-    $compact=$generator -and $kv.Compact -eq '1'
+    $compact=$g16 -or ($generator -and $kv.Compact -eq '1')
     if($compact){
         $finalOffset=2*[int]([math]::Ceiling($expected.Length/128)*128)
-        $scratchOffset=[int]([math]::Ceiling(($finalOffset+$expected.Length+18432)/4096)*4096)
+        $scratchOffset=[int]([math]::Ceiling(($finalOffset+$expected.Length+$coefficientBytes)/4096)*4096)
         $outputBytes=192+$scratchOffset+131072
     } else {
         $finalOffset=if($generator){3*[int]([math]::Ceiling((192+5*$expected.Length+6144)/128)*128)}else{0}
@@ -73,8 +79,8 @@ try {
         $outputBytes=if($generator){192+$finalOffset+$expected.Length+18432}else{192+5*$expected.Length+6144}
     }
     $completedStages=if($generator){19}else{6}
-    $allowedWeights=if($generator){@(2064384)}else{@(294912,688128,1081344)}
-    $parameterBytes=if($generator){147472}else{49152}
+    $allowedWeights=if($g16){@(4128768)}elseif($generator){@(2064384)}else{@(294912,688128,1081344)}
+    $parameterBytes=if($g16){294912}elseif($generator){147472}else{49152}
     if ($expected.Length -ne $tiles*8192 -or $act.Length -ne $expected.Length -or $wts.Length -notin $allowedWeights -or $tbl.Length -ne $parameterBytes -or $expectedCoefficients.Length -ne $coefficientBytes) { throw 'Connected fixture buffer lengths' }
     $config = [BitConverter]::GetBytes([uint32]$tiles)
     $ticks = [Collections.Generic.List[long]]::new()
@@ -97,8 +103,10 @@ try {
         $coefBad = 0
         for ($b=0; $b -lt $coefficientBytes; $b++) { if ($out[$offset + $coefficientOffset + $b] -ne $expectedCoefficients[$b]) { $coefBad++ } }
         if ($kv.CaptureOutput -eq '1' -and $rc -eq 0 -and [BitConverter]::ToUInt32($out,36) -ge 6) {
-            $captured = [byte[]]::new($expected.Length)
-            [Buffer]::BlockCopy($out,$offset,$captured,0,$captured.Length)
+            # Generator60x16: the whole workspace (branch 0, branch 1, final tensor, K/M/S records) for diagnosis.
+            $from=if($g16){$offset-$finalOffset}else{$offset}; $length=if($g16){$finalOffset+$expected.Length+$coefficientBytes}else{$expected.Length}
+            $captured = [byte[]]::new($length)
+            [Buffer]::BlockCopy($out,$from,$captured,0,$captured.Length)
             [IO.File]::WriteAllBytes([IO.Path]::Combine($dir,'captured-output.bin'),$captured)
             $lines.Add('OutputSHA256=' + [Convert]::ToHexString([Security.Cryptography.SHA256]::HashData($captured)))
         }
@@ -107,7 +115,7 @@ try {
         $hvx = [BitConverter]::ToInt32($out, 28); $hmx = [BitConverter]::ToInt32($out, 32); $stageReached = [BitConverter]::ToInt32($out, 36)
         $bad = 0
         for ($b = 1; $b -lt $expected.Length; $b += 2) { if ($out[$offset + $b] -ne $expected[$b]) { $bad++ } }
-        if ($rc -ne 0 -or $stageReached -ne 7 -or $completed -ne $completedStages -or $bad -ne 0 -or $coefBad -ne 0 -or $hvx -ne 0 -or $hmx -ne 0) { $allExact = $false }
+        if ($rc -ne 0 -or $stageReached -ne 7 -or $completed -ne $completedStages -or (-not $g16 -and ($bad -ne 0 -or $coefBad -ne 0)) -or $hvx -ne 0 -or $hmx -ne 0) { $allExact = $false }
         $dt = [long]($t1 - $t0); if ($stageReached -ge 6) { $ticks.Add($dt) }
         $lines.Add("Run=$run InvokeRc=$rc Stage=$stageReached PowerRc=$power Ctx=$ctx VtcmBytes=$vtcm HvxLockRc=$hvx HmxLockRc=$hmx RegionTicks=$dt CompletedStages=$completed CoefficientByteMismatches=$coefBad InvokeMs=$($sw.Elapsed.TotalMilliseconds.ToString('F3', $inv)) Mismatches=$bad/$($expected.Length / 2)")
         if ($generator -and [BitConverter]::ToUInt64($out, 48) -gt 0) {
