@@ -52,7 +52,7 @@ first audio, and SM8635 results are not yet measured.
 Text to Kokoro token IDs, distilled from Windows SAPI Zira (contextual
 pronunciation choices such as noun/verb `record`) into a compact PSD1 and a
 CoreLib-only assembly, with the selection logic compiled alongside the data.
-Developed in PSPerception and imported here at a pinned commit. Reported by
+Developed in PSPerception and imported here at a pinned commit (see [phonemizer/README.md](phonemizer/README.md)). Reported by
 its workflow (Windows; not yet measured on the phone):
 
 - Corpus: 73 utterances, 332 word events, 1,272 phone events.
