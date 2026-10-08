@@ -59,6 +59,36 @@ function Get-QuantizeCroutons16Kernel {
     $script:Kernels.QuantizeCroutons16 = $k; $k
 }
 
+function Get-QuantizeRowsKernel {
+    # (double[] w [r][i], int rows, int per, int levels, double[] clip [r], double[] q, double[] err [r]): per row r,
+    # scale = clip_r * max|w_r| / levels, q = clamp(round(w / scale), +-levels) * scale (round half to even), err_r = the
+    # squared error of the row. Rows with max 0 stay 0. Build-time analysis of weight quantization
+    # (tools/Measure-KokoroDecoderWeightError.ps1).
+    if ($script:Kernels.ContainsKey('QuantizeRows')) { return $script:Kernels.QuantizeRows }
+    $E = [Expression]
+    $w = $E::Parameter([double[]], 'w'); $rows = $E::Parameter([int], 'rows'); $per = $E::Parameter([int], 'per'); $levels = $E::Parameter([int], 'levels')
+    $clip = $E::Parameter([double[]], 'clip'); $q = $E::Parameter([double[]], 'q'); $err = $E::Parameter([double[]], 'err')
+    $r = $E::Variable([int], 'r'); $i = $E::Variable([int], 'i'); $base = $E::Variable([int], 'rowBase'); $max = $E::Variable([double], 'max')
+    $scale = $E::Variable([double], 'scale'); $v = $E::Variable([double], 'v'); $acc = $E::Variable([double], 'acc'); $lv = $E::Variable([double], 'lv')
+    $round = [Math].GetMethod('Round', [Type[]]@([double])); $abs = [Math].GetMethod('Abs', [Type[]]@([double]))
+    $mx = [Math].GetMethod('Max', [Type[]]@([double], [double])); $clamp = [Math].GetMethod('Clamp', [Type[]]@([double], [double], [double]))
+    $wi = $E::ArrayIndex($w, $E::Add($base, $i))
+    $findMax = New-For $i (New-Int 0) $per ($E::Assign($max, $E::Call($mx, $max, $E::Call($abs, $wi))))
+    $quantize = New-For $i (New-Int 0) $per ($E::Block(
+        $E::Assign($v, $E::Multiply($E::Call($clamp, $E::Call($round, $E::Divide($wi, $scale)), $E::Negate($lv), $lv), $scale)),
+        $E::Assign($E::ArrayAccess($q, $E::Add($base, $i)), $v),
+        $E::AddAssign($acc, $E::Multiply($E::Subtract($v, $wi), $E::Subtract($v, $wi)))))
+    $row = $E::Block(
+        $E::Assign($base, $E::Multiply($r, $per)), $E::Assign($max, $E::Constant(0.0)), $findMax, $E::Assign($acc, $E::Constant(0.0)),
+        $E::IfThen($E::GreaterThan($max, $E::Constant(0.0)), $E::Block(
+            $E::Assign($scale, $E::Divide($E::Multiply($E::ArrayIndex($clip, $r), $max), $lv)), $quantize)),
+        $E::Assign($E::ArrayAccess($err, $r), $acc))
+    $body = $E::Block([ParameterExpression[]]@($r, $i, $base, $max, $scale, $v, $acc, $lv),
+        $E::Assign($lv, $E::Convert($levels, [double])), (New-For $r (New-Int 0) $rows $row))
+    $k = $E::Lambda([Action[double[], int, int, int, double[], double[], double[]]], $body, [ParameterExpression[]]@($w, $rows, $per, $levels, $clip, $q, $err)).Compile()
+    $script:Kernels.QuantizeRows = $k; $k
+}
+
 function Get-PackWeightPlanesKernel {
     # (float[] w [o][i][k] with 128 x 128, int K, double[] sW, byte[] wh, byte[] wl, long[] sumH, long[] sumL) -> int
     # Wq = round(w / sW_o) (half to even); Wh = (Wq + 128) >> 8; Wl = Wq - 256 Wh; packed in HMX order
@@ -347,4 +377,4 @@ function Get-Conv1dKernel {
     $script:Kernels.Conv1d = $k; $k
 }
 
-Export-ModuleMember -Function Get-SplitPlanesKernel, Get-LowLowWindowShapedKernel, Get-Conv1dKernel, Get-PackWeightPlanesShapedKernel, Get-LowLowWindowKernel, Get-QuantizeCroutons16Kernel, Get-PackWeightPlanesKernel, Get-Mean3Kernel, Get-Croutons16ErrorKernel, Get-ChannelStatsKernel, Get-DecodeCroutons16Kernel, Get-InterleavePlanesKernel
+Export-ModuleMember -Function Get-QuantizeRowsKernel, Get-SplitPlanesKernel, Get-LowLowWindowShapedKernel, Get-Conv1dKernel, Get-PackWeightPlanesShapedKernel, Get-LowLowWindowKernel, Get-QuantizeCroutons16Kernel, Get-PackWeightPlanesKernel, Get-Mean3Kernel, Get-Croutons16ErrorKernel, Get-ChannelStatsKernel, Get-DecodeCroutons16Kernel, Get-InterleavePlanesKernel

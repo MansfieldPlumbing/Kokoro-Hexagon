@@ -9,7 +9,9 @@ param(
     [ValidateLength(1,510)][string]$Phonemes = 'həlˈoʊ wˈɜɹld.',
     [ValidateSet('af_heart','am_michael')][string]$Voice = 'af_heart',
     [ValidateRange(1,100)][int]$Seed = 17,
-    [string]$OutputDirectory
+    [string]$OutputDirectory,
+    # generator: tools/reference/capture_stock_generator.py; decoder: capture_stock_decoder.py (the decoder before the generator).
+    [ValidateSet('generator','decoder')][string]$Block = 'generator'
 )
 $ErrorActionPreference = 'Stop'
 $root = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '../..'))
@@ -46,10 +48,10 @@ foreach ($name in $inputNames) {
     if ((Get-Item -LiteralPath $file).Length -ne $pin[0].bytes -or (Get-FileHash -LiteralPath $file).Hash -cne $pin[0].sha256) { throw "Stock input integrity mismatch: $name" }
     $inputs[$name] = @{ path=$file; sha256=$pin[0].sha256 }
 }
-$spec = @{ sourceCommit=$commit; sourceRoot=$sourceRoot; sourceFiles=$sourceFiles; inputs=$inputs; phonemes=$Phonemes; voice=$Voice; seed=$Seed; block='decoder.generator'; output=$out; exportToolSha256=(Get-FileHash -LiteralPath $PSCommandPath).Hash }
+$spec = @{ sourceCommit=$commit; sourceRoot=$sourceRoot; sourceFiles=$sourceFiles; inputs=$inputs; phonemes=$Phonemes; voice=$Voice; seed=$Seed; block=$(if ($Block -eq 'decoder') { 'decoder' } else { 'decoder.generator' }); output=$out; exportToolSha256=(Get-FileHash -LiteralPath $PSCommandPath).Hash }
 $specPath = Join-Path $out 'capture-spec.json'
 $spec | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath $specPath -Encoding utf8NoBOM
-& $Python (Join-Path $PSScriptRoot 'capture_stock_generator.py') --spec $specPath
+& $Python (Join-Path $PSScriptRoot $(if ($Block -eq 'decoder') { 'capture_stock_decoder.py' } else { 'capture_stock_generator.py' })) --spec $specPath
 if ($LASTEXITCODE) { throw 'Stock reference capture failed.' }
 if (-not (Test-Path -LiteralPath (Join-Path $out 'capture.json'))) { throw 'Stock capture manifest missing.' }
 Write-Output "Capture: $out"
