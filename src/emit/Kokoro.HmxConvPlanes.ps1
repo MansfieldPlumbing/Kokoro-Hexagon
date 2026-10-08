@@ -21,8 +21,8 @@
 #   With -WeightPlanes 2, Wl follows Wh directly (r2 + groups*Kernel*CB*2048), same order.
 function New-KokoroHmxConvPlanesSteps {
     param(
-        [ValidateSet(128, 256)][int] $InputChannels = 128,
-        [ValidateSet(128, 256)][int] $OutputChannels = 128,
+        [ValidateSet(64, 128, 256)][int] $InputChannels = 128,
+        [ValidateSet(64, 128, 256)][int] $OutputChannels = 128,
         [ValidateSet(3, 7, 11)][int] $Kernel = 3,
         [ValidateSet(1, 3, 5)][int] $Dilation = 1,
         [ValidateSet(1, 2)][int] $WeightPlanes = 1,

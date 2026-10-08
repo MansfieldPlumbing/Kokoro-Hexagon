@@ -95,6 +95,42 @@ function Get-PackWeightPlanesKernel {
     $script:Kernels.PackWeightPlanes = $k; $k
 }
 
+function Get-PackWeightPlanesShapedKernel {
+    # As Get-PackWeightPlanesKernel for any cout, cin (multiples of 64 and 32): (float[] w [o][i][k], int cout, int cin,
+    # int K, double[] sW, byte[] wh, byte[] wl, long[] sumH, long[] sumL) -> int count of |Wq| > 32512.
+    # HMX order (Kokoro.HmxConvPlanes.ps1): ((g*K + k)*CB + blk)*2048 + 1024*hh + 128*(i >> 2) + 4*c + (i & 3).
+    if ($script:Kernels.ContainsKey('PackWeightPlanesShaped')) { return $script:Kernels.PackWeightPlanesShaped }
+    $E = [Expression]
+    $w = $E::Parameter([float[]], 'w'); $cout = $E::Parameter([int], 'cout'); $cin = $E::Parameter([int], 'cin'); $K = $E::Parameter([int], 'K'); $sW = $E::Parameter([double[]], 'sW')
+    $wh = $E::Parameter([byte[]], 'wh'); $wl = $E::Parameter([byte[]], 'wl'); $sumH = $E::Parameter([long[]], 'sumH'); $sumL = $E::Parameter([long[]], 'sumL')
+    $o = $E::Variable([int], 'o'); $ic = $E::Variable([int], 'ic'); $tap = $E::Variable([int], 'tap'); $cb = $E::Variable([int], 'cb')
+    $q = $E::Variable([int], 'q'); $qh = $E::Variable([int], 'qh'); $ql = $E::Variable([int], 'ql'); $at = $E::Variable([int], 'at'); $bad = $E::Variable([int], 'bad')
+    $round = [Math].GetMethod('Round', [Type[]]@([double])); $abs = [Math].GetMethod('Abs', [Type[]]@([int]))
+    $src = $E::ArrayIndex($w, $E::Add($E::Multiply($E::Add($E::Multiply($o, $cin), $ic), $K), $tap))
+    $g = $E::RightShift($o, (New-Int 6)); $hh = $E::And($E::RightShift($o, (New-Int 5)), (New-Int 1)); $cc = $E::And($o, (New-Int 31))
+    $blk = $E::RightShift($ic, (New-Int 5)); $i = $E::And($ic, (New-Int 31))
+    $pos = $E::Add($E::Add($E::Add($E::Add(
+        $E::Multiply($E::Add($E::Multiply($E::Add($E::Multiply($g, $K), $tap), $cb), $blk), (New-Int 2048)),
+        $E::Multiply((New-Int 1024), $hh)), $E::Multiply((New-Int 128), $E::RightShift($i, (New-Int 2)))),
+        $E::Multiply((New-Int 4), $cc)), $E::And($i, (New-Int 3)))
+    $inner = $E::Block(
+        $E::Assign($q, $E::Convert($E::Call($round, $E::Divide($E::Convert($src, [double]), $E::ArrayIndex($sW, $o))), [int])),
+        $E::IfThen($E::GreaterThan($E::Call($abs, $q), (New-Int 32512)), $E::PostIncrementAssign($bad)),
+        $E::Assign($qh, $E::RightShift($E::Add($q, (New-Int 128)), (New-Int 8))),
+        $E::Assign($ql, $E::Subtract($q, $E::Multiply((New-Int 256), $qh))),
+        $E::Assign($at, $pos),
+        $E::Assign($E::ArrayAccess($wh, $at), $E::Convert($E::And($qh, (New-Int 255)), [byte])),
+        $E::Assign($E::ArrayAccess($wl, $at), $E::Convert($E::And($ql, (New-Int 255)), [byte])),
+        $E::AddAssign($E::ArrayAccess($sumH, $o), $E::Convert($qh, [long])),
+        $E::AddAssign($E::ArrayAccess($sumL, $o), $E::Convert($ql, [long])))
+    $body = $E::Block([int], [ParameterExpression[]]@($o, $ic, $tap, $cb, $q, $qh, $ql, $at, $bad),
+        $E::Assign($bad, (New-Int 0)), $E::Assign($cb, $E::RightShift($cin, (New-Int 5))),
+        (New-For $o (New-Int 0) $cout (New-For $ic (New-Int 0) $cin (New-For $tap (New-Int 0) $K $inner))),
+        $bad)
+    $kk = $E::Lambda([Func[float[], int, int, int, double[], byte[], byte[], long[], long[], int]], $body, [ParameterExpression[]]@($w, $cout, $cin, $K, $sW, $wh, $wl, $sumH, $sumL)).Compile()
+    $script:Kernels.PackWeightPlanesShaped = $kk; $kk
+}
+
 function Get-Mean3Kernel {
     # (float[] a, float[] b, float[] c, float[] dst): dst = (a + b + c) / 3 in double, stored as float.
     if ($script:Kernels.ContainsKey('Mean3')) { return $script:Kernels.Mean3 }
@@ -226,4 +262,27 @@ function Get-LowLowWindowKernel {
     $script:Kernels.LowLowWindow = $k; $k
 }
 
-Export-ModuleMember -Function Get-LowLowWindowKernel, Get-QuantizeCroutons16Kernel, Get-PackWeightPlanesKernel, Get-Mean3Kernel, Get-Croutons16ErrorKernel, Get-ChannelStatsKernel, Get-DecodeCroutons16Kernel, Get-InterleavePlanesKernel
+function Get-Conv1dKernel {
+    # (double[] x [i][t], int cin, int frames, double[] w [o][i][k], int cout, int K, int first, double[] y [o][t]):
+    # y[o][t] = sum_i sum_k w[o][i][k] x[i][t + first + k], zero outside 0..frames-1. Build-time checks of
+    # folded linear stages against stock captures.
+    if ($script:Kernels.ContainsKey('Conv1d')) { return $script:Kernels.Conv1d }
+    $E = [Expression]
+    $x = $E::Parameter([double[]], 'x'); $cin = $E::Parameter([int], 'cin'); $frames = $E::Parameter([int], 'frames'); $w = $E::Parameter([double[]], 'w')
+    $cout = $E::Parameter([int], 'cout'); $K = $E::Parameter([int], 'K'); $first = $E::Parameter([int], 'first'); $y = $E::Parameter([double[]], 'y')
+    $o = $E::Variable([int], 'o'); $i = $E::Variable([int], 'i'); $tap = $E::Variable([int], 'tap'); $t = $E::Variable([int], 't')
+    $tt = $E::Variable([int], 'tt'); $wv = $E::Variable([double], 'wv')
+    $inner = $E::Block(
+        $E::Assign($tt, $E::Add($E::Add($t, $first), $tap)),
+        $E::IfThen($E::AndAlso($E::GreaterThanOrEqual($tt, (New-Int 0)), $E::LessThan($tt, $frames)),
+            $E::AddAssign($E::ArrayAccess($y, $E::Add($E::Multiply($o, $frames), $t)), $E::Multiply($wv, $E::ArrayIndex($x, $E::Add($E::Multiply($i, $frames), $tt))))))
+    $perTap = $E::Block(
+        $E::Assign($wv, $E::ArrayIndex($w, $E::Add($E::Multiply($E::Add($E::Multiply($o, $cin), $i), $K), $tap))),
+        $E::IfThen($E::NotEqual($wv, $E::Constant(0.0)), (New-For $t (New-Int 0) $frames $inner)))
+    $body = $E::Block([ParameterExpression[]]@($o, $i, $tap, $t, $tt, $wv),
+        (New-For $o (New-Int 0) $cout (New-For $i (New-Int 0) $cin (New-For $tap (New-Int 0) $K $perTap))))
+    $k = $E::Lambda([Action[double[], int, int, double[], int, int, int, double[]]], $body, [ParameterExpression[]]@($x, $cin, $frames, $w, $cout, $K, $first, $y)).Compile()
+    $script:Kernels.Conv1d = $k; $k
+}
+
+Export-ModuleMember -Function Get-Conv1dKernel, Get-PackWeightPlanesShapedKernel, Get-LowLowWindowKernel, Get-QuantizeCroutons16Kernel, Get-PackWeightPlanesKernel, Get-Mean3Kernel, Get-Croutons16ErrorKernel, Get-ChannelStatsKernel, Get-DecodeCroutons16Kernel, Get-InterleavePlanesKernel

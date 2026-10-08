@@ -119,6 +119,9 @@ phone measurements establish achieved speed and time to first audio.
   `docs/results/generator60x-16bit-sm8550-20261008.md`. With the low x low group, rounded table biases and
   scales calibrated on two other sentences (holdout): 68.76 dB in 29.84 ms. See
   `docs/results/generator60x-16bit-holdout-sm8550-20261008.md`.
+- The 16-bit generator tail (LeakyReLU, conv_post, exp/sin, iSTFT as an HMX conv) plays stock-input
+  hello world at 38.07 dB PCM against stock in 2.97 ms on SM8550. See
+  `docs/results/generator-tail16-sm8550-20261008.md`.
 
 ## Product shape
 

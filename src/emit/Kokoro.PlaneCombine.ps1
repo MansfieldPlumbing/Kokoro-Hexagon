@@ -15,7 +15,7 @@
 function New-KokoroPlaneCombineSteps {
     param(
         [ValidateSet('Conv','Residual')][string] $Mode = 'Conv',
-        [ValidateSet(128,256)][int] $Channels = 128,
+        [ValidateSet(64, 128, 256)][int] $Channels = 128,
         [ValidateSet(2,3)][int] $Groups = 2,
         [Parameter(Mandatory)][ValidateRange(2048, 1073741824)][long] $PlaneStride,
         [string] $LabelPrefix = 'planecombine',

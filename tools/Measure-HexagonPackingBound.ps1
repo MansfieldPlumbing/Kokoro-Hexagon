@@ -30,7 +30,7 @@ foreach($f in 'Kokoro.AdaInSnakeInteger.ps1','Kokoro.AdaInSnakeTurns.ps1','Kokor
 
 # Op -> class. Fields that hold vector registers are listed per class below.
 $class=@{}
-foreach($o in 'vadd-w','vsub-w','vand','vor','vxor','vmin-w','vmax-w','vadd-h','vadd-h-sat','vsub-h','vabs-h-sat'){ $class[$o]='alu' }
+foreach($o in 'vadd-w','vsub-w','vand','vor','vxor','vmin-w','vmax-w','vmin-h','vmax-h','vadd-h','vadd-h-sat','vsub-h','vabs-h-sat'){ $class[$o]='alu' }
 foreach($o in 'vsplat','vsplat-h'){ $class[$o]='alu-rt' }
 foreach($o in 'vlsr-uw','vasr-w','vasl-w','vasr-h','vasl-h'){ $class[$o]='shift-rt' }
 foreach($o in 'vmpyie-w-uh','vmpye-w-uh','vmpy-h-rnd-sat'){ $class[$o]='mpy2' }

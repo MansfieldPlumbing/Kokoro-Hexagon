@@ -10,7 +10,7 @@ $build=[IO.Path]::GetFullPath((Join-Path $PSScriptRoot '../build'))+[IO.Path]::D
 $out=[IO.Path]::GetFullPath($OutputDirectory)
 if (-not $out.StartsWith($build,[StringComparison]::OrdinalIgnoreCase) -or (Test-Path $out)) { throw 'Choose a new build/ directory.' }
 $steps=[Collections.Generic.List[hashtable]]::new()
-foreach ($op in 'mpyu-d','mpy-d','add-d','sub-d','gtu-d','gt','sub','vasr-w','vasl-w','vmax-w','vmin-w','vor','vsub-w') {
+foreach ($op in 'mpyu-d','mpy-d','add-d','sub-d','gtu-d','gt','sub','vasr-w','vasl-w','vmax-w','vmin-w','vor','vsub-w','vasr-wv','vlsr-wv','vasr-hv','vasl-wv','vmin-h','vmax-h') {
  foreach ($r in 0,1,7,15,31) {
   $pair=$r -band 30
   $step=@{Op=$op;d=$r;s=$r;t=(31-$r)}

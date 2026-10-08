@@ -60,6 +60,14 @@ $script:HexagonForms = @{
     'vasr-w'         = '00011001011tttttPP0sssss101ddddd'
     'vasl-w'         = '00011001011tttttPP0sssss111ddddd'
     'vmax-w'         = '00011111001tttttPP0sssss000ddddd'
+    # Per-lane shifts by a vector of signed 6-bit amounts, and halfword min/max: SDK 6.4.0.2 hexagon-llvm-mc
+    # encodings; semantics V73 HVX PRM 80-N2040-54 Rev. AB (vasr: amount > 0 shifts right, else left).
+    'vasr-wv'        = '00011111101tttttPP0sssss000ddddd'
+    'vlsr-wv'        = '00011111101tttttPP0sssss001ddddd'
+    'vasr-hv'        = '00011111101tttttPP0sssss011ddddd'
+    'vasl-wv'        = '00011111101tttttPP0sssss100ddddd'
+    'vmin-h'         = '00011111000tttttPP0sssss011ddddd'
+    'vmax-h'         = '00011111000tttttPP0sssss111ddddd'
     'vmin-w'         = '00011111000tttttPP0sssss100ddddd'
     'vor'            = '00011100001tttttPP0sssss110ddddd'
     # V73 HVX PRM Rev AB pp.227-230, halfword lookup with r0..7 control.
@@ -438,6 +446,12 @@ function ConvertTo-HexagonAssembly {
         'vasr-w' { $s="v$($Step.d).w = vasr(v$($Step.s).w,r$($Step.t))" }
         'vasl-w' { $s="v$($Step.d).w = vasl(v$($Step.s).w,r$($Step.t))" }
         'vmax-w' { $s="v$($Step.d).w = vmax(v$($Step.s).w,v$($Step.t).w)" }
+        'vasr-wv' { $s="v$($Step.d).w = vasr(v$($Step.s).w,v$($Step.t).w)" }
+        'vlsr-wv' { $s="v$($Step.d).w = vlsr(v$($Step.s).w,v$($Step.t).w)" }
+        'vasr-hv' { $s="v$($Step.d).h = vasr(v$($Step.s).h,v$($Step.t).h)" }
+        'vasl-wv' { $s="v$($Step.d).w = vasl(v$($Step.s).w,v$($Step.t).w)" }
+        'vmin-h' { $s="v$($Step.d).h = vmin(v$($Step.s).h,v$($Step.t).h)" }
+        'vmax-h' { $s="v$($Step.d).h = vmax(v$($Step.s).h,v$($Step.t).h)" }
         'vmin-w' { $s="v$($Step.d).w = vmin(v$($Step.s).w,v$($Step.t).w)" }
         'vor' { $s="v$($Step.d) = vor(v$($Step.s),v$($Step.t))" }
         'vsub-w' { $s="v$($Step.d).w = vsub(v$($Step.s).w,v$($Step.t).w)" }
