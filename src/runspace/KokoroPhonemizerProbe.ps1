@@ -9,6 +9,8 @@ $lines = [Collections.Generic.List[string]]::new()
 $lines.Add('Job=kokoro-phonemizer')
 $inv = [Globalization.CultureInfo]::InvariantCulture
 $passed = $false
+# Written before any work, so an empty receipt means the harness never started.
+[IO.File]::WriteAllLines($receipt, [string[]]@('Job=kokoro-phonemizer', 'Started=True'))
 try {
     $dll = [IO.Path]::Combine($dir, 'driver.dll')
     $lines.Add('DriverSHA256=' + [Convert]::ToHexString([Security.Cryptography.SHA256]::HashData([IO.File]::ReadAllBytes($dll))))

@@ -415,7 +415,7 @@ function Convert-EnglishZiraCorpus {
     [pscustomobject]@{Gate='TYPED_ZIRA_CORPUS_LOWERED';Captures=$captures.Count;Output=$compiled.Output;Receipt=$compiled.Receipt;Source=$compiled.Source;PronunciationSelection='Observations only; contextual choices require admission'}
 }
 $script:MobyPhoneMap=[Collections.Generic.Dictionary[string,string]]::new([StringComparer]::Ordinal)
-foreach($entry in '&=æ;(@)=ɛ;A=ɑ;eI=A;@=ə;-=ə;b=b;tS=ʧ;d=d;E=ɛ;i=i;f=f;g=ɡ;h=h;hw=w;I=ɪ;aI=I;dZ=ʤ;k=k;l=l;m=m;N=ŋ;n=n;Oi=Y;AU=W;O=ɔ;oU=O;u=u;U=ʊ;p=p;r=ɹ;S=ʃ;s=s;T=θ;D=ð;t=t;@r=əɹ;v=v;w=w;j=j;Z=ʒ;z=z'.Split(';')){
+foreach($entry in '&=æ;(@)=ɛ;A=ɑ;eI=A;@=ə;-=ə;b=b;tS=ʧ;d=d;E=ɛ;i=i;f=f;g=ɡ;h=h;hw=w;I=ɪ;aI=I;dZ=ʤ;k=k;l=l;m=m;N=ŋ;n=n;Oi=Y;AU=W;O=ɔ;oU=O;u=u;U=ʊ;p=p;r=ɹ;S=ʃ;s=s;T=θ;D=ð;t=t;@r=əɹ;v=v;w=w;j=j;Z=ʒ;z=z;[@]=ɜ;ju=ju;a=æ'.Split(';')){
     $pair=$entry.Split('=');$script:MobyPhoneMap.Add($pair[0],$pair[1])
 }
 
@@ -429,7 +429,12 @@ function ConvertFrom-MobyPronunciation {
         if($ch -ceq [char]39){$stress='ˈ';$at++;continue}
         if($ch -ceq ','){$stress='ˌ';$at++;continue}
         if($ch -ceq '_' -or $ch -ceq ' '){[void]$out.Append(' ');$at++;continue}
-        if($ch -ceq '/'){
+        if($ch -ceq '/' -and $at+1 -lt $Notation.Length -and $Notation[$at+1] -ceq '/'){
+            # Some rows double the delimiters of a unit: b//Oi// (boy), n//Oi//z (noise).
+            $end=$Notation.IndexOf('//', $at+2)
+            if($end -lt 0){return $null}
+            $unit=$Notation.Substring($at+2,$end-$at-2);$at=$end+2
+        }elseif($ch -ceq '/'){
             $end=$Notation.IndexOf('/', $at+1)
             if($end -lt 0){return $null}
             $unit=$Notation.Substring($at+1,$end-$at-1);$at=$end+1
@@ -438,11 +443,14 @@ function ConvertFrom-MobyPronunciation {
         $phone=$map[$unit]
         if($stress -and $unit -ceq '@'){$phone='ʌ'}
         if($stress -and $unit -ceq '@r'){$phone='ɜɹ'}
+        # Stress marks precede the vowel nucleus, so /ju/ (j + u) takes a pending mark between its two phones.
+        if($unit -ceq 'ju' -and $stress){[void]$out.Append('j'+$stress+'u');$stress='';continue}
         if($phone[0] -cin 'AIOWYɑɔəæɛɜɪiʊuʌ'.ToCharArray() -and $stress){[void]$out.Append($stress);$stress=''}
         [void]$out.Append($phone)
     }
     if($stress){return $null}
-    $out.ToString().Trim()
+    # Some rows spell the diphthongs as two vowels: s/A//I/d, h/&//U/s.
+    $out.ToString().Trim().Replace('ɑɪ','I').Replace('æʊ','W')
 }
 
 function Get-EnglishMobyFacts {
@@ -486,9 +494,15 @@ function Get-EnglishMobyFacts {
         if($capabilities.ContainsKey($word)){$capabilities[$word]=$capabilities[$word] -bor $bits}else{$capabilities.Add($word,$bits)}
     }
     $rows=0;$excluded=0;$unconverted=0
+    # Lowercase rows first, then capitalized rows (names and other readings: City, Here, Rose), so a word's
+    # lowercase readings are listed first among its variants.
+    foreach($phase in 0,1){
     foreach($line in [IO.File]::ReadLines((Join-Path $root 'pronunciations.txt'),[Text.Encoding]::Latin1)){
-        $rows++;$space=$line.IndexOf(' ')
-        if($space -lt 1){$excluded++;continue}
+        $space=$line.IndexOf(' ')
+        if($space -lt 1){if($phase -eq 0){$rows++;$excluded++};continue}
+        $spelling=$line.Substring(0,$space);$slash=$spelling.LastIndexOf('/');if($slash -ge 0){$spelling=$spelling.Substring(0,$slash)}
+        if(($spelling -ceq $spelling.ToLowerInvariant()) -ne ($phase -eq 0)){continue}
+        $rows++
         $word=$line.Substring(0,$space).ToLowerInvariant();$tag=''
         $slash=$word.LastIndexOf('/')
         if($slash -ge 0){$tag=$word.Substring($slash+1);$word=$word.Substring(0,$slash)}
@@ -509,6 +523,7 @@ function Get-EnglishMobyFacts {
         }
         switch -CaseSensitive($tag){'n'{$record[1]=$record[1] -bor 1};'v'{$record[1]=$record[1] -bor 2};'aj'{$record[1]=$record[1] -bor 4}}
     }
+    }
     $writer=[IO.StreamWriter]::new($cache,$false,[Text.UTF8Encoding]::new($false))
     try{foreach($record in $records.Values){$writer.WriteLine($record -join "`t")}}finally{$writer.Dispose()}
     [pscustomobject]@{ParserHash=$parserHash;CacheHash=(Get-FileHash -LiteralPath $cache).Hash;Commit=$commit;PronunciationSha256=$sources[0][2];CapabilitiesSha256=$sources[1][2];SourceRows=$rows;ExcludedMultiwordOrLongRows=$excluded;UnconvertedRows=$unconverted} | Export-Clixml -LiteralPath $cacheReceipt
@@ -520,7 +535,7 @@ function Get-EnglishMobyFacts {
 }
 
 function Add-EnglishCompiledRange {
-    param([Text.StringBuilder]$Index,[Text.StringBuilder]$Data,[string]$Value,[hashtable]$Interned)
+    param([Text.StringBuilder]$Index,[Text.StringBuilder]$Data,[string]$Value,[Collections.Generic.Dictionary[string,int]]$Interned)
     if($Value.Length -ge 4096 -or $Data.Length -ge 16777216){throw 'Compiled lexical range bound exceeded.'}
     if($Interned.ContainsKey($Value)){$start=$Interned[$Value]}else{$start=$Data.Length;$Interned[$Value]=$start;[void]$Data.Append($Value)}
     [void]$Index.Append([char](4096+($start -band 4095)))
@@ -635,7 +650,9 @@ function Build-EnglishReference {
         $symbols[$pair.Value]=$pair.Key[0]
     }
     $forms=[Text.StringBuilder]::new();$caps=[Text.StringBuilder]::new()
-    $offsets=[Text.StringBuilder]::new();$phones=[Text.StringBuilder]::new();$roles=[Text.StringBuilder]::new();$alternates=[Text.StringBuilder]::new();$interned=@{};$alternateRow=0
+    $offsets=[Text.StringBuilder]::new();$phones=[Text.StringBuilder]::new();$roles=[Text.StringBuilder]::new();$alternates=[Text.StringBuilder]::new();$alternateRow=0
+    # Ordinal: Kokoro phones are case-sensitive (I/i, A/a, O/o); a PowerShell hashtable would merge them.
+    $interned=[Collections.Generic.Dictionary[string,int]]::new([StringComparer]::Ordinal)
     $facts=@(if($Source -ceq 'Moby'){Get-EnglishMobyFacts}elseif($Source -ceq 'MobyOnly'){Get-EnglishMobyFacts -WithoutAuthoredOverrides}else{Get-EnglishProofFacts})
     $ordered=[Collections.Generic.SortedDictionary[string,object]]::new([StringComparer]::Ordinal)
     foreach($fact in $facts){$ordered.Add($fact[0],$fact)}
@@ -1164,11 +1181,11 @@ function Remove-EnglishContextEvidence {
 
 function Invoke-EnglishPhonemizer {
     [CmdletBinding()]
-    param([Parameter(Mandatory)][AllowEmptyString()][string]$Text,$Context=$null,[string]$ReferencePath=$AssemblyPath)
+    param([Parameter(Mandatory)][AllowEmptyString()][string]$Text,$Context=$null,[string]$ReferencePath=$AssemblyPath,[switch]$Lexical)
     $start=[Diagnostics.Stopwatch]::StartNew()
     if($null -eq $Context){
         $driver=Import-EnglishCoreDriver -ReferencePath $ReferencePath
-        $result=$driver.Run.Invoke($Text)
+        $result=if($Lexical){$driver.RunLexical.Invoke($Text)}else{$driver.Run.Invoke($Text)}
         $result | Add-Member -NotePropertyName Timing -NotePropertyValue ([pscustomobject]@{TotalMs=$start.Elapsed.TotalMilliseconds;BinderInvocations=0})
         return $result
     }
@@ -1250,6 +1267,7 @@ class CoreToken {
     [int]$SourceEnd
     [string]$Pron
     [string]$PronunciationSource='CompiledLexicon'
+    [string]$Polish=''
     [int[]]$SymbolIds
     [int[]]$Roles
     [string[]]$Alternatives
@@ -1288,6 +1306,7 @@ class CoreEngine {
     [Collections.Generic.List[string]]$Withdrawn
     [Collections.Generic.Dictionary[string,string]]$Corrections
     [bool]$Boundary
+    [bool]$Polish
     CoreEngine() {
         $this.Occurrences=[Collections.Generic.List[CoreOccurrence]]::new()
         $this.Candidates=[CoreCandidate[]]::new(1);$this.Candidates[0]=[CoreCandidate]::new()
@@ -1431,9 +1450,22 @@ class CoreEngine {
         while($at -lt $text.Length){
             if([char]::IsWhiteSpace($text.get_Chars($at))){$at++;continue}
             [int]$start=$at;[string]$kind='Word'
-            if([char]::IsLetterOrDigit($text.get_Chars($at)) -or $text.get_Chars($at) -ceq [Convert]::ToChar(36)){
+            [char]$first=$text.get_Chars($at)
+            # Polish: a minus sign that starts a number joins it.
+            [bool]$minus=$this.Polish -and $first -ceq [Convert]::ToChar(45) -and $at+1 -lt $text.Length -and [char]::IsDigit($text.get_Chars($at+1)) -and ($at -eq 0 -or [char]::IsWhiteSpace($text.get_Chars($at-1)))
+            if([char]::IsLetterOrDigit($first) -or $first -ceq [Convert]::ToChar(36) -or $minus){
+                [bool]$numeric=$this.Polish -and ([char]::IsDigit($first) -or $first -ceq [Convert]::ToChar(36) -or $minus)
                 $at++
-                while($at -lt $text.Length -and ([char]::IsLetterOrDigit($text.get_Chars($at)) -or $text.get_Chars($at) -ceq [Convert]::ToChar(39) -or $text.get_Chars($at) -ceq [Convert]::ToChar(8217))){$at++}
+                while($at -lt $text.Length){
+                    [char]$ch=$text.get_Chars($at)
+                    if([char]::IsLetterOrDigit($ch) -or $ch -ceq [Convert]::ToChar(39) -or $ch -ceq [Convert]::ToChar(8217)){$at++;continue}
+                    # Polish: a separator between digits stays inside one number (1,024 1.05 12:05 3/4 555-0147).
+                    if($numeric -and $at+1 -lt $text.Length -and ',.:/-'.IndexOf($ch) -ge 0 -and [char]::IsDigit($text.get_Chars($at-1)) -and [char]::IsDigit($text.get_Chars($at+1))){$at=$at+2;continue}
+                    break
+                }
+                if($numeric -and $at -lt $text.Length -and $text.get_Chars($at) -ceq [Convert]::ToChar(37)){$at++}
+                # Polish: a per-second or per-hour unit suffix (Mb/s, km/h).
+                if($this.Polish -and -not $numeric -and $at+1 -lt $text.Length -and $text.get_Chars($at) -ceq [Convert]::ToChar(47) -and 'sh'.IndexOf($text.get_Chars($at+1)) -ge 0 -and ($at+2 -ge $text.Length -or -not [char]::IsLetterOrDigit($text.get_Chars($at+2)))){$at=$at+2}
             }else{$kind='Boundary';$at++}
             [CoreOccurrence]$o=[CoreOccurrence]::new();$o.Text=$text.Substring($start,$at-$start);$o.Start=$start;$o.End=$at;$o.Kind=$kind;$o.LexicalId=-1
             if($kind -ceq 'Word'){$o.LexicalId=[Lexicon]::Find($o.Text);if($o.LexicalId -ge 0){$o.Capabilities=[Lexicon]::Capabilities($o.LexicalId)}}
@@ -1508,25 +1540,590 @@ class CoreEngine {
                 [string]$key=$o.Text.ToLowerInvariant()+':'+[Convert]::ToString($roles.get_Item(0))+':'+[Convert]::ToString($this.FollowingVowel($o))
                 if($this.Corrections.ContainsKey($key)){$phone=$this.Corrections.get_Item($key);$reason=$null;$t.PronunciationSource='ZiraCorrection'}
             }
-            [Collections.Generic.List[int]]$tokenIds=[Collections.Generic.List[int]]::new()
-            if(-not [object]::ReferenceEquals($null,$phone)){
-                if($phones.Length -gt 0){[void]$phones.Append(' ');$ids.Add(16)}
-                $t.EmissionStart=[System.Nullable[int]]::new($phones.Length)
-                [char]$ch=[Convert]::ToChar(0)
-                foreach($ch in $phone.ToCharArray()){
-                    [int]$symbol=[Phonology]::SymbolId($ch);if($symbol -lt 0){throw [ArgumentException]::new('Phone outside target vocabulary.')}
-                    $ids.Add($symbol);$tokenIds.Add($symbol)
-                }
-                [void]$phones.Append($phone);$t.EmissionEnd=[System.Nullable[int]]::new($phones.Length);$t.Status='Valid'
-            }else{$t.Status=$reason;$unresolved.Add($t);if($reason -ceq 'UnknownLexicalIdentity'){$oov.Add($t)}}
-            $t.Pron=$phone;$t.Roles=$roles.ToArray();$t.Alternatives=$alternatives.ToArray();$t.SymbolIds=$tokenIds.ToArray()
+            $t.Pron=$phone;$t.Roles=$roles.ToArray();$t.Alternatives=$alternatives.ToArray()
+            if([object]::ReferenceEquals($null,$phone)){$t.Status=$reason}else{$t.Status='Valid'}
             $tokens.Add($t);if($roles.Count -gt 1 -or $alternatives.Count -gt 1){$ambiguous.Add($t)}
         }
-        $r.Tokens=$tokens.ToArray();$r.UnresolvedSpans=$unresolved.ToArray();$r.OovSpans=$oov.ToArray();$r.AmbiguousDecisions=$ambiguous.ToArray()
+        # Emission follows the optional polish pass; an empty phone (a hyphen, an abbreviation's period) is silent.
+        [CoreToken[]]$emitted=$tokens.ToArray()
+        if($this.Polish){[CorePolish]::Apply($this,$emitted)}
+        [CoreToken]$e=$null
+        foreach($e in $emitted){
+            [Collections.Generic.List[int]]$tokenIds=[Collections.Generic.List[int]]::new()
+            if(-not [object]::ReferenceEquals($null,$e.Pron)){
+                if($e.Pron.Length -gt 0){
+                    if($phones.Length -gt 0){[void]$phones.Append(' ');$ids.Add(16)}
+                    $e.EmissionStart=[System.Nullable[int]]::new($phones.Length)
+                    [char]$ch=[Convert]::ToChar(0)
+                    foreach($ch in $e.Pron.ToCharArray()){
+                        [int]$symbol=[Phonology]::SymbolId($ch);if($symbol -lt 0){throw [ArgumentException]::new('Phone outside target vocabulary.')}
+                        $ids.Add($symbol);$tokenIds.Add($symbol)
+                    }
+                    [void]$phones.Append($e.Pron);$e.EmissionEnd=[System.Nullable[int]]::new($phones.Length)
+                }
+                $e.Status='Valid'
+            }else{$unresolved.Add($e);if($e.Status -ceq 'UnknownLexicalIdentity'){$oov.Add($e)}}
+            $e.SymbolIds=$tokenIds.ToArray()
+        }
+        $r.Tokens=$emitted;$r.UnresolvedSpans=$unresolved.ToArray();$r.OovSpans=$oov.ToArray();$r.AmbiguousDecisions=$ambiguous.ToArray()
         $r.SymbolIds=$ids.ToArray();$r.SupportedPhones=$phones.ToString();$r.Complete=$unresolved.Count -eq 0
         $r.PronunciationStatus='UnsupportedOrPending';if($r.Complete){$r.KokoroPhones=$r.SupportedPhones;$r.PronunciationStatus='Resolved'}
         $r.Bindings=$this.Trace.ToArray();$r.Withdrawn=$this.Withdrawn.ToArray()
         return $r
+    }
+}
+class CorePolish {
+    # Hand-written pass applied by CoreDriver.Run after lexical lookup, grammar roles and Zira choices.
+    # Order: resolve open spans (units, acronyms, numbers, abbreviations, contractions, inflections,
+    # heteronym defaults), then weak forms, primary stress on content words, and US flaps within words.
+    static [Collections.Generic.Dictionary[string,string]]$WeakTable
+    static [Collections.Generic.Dictionary[string,string]]$StrongTable
+    static [Collections.Generic.Dictionary[string,string]]$LetterTable
+    static [Collections.Generic.Dictionary[string,string]]$UnitTable
+    static [Collections.Generic.Dictionary[string,string]]$AbbreviationTable
+    static [Collections.Generic.Dictionary[string,string]] Table([string]$pairs) {
+        [Collections.Generic.Dictionary[string,string]]$d=[Collections.Generic.Dictionary[string,string]]::new([StringComparer]::Ordinal)
+        [string]$entry=''
+        foreach($entry in $pairs.Split([Convert]::ToChar(59),[StringSplitOptions]::RemoveEmptyEntries)){
+            [int]$at=$entry.IndexOf([Convert]::ToChar(61))
+            $d.Add($entry.Substring(0,$at),$entry.Substring($at+1))
+        }
+        return $d
+    }
+    # Function words keep these unstressed forms before another word; before punctuation or at the end they keep
+    # the lexicon form. Forms marked by the Zira measurement in phonemizer/README.md follow Zira's observed phones.
+    static [Collections.Generic.Dictionary[string,string]] Weak() {
+        if([object]::ReferenceEquals($null,[CorePolish]::WeakTable)){
+            [CorePolish]::WeakTable=[CorePolish]::Table('a=ə;an=ən;the=ðə;and=æn;of=ʌv;to=tʊ;for=fəɹ;from=fɹɑm;at=æt;as=æz;was=wəz;were=wɜɹ;can=kæn;are=ɑɹ;is=ɪz;am=æm;be=bi;been=bɪn;has=hæz;have=hæv;had=hæd;do=du;does=dʌz;did=dɪd;will=wɪl;would=wʊd;could=kʊd;should=ʃʊd;shall=ʃæl;must=mʌst;by=bI;with=wɪð;in=ɪn;into=ɪntu;on=ɑn;or=ɔɹ;but=bʌt;nor=nɔɹ;if=ɪf;than=ðæn;that=ðæt;then=ðɛn;so=sO;not=nɑt;he=hi;she=ʃi;we=wi;you=ju;they=ðA;it=ɪt;me=mi;him=hɪm;her=hɜɹ;us=ʌs;them=ðəm;my=mI;your=jɔɹ;his=hɪz;its=ɪts;our=Wɹ;their=ðɛɹ;i=I;this=ðɪs;these=ðiz;those=ðOz;there=ðɛɹ;some=sʌm;up=ʌp;upon=əpɑn;i''m=Im;i''ve=Iv;i''ll=Il;i''d=Id;you''re=jʊɹ;you''ve=juv;you''ll=jul;we''re=wɪɹ;we''ve=wiv;they''re=ðɛɹ;it''s=ɪts;that''s=ðæts;he''s=hiz;she''s=ʃiz;there''s=ðɛɹz')
+        }
+        return [CorePolish]::WeakTable
+    }
+    # Full forms for a function word before punctuation or at the end (What are you looking at?); Zira's
+    # phrase-final captures: at æt, for fɔɹ, from fɹɑm, her hɜɹ.
+    static [Collections.Generic.Dictionary[string,string]] Strong() {
+        if([object]::ReferenceEquals($null,[CorePolish]::StrongTable)){
+            [CorePolish]::StrongTable=[CorePolish]::Table('a=ˈA;and=ænd;of=ʌv;to=tu;for=fɔɹ;from=fɹɑm;at=æt;as=æz;was=wʌz;were=wɜɹ;can=kæn;are=ɑɹ;am=æm;has=hæz;have=hæv;had=hæd;do=du;does=dʌz;than=ðæn;that=ðæt;them=ðɛm;her=hɜɹ;us=ʌs;you=ju;him=hɪm')
+        }
+        return [CorePolish]::StrongTable
+    }
+    static [Collections.Generic.Dictionary[string,string]] Letters() {
+        if([object]::ReferenceEquals($null,[CorePolish]::LetterTable)){
+            [CorePolish]::LetterTable=[CorePolish]::Table('A=ˈA;B=bˈi;C=sˈi;D=dˈi;E=ˈi;F=ˈɛf;G=ʤˈi;H=ˈAʧ;I=ˈI;J=ʤˈA;K=kˈA;L=ˈɛl;M=ˈɛm;N=ˈɛn;O=ˈO;P=pˈi;Q=kjˈu;R=ˈɑɹ;S=ˈɛs;T=tˈi;U=jˈu;V=vˈi;W=dˈʌbəlju;X=ˈɛks;Y=wˈI;Z=zˈi')
+        }
+        return [CorePolish]::LetterTable
+    }
+    # Unit after a number: singular|plural.
+    static [Collections.Generic.Dictionary[string,string]] Units() {
+        if([object]::ReferenceEquals($null,[CorePolish]::UnitTable)){
+            [CorePolish]::UnitTable=[CorePolish]::Table('KB=kˈɪləbˌIt|kˈɪləbˌIts;MB=mˈɛɡəbˌIt|mˈɛɡəbˌIts;GB=ɡˈɪɡəbˌIt|ɡˈɪɡəbˌIts;TB=tˈɛɹəbˌIt|tˈɛɹəbˌIts;Kb=kˈɪləbˌɪt|kˈɪləbˌɪts;Mb=mˈɛɡəbˌɪt|mˈɛɡəbˌɪts;Gb=ɡˈɪɡəbˌɪt|ɡˈɪɡəbˌɪts;KiB=kˈɪbibˌIt|kˈɪbibˌIts;MiB=mˈɛbibˌIt|mˈɛbibˌIts;GiB=ɡˈɪbibˌIt|ɡˈɪbibˌIts;km=kɪlˈɑmətəɹ|kɪlˈɑmətəɹz;kg=kˈɪləɡɹˌæm|kˈɪləɡɹˌæmz;cm=sˈɛntəmˌitəɹ|sˈɛntəmˌitəɹz;mm=mˈɪləmˌitəɹ|mˈɪləmˌitəɹz;ms=mˈɪləsˌɛkənd|mˈɪləsˌɛkəndz;Hz=hˈɜɹts|hˈɜɹts;kHz=kˈɪləhˌɜɹts|kˈɪləhˌɜɹts;MHz=mˈɛɡəhˌɜɹts|mˈɛɡəhˌɜɹts;GHz=ɡˈɪɡəhˌɜɹts|ɡˈɪɡəhˌɜɹts;mph=mˈIl pəɹ ˈWəɹ|mˈIlz pəɹ ˈWəɹ;lb=pˈWnd|pˈWndz;lbs=pˈWndz|pˈWndz;oz=ˈWns|ˈWnsɪz;ft=fˈʊt|fˈit;AM=ˌAˈɛm|ˌAˈɛm;PM=pˌiˈɛm|pˌiˈɛm;am=ˌAˈɛm|ˌAˈɛm;pm=pˌiˈɛm|pˌiˈɛm')
+        }
+        return [CorePolish]::UnitTable
+    }
+    # Abbreviations written with a following period.
+    static [Collections.Generic.Dictionary[string,string]] Abbreviations() {
+        if([object]::ReferenceEquals($null,[CorePolish]::AbbreviationTable)){
+            [CorePolish]::AbbreviationTable=[CorePolish]::Table('Dr=dˈɑktəɹ;Mr=mˈɪstəɹ;Mrs=mˈɪsɪz;Ms=mˈɪz;Jr=ʤˈunjəɹ;Sr=sˈinjəɹ;Prof=pɹəfˈɛsəɹ;St=stɹˈit;Mt=mˈWnt;Ave=ˈævənˌu;Rd=ɹˈOd;vs=vˈɜɹsəs;etc=ɛtsˈɛtəɹə')
+        }
+        return [CorePolish]::AbbreviationTable
+    }
+    static [string] None() {[string]$none=$null;return $none}
+    static [bool] IsVowel([char]$c) {return 'AIOWYɑɔəæɛɜɪiʊuʌɐᵻaeoɚ'.IndexOf($c) -ge 0}
+    static [bool] IsStress([char]$c) {return $c -ceq [Convert]::ToChar(712) -or $c -ceq [Convert]::ToChar(716)}
+    static [string] Item([string]$list,[int]$index) {
+        return $list.Split([Convert]::ToChar(124),[StringSplitOptions]::None)[$index]
+    }
+    static [string] Ones() {return 'zˈiɹO|wˈʌn|tˈu|θɹˈi|fˈɔɹ|fˈIv|sˈɪks|sˈɛvən|ˈAt|nˈIn|tˈɛn|ɪlˈɛvən|twˈɛlv|θɜɹtˈin|fɔɹtˈin|fɪftˈin|sɪkstˈin|sɛvəntˈin|Atˈin|nIntˈin'}
+    static [string] OrdinalOnes() {return 'zˈiɹOθ|fˈɜɹst|sˈɛkənd|θˈɜɹd|fˈɔɹθ|fˈɪfθ|sˈɪksθ|sˈɛvənθ|ˈAtθ|nˈInθ|tˈɛnθ|ɪlˈɛvənθ|twˈɛlfθ|θɜɹtˈinθ|fɔɹtˈinθ|fɪftˈinθ|sɪkstˈinθ|sɛvəntˈinθ|Atˈinθ|nIntˈinθ'}
+    static [string] Tens() {return '||twˈɛnti|θˈɜɹti|fˈɔɹti|fˈɪfti|sˈɪksti|sˈɛvənti|ˈAti|nˈInti'}
+    static [string] OrdinalTens() {return '||twˈɛntiəθ|θˈɜɹtiəθ|fˈɔɹtiəθ|fˈɪftiəθ|sˈɪkstiəθ|sˈɛvəntiəθ|ˈAtiəθ|nˈIntiəθ'}
+    static [string] Months() {return '|ʤˈænjuˌɛɹi|fˈɛbɹuˌɛɹi|mˈɑɹʧ|ˈApɹəl|mˈA|ʤˈun|ʤʊlˈI|ˈɔɡəst|sɛptˈɛmbəɹ|ɑktˈObəɹ|nOvˈɛmbəɹ|dɪsˈɛmbəɹ'}
+    static [bool] IsMonth([string]$lower) {
+        return ' january february march april may june july august september october november december '.Contains(' '+$lower+' ')
+    }
+    # Digits only, at most nine, or -1.
+    static [int] Parse([string]$digits) {
+        if($digits.Length -lt 1 -or $digits.Length -gt 9){return -1}
+        [int]$v=0
+        [char]$c=[Convert]::ToChar(0)
+        foreach($c in $digits.ToCharArray()){
+            if(-not [char]::IsDigit($c) -or [Convert]::ToInt32($c) -gt 57){return -1}
+            $v=$v*10+[Convert]::ToInt32($c)-48
+        }
+        return $v
+    }
+    static [string] Digits([string]$digits) {
+        [Text.StringBuilder]$b=[Text.StringBuilder]::new()
+        [char]$c=[Convert]::ToChar(0)
+        foreach($c in $digits.ToCharArray()){
+            [int]$d=[Convert]::ToInt32($c)-48
+            if($d -lt 0 -or $d -gt 9){return [CorePolish]::None()}
+            if($b.Length -gt 0){[void]$b.Append(' ')}
+            [void]$b.Append([CorePolish]::Item([CorePolish]::Ones(),$d))
+        }
+        return $b.ToString()
+    }
+    static [string] Cardinal([int]$v) {
+        if($v -lt 20){return [CorePolish]::Item([CorePolish]::Ones(),$v)}
+        if($v -lt 100){
+            [string]$tens=[CorePolish]::Item([CorePolish]::Tens(),[int](($v-$v%10)/10))
+            if($v%10 -eq 0){return $tens}
+            return $tens+' '+[CorePolish]::Item([CorePolish]::Ones(),$v%10)
+        }
+        [int]$scale=100;[string]$name='hˈʌndɹəd'
+        if($v -ge 1000){$scale=1000;$name='θˈWzənd'}
+        if($v -ge 1000000){$scale=1000000;$name='mˈɪljən'}
+        if($v -ge 1000000000){$scale=1000000000;$name='bˈɪljən'}
+        [string]$head=[CorePolish]::Cardinal([int](($v-$v%$scale)/$scale))+' '+$name
+        if($v%$scale -eq 0){return $head}
+        return $head+' '+[CorePolish]::Cardinal($v%$scale)
+    }
+    static [string] OrdinalWord([string]$word) {
+        for([int]$i=0;$i -lt 20;$i++){if($word -ceq [CorePolish]::Item([CorePolish]::Ones(),$i)){return [CorePolish]::Item([CorePolish]::OrdinalOnes(),$i)}}
+        for([int]$i=2;$i -lt 10;$i++){if($word -ceq [CorePolish]::Item([CorePolish]::Tens(),$i)){return [CorePolish]::Item([CorePolish]::OrdinalTens(),$i)}}
+        return $word+'θ'
+    }
+    static [string] Ordinal([int]$v) {
+        [string]$words=[CorePolish]::Cardinal($v)
+        [int]$at=$words.LastIndexOf([Convert]::ToChar(32))
+        return $words.Substring(0,$at+1)+[CorePolish]::OrdinalWord($words.Substring($at+1))
+    }
+    static [string] Year([int]$v) {
+        if($v -ge 2000 -and $v -le 2009){
+            if($v -eq 2000){return 'tˈu θˈWzənd'}
+            return 'tˈu θˈWzənd '+[CorePolish]::Item([CorePolish]::Ones(),$v-2000)
+        }
+        [int]$low=$v%100;[int]$high=($v-$low)/100
+        if($low -eq 0){return [CorePolish]::Cardinal($high)+' hˈʌndɹəd'}
+        if($low -lt 10){return [CorePolish]::Cardinal($high)+' ˈO '+[CorePolish]::Item([CorePolish]::Ones(),$low)}
+        return [CorePolish]::Cardinal($high)+' '+[CorePolish]::Cardinal($low)
+    }
+    # Plural or 3rd-person -s after the final phone: ɪz after sibilants, s after voiceless, z otherwise.
+    static [string] SuffixS([string]$phone) {
+        [char]$last=$phone.get_Chars($phone.Length-1)
+        if('szʃʒʧʤ'.IndexOf($last) -ge 0){return $phone+'ɪz'}
+        if('ptkfθ'.IndexOf($last) -ge 0){return $phone+'s'}
+        return $phone+'z'
+    }
+    static [string] SuffixD([string]$phone) {
+        [char]$last=$phone.get_Chars($phone.Length-1)
+        if('td'.IndexOf($last) -ge 0){return $phone+'ɪd'}
+        if('pkfθsʃʧ'.IndexOf($last) -ge 0){return $phone+'t'}
+        return $phone+'d'
+    }
+    static [string] Number([string]$s,[string]$previous) {
+        if($s.Length -lt 1 -or $s.Length -gt 32){return [CorePolish]::None()}
+        [char]$first=$s.get_Chars(0)
+        if($first -ceq [Convert]::ToChar(45)){
+            [string]$rest=[CorePolish]::Number($s.Substring(1),'')
+            if([object]::ReferenceEquals($null,$rest)){return $rest}
+            return 'mˈInəs '+$rest
+        }
+        if($first -ceq [Convert]::ToChar(36)){return [CorePolish]::Money($s.Substring(1))}
+        if($s.get_Chars($s.Length-1) -ceq [Convert]::ToChar(37)){
+            [string]$percent=[CorePolish]::Number($s.Substring(0,$s.Length-1),'')
+            if([object]::ReferenceEquals($null,$percent)){return $percent}
+            return $percent+' pəɹsˈɛnt'
+        }
+        [string[]]$parts=$s.Split([Convert]::ToChar(58),[StringSplitOptions]::None)
+        if($parts.Length -eq 2){
+            [int]$hour=[CorePolish]::Parse($parts[0]);[int]$minute=[CorePolish]::Parse($parts[1])
+            if($hour -lt 0 -or $hour -gt 24 -or $minute -lt 0 -or $minute -gt 59 -or $parts[1].Length -ne 2){return [CorePolish]::None()}
+            if($minute -eq 0){return [CorePolish]::Cardinal($hour)+' əklˈɑk'}
+            if($minute -lt 10){return [CorePolish]::Cardinal($hour)+' ˈO '+[CorePolish]::Item([CorePolish]::Ones(),$minute)}
+            return [CorePolish]::Cardinal($hour)+' '+[CorePolish]::Cardinal($minute)
+        }
+        if($parts.Length -gt 2){return [CorePolish]::None()}
+        $parts=$s.Split([Convert]::ToChar(47),[StringSplitOptions]::None)
+        if($parts.Length -eq 3){
+            [int]$month=[CorePolish]::Parse($parts[0]);[int]$day=[CorePolish]::Parse($parts[1]);[int]$year=[CorePolish]::Parse($parts[2])
+            if($month -lt 1 -or $month -gt 12 -or $day -lt 1 -or $day -gt 31 -or $year -lt 0 -or ($parts[2].Length -ne 2 -and $parts[2].Length -ne 4)){return [CorePolish]::None()}
+            [string]$date=[CorePolish]::Item([CorePolish]::Months(),$month)+' '+[CorePolish]::Ordinal($day)+' '
+            if($parts[2].Length -eq 4){return $date+[CorePolish]::Year($year)}
+            if($year -lt 10){return $date+'ˈO '+[CorePolish]::Item([CorePolish]::Ones(),$year)}
+            return $date+[CorePolish]::Cardinal($year)
+        }
+        if($parts.Length -eq 2){
+            [int]$numerator=[CorePolish]::Parse($parts[0]);[int]$denominator=[CorePolish]::Parse($parts[1])
+            if($numerator -lt 0 -or $denominator -lt 2){return [CorePolish]::None()}
+            [string]$whole=[CorePolish]::Cardinal($numerator)+' '
+            if($denominator -eq 2){if($numerator -eq 1){return $whole+'hˈæf'};return $whole+'hˈævz'}
+            if($denominator -eq 4){if($numerator -eq 1){return $whole+'kwˈɔɹtəɹ'};return $whole+'kwˈɔɹtəɹz'}
+            if($numerator -eq 1){return $whole+[CorePolish]::Ordinal($denominator)}
+            return $whole+[CorePolish]::SuffixS([CorePolish]::Ordinal($denominator))
+        }
+        if($parts.Length -gt 3){return [CorePolish]::None()}
+        $parts=$s.Split([Convert]::ToChar(45),[StringSplitOptions]::None)
+        if($parts.Length -gt 1){
+            [Text.StringBuilder]$spoken=[Text.StringBuilder]::new()
+            [string]$group=''
+            foreach($group in $parts){
+                [string]$digits=[CorePolish]::Digits($group)
+                if([object]::ReferenceEquals($null,$digits) -or $group.Length -lt 1){return [CorePolish]::None()}
+                if($spoken.Length -gt 0){[void]$spoken.Append(' ')}
+                [void]$spoken.Append($digits)
+            }
+            return $spoken.ToString()
+        }
+        $parts=$s.Split([Convert]::ToChar(46),[StringSplitOptions]::None)
+        if($parts.Length -gt 2){
+            [Text.StringBuilder]$version=[Text.StringBuilder]::new()
+            [string]$piece=''
+            foreach($piece in $parts){
+                [int]$value=[CorePolish]::Parse($piece)
+                if($value -lt 0){return [CorePolish]::None()}
+                if($version.Length -gt 0){[void]$version.Append(' pˈYnt ')}
+                [void]$version.Append([CorePolish]::Cardinal($value))
+            }
+            return $version.ToString()
+        }
+        if($parts.Length -eq 2){
+            [string]$fraction=[CorePolish]::Digits($parts[1])
+            [string]$integer=[CorePolish]::Number($parts[0],'')
+            if($parts[0].Length -eq 0){$integer='zˈiɹO'}
+            if([object]::ReferenceEquals($null,$fraction) -or $parts[1].Length -lt 1 -or [object]::ReferenceEquals($null,$integer)){return [CorePolish]::None()}
+            return $integer+' pˈYnt '+$fraction
+        }
+        [string]$plain=$s.Replace(',','')
+        if($plain.Length -ne $s.Length){
+            [string[]]$groups=$s.Split([Convert]::ToChar(44),[StringSplitOptions]::None)
+            for([int]$g=1;$g -lt $groups.Length;$g++){if($groups[$g].Length -ne 3){return [CorePolish]::None()}}
+            if($groups[0].Length -lt 1 -or $groups[0].Length -gt 3){return [CorePolish]::None()}
+        }
+        [int]$end=0
+        while($end -lt $plain.Length -and [char]::IsDigit($plain.get_Chars($end))){$end++}
+        if($end -eq 0){return [CorePolish]::None()}
+        [string]$number=$plain.Substring(0,$end);[string]$suffix=$plain.Substring($end).ToLowerInvariant()
+        [int]$n=[CorePolish]::Parse($number)
+        if($suffix.Length -gt 0){
+            if($n -lt 0){return [CorePolish]::None()}
+            if($suffix -ceq 'st' -or $suffix -ceq 'nd' -or $suffix -ceq 'rd' -or $suffix -ceq 'th'){return [CorePolish]::Ordinal($n)}
+            if($suffix -ceq 's'){
+                if($number.Length -eq 4 -and $n -ge 1100 -and $n -le 2099){return [CorePolish]::Year($n)+'z'}
+                return [CorePolish]::SuffixS([CorePolish]::Cardinal($n))
+            }
+            return [CorePolish]::None()
+        }
+        if($n -ge 1 -and $n -le 31 -and [CorePolish]::IsMonth($previous)){return [CorePolish]::Ordinal($n)}
+        if($n -lt 0 -or ($number.Length -gt 1 -and $number.get_Chars(0) -ceq [Convert]::ToChar(48))){return [CorePolish]::Digits($number)}
+        if($number.Length -eq 4 -and $n -ge 1100 -and $n -le 2099 -and $plain.Length -eq $s.Length){return [CorePolish]::Year($n)}
+        return [CorePolish]::Cardinal($n)
+    }
+    static [string] Money([string]$s) {
+        [string[]]$parts=$s.Replace(',','').Split([Convert]::ToChar(46),[StringSplitOptions]::None)
+        if($parts.Length -gt 2){return [CorePolish]::None()}
+        [int]$dollars=0
+        if($parts[0].Length -gt 0){$dollars=[CorePolish]::Parse($parts[0])}
+        [int]$cents=0
+        if($parts.Length -eq 2){
+            if($parts[1].Length -ne 2){return [CorePolish]::None()}
+            $cents=[CorePolish]::Parse($parts[1])
+        }
+        if($dollars -lt 0 -or $cents -lt 0){return [CorePolish]::None()}
+        [string]$spoken=''
+        if($dollars -gt 0 -or $cents -eq 0){
+            $spoken=[CorePolish]::Cardinal($dollars)+' dˈɑləɹz'
+            if($dollars -eq 1){$spoken=[CorePolish]::Cardinal($dollars)+' dˈɑləɹ'}
+        }
+        if($cents -gt 0){
+            if($spoken.Length -gt 0){$spoken=$spoken+' '+[CorePolish]::Weak().get_Item('and')+' '}
+            if($cents -eq 1){$spoken=$spoken+[CorePolish]::Cardinal($cents)+' sˈɛnt'}else{$spoken=$spoken+[CorePolish]::Cardinal($cents)+' sˈɛnts'}
+        }
+        return $spoken
+    }
+    static [bool] IsNumber([string]$text) {
+        if($text.Length -lt 1){return $false}
+        [char]$c=$text.get_Chars(0)
+        if([char]::IsDigit($c)){return $true}
+        return $text.Length -gt 1 -and ($c -ceq [Convert]::ToChar(36) -or $c -ceq [Convert]::ToChar(45)) -and [char]::IsDigit($text.get_Chars(1))
+    }
+    static [string] Spell([string]$word) {
+        [Text.StringBuilder]$b=[Text.StringBuilder]::new()
+        for([int]$i=0;$i -lt $word.Length;$i++){
+            [string]$letter=[CorePolish]::Letters().get_Item($word.Substring($i,1))
+            if($i -lt $word.Length-1){$letter=$letter.Replace('ˈ','ˌ')}
+            [void]$b.Append($letter)
+        }
+        return $b.ToString()
+    }
+    static [bool] IsAcronym([string]$word) {
+        if($word.Length -lt 2 -or $word.Length -gt 6){return $false}
+        [char]$c=[Convert]::ToChar(0)
+        foreach($c in $word.ToCharArray()){if([Convert]::ToInt32($c) -lt 65 -or [Convert]::ToInt32($c) -gt 90){return $false}}
+        if([CorePolish]::Weak().ContainsKey($word.ToLowerInvariant())){return $false}
+        # Written-in-capitals words of four or more letters that the lexicon knows (NASA, STOP) are read as words.
+        return $word.Length -lt 4 -or [Lexicon]::Find($word) -lt 0
+    }
+    static [int] Nuclei([string]$phone) {
+        [int]$count=0;[bool]$inside=$false
+        [char]$c=[Convert]::ToChar(0)
+        foreach($c in $phone.ToCharArray()){
+            [bool]$vowel=[CorePolish]::IsVowel($c)
+            if($vowel -and -not $inside){$count++}
+            $inside=$vowel
+        }
+        return $count
+    }
+    # Same-role Moby variants: an untagged Moby row fills every role, so a variant this role does not share with
+    # every other role came from a role-tagged row (produce/n, export/v) and is preferred. Then the fewest
+    # syllables (Moby lists readings such as "Here" /hˈiɹi/ beside here /hiɹ/), then the first listed.
+    static [string] Pick([int]$id,[int]$role) {
+        [string[]]$values=[Lexicon]::Phones($id,$role).Split([Convert]::ToChar(124),[StringSplitOptions]::RemoveEmptyEntries)
+        if($values.Length -eq 0){return [CorePolish]::None()}
+        [string]$best=$values[0];[int]$bestScore=100000
+        [string]$value=''
+        foreach($value in $values){
+            [int]$score=[CorePolish]::Nuclei($value)
+            for([int]$r=0;$r -lt 5;$r++){
+                [string]$other=[Lexicon]::Phones($id,$r)
+                if($r -ne $role -and $other.Length -gt 0 -and ('|'+$other+'|').IndexOf('|'+$value+'|') -lt 0){$score=$score-1000;break}
+            }
+            if($score -lt $bestScore){$best=$value;$bestScore=$score}
+        }
+        return $best
+    }
+    static [string] Lexical([int]$id,[int]$role) {
+        [string]$phone=[CorePolish]::Pick($id,$role)
+        for([int]$r=0;$r -lt 5 -and [object]::ReferenceEquals($null,$phone);$r++){$phone=[CorePolish]::Pick($id,$r)}
+        return $phone
+    }
+    static [string] Lower([CoreToken[]]$tokens,[int]$index) {
+        if($index -lt 0 -or $index -ge $tokens.Length){return ''}
+        return $tokens[$index].Word.ToLowerInvariant().Replace([Convert]::ToChar(8217),[Convert]::ToChar(39))
+    }
+    static [bool] IsWord([CoreEngine]$engine,[int]$index) {
+        return $index -ge 0 -and $index -lt $engine.Occurrences.Count -and $engine.Occurrences.get_Item($index).Kind -ceq 'Word'
+    }
+    # Heteronym and variant default when the grammar leaves the role open: the previous word decides.
+    static [int] Role([CoreEngine]$engine,[CoreToken[]]$tokens,[int]$index,[int]$fallback) {
+        if(-not [CorePolish]::IsWord($engine,$index-1)){return 1}
+        [string]$previous=' '+[CorePolish]::Lower($tokens,$index-1)+' '
+        if(' the a an this that these those my your his her its our their every each some any no another fresh '.Contains($previous)){return 0}
+        if(' to will would can could should must may might shall do does did don''t can''t won''t didn''t doesn''t please not i you we they let''s never always often also he she it who '.Contains($previous)){return 1}
+        if(' is are was were be been am being very so too quite more most '.Contains($previous)){return 2}
+        # A determiner and plural subject directly before a clause-final word: "The rebels rebel."
+        if($previous.EndsWith('s ',[StringComparison]::Ordinal) -and -not [CorePolish]::IsWord($engine,$index+1) -and ' the these those my your his her our their some many '.Contains(' '+[CorePolish]::Lower($tokens,$index-2)+' ')){return 1}
+        return $fallback
+    }
+    static [string] Heteronym([CoreEngine]$engine,[CoreToken[]]$tokens,[int]$index) {
+        [CoreToken]$t=$tokens[$index]
+        [string]$lower=[CorePolish]::Lower($tokens,$index)
+        if($lower -ceq 'read'){
+            [string]$previous=' '+[CorePolish]::Lower($tokens,$index-1)+' '
+            [bool]$past=' had has have was were been is are be ''ve ''d he she it '.Contains($previous)
+            for([int]$j=$index+1;$j -lt $tokens.Length;$j++){if(' yesterday ago last '.Contains(' '+[CorePolish]::Lower($tokens,$j)+' ')){$past=$true}}
+            if($past){return [CorePolish]::Lexical($t.LexicalId,3)}
+            return [CorePolish]::Lexical($t.LexicalId,1)
+        }
+        [int]$role=[CorePolish]::Role($engine,$tokens,$index,0)
+        if($role -eq 2 -and [Lexicon]::Phones($t.LexicalId,2).Length -eq 0){$role=3}
+        if($role -eq 3 -and [Lexicon]::Phones($t.LexicalId,3).Length -eq 0){$role=0}
+        return [CorePolish]::Lexical($t.LexicalId,$role)
+    }
+    static [string] Base([string]$word,[int]$role) {
+        [int]$id=[Lexicon]::Find($word)
+        if($id -lt 0 -or $word.Length -lt 2){return [CorePolish]::None()}
+        return [CorePolish]::Lexical($id,$role)
+    }
+    # Regular inflection of a lexicon word: -s/-es/-ies, -ed/-ied, -ing, with e-drop and doubled consonants.
+    static [string] Inflect([string]$w,[int]$nounRole) {
+        [int]$n=$w.Length
+        [string]$base=$null
+        if($n -ge 4 -and $w.EndsWith('ies',[StringComparison]::Ordinal)){
+            $base=[CorePolish]::Base($w.Substring(0,$n-3)+'y',$nounRole);if(-not [object]::ReferenceEquals($null,$base)){return $base+'z'}
+        }
+        if($n -ge 4 -and $w.EndsWith('es',[StringComparison]::Ordinal)){
+            $base=[CorePolish]::Base($w.Substring(0,$n-2),$nounRole);if(-not [object]::ReferenceEquals($null,$base)){return [CorePolish]::SuffixS($base)}
+        }
+        if($n -ge 3 -and $w.EndsWith('s',[StringComparison]::Ordinal) -and -not $w.EndsWith('ss',[StringComparison]::Ordinal)){
+            $base=[CorePolish]::Base($w.Substring(0,$n-1),$nounRole);if(-not [object]::ReferenceEquals($null,$base)){return [CorePolish]::SuffixS($base)}
+        }
+        if($n -ge 4 -and $w.EndsWith('ied',[StringComparison]::Ordinal)){
+            $base=[CorePolish]::Base($w.Substring(0,$n-3)+'y',1);if(-not [object]::ReferenceEquals($null,$base)){return $base+'d'}
+        }
+        if($n -ge 4 -and $w.EndsWith('ed',[StringComparison]::Ordinal)){
+            $base=[CorePolish]::Base($w.Substring(0,$n-1),1);if(-not [object]::ReferenceEquals($null,$base)){return [CorePolish]::SuffixD($base)}
+            $base=[CorePolish]::Base($w.Substring(0,$n-2),1);if(-not [object]::ReferenceEquals($null,$base)){return [CorePolish]::SuffixD($base)}
+            if($n -ge 5 -and $w.get_Chars($n-3) -ceq $w.get_Chars($n-4)){
+                $base=[CorePolish]::Base($w.Substring(0,$n-3),1);if(-not [object]::ReferenceEquals($null,$base)){return [CorePolish]::SuffixD($base)}
+            }
+        }
+        if($n -ge 5 -and $w.EndsWith('ing',[StringComparison]::Ordinal)){
+            $base=[CorePolish]::Base($w.Substring(0,$n-3),1);if(-not [object]::ReferenceEquals($null,$base)){return $base+'ɪŋ'}
+            $base=[CorePolish]::Base($w.Substring(0,$n-3)+'e',1);if(-not [object]::ReferenceEquals($null,$base)){return $base+'ɪŋ'}
+            if($n -ge 6 -and $w.get_Chars($n-4) -ceq $w.get_Chars($n-5)){
+                $base=[CorePolish]::Base($w.Substring(0,$n-4),1);if(-not [object]::ReferenceEquals($null,$base)){return $base+'ɪŋ'}
+            }
+        }
+        return [CorePolish]::None()
+    }
+    # Possessive and contracted forms: base word plus 's, 're, 've, 'll, 'd, 'm, n't, or a plural possessive.
+    static [string] Contract([string]$w,[int]$nounRole) {
+        [int]$at=$w.LastIndexOf([Convert]::ToChar(39))
+        if($at -lt 1){return [CorePolish]::None()}
+        [string]$suffix=$w.Substring($at)
+        if($suffix -ceq '''t' -and $at -ge 2 -and $w.get_Chars($at-1) -ceq [Convert]::ToChar(110)){
+            [string]$stem=[CorePolish]::Base($w.Substring(0,$at-1),1)
+            if([object]::ReferenceEquals($null,$stem)){return $stem}
+            if([CorePolish]::IsVowel($stem.get_Chars($stem.Length-1))){return $stem+'nt'}
+            return $stem+'ənt'
+        }
+        [string]$base=[CorePolish]::Base($w.Substring(0,$at),$nounRole)
+        if([object]::ReferenceEquals($null,$base)){return $base}
+        if($suffix -ceq ''''){return $base}
+        if($suffix -ceq '''s'){return [CorePolish]::SuffixS($base)}
+        [bool]$open=[CorePolish]::IsVowel($base.get_Chars($base.Length-1))
+        if($suffix -ceq '''re'){if($open){return $base+'ɹ'};return $base+'əɹ'}
+        if($suffix -ceq '''ve'){if($open){return $base+'v'};return $base+'əv'}
+        if($suffix -ceq '''ll'){if($open){return $base+'l'};return $base+'əl'}
+        if($suffix -ceq '''d'){if($open){return $base+'d'};return $base+'əd'}
+        if($suffix -ceq '''m'){return $base+'m'}
+        return [CorePolish]::None()
+    }
+    static [string] Symbol([string]$text) {
+        if($text -ceq '-' -or $text -ceq '/' -or $text -ceq [Convert]::ToString([Convert]::ToChar(8211))){return ''}
+        if($text -ceq '&'){return [CorePolish]::Weak().get_Item('and')}
+        if($text -ceq '+'){return 'plˈʌs'}
+        if($text -ceq '@'){return 'ˈæt'}
+        return [CorePolish]::None()
+    }
+    static [bool] StartsWithVowel([string]$phone) {
+        for([int]$i=0;$i -lt $phone.Length;$i++){
+            [char]$c=$phone.get_Chars($i)
+            if(-not [CorePolish]::IsStress($c)){return [CorePolish]::IsVowel($c)}
+        }
+        return $false
+    }
+    # Primary stress before the vowel nucleus of a content word that has none: promote secondary stress, else
+    # mark the first full vowel (or the first vowel when every vowel is a schwa).
+    static [string] Stress([string]$phone) {
+        if($phone.IndexOf([Convert]::ToChar(712)) -ge 0 -or $phone.IndexOf([Convert]::ToChar(32)) -ge 0){return $phone}
+        [int]$secondary=$phone.IndexOf([Convert]::ToChar(716))
+        if($secondary -ge 0){return $phone.Substring(0,$secondary)+'ˈ'+$phone.Substring($secondary+1)}
+        [int]$at=-1
+        for([int]$i=0;$i -lt $phone.Length;$i++){
+            [char]$c=$phone.get_Chars($i)
+            if([CorePolish]::IsVowel($c) -and $c -cne [Convert]::ToChar(601)){$at=$i;break}
+        }
+        if($at -lt 0){for([int]$i=0;$i -lt $phone.Length;$i++){if([CorePolish]::IsVowel($phone.get_Chars($i))){$at=$i;break}}}
+        if($at -lt 0){return $phone}
+        # A stressed schwa is ʌ, or ɜ before ɹ (Moby writes cup and dove with an unstressed /@/).
+        if($phone.get_Chars($at) -ceq [Convert]::ToChar(601)){
+            if($at+1 -lt $phone.Length -and $phone.get_Chars($at+1) -ceq [Convert]::ToChar(633)){return $phone.Substring(0,$at)+'ˈɜ'+$phone.Substring($at+1)}
+            return $phone.Substring(0,$at)+'ˈʌ'+$phone.Substring($at+1)
+        }
+        return $phone.Substring(0,$at)+'ˈ'+$phone.Substring($at)
+    }
+    # US flap within a word: t or d after a vowel, or t after ɹ, before an unstressed reduced vowel (a stress mark
+    # would come first) or syllabic əl. Not before a full vowel (detail), a final ən (button), or for d after ɹ
+    # (Moby's -day words: yesterday /jˈɛstəɹdi/).
+    static [string] Flap([string]$phone) {
+        [Text.StringBuilder]$b=[Text.StringBuilder]::new($phone)
+        for([int]$i=1;$i -lt $phone.Length-1;$i++){
+            [char]$c=$phone.get_Chars($i)
+            if($c -cne [Convert]::ToChar(116) -and $c -cne [Convert]::ToChar(100)){continue}
+            [char]$before=$phone.get_Chars($i-1)
+            if(-not [CorePolish]::IsVowel($before) -and ($before -cne [Convert]::ToChar(633) -or $c -ceq [Convert]::ToChar(100))){continue}
+            if('əɪiɚᵻOʊ'.IndexOf($phone.get_Chars($i+1)) -lt 0){continue}
+            if($i+3 -le $phone.Length -and $phone.Substring($i+1,2) -ceq 'ən' -and ($i+3 -eq $phone.Length -or $phone.get_Chars($i+3) -ceq [Convert]::ToChar(32))){continue}
+            $b.set_Chars($i,[Convert]::ToChar(638))
+        }
+        return $b.ToString()
+    }
+    static [void] Resolve([CoreEngine]$engine,[CoreToken[]]$tokens,[int]$i) {
+        [CoreToken]$t=$tokens[$i]
+        [CoreOccurrence]$o=$engine.Occurrences.get_Item($i)
+        [string]$text=$o.Text.Replace([Convert]::ToChar(8217),[Convert]::ToChar(39))
+        [string]$lower=$text.ToLowerInvariant()
+        [string]$previous=[CorePolish]::Lower($tokens,$i-1)
+        [bool]$afterNumber=[CorePolish]::IsWord($engine,$i-1) -and [CorePolish]::IsNumber($tokens[$i-1].Word)
+        # A unit after a number, with an optional per-second or per-hour suffix.
+        if($afterNumber){
+            [string]$unit=$text;[string]$per=''
+            if($unit.EndsWith('/s',[StringComparison]::Ordinal)){$unit=$unit.Substring(0,$unit.Length-2);$per=' pəɹ sˈɛkənd'}
+            if($unit.EndsWith('/h',[StringComparison]::Ordinal)){$unit=$unit.Substring(0,$unit.Length-2);$per=' pəɹ ˈWəɹ'}
+            if([CorePolish]::Units().ContainsKey($unit)){
+                [int]$form=1
+                if($tokens[$i-1].Word -ceq '1' -or $tokens[$i-1].Word -ceq '-1'){$form=0}
+                $t.Pron=[CorePolish]::Item([CorePolish]::Units().get_Item($unit),$form)+$per;$t.PronunciationSource='Unit';return
+            }
+        }
+        if([CorePolish]::IsAcronym($text)){$t.Pron=[CorePolish]::Spell($text);$t.PronunciationSource='Acronym';return}
+        if(-not [object]::ReferenceEquals($null,$t.Pron)){return}
+        if($o.LexicalId -ge 0){
+            [string]$chosen=[CorePolish]::Heteronym($engine,$tokens,$i)
+            if(-not [object]::ReferenceEquals($null,$chosen)){$t.Pron=$chosen;$t.PronunciationSource='HeteronymDefault'}
+            return
+        }
+        [string]$phone=$null;[string]$source='Number'
+        if([CorePolish]::IsNumber($text)){$phone=[CorePolish]::Number($text,$previous)}
+        elseif([CorePolish]::Abbreviations().ContainsKey($text) -and [CorePolish]::IsPeriod($engine,$i+1)){
+            $source='Abbreviation';$phone=[CorePolish]::Abbreviations().get_Item($text)
+            if($text -ceq 'St' -and [CorePolish]::IsWord($engine,$i+2) -and [char]::IsUpper($tokens[$i+2].Word.get_Chars(0))){$phone='sˈAnt'}
+            # The abbreviation's period is not a sentence stop when more words follow.
+            for([int]$j=$i+2;$j -lt $tokens.Length;$j++){if([CorePolish]::IsWord($engine,$j)){$tokens[$i+1].Pron='';$tokens[$i+1].PronunciationSource='Abbreviation';break}}
+        }
+        elseif($lower.IndexOf([Convert]::ToChar(39)) -ge 0){
+            $source='Contraction'
+            $phone=[CorePolish]::Lexical2($lower)
+            if([object]::ReferenceEquals($null,$phone)){$phone=[CorePolish]::Contract($lower,[CorePolish]::Role($engine,$tokens,$i,0))}
+        }
+        else{$source='Morphology';$phone=[CorePolish]::Inflect($lower,[CorePolish]::Role($engine,$tokens,$i,0))}
+        if(-not [object]::ReferenceEquals($null,$phone)){$t.Pron=$phone;$t.PronunciationSource=$source}
+    }
+    static [string] Lexical2([string]$word) {
+        [int]$id=[Lexicon]::Find($word)
+        if($id -lt 0){return [CorePolish]::None()}
+        return [CorePolish]::Lexical($id,0)
+    }
+    static [bool] IsPeriod([CoreEngine]$engine,[int]$index) {
+        if($index -lt 1 -or $index -ge $engine.Occurrences.Count){return $false}
+        [CoreOccurrence]$o=$engine.Occurrences.get_Item($index)
+        return $o.Kind -ceq 'Boundary' -and $o.Text -ceq '.' -and $o.Start -eq $engine.Occurrences.get_Item($index-1).End
+    }
+    static [void] Apply([CoreEngine]$engine,[CoreToken[]]$tokens) {
+        for([int]$i=0;$i -lt $tokens.Length;$i++){
+            [CoreToken]$t=$tokens[$i]
+            if($engine.Occurrences.get_Item($i).Kind -ceq 'Boundary'){
+                if([object]::ReferenceEquals($null,$t.Pron)){
+                    [string]$symbol=[CorePolish]::Symbol($t.Word)
+                    if(-not [object]::ReferenceEquals($null,$symbol)){$t.Pron=$symbol;$t.PronunciationSource='Symbol'}
+                }
+                continue
+            }
+            [CorePolish]::Resolve($engine,$tokens,$i)
+        }
+        for([int]$i=0;$i -lt $tokens.Length;$i++){
+            [CoreToken]$t=$tokens[$i]
+            if(-not [CorePolish]::IsWord($engine,$i) -or [object]::ReferenceEquals($null,$t.Pron) -or $t.Pron.Length -eq 0){continue}
+            [string]$lower=[CorePolish]::Lower($tokens,$i)
+            [string]$source=$t.PronunciationSource
+            [bool]$lexical=$source -ceq 'CompiledLexicon' -or $source -ceq 'HeteronymDefault'
+            [bool]$function=[CorePolish]::Weak().ContainsKey($lower)
+            if($function -and [CorePolish]::IsWord($engine,$i-1) -and ' the a an my your his her our their '.Contains(' '+[CorePolish]::Lower($tokens,$i-1)+' ')){$function=$false}
+            [string]$phone=$t.Pron
+            # Function words stay unstressed; the weak form replaces only a lexicon or default choice.
+            if($function -and $lexical){
+                if([CorePolish]::IsWord($engine,$i+1) -and $i+1 -lt $tokens.Length -and -not [object]::ReferenceEquals($null,$tokens[$i+1].Pron) -and $tokens[$i+1].Pron.Length -gt 0){
+                    $phone=[CorePolish]::Weak().get_Item($lower)
+                    # Zira reads the as ðɪ before a vowel (158 of 984 captured).
+                    if($lower -ceq 'the' -and [CorePolish]::StartsWithVowel($tokens[$i+1].Pron)){$phone='ðɪ'}
+                    if($phone -cne $t.Pron){$t.Polish=$t.Polish+'WeakForm;'}
+                }elseif([CorePolish]::Strong().ContainsKey($lower)){
+                    $phone=[CorePolish]::Strong().get_Item($lower)
+                    if($phone -cne $t.Pron){$t.Polish=$t.Polish+'StrongForm;'}
+                }
+            }elseif(-not $function){
+                [string]$stressed=[CorePolish]::Stress($phone)
+                if($stressed -cne $phone){$t.Polish=$t.Polish+'Stress;'}
+                $phone=$stressed
+            }
+            if($source -cne 'ZiraCorrection'){
+                [string]$flapped=[CorePolish]::Flap($phone)
+                if($flapped -cne $phone){$t.Polish=$t.Polish+'Flap;'}
+                $phone=$flapped
+            }
+            $t.Pron=$phone
+        }
     }
 }
 class CoreDriver {
@@ -1537,7 +2134,7 @@ class CoreDriver {
     }
     static [string] NormalizeZira([string]$raw) {
         if([object]::ReferenceEquals($null,$raw) -or $raw.Length -gt 8192){throw [ArgumentOutOfRangeException]::new('raw')}
-        return $raw.Replace('i͡ə','iə').Replace('t͡ʃ','ʧ').Replace('d͡ʒ','ʤ').Replace('a͡ɪ','I').Replace('e͡ɪ','A').Replace('o͡ʊ','O').Replace('a͡ʊ','W').Replace('ɔ͡ɪ','Y').Replace('a͡i','I').Replace('e͡i','A').Replace('o͡u','O').Replace('a͡u','W').Replace('ɔ͡i','Y').Replace('ɻ','ɹ').Replace('ɚ','əɹ').Replace('ɝ','ɜɹ').Replace('g','ɡ').Replace('tʃ','ʧ').Replace('dʒ','ʤ').Replace('aɪ','I').Replace('eɪ','A').Replace('oʊ','O').Replace('aʊ','W').Replace('ɔɪ','Y')
+        return $raw.Replace('i͡ə','iə').Replace('u͡ə','uə').Replace('t͡ʃ','ʧ').Replace('d͡ʒ','ʤ').Replace('a͡ɪ','I').Replace('e͡ɪ','A').Replace('o͡ʊ','O').Replace('a͡ʊ','W').Replace('ɔ͡ɪ','Y').Replace('a͡i','I').Replace('e͡i','A').Replace('o͡u','O').Replace('a͡u','W').Replace('ɔ͡i','Y').Replace('ɻ','ɹ').Replace('ɚ','əɹ').Replace('ɝ','ɜɹ').Replace('g','ɡ').Replace('tʃ','ʧ').Replace('dʒ','ʤ').Replace('aɪ','I').Replace('eɪ','A').Replace('oʊ','O').Replace('aʊ','W').Replace('ɔɪ','Y')
     }
     static [int[]] ZiraTokenIds([string]$raw) {
         [string]$phones=[CoreDriver]::NormalizeZira($raw)
@@ -1555,7 +2152,12 @@ class CoreDriver {
         for([int]$i=0;$i -lt $count;$i++){$sum+=[CoreDriver]::ZiraTokenIds($raw).Length}
         return $sum
     }
+    # Product entry: lexicon, grammar roles and Zira choices, then the polish pass.
     static [CoreResult] Run([string]$text) {
+        [CoreEngine]$engine=[CoreEngine]::new();$engine.Polish=$true;$engine.Scan($text);return $engine.Result($text)
+    }
+    # Lexicon, grammar and Zira choices only; equal to the SMA reference path (Test-EnglishCoreDriver).
+    static [CoreResult] RunLexical([string]$text) {
         [CoreEngine]$engine=[CoreEngine]::new();$engine.Scan($text);return $engine.Result($text)
     }
     static [int] Batch([string]$text,[int]$count) {
@@ -1588,6 +2190,7 @@ class CoreDriver {
             [void]$b.Append(';Pron=');[void]$b.Append([CoreDriver]::Literal($t.Pron))
             [void]$b.Append(';Status=');[void]$b.Append([CoreDriver]::Literal($t.Status))
             [void]$b.Append(';PronunciationSource=');[void]$b.Append([CoreDriver]::Literal($t.PronunciationSource))
+            [void]$b.Append(';Polish=');[void]$b.Append([CoreDriver]::Literal($t.Polish))
             [void]$b.Append(';Roles=@(')
             for([int]$j=0;$j -lt $t.Roles.Length;$j++){if($j -gt 0){[void]$b.Append(',')};[void]$b.Append([Convert]::ToString($t.Roles[$j]))}
             [void]$b.Append(')}')
@@ -1660,7 +2263,7 @@ function Import-EnglishCoreDriver {
     $assembly=[Reflection.Assembly]::LoadFrom($output);$dependencies=@($assembly.GetReferencedAssemblies())
     if($dependencies.Count -ne 1 -or $dependencies[0].Name -cne 'System.Private.CoreLib'){throw 'Unexpected standalone dependency.'}
     $type=$assembly.GetType('CoreDriver',$true)
-    $driver=[pscustomobject]@{Assembly=$assembly;Run=[Func[string,object]]$type.GetMethod('Run').CreateDelegate([Func[string,object]]);Batch=[Func[string,int,int]]$type.GetMethod('Batch').CreateDelegate([Func[string,int,int]]);NormalizeZira=[Func[string,string]]$type.GetMethod('NormalizeZira').CreateDelegate([Func[string,string]]);ZiraTokenIds=[Func[string,int[]]]$type.GetMethod('ZiraTokenIds').CreateDelegate([Func[string,int[]]]);ZiraBatch=[Func[string,int,int]]$type.GetMethod('ZiraBatch').CreateDelegate([Func[string,int,int]]);Output=$output;Receipt=$receiptPath;SourceSha256=$identity;Corrections=$table.Count}
+    $driver=[pscustomobject]@{Assembly=$assembly;Run=[Func[string,object]]$type.GetMethod('Run').CreateDelegate([Func[string,object]]);RunLexical=[Func[string,object]]$type.GetMethod('RunLexical').CreateDelegate([Func[string,object]]);Batch=[Func[string,int,int]]$type.GetMethod('Batch').CreateDelegate([Func[string,int,int]]);NormalizeZira=[Func[string,string]]$type.GetMethod('NormalizeZira').CreateDelegate([Func[string,string]]);ZiraTokenIds=[Func[string,int[]]]$type.GetMethod('ZiraTokenIds').CreateDelegate([Func[string,int[]]]);ZiraBatch=[Func[string,int,int]]$type.GetMethod('ZiraBatch').CreateDelegate([Func[string,int,int]]);Output=$output;Receipt=$receiptPath;SourceSha256=$identity;Corrections=$table.Count}
     $script:EnglishCoreCache[$ReferencePath]=$driver;$driver
 }
 
@@ -1759,7 +2362,7 @@ function Get-EnglishZiraReference {
 
 function ConvertTo-EnglishKokoroPhones {
     param([string]$Phones)
-    $Phones.Replace('i͡ə','iə').Replace('t͡ʃ','ʧ').Replace('d͡ʒ','ʤ').Replace('a͡ɪ','I').Replace('e͡ɪ','A').Replace('o͡ʊ','O').Replace('a͡ʊ','W').Replace('ɔ͡ɪ','Y').Replace('a͡i','I').Replace('e͡i','A').Replace('o͡u','O').Replace('a͡u','W').Replace('ɔ͡i','Y').Replace('ɻ','ɹ').Replace('ɚ','əɹ').Replace('ɝ','ɜɹ').Replace('g','ɡ').Replace('tʃ','ʧ').Replace('dʒ','ʤ').Replace('aɪ','I').Replace('eɪ','A').Replace('oʊ','O').Replace('aʊ','W').Replace('ɔɪ','Y')
+    $Phones.Replace('i͡ə','iə').Replace('u͡ə','uə').Replace('t͡ʃ','ʧ').Replace('d͡ʒ','ʤ').Replace('a͡ɪ','I').Replace('e͡ɪ','A').Replace('o͡ʊ','O').Replace('a͡ʊ','W').Replace('ɔ͡ɪ','Y').Replace('a͡i','I').Replace('e͡i','A').Replace('o͡u','O').Replace('a͡u','W').Replace('ɔ͡i','Y').Replace('ɻ','ɹ').Replace('ɚ','əɹ').Replace('ɝ','ɜɹ').Replace('g','ɡ').Replace('tʃ','ʧ').Replace('dʒ','ʤ').Replace('aɪ','I').Replace('eɪ','A').Replace('oʊ','O').Replace('aʊ','W').Replace('ɔɪ','Y')
 }
 
 function Get-EnglishPhoneComparison {
@@ -2022,31 +2625,55 @@ print('Stock Kokoro WAV created: samples=' + str(len(audio)) + '; sample_rate=24
 }
 
 function New-EnglishZiraCorpus {
-    $directory=Join-Path $script:EnglishBuildRoot ('english\corpora\'+[guid]::NewGuid().ToString('N'))
+    # Authored, deterministic capture corpus (no third-party text). Admission partitions use constructions the
+    # grammar resolves (pronoun or determiner subject, transitive verb, determiner object; copular property), so
+    # roles are known; construction and held-out share word/role/onset keys in different sentences.
+    # Carrier sentences are captured for function-word weak forms only; they are not admission partitions.
+    $directory=Join-Path $script:EnglishBuildRoot 'english\corpora\scaled'
     [void][IO.Directory]::CreateDirectory($directory)
-    $construction=[Collections.Generic.List[string]]::new();$heldout=[Collections.Generic.List[string]]::new()
+    $reference=Import-EnglishReference $AssemblyPath
+    $construction=[Collections.Generic.List[string]]::new();$heldout=[Collections.Generic.List[string]]::new();$carriers=[Collections.Generic.List[string]]::new()
+    $verbs=@('record','present','permit','object','produce','export','import','project','conduct','contract','convert','increase','insult','protest','refuse','subject','suspect','address','close','lead','wind','use','reject','combine','escort','extract','separate','estimate','open','find','watch','write','play','push','press','carry','paint','clean','fix','move','build','sell','buy','take','bring','see','hear','need','want','like','love','hold','keep','wash','cut','show','check','visit','call','answer','lift','drop','catch','throw','kick','pull','follow','read','close')
+    $nouns=@('record','present','permit','object','produce','export','import','project','conduct','contract','increase','insult','protest','suspect','address','lead','wind','minute','bass','tear','wound','dove','subject','desert','estimate','book','song','door','clock','apple','orange','elephant','actor','hour','university','idea','computer','buffer','file','number','date','voice','window','pipe','team','teacher','leaf','key','letter','table','chair','house','car','road','river','city','garden','water','paper','bottle','picture','camera','ticket','bag','box','phone','story','question','answer','message','engine','battery','bridge','tower','butter','ladder','kitten','metal','city','meter','letter','motto')
+    $adjectives=@('live','close','minute','perfect','content','invalid','open','red','heavy','useful','new','old','small','large','ready','quiet','clean','empty','full','pretty','better','little','total','vital')
+    $verbs=@($verbs | Sort-Object -Unique | Where-Object {$id=$reference.Find.Invoke($_);$id -ge 0 -and ($reference.Flags.Invoke($id) -band 1026) -eq 1026})
+    $nouns=@($nouns | Sort-Object -Unique | Where-Object {$id=$reference.Find.Invoke($_);$id -ge 0 -and ($reference.Flags.Invoke($id) -band 1) -ne 0})
+    $adjectives=@($adjectives | Sort-Object -Unique | Where-Object {$id=$reference.Find.Invoke($_);$id -ge 0 -and ($reference.Flags.Invoke($id) -band 4) -ne 0})
+    for($i=0;$i -lt $verbs.Count;$i++){
+        for($k=0;$k -lt 9;$k++){
+            $noun=$nouns[($i*7+$k*5)%$nouns.Count]
+            if($k -lt 6){$construction.Add(@('They','I','We','You')[$k%4]+' '+$verbs[$i]+' the '+$noun+'.')}else{$heldout.Add(@('We','They','You')[$k%3]+' '+$verbs[$i]+' the '+$noun+'.')}
+        }
+    }
+    for($i=0;$i -lt $nouns.Count;$i++){
+        for($k=0;$k -lt 3;$k++){
+            $sentence='The '+$nouns[$i]+' is '+$adjectives[($i*5+$k*3)%$adjectives.Count]+'.'
+            if($k -lt 2){$construction.Add($sentence)}else{$heldout.Add($sentence)}
+        }
+    }
+    # The original smoke admission pair, so one capture and one -Distill reproduce every admitted choice.
+    foreach($phrase in @('Play the record.','Please record it.','Push record.')){$construction.Add($phrase)}
+    foreach($phrase in @('They play the record.','They record it.','We record the record.')){$heldout.Add($phrase)}
     foreach($noun in @('record','present','permit','book','song','music','door','clock','apple','orange','elephant','actor','hour','university','idea','computer','buffer','file','number','date','voice','window','pipe','team','teacher','leaf','key')){
         $construction.Add('The '+$noun+' is here.');$construction.Add('I saw the '+$noun+'.')
         $heldout.Add('We saw the '+$noun+' today.')
     }
-    foreach($verb in @('record','present','permit','close','wind','lead','read','write','watch','open','find')){
-        $construction.Add('They '+$verb+' the book.');$construction.Add('We '+$verb+' the record.')
-        $heldout.Add('They '+$verb+' the book every day.')
+    $templates=@('I want to see the {0}.','A {0} of the {1}.','She went to the {0} and the {1}.','He was at the {0} for an hour.','We were in the {0} with them.','They can take it from the {0}.','Is it on the {0} or under it?','Give the {0} to him and to her.','What are you looking at?','Where did you come from?','She has been to the {0} as well.','It is for you, not for me.','The {0} that we saw was old.','There is a {0} by the {1}.','You could put the {0} into the {1}.','He would not do that to us.','Some of the {0} was there.','We had to wait for the {0}.','Do you have an {0} or a {1}?','They should be here by now.','I am sure that he can do it.','Was the {0} there at all?','Are they in the {0} or at the {1}?','Her {0} and his {1} are here.','Their {0} is bigger than our {1}.','My {0} is your {1}.','This is what we were talking about.','He must have seen the {0}.','Who was it for?','Get me a {0} from the {1}, please.','The {0} was made of {1}.','It was as big as a {0}.','If you can, bring the {0} with you.','So the {0} was not there?','Then we went up to the {0}.','I will be at the {0} at ten.','You and I can do it.','We have seen the {0} and the {1}.','They were not at the {0} when we got there.','The water in the {0} was better than the {1}.')
+    $fill=@('house','city','garden','river','table','box','window','car','bridge','paper','water','bottle')
+    for($i=0;$i -lt $templates.Count;$i++){
+        foreach($k in 0..4){
+            $carriers.Add([string]::Format($templates[$i],$fill[($i+$k)%$fill.Count],$fill[($i+$k+5)%$fill.Count]))
+        }
     }
-    foreach($adj in @('live','closed','open','red','heavy','useful','new','old','small','large')){
-        $construction.Add('The door is '+$adj+'.');$construction.Add('The book is '+$adj+'.')
-        $heldout.Add('The record is '+$adj+'.')
-    }
-    foreach($n in @(0,1,12,64,1024)){
-        $construction.Add('The value is '+$n+'.');$heldout.Add('The file is '+$n+' KB.')
-    }
-    foreach($phrase in @('The meeting is on October 8, 2026.','The total is $12.50.','The file is 12 MB.','They had read the book.','They will read the book tomorrow.','Alice cannot find her keys.')){$construction.Add($phrase)}
-    foreach($phrase in @('The meeting is on November 9, 2027.','The total is $24.75.','The file is 32 MB.','We had read the record.','They read the book yesterday.','John cannot find his keys.')){$heldout.Add($phrase)}
+    $construction=@($construction | Select-Object -Unique);$heldout=@($heldout | Select-Object -Unique | Where-Object {$_ -cnotin $construction})
+    $carriers=@($carriers | Select-Object -Unique | Where-Object {$_ -cnotin $construction -and $_ -cnotin $heldout})
     foreach($sentence in $construction){if($sentence -cin $heldout){throw 'Corpus partitions overlap.'}}
-    $trainingPath=Join-Path $directory 'construction.txt';$heldoutPath=Join-Path $directory 'held-out.txt'
-    [IO.File]::WriteAllLines($trainingPath,$construction.ToArray(),[Text.UTF8Encoding]::new($false))
-    [IO.File]::WriteAllLines($heldoutPath,$heldout.ToArray(),[Text.UTF8Encoding]::new($false))
-    $receipt=[ordered]@{Version=1;Generator='PowerShell authored sentence templates';ConstructionSentences=$construction.Count;HeldOutSentences=$heldout.Count;Construction=$trainingPath;ConstructionSha256=(Get-FileHash -LiteralPath $trainingPath).Hash;HeldOut=$heldoutPath;HeldOutSha256=(Get-FileHash -LiteralPath $heldoutPath).Hash;Purpose='Zira contextual pronunciation capture and independent held-out context evaluation';Coverage='Seed corpus; not comprehensive English';AuthorSha256=(Get-FileHash -LiteralPath $PSCommandPath).Hash}
+    $trainingPath=Join-Path $directory 'construction.txt';$heldoutPath=Join-Path $directory 'held-out.txt';$carrierPath=Join-Path $directory 'carriers.txt';$capturePath=Join-Path $directory 'capture.txt'
+    [IO.File]::WriteAllLines($trainingPath,[string[]]$construction,[Text.UTF8Encoding]::new($false))
+    [IO.File]::WriteAllLines($heldoutPath,[string[]]$heldout,[Text.UTF8Encoding]::new($false))
+    [IO.File]::WriteAllLines($carrierPath,[string[]]$carriers,[Text.UTF8Encoding]::new($false))
+    [IO.File]::WriteAllLines($capturePath,[string[]](@($construction)+@($heldout)+@($carriers)),[Text.UTF8Encoding]::new($false))
+    $receipt=[ordered]@{Version=2;Generator='PowerShell authored sentence templates';ConstructionSentences=$construction.Count;HeldOutSentences=$heldout.Count;CarrierSentences=$carriers.Count;Construction=$trainingPath;ConstructionSha256=(Get-FileHash -LiteralPath $trainingPath).Hash;HeldOut=$heldoutPath;HeldOutSha256=(Get-FileHash -LiteralPath $heldoutPath).Hash;Carriers=$carrierPath;CarriersSha256=(Get-FileHash -LiteralPath $carrierPath).Hash;Capture=$capturePath;CaptureSha256=(Get-FileHash -LiteralPath $capturePath).Hash;Purpose='Zira contextual pronunciation capture, held-out admission, and function-word weak-form measurement';Coverage='Authored templates; not comprehensive English';AuthorSha256=(Get-FileHash -LiteralPath $PSCommandPath).Hash}
     Write-EnglishBuildReceipt (Join-Path $directory 'corpus.psd1') $receipt
     [pscustomobject]$receipt
 }
@@ -2213,7 +2840,7 @@ function Test-EnglishCoreDriver {
     $fixtures=@('Play the record.','Please record it.','Push record.','The record records the record.','They present the present.','They permit the record.','They live.','The music is live.','They close the door.','They wind the clock.','They lead the cat.','They had read the record.','They read the record.','The door was closed by Alice.','The door was closed by noon.','I saw her duck.','I saw her shit.','The duck.','They duck.','the door was','The quuxblarg records the record.','The actor records the record.','The hour records the record.','The university records the record.','The one records the record.','')
     foreach($sentence in $fixtures){
         $legacy=Invoke-EnglishPhonemizer -Text $sentence -Context (New-EnglishContext)
-        $native=Invoke-EnglishPhonemizer -Text $sentence
+        $native=Invoke-EnglishPhonemizer -Text $sentence -Lexical
         Assert-EnglishContract 'canonical CoreLib path' ($native.Execution -ceq 'CoreLib lowered typed pronunciation driver')
         Assert-EnglishContract 'lowered phone and grammar equivalence' ($legacy.KokoroPhones -ceq $native.KokoroPhones -and $legacy.SupportedPhones -ceq $native.SupportedPhones -and $legacy.GrammarStatus -ceq $native.GrammarStatus -and $legacy.Complete -eq $native.Complete -and $legacy.Candidates.Count -eq $native.Candidates.Count -and ($legacy.SymbolIds -join ',') -ceq ($native.SymbolIds -join ','))
         $before=@($legacy.Tokens | ForEach-Object {$_.SourceStart.ToString()+':'+$_.SourceEnd+':'+$_.Status+':'+$_.Pron+':'+($_.Roles -join ',')}) -join '|'
@@ -2224,8 +2851,36 @@ function Test-EnglishCoreDriver {
     foreach($case in @(@('Play the record.',0,'ɹˈɛkəɹd'),@('Please record it.',1,'ɹɪkˈɔɹd'),@('Push record.',0,'ɹˈɛkəɹd'))){
         $result=$driver.Run.Invoke($case[0]);$token=@($result.Tokens | Where-Object {$_.Word.ToLowerInvariant() -ceq 'record'})
         Assert-EnglishContract 'explicit imperative record role and pronunciation' ($result.Complete -and $token.Count -eq 1 -and $token[0].Roles.Length -eq 1 -and $token[0].Roles[0] -eq $case[1] -and $token[0].Pron -ceq $case[2])
-        $legacy=Invoke-EnglishPhonemizer -Text $case[0] -Context (New-EnglishContext)
-        Assert-EnglishContract 'imperative lowering equivalence' ($legacy.KokoroPhones -ceq $result.KokoroPhones -and $legacy.GrammarStatus -ceq $result.GrammarStatus)
+        $legacy=Invoke-EnglishPhonemizer -Text $case[0] -Context (New-EnglishContext);$lexical=$driver.RunLexical.Invoke($case[0])
+        Assert-EnglishContract 'imperative lowering equivalence' ($legacy.KokoroPhones -ceq $lexical.KokoroPhones -and $legacy.GrammarStatus -ceq $lexical.GrammarStatus -and $result.GrammarStatus -ceq $lexical.GrammarStatus)
+    }
+    # Polish pass fixtures (CorePolish): stress, the pronoun I, flaps, weak forms, inflection, numbers, units,
+    # acronyms, abbreviations and heteronym defaults. Expected phones are fixed; changing a rule changes them.
+    $polishFixtures=@(
+        @('They live here.','ðA lˈɪv hˈiɹ .'),
+        @('I saw her duck.','I sˈɔ hɜɹ dˈʌk .'),
+        @('The water was better than the little ladder.','ðə wˈɔɾəɹ wəz bˈɛɾəɹ ðæn ðə lˈɪɾəl lˈæɾəɹ .'),
+        @('The kitten sat on a pretty button.','ðə kˈɪtən sˈæt ɑn ə pɹˈɪɾi bˈʌtən .'),
+        @('The apple fell.','ðɪ ˈæpəl fˈɛl .'),
+        @('The rebels rebel.','ðə ɹˈɪbɛlz ɹɪbˈɛl .'),
+        @('The pipe contains lead.','ðə pˈIp kəntˈAnz lˈɛd .'),
+        @('John''s keys aren''t here.','ʤˈɑnz kˈiz ˈɑɹnt hˈiɹ .'),
+        @('I read it yesterday.','I ɹˈɛd ɪt jˈɛstəɹdi .'),
+        @('We stopped, tried and ended.','wi stˈɑpt , tɹˈId æn ˈɛndɪd .'),
+        @('The total is $12.50.','ðə tˈOɾəl ɪz twˈɛlv dˈɑləɹz æn fˈɪfti sˈɛnts .'),
+        @('Meet at 12:05 PM.','mˈit æt twˈɛlv ˈO fˈIv pˌiˈɛm .'),
+        @('The rate is 5 Mb/s.','ðə ɹˈAt ɪz fˈIv mˈɛɡəbˌɪts pəɹ sˈɛkənd .'),
+        @('The date is 03/04/2026.','ðə dˈAt ɪz mˈɑɹʧ fˈɔɹθ twˈɛnti twˈɛnti sˈɪks .'),
+        @('Use a 3/4-inch pipe.','jˈuz ə θɹˈi kwˈɔɹɾəɹz ˈɪnʧ pˈIp .'),
+        @('NASA called the FBI.','nˈæsə kˈɔld ðɪ ˌɛfbˌiˈI .'),
+        @('Dr. Smith lives on Main St.','dˈɑktəɹ smˈɪθ lˈIvz ɑn mˈAn stɹˈit .'),
+        @('I want to go to the city.','I wˈɑnt tʊ ɡˈO tʊ ðə sˈɪɾi .'),
+        @('Give it to him and to her.','ɡˈɪv ɪt tʊ hɪm æn tʊ hɜɹ .'),
+        @('What are you looking at?','wˈʌt ɑɹ ju lˈʊkɪŋ æt ?')
+    )
+    foreach($case in $polishFixtures){
+        $result=$driver.Run.Invoke($case[0])
+        Assert-EnglishContract ('polish fixture: '+$case[0]) ($result.Complete -and $result.KokoroPhones -ceq $case[1])
     }
     Assert-EnglishContract 'independent fixed record fixture' ($record.KokoroPhones -ceq 'ðə ɹˈɛkəɹd ɹɪkˈɔɹdz ðə ɹˈɛkəɹd .')
     $unknown=$driver.Run.Invoke('The quuxblarg records the record.')
@@ -2264,8 +2919,8 @@ function Test-EnglishCoreDriver {
     $count=$driver.Batch.Invoke('The record records the record.',$runs)
     $watch.Stop()
     Assert-EnglishContract 'native batch output count' ($count -eq $record.SymbolIds.Length*$runs)
-    $report=[pscustomobject]@{Gate='CORELIB_STANDALONE_PHONEMIZER=PASS';Fixtures=$fixtures.Count;ExternalProcesses=$externalCases.Count;ExternalSmaLoaded=$false;TeacherCorrectionChecks=$teacherChecks;BatchRuns=$runs;MeanNativeSentenceUs=$watch.Elapsed.TotalMilliseconds*1000/$runs;BenchmarkBoundary='One managed batch call; includes scanning, lookup, roles, corrections, source spans, graph construction and token IDs; excludes build, process startup and audio';AssemblyReferences=@($driver.Assembly.GetReferencedAssemblies() | ForEach-Object Name);Driver=$driver.Output;BuildReceipt=$driver.Receipt}
-    Write-EnglishBuildReceipt (Join-Path $directory 'verification.psd1') ([ordered]@{Gate=$report.Gate;Fixtures=$report.Fixtures;ExternalProcesses=$report.ExternalProcesses;ExternalSmaLoaded=$report.ExternalSmaLoaded;TeacherCorrectionChecks=$report.TeacherCorrectionChecks;BatchRuns=$report.BatchRuns;MeanNativeSentenceUs=$report.MeanNativeSentenceUs;AssemblyReferences=$report.AssemblyReferences;Driver=$report.Driver;BuildReceipt=$report.BuildReceipt})
+    $report=[pscustomobject]@{Gate='CORELIB_STANDALONE_PHONEMIZER=PASS';Fixtures=$fixtures.Count;PolishFixtures=$polishFixtures.Count;ExternalProcesses=$externalCases.Count;ExternalSmaLoaded=$false;TeacherCorrectionChecks=$teacherChecks;BatchRuns=$runs;MeanNativeSentenceUs=$watch.Elapsed.TotalMilliseconds*1000/$runs;BenchmarkBoundary='One managed batch call; includes scanning, lookup, roles, corrections, source spans, graph construction and token IDs; excludes build, process startup and audio';AssemblyReferences=@($driver.Assembly.GetReferencedAssemblies() | ForEach-Object Name);Driver=$driver.Output;BuildReceipt=$driver.Receipt}
+    Write-EnglishBuildReceipt (Join-Path $directory 'verification.psd1') ([ordered]@{Gate=$report.Gate;Fixtures=$report.Fixtures;PolishFixtures=$report.PolishFixtures;ExternalProcesses=$report.ExternalProcesses;ExternalSmaLoaded=$report.ExternalSmaLoaded;TeacherCorrectionChecks=$report.TeacherCorrectionChecks;BatchRuns=$report.BatchRuns;MeanNativeSentenceUs=$report.MeanNativeSentenceUs;AssemblyReferences=$report.AssemblyReferences;Driver=$report.Driver;BuildReceipt=$report.BuildReceipt})
     $report
 }
 
@@ -2317,8 +2972,11 @@ function Test-EnglishPhonemizer {
         $target=@($result.Tokens | Where-Object Word -ceq $case[1])[0]
         Assert-EnglishContract ('shared binding: '+$case[1]) ($result.Complete -and $target.Roles -contains $case[2] -and $target.Pron -ceq $case[3])
     }
-    $tense=Invoke-EnglishPhonemizer -Text 'They read the record.' -ReferencePath $ReferencePath
+    $tense=Invoke-EnglishPhonemizer -Text 'They read the record.' -ReferencePath $ReferencePath -Lexical
     Assert-EnglishContract 'read tense ambiguity retained' (-not $tense.Complete -and $tense.Candidates.Count -eq 2 -and $null -eq $tense.KokoroPhones)
+    $default=Invoke-EnglishPhonemizer -Text 'They read the record.' -ReferencePath $ReferencePath
+    $read=@($default.Tokens | Where-Object Word -ceq 'read')
+    Assert-EnglishContract 'read tense default after the grammar' ($default.Complete -and $default.Candidates.Count -eq 2 -and $read.Count -eq 1 -and $read[0].Roles.Count -eq 2 -and $read[0].PronunciationSource -ceq 'HeteronymDefault' -and $read[0].Pron -ceq 'ɹˈid')
     $checks.Add('Role-sensitive projection shared across eight supported cross-word fixtures; unresolved read tense retained')
     $ambiguous=New-EnglishContext -ReferencePath $ReferencePath
     Add-EnglishText $ambiguous 'I saw her duck.';$a=Get-EnglishResult $ambiguous
@@ -2336,7 +2994,7 @@ function Test-EnglishPhonemizer {
     Assert-EnglishContract 'linked event graph constrains reading' ($linked.Candidates.Count -eq 1 -and $null -ne $linked.Candidates[0].Clause.Complement)
     $checks.Add('Prior/later explicitly linked typed graphs constrain ambiguity; removing evidence restores alternatives')
     foreach($sentence in @('The record records the record.','The door was closed by Alice.','I saw her duck.','They had read the record.')){
-        $whole=Invoke-EnglishPhonemizer -Text $sentence -ReferencePath $ReferencePath
+        $whole=Invoke-EnglishPhonemizer -Text $sentence -ReferencePath $ReferencePath -Lexical
         $incremental=New-EnglishContext -ReferencePath $ReferencePath
         $words=$sentence.Split(' ')
         for($i=0;$i -lt $words.Length;$i++){Add-EnglishText $incremental ($words[$i]+$(if($i -lt $words.Length-1){' '}else{''}))}
