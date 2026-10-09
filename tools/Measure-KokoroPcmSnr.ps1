@@ -5,15 +5,22 @@ Raw PCM SNR of a DSP job's int16 output against the stock PyTorch PCM of the sam
 No lag, gain fitting or cropping: SNR = 10 log10(sum ref^2 / sum (ref - pcm / 32768)^2) over every sample.
 The output buffer holds int16 PCM at -PcmOffset; the fixture directory holds expected-pcm-f32.bin and
 fixture.json (Samples). With -WavPath, also writes the DSP PCM as a 24 kHz mono WAV inside build/.
+Without -PcmOffset, the offset comes from runner-layout.json beside the output (device-output-*.bin is written into the
+emission directory); 256 only when there is no layout. A whole-job PCM sits far past 256 (17,207,552 for the decoder +
+generator job), and reading at 256 scored a correct run at -26 dB on 2026-10-09.
 #>
 [CmdletBinding()]
 param(
     [Parameter(Mandatory)][string] $OutputPath,
     [Parameter(Mandatory)][string] $FixtureDirectory,
-    [int] $PcmOffset = 256,
+    [int] $PcmOffset = -1,
     [string] $WavPath
 )
 $ErrorActionPreference = 'Stop'
+if ($PcmOffset -lt 0) {
+    $layoutPath = Join-Path (Split-Path -LiteralPath ([IO.Path]::GetFullPath($OutputPath))) 'runner-layout.json'
+    $PcmOffset = if (Test-Path -LiteralPath $layoutPath) { [int](Get-Content -LiteralPath $layoutPath -Raw | ConvertFrom-Json).PcmOffset } else { 256 }
+}
 $fx = Get-Content -LiteralPath (Join-Path $FixtureDirectory 'fixture.json') -Raw | ConvertFrom-Json
 $n = [int]$fx.Samples
 $refBytes = [IO.File]::ReadAllBytes((Join-Path $FixtureDirectory 'expected-pcm-f32.bin'))
