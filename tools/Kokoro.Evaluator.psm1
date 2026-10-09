@@ -53,7 +53,11 @@ function Invoke-KokoroEmission {
         $arguments = @('-NoProfile', '-File', (Join-Path $script:Root 'tools/Emit-HexagonProbe.ps1'), '-Kernel', $Kernel, '-OutputDirectory', $dir, '-Force')
         foreach ($k in ($Parameters.Keys | Sort-Object)) { $v = $Parameters[$k]; if ($v -is [bool]) { if ($v) { $arguments += "-$k" } } else { $arguments += "-$k", "$v" } }
         $out = & $script:Pwsh @arguments 2>&1
-        if ($LASTEXITCODE -or -not (Test-Path -LiteralPath (Join-Path $dir 'runner-layout.json'))) { throw "Emission failed ($Kernel $($pairs -join ' ')): $(($out | Select-Object -Last 6) -join ' | ')" }
+        if ($LASTEXITCODE -or -not (Test-Path -LiteralPath (Join-Path $dir 'runner-layout.json'))) {
+            # The emitter's own message (a thrown layout or encoding error) is the cause; the rest is stack text.
+            $cause = @($out | ForEach-Object { "$_" } | Where-Object { $_.Trim().StartsWith('|') -and -not $_.Trim().TrimStart('|').Trim().StartsWith('~') }) | Select-Object -Last 1; if ($cause) { $cause = $cause.Trim().TrimStart('|').Trim() }
+            if (-not $cause) { $cause = ($out | Select-Object -Last 1) }
+            throw "emission refused ($($pairs -join ' ')): $cause" }
     }
     [pscustomobject]@{ Kernel = $Kernel; Key = $key; Directory = $dir; LibrarySHA256 = (Get-FileHash -LiteralPath (Join-Path $dir 'libkokoro_generator_tail_skel.so')).Hash }
 }
@@ -155,7 +159,8 @@ function Compare-KokoroSetup {
     $rows = foreach ($n in $names) { $r = Invoke-KokoroExperiment -Case $Case -Setup $n -Runs $Runs 6>$null; [pscustomobject]@{ Setup = $n; Status = $r.Status; MedianMs = $r.MedianMs; PcmSnrDb = $r.PcmSnrDb; Clipped = $r.Clipped; Pcm = $(if ($r.PcmSHA256) { $r.PcmSHA256.Substring(0, 8) }); Reason = $r.Reason } }
     $base = ($rows | Where-Object Setup -eq 'Baseline').MedianMs
     foreach ($r in ($rows | Sort-Object { if ($null -eq $_.MedianMs) { [double]::MaxValue } else { $_.MedianMs } })) {
-        $delta = if ($base -and $r.MedianMs) { '{0:+0.0;-0.0}%' -f (100 * ($r.MedianMs - $base) / $base) } else { '' }
+        $noise = (Get-KokoroRatchetCase $Case).NoiseFraction
+        $delta = if ($base -and $r.MedianMs) { $d = ($r.MedianMs - $base) / $base; '{0:+0.0;-0.0}%{1}' -f (100 * $d), $(if ([math]::Abs($d) -lt $noise -and $r.Setup -ne 'Baseline') { ' (noise)' } else { '' }) } else { '' }
         Write-Host ('{0,-10} {1,-8} {2,9} ms {3,7}  {4,6} dB  clip {5}  pcm {6}  {7}' -f $r.Setup, $r.Status, $r.MedianMs, $delta, $r.PcmSnrDb, $r.Clipped, $r.Pcm, $r.Reason)
     }
     $rows
