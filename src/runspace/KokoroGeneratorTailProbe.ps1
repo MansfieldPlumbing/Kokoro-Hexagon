@@ -9,6 +9,8 @@ $receipt = [IO.Path]::Combine($dir, 'receipt.txt')
 $lines = [Collections.Generic.List[string]]::new()
 $lines.Add('Job=kokoro-generator-tail')
 $inv = [Globalization.CultureInfo]::InvariantCulture
+# Written before any loading: an empty receipt means the app never ran this script; Started= alone means it stalled.
+[IO.File]::WriteAllLines($receipt, @('Job=kokoro-generator-tail', "Started=$([DateTime]::UtcNow.ToString('o', $inv))"))
 $Marshal = [Runtime.InteropServices.Marshal]; $native = [IntPtr]::Zero; $opened = $false; $handle = [uint64]0
 $pins = [Collections.Generic.List[object]]::new(); $allocations = [Collections.Generic.List[object]]::new()
 $passed = $false; $stream = $null; $audio = $null
