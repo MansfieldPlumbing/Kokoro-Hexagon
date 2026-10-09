@@ -30,8 +30,22 @@
             NoiseFraction = 0.03
             PcmSHA256 = '69F7977245142FA43D56C3582F67F23D8175C37203DA15AA97841A7CA97366F8'
         }
-        @{ Name = 'benchmark-0-sm8550'; Soc = 'SM8550'; Audio = '1.525 s, 61 decoder frames'; Capture = 'build/capture-iphone-bench/0-*'
-           Blocked = 'Job inputs are built only from the hello-world captures: needs the model package (weights and tables built once) and an input packer for any capture.' }
+        @{
+            Name = 'benchmark-0-sm8550'
+            Audio = '1.525 s, 61 decoder frames'
+            Kernel = 'KokoroDecoderGenerator16Run'
+            Parameters = @{ ResBlockFrames = 7321; ResidentHvxThreads = 4; ResidentBatchTiles = 22 }
+            # New-KokoroJobInput -Reference build/decoder-generator-fixture-20261009 with the hello-world captures mapped
+            # to build/capture-iphone-bench/0-decoder and 0-generator; calibration unchanged.
+            Input = 'build/evaluator/input/benchmark-0/decoder-generator-fixture-20261009'
+            Soc = 'SM8550'
+            # First measurement, 2026-10-09 (docs/results/benchmark0-sm8550-20261009.md); one 3-run sample.
+            PcmSnrDbFloor = 28.49
+            ClippedCeiling = 0
+            MedianMsCeiling = 116.161
+            NoiseFraction = 0.03
+            PcmSHA256 = '6D871B3F54D6256A9F723B1E48DA4D3B47B58884A8738261343296BC4AD4CD7E'
+        }
         @{ Name = 'benchmark-1-sm8550'; Soc = 'SM8550'; Audio = '4.450 s, 178 decoder frames'; Capture = 'build/capture-iphone-bench/1-*'
            Blocked = 'Decoder holds the whole sequence in VTCM (capacity 96 frames) and the generator is resident: needs halo-tiled streaming through DDR.' }
         @{ Name = 'benchmark-2-sm8550'; Soc = 'SM8550'; Audio = '8.050 s, 322 decoder frames'; Capture = 'build/capture-iphone-bench/2-*'
