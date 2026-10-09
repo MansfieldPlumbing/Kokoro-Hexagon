@@ -97,6 +97,93 @@ function New-KokoroAlbertGelu16RunSteps {
         ParameterBytes=$L.ParameterBytes;OutputBytes=$L.OutputBytes;OutputOffset=$L.OutputOffset;PcmOffset=$L.OutputOffset;Samples=1;VtcmBytes=$L.VtcmBytes;Regions=$L.Regions}}
 }
 
+# Attention: q and k rescaled per channel in place (New-KokoroScaleConvert16Steps, Kokoro.Decoder16.ps1): k to one LSB per head, q so q'_c k_c has one LSB
+# per head, then New-KokoroAttention16Steps. Buffers: config, input (q, k, v: biased u16 croutons, 768 wide, one after
+# another), weights (unused, >= 128 B), tables (q conversion 384 B per 32-channel block, then the attention constants),
+# output: the context tensor at 256 (rows past T hold 0x8000). Tables: q conversion, k conversion (384 B per block each).
+function Get-KokoroAlbertAttention16Layout {
+    param([ValidateRange(1,512)][int]$Tokens=16)
+    . (Join-Path $PSScriptRoot '../kernels/Kokoro.Attention16.ps1')
+    $tiles=[int][math]::Ceiling($Tokens/32); $bytes=$tiles*64L*768; $convertBytes=2*384L*24; $constBytes=256L+256L*$tiles
+    $scratch=Get-KokoroAttention16Scratch -Tokens $Tokens
+    $al={param([long]$v) [long]([math]::Ceiling($v/65536)*65536)}
+    $regions=[ordered]@{}; $at=0L
+    foreach($r in @(@('Q',$bytes),@('K',$bytes),@('V',$bytes),@('Context',$bytes),@('Tables',($convertBytes+$constBytes)),@('Scratch',$scratch.Bytes))){ $regions[$r[0]]=[ordered]@{Offset=$at;Bytes=[long]$r[1]}; $at+=& $al $r[1] }
+    if($at -gt 8388608){throw "ALBERT attention needs $at bytes of VTCM (8 MiB available)"}
+    [pscustomobject]@{Tokens=$Tokens;Tiles=$tiles;TensorBytes=$bytes;InputBytes=(3*$bytes);WeightBytes=128L;ConvertBytes=$convertBytes;ConstantBytes=$constBytes
+        ParameterBytes=($convertBytes+$constBytes);OutputOffset=256L;OutputBytes=(256L+$bytes);VtcmBytes=$at;Regions=$regions}
+}
+
+function New-KokoroAlbertAttention16RunSteps {
+    param([ValidateRange(1,512)][int]$Tokens=16)
+    foreach($file in '../kernels/Kokoro.Attention16.ps1','../kernels/Kokoro.Decoder16.ps1') { . (Join-Path $PSScriptRoot $file) }
+    $L=Get-KokoroAlbertAttention16Layout -Tokens $Tokens
+    $reg=$L.Regions
+    $job={
+        & $dma 18 $reg.Q.Offset 20 0 $L.TensorBytes
+        & $dma 18 $reg.K.Offset 20 $L.TensorBytes $L.TensorBytes
+        & $dma 18 $reg.V.Offset 20 (2*$L.TensorBytes) $L.TensorBytes
+        & $dma 18 $reg.Tables.Offset 22 0 $L.ParameterBytes
+        & $ptr 0 18 $reg.Q.Offset; & $ptr 1 18 $reg.Tables.Offset; & $imm 2 $L.Tiles
+        & $call 'albert_qconvert'; & $sync
+        & $ptr 0 18 $reg.K.Offset; & $ptr 1 18 ($reg.Tables.Offset+$L.ConvertBytes/2); & $imm 2 $L.Tiles
+        & $call 'albert_qconvert'; & $sync
+        # Context rows the attention does not write (past T) hold the 16-bit zero.
+        & $ptr 4 18 $reg.Context.Offset; & $imm 6 0x80008000L; $s.Add(@{Op='vsplat';d=0;s=6}); & $imm 5 ($L.TensorBytes/128); $s.Add(@{Op='imm';d=7;i=0})
+        $s.Add(@{Op='label';Name='albattn_fill'}); $s.Add(@{Op='vstore';s=4;t=0;Offset=0}); $s.Add(@{Op='addi';d=4;s=4;i=128})
+        $s.Add(@{Op='addi';d=5;s=5;i=-1}); $s.Add(@{Op='gtu';d=0;s=5;t=7}); $s.Add(@{Op='jump-p';u=0;Label='albattn_fill'})
+        & $ptr 0 18 $reg.Q.Offset; & $ptr 1 18 $reg.K.Offset; & $ptr 2 18 $reg.V.Offset; & $ptr 3 18 $reg.Context.Offset
+        & $ptr 4 18 ($reg.Tables.Offset+$L.ConvertBytes); & $ptr 5 18 $reg.Scratch.Offset
+        & $call 'albert_attention'; & $sync
+        & $dma 23 $L.OutputOffset 18 $reg.Context.Offset $L.TensorBytes
+    }
+    $bodies=@(
+        @('albert_qconvert',@(New-KokoroScaleConvert16Steps -Channels 768 -LabelPrefix 'albqconv')),
+        @('albert_attention',@(New-KokoroAttention16Steps -Tokens $Tokens -LabelPrefix 'albattn')))
+    $steps=New-KokoroWrappedJobSteps -Minimum @(4,$L.InputBytes,$L.WeightBytes,$L.ParameterBytes,$L.OutputBytes) -VtcmBytes $L.VtcmBytes -Tiles $L.Tiles -Job $job -Bodies $bodies
+    [pscustomobject]@{Steps=$steps;Layout=[ordered]@{Tokens=$Tokens;Tiles=$L.Tiles;InputBytes=$L.InputBytes;WeightBytes=$L.WeightBytes;ParameterBytes=$L.ParameterBytes
+        ConvertBytes=$L.ConvertBytes;OutputBytes=$L.OutputBytes;OutputOffset=$L.OutputOffset;PcmOffset=$L.OutputOffset;Samples=1;VtcmBytes=$L.VtcmBytes;Regions=$L.Regions}}
+}
+
+# Embeddings: New-KokoroEmbed16Steps (gather + position/type) then New-KokoroLayerNorm16Steps over 128 channels, in place.
+# Buffers: config, input (token ids int32[T] padded to 128 B, then posType croutons 128 wide), weights (word rows,
+# Vocab * 512 B), tables (LayerNorm constants for 128 channels), output: the embedding output (128 wide) at 256.
+# Vocab = config n_token (lib/kokoro-v1_0.config.json: 178).
+function Get-KokoroAlbertEmbed16Layout {
+    param([ValidateRange(1,512)][int]$Tokens=16,[ValidateRange(1,65536)][int]$Vocab=178)
+    $tiles=[int][math]::Ceiling($Tokens/32); $bytes=$tiles*64L*128; $idBytes=[long]([math]::Ceiling(4*$Tokens/128)*128)
+    $tableBytes=[long]([math]::Ceiling((256L*4+8)/128)*128); $wordBytes=512L*$Vocab
+    $al={param([long]$v) [long]([math]::Ceiling($v/65536)*65536)}
+    $regions=[ordered]@{}; $at=0L
+    foreach($r in @(@('Ids',$idBytes),@('PosType',$bytes),@('X',$bytes),@('Word',$wordBytes),@('Tables',$tableBytes),@('Scratch',1024L))){ $regions[$r[0]]=[ordered]@{Offset=$at;Bytes=[long]$r[1]}; $at+=& $al $r[1] }
+    [pscustomobject]@{Tokens=$Tokens;Vocab=$Vocab;Tiles=$tiles;IdBytes=$idBytes;TensorBytes=$bytes;InputBytes=($idBytes+$bytes);WeightBytes=$wordBytes;ParameterBytes=$tableBytes
+        OutputOffset=256L;OutputBytes=(256L+$bytes);VtcmBytes=$at;Regions=$regions}
+}
+
+function New-KokoroAlbertEmbed16RunSteps {
+    param([ValidateRange(1,512)][int]$Tokens=16,[ValidateRange(1,65536)][int]$Vocab=178)
+    foreach($file in '../kernels/Kokoro.Embed16.ps1','../kernels/Kokoro.LayerNorm16.ps1') { . (Join-Path $PSScriptRoot $file) }
+    $L=Get-KokoroAlbertEmbed16Layout -Tokens $Tokens -Vocab $Vocab
+    $reg=$L.Regions
+    $job={
+        & $dma 18 $reg.Ids.Offset 20 0 $L.IdBytes
+        & $dma 18 $reg.PosType.Offset 20 $L.IdBytes $L.TensorBytes
+        & $dma 18 $reg.Word.Offset 21 0 $L.WeightBytes
+        & $dma 18 $reg.Tables.Offset 22 0 $L.ParameterBytes
+        & $ptr 0 18 $reg.Ids.Offset; & $ptr 1 18 $reg.Word.Offset; & $ptr 2 18 $reg.PosType.Offset; & $ptr 3 18 $reg.X.Offset; & $imm 4 $Tokens
+        & $call 'albert_embed'; & $sync
+        & $ptr 0 18 $reg.X.Offset; & $ptr 1 18 $reg.X.Offset; & $ptr 2 18 $reg.Tables.Offset; & $ptr 3 18 $reg.Scratch.Offset; & $imm 4 $L.Tiles
+        & $call 'albert_embed_layernorm'; & $sync
+        & $dma 23 $L.OutputOffset 18 $reg.X.Offset $L.TensorBytes
+    }
+    $bodies=@(
+        @('albert_embed',@(New-KokoroEmbed16Steps -Blocks 4 -Vocab $Vocab -Tokens $Tokens -LabelPrefix 'albembed')),
+        @('albert_embed_layernorm',@(New-KokoroLayerNorm16Steps -Channels 128 -LabelPrefix 'albembln')))
+    $steps=New-KokoroWrappedJobSteps -Minimum @(4,$L.InputBytes,$L.WeightBytes,$L.ParameterBytes,$L.OutputBytes) -VtcmBytes $L.VtcmBytes -Tiles $L.Tiles -Job $job -Bodies $bodies
+    [pscustomobject]@{Steps=$steps;Layout=[ordered]@{Tokens=$Tokens;Vocab=$Vocab;Tiles=$L.Tiles;InputBytes=$L.InputBytes;WeightBytes=$L.WeightBytes;ParameterBytes=$L.ParameterBytes
+        OutputBytes=$L.OutputBytes;OutputOffset=$L.OutputOffset;PcmOffset=$L.OutputOffset;Samples=1;VtcmBytes=$L.VtcmBytes;Regions=$L.Regions}}
+}
+
 function Get-KokoroAlbertLayerNorm16Layout {
     param([ValidateRange(32,2048)][int]$Channels=768,[ValidateRange(1,512)][int]$Tokens=16)
     if($Channels % 32){throw 'Channels must be whole 32-channel blocks'}
