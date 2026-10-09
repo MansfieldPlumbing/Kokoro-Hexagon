@@ -4,11 +4,12 @@
 The one entrypoint for Kokoro-Hexagon work: where the project stands, what to do next, and every routine operation.
 
 .DESCRIPTION
-Run it with no arguments first. It prints the commit, the attached phone, the next step from the newest handoff,
+Run it with no arguments first. It prints the commit, the next step from the newest handoff,
 the ratchet cases and the commands below. Every recurring operation belongs here as a command. A step typed by hand
 twice, or written as a scratch script, is a missing command: add it here.
 
-  Status                      Project state, next step, phone, cases, commands (default).
+  Status                      Project state, next step, cases, commands (default). Reads the repository only:
+                              no adb, no phone, no network. Phone access is only in Run, Ratchet and Compare.
   Ratchet  [-Case]            Case-pair check, then every unblocked ratchet case on the phone; throws on regression.
   Run      -Case [-Hypothesis] [-Runs]
                               Emit the case's kernel, run it on the phone, print input hashes, receipt and result.
@@ -109,8 +110,6 @@ switch ($Command) {
         $dirty = @(git -C $Root status --porcelain).Count
         "Kokoro-Hexagon  $head"
         "                $dirty uncommitted"
-        $phones = @(Get-Phone)
-        "Phone           $(if ($phones) { ($phones.Soc -join ', ') } else { 'none attached' })"
         $next = Get-NextStep
         "Next            ($($next.Handoff))"
         $next.Steps | ForEach-Object { "  $_" }

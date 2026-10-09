@@ -6,7 +6,8 @@ The machine-wide rules in `C:\Dev\AGENTS.md` apply.
 
     pwsh -NoProfile -File ./Invoke-KokoroHexagon.ps1
 
-It prints the commit, the attached phone, the next step and every command (stock captures, ALBERT error, emit,
+It prints the commit, the next step and every command, reading only the repository (no adb or phone; phone access is
+only in `Run`, `Ratchet` and `Compare`) (stock captures, ALBERT error, emit,
 kernel check, phone runs, ratchet, job inputs, search). Do the work through its commands. A step typed by hand twice,
 or written as a scratch script, is a missing command: add it to `Invoke-KokoroHexagon.ps1` and use it. Scripts under
 `tools/` are being absorbed into it as they are used.
