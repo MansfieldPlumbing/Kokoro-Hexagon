@@ -7,7 +7,7 @@ Kokoro evaluator: runs a DSP job candidate on a phone, scores it against stock, 
 One candidate = an emitter kernel with its parameters, run on an input (a capture-derived fixture directory). The
 evaluator emits it (cached by a hash of the parameters and every file in src/hexagon, src/kernels and src/jobs), runs it on the attached phone of
 the SoC (tools/Invoke-GeneratorTailProbe.ps1; unchanged staged files are not pushed again), scores PCM against the stock
-PCM in the input (tools/Measure-KokoroPcmSnr.ps1), writes the WAV, and appends one row to build/evaluator/experiments.tsv.
+PCM in the input (tools/Measure-KokoroPcmSnr.ps1), writes the WAV, and appends one row to the experiment log (C:/Dev/Pwsh-Development/kokoro-hexagon/experiments.tsv).
 Correctness gates timing: a candidate below its PCM floor is 'discard' whatever its speed.
 
 The ratchet (tools/Kokoro.Ratchet.psd1, committed) lists cases with accepted values: PCM SNR floor, median DSP ms
@@ -23,7 +23,8 @@ the commit message. Only a measured improvement moves an accepted value (Update-
 $script:Root = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..'))
 $script:Pwsh = (Get-Process -Id $PID).Path
 $script:RatchetPath = Join-Path $PSScriptRoot 'Kokoro.Ratchet.psd1'
-$script:LogPath = Join-Path $script:Root 'build/evaluator/experiments.tsv'
+# The experiment log is committed evidence in the shared PowerShell library (C:/Dev/Pwsh-Development/kokoro-hexagon).
+$script:LogPath = [IO.Path]::GetFullPath((Join-Path $script:Root '../Pwsh-Development/kokoro-hexagon/experiments.tsv'))
 $script:Standards = @{
     Pass = 'Ratchet: put the score line in the commit message; Update-KokoroRatchet moves an accepted value only after a measured gain.'
     Fail = 'Make this failure impossible to repeat: a check, a clearer error or a tool fix, not a handoff note.'
