@@ -2,7 +2,7 @@
 [CmdletBinding()]
 param(
     [string] $OutputDirectory = (Join-Path $PSScriptRoot '..\build\hexagon-emission\emitted'),
-    [ValidateSet('Probe','KokoroAffine','KokoroAdaIn','KokoroAdaInResBlock','KokoroAdaInStatistics','KokoroAdaInIntegerCoefficients','KokoroAdaInIntegerAffine','KokoroSnakeInteger','KokoroResidualInteger','KokoroAlbertSoftmax3','KokoroAlbertAttention3','KokoroAlbertAttentionOutput3','KokoroAlbertConnectedAttention3','KokoroConvTile','KokoroLinearTile','KokoroR0Sub0','KokoroHmxLock','KokoroHmxMatrix','KokoroHmxConv','KokoroHmxConvPlanes','KokoroHmxConvPlanesLoop','KokoroPlaneCombine','KokoroPlaneCombineLoop','KokoroAdaInMoments16','KokoroAdaInMoments16Loop','KokoroAdaInTurnsCoefficients','KokoroAdaInAffineCoefficientsLoop','KokoroHmxConvRun','KokoroResBlockRun','KokoroBranchAverageInteger','KokoroGenerator60xRun','KokoroLeakyReluInteger','KokoroVtcmQuery','KokoroDmaCopy','KokoroDmaBench','KokoroAdaInSnakeInteger','KokoroAdaInSnakeTurns','KokoroGenerator60xResidentRun','KokoroGenerator60x16Run','KokoroGeneratorTailRun','KokoroGeneratorTail16Run','KokoroGeneratorStage16TailRun','KokoroResBlock16Run','KokoroGeneratorFrontStageTailRun','KokoroGeneratorFront10x16Run','KokoroGeneratorWhole16Run','KokoroHarmonicStft16Run','KokoroHarmonicSource16Run','KokoroGeneratorWholeSource16Run')][string] $Kernel='Probe',
+    [ValidateSet('Probe','KokoroAffine','KokoroAdaIn','KokoroAdaInResBlock','KokoroAdaInStatistics','KokoroAdaInIntegerCoefficients','KokoroAdaInIntegerAffine','KokoroSnakeInteger','KokoroResidualInteger','KokoroAlbertSoftmax3','KokoroAlbertAttention3','KokoroAlbertAttentionOutput3','KokoroAlbertConnectedAttention3','KokoroConvTile','KokoroLinearTile','KokoroR0Sub0','KokoroHmxLock','KokoroHmxMatrix','KokoroHmxConv','KokoroHmxConvPlanes','KokoroHmxConvPlanesLoop','KokoroPlaneCombine','KokoroPlaneCombineLoop','KokoroAdaInMoments16','KokoroAdaInMoments16Loop','KokoroAdaInTurnsCoefficients','KokoroAdaInAffineCoefficientsLoop','KokoroAdaInLeaky16','KokoroDecoderPass','KokoroHmxConvRun','KokoroResBlockRun','KokoroBranchAverageInteger','KokoroGenerator60xRun','KokoroLeakyReluInteger','KokoroVtcmQuery','KokoroDmaCopy','KokoroDmaBench','KokoroAdaInSnakeInteger','KokoroAdaInSnakeTurns','KokoroGenerator60xResidentRun','KokoroGenerator60x16Run','KokoroGeneratorTailRun','KokoroGeneratorTail16Run','KokoroGeneratorStage16TailRun','KokoroResBlock16Run','KokoroGeneratorFrontStageTailRun','KokoroGeneratorFront10x16Run','KokoroGeneratorWhole16Run','KokoroHarmonicStft16Run','KokoroHarmonicSource16Run','KokoroGeneratorWholeSource16Run')][string] $Kernel='Probe',
     [ValidateRange(2, 32768)][int] $ResBlockFrames = 7801,
     [ValidateSet(3,7,11)][int] $ResBlockKernel = 3,
     [ValidateSet(128,256)][int] $IntegerChannels = 128,
@@ -12,6 +12,13 @@ param(
     # KokoroHmxConvPlanesLoop: decoder shapes (docs/decoder-design.md).
     [ValidateRange(32, 2048)][int] $ConvInputChannels = 1120,
     [ValidateRange(64, 2048)][int] $ConvOutputChannels = 1024,
+    [ValidateSet('Windows','Tensor')][string] $LeakyOutput = 'Windows',
+    # KokoroDecoderPass: one pass of src/emit/Kokoro.Decoder16.ps1.
+    [ValidateSet('PadRows16','LowWindow16','FrameDouble16','Pool2','StrideConv16')][string] $DecoderPass = 'PadRows16',
+    [ValidateRange(1, 1048576)][int] $DecoderFrames = 65,
+    [ValidateSet(0, 0x8000)][int] $DecoderHalfword = 0x8000,
+    [ValidateRange(0, 2047)][int] $DecoderChannel = 1088,
+    [ValidateRange(0, 1048576)][long] $CombineOutputTileSkip = 0,
     [ValidateSet(1, 3, 5)][int] $ConvDilation = 1,
     [switch] $ConvOutputPlanes,
     [ValidateSet(1,2)][int] $ConvWeightPlanes = 1,
@@ -351,7 +358,7 @@ if($Kernel -eq 'KokoroR0Sub0') {
     $symbol='kokoro_plane_combine'; $soname='libkokoro_plane_combine.so'
 } elseif($Kernel -eq 'KokoroPlaneCombineLoop') {
     . (Join-Path $PSScriptRoot '..' 'src' 'emit' 'Kokoro.PlaneCombine.ps1')
-    $steps=@(New-KokoroPlaneCombineLoopSteps -Mode $CombineMode -Channels $ConvOutputChannels -PlaneStride (3*($ConvOutputChannels/32)*2048))
+    $steps=@(New-KokoroPlaneCombineLoopSteps -Mode $CombineMode -Channels $ConvOutputChannels -PlaneStride (3*($ConvOutputChannels/32)*2048) -OutputTileSkip $CombineOutputTileSkip)
     $symbol='kokoro_plane_combine_loop'; $soname='libkokoro_plane_combine_loop.so'
 } elseif($Kernel -eq 'KokoroAdaInMoments16Loop') {
     . (Join-Path $PSScriptRoot '..' 'src' 'emit' 'Kokoro.AdaInMoments16.ps1')
@@ -365,6 +372,19 @@ if($Kernel -eq 'KokoroR0Sub0') {
     . (Join-Path $PSScriptRoot '..' 'src' 'emit' 'Kokoro.AdaInTurnsCoefficients.ps1')
     $steps=@(New-KokoroAdaInAffineCoefficientsLoopSteps -Channels $ConvInputChannels)
     $symbol='kokoro_adain_affine_coefficients_loop'; $soname='libkokoro_adain_affine_coefficients_loop.so'
+} elseif($Kernel -eq 'KokoroDecoderPass') {
+    . (Join-Path $PSScriptRoot '..' 'src' 'emit' 'Kokoro.Decoder16.ps1')
+    $steps=@(switch($DecoderPass){
+        'PadRows16' { New-KokoroPadRows16Steps -Frames $DecoderFrames -Channels $ConvInputChannels -Halfword $DecoderHalfword }
+        'LowWindow16' { New-KokoroLowWindow16Steps }
+        'FrameDouble16' { New-KokoroFrameDouble16Steps -Channels $ConvInputChannels }
+        'Pool2' { New-KokoroPool2Steps -Channels $ConvInputChannels }
+        'StrideConv16' { New-KokoroStrideConv16Steps -Frames $DecoderFrames -Channels $ConvInputChannels -Channel $DecoderChannel } })
+    $symbol='kokoro_decoder_pass'; $soname='libkokoro_decoder_pass.so'
+} elseif($Kernel -eq 'KokoroAdaInLeaky16') {
+    . (Join-Path $PSScriptRoot '..' 'src' 'emit' 'Kokoro.AdaInLeaky16.ps1')
+    $steps=@(New-KokoroAdaInLeaky16Steps -Channels $ConvInputChannels -Output $LeakyOutput)
+    $symbol='kokoro_adain_leaky16'; $soname='libkokoro_adain_leaky16.so'
 } elseif($Kernel -eq 'KokoroAdaInTurnsCoefficients') {
     . (Join-Path $PSScriptRoot '..' 'src' 'emit' 'Kokoro.AdaInTurnsCoefficients.ps1')
     $steps=@(New-KokoroAdaInTurnsCoefficientsSteps -Channels $ConvChannels)

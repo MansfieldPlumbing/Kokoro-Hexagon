@@ -110,6 +110,8 @@ function New-KokoroPlaneCombineLoopSteps {
         [ValidateSet('Conv','Residual','Scale')][string] $Mode = 'Conv',
         [ValidateRange(32, 2048)][int] $Channels = 1024,
         [Parameter(Mandatory)][ValidateRange(2048, 1073741824)][long] $PlaneStride,
+        # Bytes added to the output pointer after each tile: the output is a wider tensor (tile stride 64 * Channels + skip).
+        [ValidateRange(0, 1048576)][long] $OutputTileSkip = 0,
         [string] $LabelPrefix = 'planecombineloop',
         [switch] $NoReturn
     )
@@ -159,6 +161,7 @@ function New-KokoroPlaneCombineLoopSteps {
     $s.Add(@{Op='addi';d=5;s=5;i=-1})
     $s.Add(@{Op='gtu';d=0;s=5;t=7})
     $s.Add(@{Op='jump-p';u=0;Label="${LabelPrefix}_block"})
+    if ($OutputTileSkip -gt 0) { if ($OutputTileSkip % 128) { throw 'Output tile skip must keep vector alignment' }; & $imm 13 $OutputTileSkip; $s.Add(@{Op='add';d=1;s=1;t=13}) }
     $s.Add(@{Op='addi';d=15;s=15;i=-1})
     $s.Add(@{Op='gtu';d=0;s=15;t=7})
     $s.Add(@{Op='jump-p';u=0;Label="${LabelPrefix}_tile"})

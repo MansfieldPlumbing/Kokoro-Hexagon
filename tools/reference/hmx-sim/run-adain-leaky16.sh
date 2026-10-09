@@ -1,9 +1,9 @@
 #!/bin/bash
-# Run the PowerShell-emitted looped plane combine in the V73 simulator: run-plane-combine-loop.sh <emitted-code.bin> <channels> <mode 0 Conv|1 Residual|2 Scale> [output tile skip bytes]
+# Run the PowerShell-emitted fused AdaIN + LeakyReLU body in the V73 simulator: run-adain-leaky16.sh <emitted-code.bin> <channels> <output 0 Windows|1 Tensor>
 set -euo pipefail
 T=/home/scott/hexagon/Hexagon_SDK/6.4.0.2/tools/HEXAGON_Tools/19.0.04/Tools
 here="$(cd "$(dirname "$0")" && pwd)"
-bin="$1"; ch="$2"; mode="$3"; skip="${4:-0}"
+bin="$1"; ch="$2"; out="$3"
 work="$(mktemp -d)"
 shim=/tmp/hexagon-ncshim
 mkdir -p "$shim"
@@ -15,6 +15,6 @@ export LD_LIBRARY_PATH="$shim:${LD_LIBRARY_PATH:-}"
   od -An -v -tx1 "$bin" | sed 's/\([0-9a-f][0-9a-f]\)/0x\1,/g'
   echo '};'
 } > "$work/emitted_code.h"
-"$T/bin/hexagon-clang" -mv73 -mhmx -mhvx -O2 -DCH="$ch" -DMODE="$mode" -DSKIP="$skip" -include "$work/emitted_code.h" "$here/plane_combine_loop.c" -o "$work/plane_combine_loop.elf" -lm
-timeout 900 "$T/bin/hexagon-sim" -mv73 --mhmx 1 "$work/plane_combine_loop.elf" 2>&1 | grep -E 'plane-combine|^t=|FAIL|PASS|rror' || true
+"$T/bin/hexagon-clang" -mv73 -mhmx -mhvx -O2 -DCH="$ch" -DOUT="$out" -include "$work/emitted_code.h" "$here/adain_leaky16.c" -o "$work/adain_leaky16.elf"
+timeout 900 "$T/bin/hexagon-sim" -mv73 --mhmx 1 "$work/adain_leaky16.elf" 2>&1 | grep -E 'adain|FAIL|PASS|rror|t=' || true
 rm -rf "$work"

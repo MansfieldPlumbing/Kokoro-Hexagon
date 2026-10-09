@@ -12,6 +12,10 @@ static unsigned cfg(int off){ unsigned b; __asm__ volatile("%0 = cfgbase":"=r"(b
 #define NT 3
 #define STRIDE (NT * OB * 2048)
 #define GROUPS 2
+#ifndef SKIP
+#define SKIP 0
+#endif
+#define OUTAT(t, at) ((at) + (size_t)((t) / 32) * SKIP)   /* frame t: its output tile is SKIP bytes further per tile (-OutputTileSkip) */
 #define IDX(i, j) (64 * ((i) / 2) + 2 * (j) + ((i) % 2))
 typedef void (*fn_t)(const void* planes, void* out, const void* ratio, unsigned tiles);
 static uint32_t lcg = 99;
@@ -22,13 +26,13 @@ static int16_t R[NT * 32][CH];
 int main(void) {
   unsigned char* v = (unsigned char*)(cfg(0x38) << 16);
   unsigned r; __asm__ volatile("%0 = ssr":"=r"(r)); r |= 1u << 26; __asm__ volatile("ssr = %0; isync"::"r"(r));
-  unsigned char *planes = v, *out = v + 6 * (size_t)STRIDE; int16_t* ratio = (int16_t*)(out + (size_t)STRIDE);
+  unsigned char *planes = v, *out = v + 6 * (size_t)STRIDE; int16_t* ratio = (int16_t*)(out + (size_t)STRIDE + (size_t)NT * SKIP);
   for (size_t i = 0; i < 6 * (size_t)STRIDE; i++) planes[i] = (unsigned char)rnd(0, 255);
   for (int c = 0; c < CH; c++) ratio[2 * c] = ratio[2 * c + 1] = (int16_t)rnd(8000, 32767);
   for (int t = 0; t < NT * 32; t++) for (int c = 0; c < CH; c++) {
     R[t][c] = (int16_t)rnd(-30000, 30000);
     size_t at = ((size_t)(t / 32) * OB + c / 32) * 2048 + 2 * IDX(t % 32, c % 32);
-    uint16_t b = (uint16_t)(R[t][c] + 32768); out[at] = (unsigned char)b; out[at + 1] = (unsigned char)(b >> 8);
+    uint16_t b = (uint16_t)(R[t][c] + 32768); out[OUTAT(t, at)] = (unsigned char)b; out[OUTAT(t, at) + 1] = (unsigned char)(b >> 8);
   }
   ((fn_t)(uintptr_t)EMITTED_CODE)(planes, out, ratio, NT);
   int bad = 0, shown = 0;
@@ -39,7 +43,7 @@ int main(void) {
     int16_t val = sat16((w1 - 32768) + (w2 - 32768));
     if (GROUPS == 3) val = sat16(val + (w3 - 32768));
     int16_t o = MODE == 1 ? sat16(R[t][c] + q15(val, ratio[2 * c])) : MODE == 2 ? q15(val, ratio[2 * c]) : val;
-    int got = (int)(out[at] | out[at + 1] << 8) - 32768;
+    int got = (int)(out[OUTAT(t, at)] | out[OUTAT(t, at) + 1] << 8) - 32768;
     if (got != o) { bad++; if (shown++ < 6) printf("t=%d c=%d w1=%d w2=%d R=%d expected %d got %d\n", t, c, w1, w2, R[t][c], o, got); }
   }
   printf("plane-combine-loop %s groups=%d C=%d tiles=%d mismatches=%d/%d %s\n", MODE == 1 ? "residual" : MODE == 2 ? "scale" : "conv", GROUPS, CH, NT, bad, NT * 32 * CH, bad ? "FAIL" : "PASS");

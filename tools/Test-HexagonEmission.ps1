@@ -4,7 +4,7 @@
 param(
     [string] $OutputDirectory = (Join-Path $PSScriptRoot '..\build\hexagon-emission\emitted'),
     [string] $ToolRoot = '/home/scott/hexagon/Hexagon_SDK/6.4.0.2/tools/HEXAGON_Tools/19.0.04/Tools/bin',
-    [ValidateSet('Probe','KokoroAffine','KokoroAdaIn','KokoroAdaInResBlock','KokoroAdaInStatistics','KokoroAdaInIntegerCoefficients','KokoroAdaInIntegerAffine','KokoroSnakeInteger','KokoroResidualInteger','KokoroAlbertSoftmax3','KokoroAlbertAttention3','KokoroAlbertAttentionOutput3','KokoroAlbertConnectedAttention3','KokoroConvTile','KokoroLinearTile','KokoroR0Sub0','KokoroHmxLock','KokoroHmxMatrix','KokoroHmxConv','KokoroHmxConvPlanes','KokoroHmxConvPlanesLoop','KokoroPlaneCombine','KokoroPlaneCombineLoop','KokoroAdaInMoments16','KokoroAdaInMoments16Loop','KokoroAdaInTurnsCoefficients','KokoroAdaInAffineCoefficientsLoop','KokoroHmxConvRun','KokoroResBlockRun','KokoroBranchAverageInteger','KokoroGenerator60xRun','KokoroLeakyReluInteger','KokoroVtcmQuery','KokoroDmaCopy','KokoroDmaBench','KokoroAdaInSnakeInteger','KokoroAdaInSnakeTurns','KokoroGenerator60xResidentRun','KokoroGenerator60x16Run','KokoroGeneratorTailRun','KokoroGeneratorTail16Run','KokoroGeneratorStage16TailRun','KokoroResBlock16Run','KokoroGeneratorFrontStageTailRun','KokoroGeneratorFront10x16Run','KokoroGeneratorWhole16Run','KokoroHarmonicStft16Run','KokoroHarmonicSource16Run','KokoroGeneratorWholeSource16Run')][string] $Kernel='Probe',
+    [ValidateSet('Probe','KokoroAffine','KokoroAdaIn','KokoroAdaInResBlock','KokoroAdaInStatistics','KokoroAdaInIntegerCoefficients','KokoroAdaInIntegerAffine','KokoroSnakeInteger','KokoroResidualInteger','KokoroAlbertSoftmax3','KokoroAlbertAttention3','KokoroAlbertAttentionOutput3','KokoroAlbertConnectedAttention3','KokoroConvTile','KokoroLinearTile','KokoroR0Sub0','KokoroHmxLock','KokoroHmxMatrix','KokoroHmxConv','KokoroHmxConvPlanes','KokoroHmxConvPlanesLoop','KokoroPlaneCombine','KokoroPlaneCombineLoop','KokoroAdaInMoments16','KokoroAdaInMoments16Loop','KokoroAdaInTurnsCoefficients','KokoroAdaInAffineCoefficientsLoop','KokoroAdaInLeaky16','KokoroDecoderPass','KokoroHmxConvRun','KokoroResBlockRun','KokoroBranchAverageInteger','KokoroGenerator60xRun','KokoroLeakyReluInteger','KokoroVtcmQuery','KokoroDmaCopy','KokoroDmaBench','KokoroAdaInSnakeInteger','KokoroAdaInSnakeTurns','KokoroGenerator60xResidentRun','KokoroGenerator60x16Run','KokoroGeneratorTailRun','KokoroGeneratorTail16Run','KokoroGeneratorStage16TailRun','KokoroResBlock16Run','KokoroGeneratorFrontStageTailRun','KokoroGeneratorFront10x16Run','KokoroGeneratorWhole16Run','KokoroHarmonicStft16Run','KokoroHarmonicSource16Run','KokoroGeneratorWholeSource16Run')][string] $Kernel='Probe',
     [ValidateRange(2, 32768)][int] $ResBlockFrames = 7801,
     [ValidateSet(3,7,11)][int] $ResBlockKernel = 3,
     [ValidateSet(128,256)][int] $IntegerChannels = 128,
@@ -13,6 +13,13 @@ param(
     [ValidateSet(1, 3, 7, 11)][int] $ConvKernel = 3,
     [ValidateRange(32, 2048)][int] $ConvInputChannels = 1120,
     [ValidateRange(64, 2048)][int] $ConvOutputChannels = 1024,
+    [ValidateSet('Windows','Tensor')][string] $LeakyOutput = 'Windows',
+    # KokoroDecoderPass: one pass of src/emit/Kokoro.Decoder16.ps1.
+    [ValidateSet('PadRows16','LowWindow16','FrameDouble16','Pool2','StrideConv16')][string] $DecoderPass = 'PadRows16',
+    [ValidateRange(1, 1048576)][int] $DecoderFrames = 65,
+    [ValidateSet(0, 0x8000)][int] $DecoderHalfword = 0x8000,
+    [ValidateRange(0, 2047)][int] $DecoderChannel = 1088,
+    [ValidateRange(0, 1048576)][long] $CombineOutputTileSkip = 0,
     [ValidateSet(1, 3, 5)][int] $ConvDilation = 1,
     [switch] $ConvOutputPlanes,
     [ValidateSet(1,2)][int] $ConvWeightPlanes = 1,
@@ -47,7 +54,7 @@ $pmuArgs=if($ResidentPmuEvents){@{ResidentPmuEvents=$ResidentPmuEvents}}else{@{}
 $result=& (Join-Path $PSScriptRoot 'Emit-HexagonProbe.ps1') -OutputDirectory $output `
     -Kernel $Kernel -ResBlockFrames $ResBlockFrames -ResBlockKernel $ResBlockKernel -IntegerChannels $IntegerChannels -LinearRows $LinearRows -LinearInputChannels $LinearInputChannels `
     -LinearOutputChannels $LinearOutputChannels -LinearVectorOutputTiles:$LinearVectorOutputTiles `
-    -AdaInFrames $AdaInFrames -AdaInChannels $AdaInChannels -AdaInVectorConvolution:$AdaInVectorConvolution -ConvChannels $ConvChannels -ConvInputChannels $ConvInputChannels -ConvOutputChannels $ConvOutputChannels -ConvKernel $ConvKernel -ConvDilation $ConvDilation -ConvOutputPlanes:$ConvOutputPlanes -ConvWeightPlanes $ConvWeightPlanes -CombineMode $CombineMode -CombineGroups $CombineGroups -ResidentCostProbePasses $ResidentCostProbePasses -ResidentCostProbeTurnsBody:$ResidentCostProbeTurnsBody -ConvTiles $ConvTiles -RegionBody:$RegionBody `
+    -AdaInFrames $AdaInFrames -AdaInChannels $AdaInChannels -AdaInVectorConvolution:$AdaInVectorConvolution -ConvChannels $ConvChannels -ConvInputChannels $ConvInputChannels -ConvOutputChannels $ConvOutputChannels -LeakyOutput $LeakyOutput -DecoderPass $DecoderPass -DecoderFrames $DecoderFrames -DecoderHalfword $DecoderHalfword -DecoderChannel $DecoderChannel -CombineOutputTileSkip $CombineOutputTileSkip -ConvKernel $ConvKernel -ConvDilation $ConvDilation -ConvOutputPlanes:$ConvOutputPlanes -ConvWeightPlanes $ConvWeightPlanes -CombineMode $CombineMode -CombineGroups $CombineGroups -ResidentCostProbePasses $ResidentCostProbePasses -ResidentCostProbeTurnsBody:$ResidentCostProbeTurnsBody -ConvTiles $ConvTiles -RegionBody:$RegionBody `
     -ProfileBreakdown:$ProfileBreakdown -BypassAdaInCoefficients:$BypassAdaInCoefficients -BypassStatisticsAndCoefficients:$BypassStatisticsAndCoefficients -BypassHmxCompute:$BypassHmxCompute -Force:$Force -ResidentHvxThreads $ResidentHvxThreads -ResidentBatchTiles $ResidentBatchTiles -ResidentCompactOutput:$ResidentCompactOutput -Stage16StopAfter $Stage16StopAfter -Stage16Kernels $Stage16Kernels -Stage16Channels $Stage16Channels @pmuArgs
 $wslOutput=(& wsl.exe --exec wslpath -a $output 2>$null | Select-Object -Last 1).Trim()
 if($LASTEXITCODE -ne 0 -or -not $wslOutput.StartsWith('/')) { throw 'Cannot resolve output directory in WSL' }
