@@ -37,6 +37,46 @@ function New-KokoroPadRows16Steps {
     $s.ToArray()
 }
 
+# New-KokoroPadRows16Steps with the frame count read at run time: r0 = tile 0, r5 = Frames. Rows Frames .. the end of
+# the last tile <- the halfword; nothing when Frames is a multiple of 32. Uses r1..r12, v0, v1, v2, v29.
+function New-KokoroPadRows16RuntimeSteps {
+    param([ValidateRange(32,2048)][int]$Channels=1120,[ValidateSet(0,0x8000)][int]$Halfword=0x8000,
+        [string]$LabelPrefix='padrows16rt',[switch]$NoReturn)
+    if ($Channels % 32) { throw 'Channels must be whole 32-channel blocks' }
+    $s = [Collections.Generic.List[hashtable]]::new()
+    $imm = { param([int]$r,[long]$v) $u=[uint32]($v -band 0xffffffffL); $s.Add(@{Op='lo';x=$r;i=($u -band 65535)}); $s.Add(@{Op='hi';x=$r;i=($u -shr 16)}) }
+    $done = "${LabelPrefix}_done"
+    $s.Add(@{Op='imm';d=12;i=0})
+    $s.Add(@{Op='imm';d=6;i=31}); $s.Add(@{Op='and';d=7;s=5;t=6})                    # f = Frames mod 32
+    $s.Add(@{Op='eq';d=0;s=7;t=12}); $s.Add(@{Op='jump-p';u=0;Label=$done})
+    $s.Add(@{Op='lsr-i';d=6;s=5;i=5}); & $imm 8 (64L * $Channels)                  # the last tile: Frames >> 5
+    $s.Add(@{Op='mpy-d';d=10;s=6;t=8}); $s.Add(@{Op='add';d=1;s=0;t=10})
+    $s.Add(@{Op='lsr-i';d=6;s=7;i=1}); $s.Add(@{Op='asl-i';d=9;s=6;i=7}); $s.Add(@{Op='add';d=1;s=1;t=9})   # row pair f >> 1
+    $s.Add(@{Op='addi';d=9;s=7;i=1}); $s.Add(@{Op='lsr-i';d=9;s=9;i=1}); $s.Add(@{Op='imm';d=8;i=16}); $s.Add(@{Op='sub';d=9;s=8;t=9})   # zero pairs: 16 - (f + 1) / 2
+    $s.Add(@{Op='imm';d=8;i=1}); $s.Add(@{Op='and';d=11;s=7;t=8})                   # f odd: row f - 1 stays, row f is padded
+    & $imm 2 ([long]$Halfword -bor ([long]$Halfword -shl 16)); $s.Add(@{Op='vsplat';d=0;s=2})
+    & $imm 2 0x0000FFFFL; $s.Add(@{Op='vsplat';d=29;s=2})
+    & $imm 2 ([long]$Halfword -shl 16); $s.Add(@{Op='vsplat';d=1;s=2})
+    $s.Add(@{Op='imm';d=3;i=($Channels/32)})
+    $s.Add(@{Op='label';Name="${LabelPrefix}_block"})
+    $s.Add(@{Op='addi';d=2;s=1;i=0})
+    $s.Add(@{Op='eq';d=0;s=11;t=12}); $s.Add(@{Op='jump-p';u=0;Label="${LabelPrefix}_even"})
+    $s.Add(@{Op='vload';d=2;s=2;Offset=0}); $s.Add(@{Op='vand';d=2;s=2;t=29}); $s.Add(@{Op='vor';d=2;s=2;t=1})
+    $s.Add(@{Op='vstore';s=2;t=2;Offset=0}); $s.Add(@{Op='addi';d=2;s=2;i=128})
+    $s.Add(@{Op='label';Name="${LabelPrefix}_even"})
+    $s.Add(@{Op='addi';d=4;s=9;i=0})
+    $s.Add(@{Op='label';Name="${LabelPrefix}_zero"})
+    $s.Add(@{Op='eq';d=0;s=4;t=12}); $s.Add(@{Op='jump-p';u=0;Label="${LabelPrefix}_next"})
+    $s.Add(@{Op='vstore';s=2;t=0;Offset=0}); $s.Add(@{Op='addi';d=2;s=2;i=128}); $s.Add(@{Op='addi';d=4;s=4;i=-1})
+    $s.Add(@{Op='eq';d=0;s=12;t=12}); $s.Add(@{Op='jump-p';u=0;Label="${LabelPrefix}_zero"})
+    $s.Add(@{Op='label';Name="${LabelPrefix}_next"})
+    $s.Add(@{Op='addi';d=1;s=1;i=2048}); $s.Add(@{Op='addi';d=3;s=3;i=-1})
+    $s.Add(@{Op='gtu';d=0;s=3;t=12}); $s.Add(@{Op='jump-p';u=0;Label="${LabelPrefix}_block"})
+    $s.Add(@{Op='label';Name=$done})
+    if (-not $NoReturn) { $s.Add(@{Op='return'}) }
+    $s.ToArray()
+}
+
 # Low conv-input window of a stored tensor (its high window is the tensor itself: the odd byte of x + 32768 is
 # (x >> 8) + 128): out = in << 8 per halfword. r0 = input, r1 = output, r2 = vectors >= 1. Uses r3..r5, v0.
 function New-KokoroLowWindow16Steps {
@@ -206,15 +246,16 @@ function New-KokoroScaleConvert16Steps {
 # r0 = curve, r1 = tensor tile 0, r2 = constants W0, W1, W2 (int32), B (int64) at 0, 4, 8, 16. Rows past F are untouched.
 # Uses r3..r15 (callee-saved registers are not touched).
 function New-KokoroStrideConv16Steps {
-    param([Parameter(Mandatory)][ValidateRange(1,1048576)][int]$Frames,[ValidateRange(32,2048)][int]$Channels=1120,
-        [Parameter(Mandatory)][ValidateRange(0,2047)][int]$Channel,[string]$LabelPrefix='strideconv16',[switch]$NoReturn)
+    # -RuntimeFrames: the caller passes Frames in r11 (Frames is then ignored).
+    param([ValidateRange(1,1048576)][int]$Frames=1,[ValidateRange(32,2048)][int]$Channels=1120,
+        [Parameter(Mandatory)][ValidateRange(0,2047)][int]$Channel,[string]$LabelPrefix='strideconv16',[switch]$NoReturn,[switch]$RuntimeFrames)
     $tileBytes = 64 * $Channels
     $s = [Collections.Generic.List[hashtable]]::new()
     $imm = { param([int]$r,[long]$v) $u=[uint32]($v -band 0xffffffffL); $s.Add(@{Op='lo';x=$r;i=($u -band 65535)}); $s.Add(@{Op='hi';x=$r;i=($u -shr 16)}) }
     & $imm 3 ([long][math]::Floor($Channel / 32) * 2048 + 4 * ($Channel % 32)); $s.Add(@{Op='add';d=1;s=1;t=3})   # row 0 of the channel
     $s.Add(@{Op='load';d=12;s=2;Offset=0}); $s.Add(@{Op='load';d=13;s=2;Offset=4}); $s.Add(@{Op='load';d=14;s=2;Offset=8})
     $s.Add(@{Op='imm';d=3;i=0})                                   # c[2t-1], zero for t = 0
-    $s.Add(@{Op='imm';d=11;i=$Frames}); $s.Add(@{Op='imm';d=15;i=0})
+    if (-not $RuntimeFrames) { $s.Add(@{Op='imm';d=11;i=$Frames}) }; $s.Add(@{Op='imm';d=15;i=0})
     & $imm 7 ($tileBytes - 2048)
     $s.Add(@{Op='label';Name="${LabelPrefix}_tile"})
     $s.Add(@{Op='imm';d=10;i=32})
