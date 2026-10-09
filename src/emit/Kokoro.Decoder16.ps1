@@ -94,8 +94,9 @@ function New-KokoroFrameDouble16Steps {
 # decode.3 pool: depthwise ConvTranspose1d(k 3, stride 2, pad 1, output_padding 1) over the LeakyReLU output a (F frames),
 # straight into the conv1 input windows at 2F frames:
 #     p[2t] = w1 a[t] + b,   p[2t+1] = w2 a[t] + w0 a[t+1] + b       (a[F] = 0)
-# Each term is q31(a * 2^16, W) with W the per-channel Q31 multiplier from a's LSB to the window LSB; b in window LSB;
-# the sum is clamped to int16 and split into the high ((p >> 8) + 128) and low (p & 255) planes (odd bytes).
+# Each term is q31(a * 2^16, W) = a W / 2^15, so W is the per-channel gain from a's LSB to the window LSB in Q15 (an int32
+# word, |gain| < 65536); b in window LSB; the sum is clamped to int16 and split into the high ((p >> 8) + 128) and low (p & 255)
+# planes (odd bytes).
 # Rows of a past F must hold 0 and one zero tile must follow the input (a[F] for F a multiple of 32).
 # r0 = a tiles, r1 = high window tile 0, r2 = low window tile 0, r3 = constants, 512 B per block: W0[32], W1[32], W2[32],
 # B[32] (int32), r4 = input tiles >= 1. Uses r0..r15, r28, v0..v21, v30, v31.
@@ -157,6 +158,45 @@ function New-KokoroPool2Steps {
     $s.Add(@{Op='addi';d=11;s=11;i=-1})
     $s.Add(@{Op='gtu';d=0;s=11;t=7})
     $s.Add(@{Op='jump-p';u=0;Label="${LabelPrefix}_block"})
+    if (-not $NoReturn) { $s.Add(@{Op='return'}) }
+    $s.ToArray()
+}
+
+# Per-channel conversion of a stored tensor to another representation (the decoder output into the generator's input
+# scales): x' = clamp(round(x * m_c * 2^e_c)), m_c below 1 as a Q31 word, e_c 0..15 (ratios under 1 use e = 0), in place.
+# e >= 0 keeps y + 2^(15 - e) inside int32 for every input. The product stays 32-bit until the
+# one saturation at int16: y = q31(x * 2^16, M) = x m 2^16, then (y + 2^(15 - e)) >> (16 - e) per lane.
+# r0 = tile 0 (biased u16), r1 = constants, 384 B per block: M[32], shift (16 - e)[32], round 2^(15 - e)[32] (int32),
+# r2 = tiles >= 1. Uses r3..r5, r7..r9, v0..v4, v14..v18, v29..v31.
+function New-KokoroScaleConvert16Steps {
+    param([ValidateRange(32,2048)][int]$Channels=512,[string]$LabelPrefix='scaleconvert16',[switch]$NoReturn)
+    if ($Channels % 32) { throw 'Channels must be whole 32-channel blocks' }
+    $s = [Collections.Generic.List[hashtable]]::new()
+    $imm = { param([int]$r,[long]$v) $u=[uint32]($v -band 0xffffffffL); $s.Add(@{Op='lo';x=$r;i=($u -band 65535)}); $s.Add(@{Op='hi';x=$r;i=($u -shr 16)}) }
+    $splat = { param([int]$v,[long]$value) & $imm 9 $value; $s.Add(@{Op='vsplat';d=$v;s=9}) }
+    & $splat 31 0x80008000L; & $splat 30 0xFFFF0000L; & $splat 29 0x0000FFFFL; & $splat 18 32767; & $splat 17 -32768
+    $s.Add(@{Op='imm';d=8;i=16}); $s.Add(@{Op='imm';d=7;i=0})
+    $s.Add(@{Op='label';Name="${LabelPrefix}_tile"})
+    $s.Add(@{Op='addi';d=4;s=1;i=0})
+    $s.Add(@{Op='imm';d=5;i=($Channels/32)})
+    $s.Add(@{Op='label';Name="${LabelPrefix}_block"})
+    $s.Add(@{Op='vload';d=14;s=4;Offset=0}); $s.Add(@{Op='vload';d=15;s=4;Offset=128}); $s.Add(@{Op='vload';d=16;s=4;Offset=256})
+    $s.Add(@{Op='imm';d=3;i=16})
+    $s.Add(@{Op='label';Name="${LabelPrefix}_pair"})
+    $s.Add(@{Op='vload';d=0;s=0;Offset=0}); $s.Add(@{Op='vxor';d=0;s=0;t=31})
+    $s.Add(@{Op='vasl-w';d=1;s=0;t=8}); $s.Add(@{Op='vand';d=2;s=0;t=30})
+    foreach ($p in @(@(3,1),@(4,2))) {
+        $s.Add(@{Op='vmpye-w-uh';d=$p[0];s=$p[1];t=14}); $s.Add(@{Op='vmpyo-acc-w-h-rnd-sat-shift';d=$p[0];s=$p[1];t=14})
+        $s.Add(@{Op='vadd-w';d=$p[0];s=$p[0];t=16}); $s.Add(@{Op='vasr-wv';d=$p[0];s=$p[0];t=15})
+        $s.Add(@{Op='vmax-w';d=$p[0];s=$p[0];t=17}); $s.Add(@{Op='vmin-w';d=$p[0];s=$p[0];t=18})
+    }
+    $s.Add(@{Op='vand';d=3;s=3;t=29}); $s.Add(@{Op='vasl-w';d=4;s=4;t=8}); $s.Add(@{Op='vor';d=3;s=3;t=4}); $s.Add(@{Op='vxor';d=3;s=3;t=31})
+    $s.Add(@{Op='vstore';s=0;t=3;Offset=0})
+    $s.Add(@{Op='addi';d=0;s=0;i=128})
+    $s.Add(@{Op='addi';d=3;s=3;i=-1}); $s.Add(@{Op='gtu';d=0;s=3;t=7}); $s.Add(@{Op='jump-p';u=0;Label="${LabelPrefix}_pair"})
+    $s.Add(@{Op='addi';d=4;s=4;i=384})
+    $s.Add(@{Op='addi';d=5;s=5;i=-1}); $s.Add(@{Op='gtu';d=0;s=5;t=7}); $s.Add(@{Op='jump-p';u=0;Label="${LabelPrefix}_block"})
+    $s.Add(@{Op='addi';d=2;s=2;i=-1}); $s.Add(@{Op='gtu';d=0;s=2;t=7}); $s.Add(@{Op='jump-p';u=0;Label="${LabelPrefix}_tile"})
     if (-not $NoReturn) { $s.Add(@{Op='return'}) }
     $s.ToArray()
 }

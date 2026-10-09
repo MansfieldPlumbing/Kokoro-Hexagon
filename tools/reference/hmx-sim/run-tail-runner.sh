@@ -13,6 +13,6 @@ ln -sf /usr/lib/x86_64-linux-gnu/libtinfo.so.6 "$shim/libtinfo.so.5"
 export LD_LIBRARY_PATH="$shim:${LD_LIBRARY_PATH:-}"
 "$T/bin/hexagon-clang" -mv73 -mhvx -mhvx-length=128b -O2 -include "$fixture/runner-image.h" "$here/tail_runner.c" -o "$work/runner.elf"
 timeout 5400 "$T/bin/hexagon-sim" -mv73 "$work/runner.elf" -- "$fixture" > "$fixture/runner-simulator.log" 2>&1 || true
-grep -E 'TailRunner|exception|CRASH|rror' "$fixture/runner-simulator.log"
+grep -E 'TailRunner|RunnerOk|exception|CRASH|rror' "$fixture/runner-simulator.log"
 case "$work" in /tmp/kokoro-tail-runner-*) rm -r -- "$work" ;; *) exit 5 ;; esac
-grep -q 'TailRunnerRc=0 Stage=7 Done=1' "$fixture/runner-simulator.log"
+grep -Eq 'TailRunnerRc=0 Stage=7 Done=1|RunnerOk=1' "$fixture/runner-simulator.log"

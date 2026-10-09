@@ -5,7 +5,8 @@
  *   3 FrameDouble16 out frame 2t, 2t+1 <- in frame t
  *   4 Pool2         p[2t] = q31(a[t], W1) + B, p[2t+1] = q31(a[t], W2) + q31(a[t+1], W0) + B (wrapping sums), clamped,
  *                   as high/low windows; a = 0 from frame FR
- *   5 StrideConv16  v[t] = clamp((W0 c[2t-1] + W1 c[2t] + W2 c[2t+1] + B + 2^14) >> 15) into channel CHAN, rows < FR */
+ *   5 StrideConv16  v[t] = clamp((W0 c[2t-1] + W1 c[2t] + W2 c[2t+1] + B + 2^14) >> 15) into channel CHAN, rows < FR
+ *   6 ScaleConvert16 x' = clamp((q31(x * 2^16, M_c) + 2^(15 - e_c)) >> (16 - e_c)) in place, e_c in 0..3 */
 #include <stdint.h>
 #include <stdio.h>
 #include <string.h>
@@ -78,6 +79,19 @@ int main(void) {
       want = (uint16_t)(clamp16((int32_t)(acc >> 15)) + 32768); }
     if (get16(b, q) != want) { bad++; if (shown++ < 6) printf("t=%d c=%d got %u want %u\n", t, c, get16(b, q), want); } }
   printf("decoder-pass strideconv16 C=%d F=%d channel=%d mismatches=%d/%d %s\n", CH, FR, CHAN, bad, n, bad ? "FAIL" : "PASS");
-#endif
-  return bad != 0;
+#elif PASS == 6
+  static int16_t X[NT * 32][CH]; static int32_t M[CH], E[CH];
+  int32_t* kc = (int32_t*)k;
+  for (int c = 0; c < CH; c++) { M[c] = rnd(1073741824, 2147483647); E[c] = rnd(0, 3);
+    int base = (c / 32) * 96 + c % 32; kc[base] = M[c]; kc[base + 32] = 16 - E[c]; kc[base + 64] = 1 << (15 - E[c]); }
+  for (int t = 0; t < NT * 32; t++) for (int c = 0; c < CH; c++) { X[t][c] = (int16_t)rnd(-32768, 32767); put16(a, at(t, c, CH), (uint16_t)(X[t][c] + 32768)); }
+  ((void (*)(void*, void*, unsigned))(uintptr_t)EMITTED_CODE)(a, k, NT);
+  int clipped = 0;
+  for (int t = 0; t < NT * 32; t++) for (int c = 0; c < CH; c++) { n++;
+    int32_t y = q31((int32_t)X[t][c] * 65536, M[c]); int32_t z = (int32_t)((uint32_t)y + (uint32_t)(1 << (15 - E[c]))) >> (16 - E[c]);
+    if (z != clamp16(z)) clipped++;
+    uint16_t want = (uint16_t)(clamp16(z) + 32768), got = get16(a, at(t, c, CH));
+    if (got != want) { bad++; if (shown++ < 6) printf("t=%d c=%d x=%d M=%ld e=%ld got %u want %u\n", t, c, X[t][c], (long)M[c], (long)E[c], got, want); } }
+  printf("decoder-pass scaleconvert16 C=%d tiles=%d mismatches=%d/%d clipped=%d %s\n", CH, NT, bad, n, clipped, bad ? "FAIL" : "PASS");
+#endif  return bad != 0;
 }

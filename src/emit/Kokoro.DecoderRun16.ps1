@@ -17,17 +17,23 @@ function Get-KokoroDecoder16Layout {
     $tb={param([int]$c) 64L*$c}
     $al={param([long]$v) [long]([math]::Ceiling($v/65536)*65536)}
     $planeStride=[long]([math]::Max($T*32,$T2*16))*2048
-    $regions=[ordered]@{}; $at=0L
-    foreach($r in @(@('WinHi',((2*$T+2)*(& $tb 1120))),@('WinLo',((2*$T+2)*(& $tb 1120))),@('Planes',(4*$planeStride)),
-        @('XA',($T*(& $tb 1120))),@('XB',($T*(& $tb 1120))),@('E',($T*(& $tb 544))),@('C',([math]::Max($T*(& $tb 1024),$T2*(& $tb 512)))),
-        @('A',(($T+1)*(& $tb 1120))),@('S',($T*(& $tb 512))),@('O',(2*$T*(& $tb 512))))){
-        $regions[$r[0]]=[ordered]@{Offset=$at;Bytes=[long]$r[1]}; $at+=& $al $r[1] }
+    # HMX activation reads span a crouton plus the next tile; an extent that straddles a 2 MiB VTCM boundary faults in the
+    # V73 simulator (exception 0x26; docs/generator60x-resident-design.md). Regions HMX reads (windows, block inputs) keep
+    # their bytes plus one 1120-wide tile and a crouton inside one 1 MiB page (faults seen crossing 0x100000 and 0x200000).
+    # Regions HMX does not read fill the gaps.
     $small=[ordered]@{Moments=0L;Km=18432L;RatioA=27648L;RatioB=31744L;Tables=35840L;Records=68608L;Pool=104448L;Stride=122368L;Curves=122880L}
     $curveBytes=[long]([math]::Ceiling(8*$F/128)*128)
-    $regions['Small']=[ordered]@{Offset=$at;Bytes=($small.Curves+2*$curveBytes)}; $at+=& $al $regions.Small.Bytes
+    $page=1048576L; $slack=(& $tb 1120)+2048
+    $regions=[ordered]@{}; $at=0L
+    foreach($r in @(@('WinHi',((2*$T+2)*(& $tb 1120)),$true),@('C',([math]::Max($T*(& $tb 1024),$T2*(& $tb 512))),$false),@('S',($T*(& $tb 512)),$false),
+        @('WinLo',((2*$T+2)*(& $tb 1120)),$true),@('A',(($T+1)*(& $tb 1120)),$false),@('XA',($T*(& $tb 1120)),$true),@('XB',($T*(& $tb 1120)),$true),
+        @('E',($T*(& $tb 544)),$true),@('Small',0,$false),@('Planes',(4*$planeStride),$false),@('O',(2*$T*(& $tb 512)),$false))){
+        if($r[0] -eq 'Small'){ $regions['Small']=[ordered]@{Offset=$at;Bytes=($small.Curves+2*$curveBytes)}; $at+=& $al $regions.Small.Bytes; continue }
+        if($r[2] -and [math]::Floor($at/$page) -ne [math]::Floor(($at+$r[1]+$slack-1)/$page)){ $at=[long]([math]::Ceiling($at/$page)*$page) }
+        if($r[2] -and [math]::Floor($at/$page) -ne [math]::Floor(($at+$r[1]+$slack-1)/$page)){ throw "$($r[0]) and its read extent exceed one 2 MiB VTCM page" }
+        $regions[$r[0]]=[ordered]@{Offset=$at;Bytes=[long]$r[1]}; $at+=& $al $r[1] }
     if($at -gt 4194304){throw 'Decoder activations exceed the first 4 MiB of VTCM'}
     $regions['Weights']=[ordered]@{Offset=4194304L;Bytes=3440640L}; $vtcm=4194304L+3440640L
-    if([math]::Floor($regions.WinHi.Offset/4194304) -ne [math]::Floor(($regions.WinLo.Offset+$regions.WinLo.Bytes-1)/4194304)){throw 'Windows cross a 4 MiB VTCM page'}
     # Inputs: asr (512-wide croutons, T tiles), F0 curve and N curve (int32, 2F samples each, 128-byte padded).
     $input=[ordered]@{Asr=0L;F0=($T*32768L);N=($T*32768L+$curveBytes)}; $inputBytes=$T*32768L+2*$curveBytes
     # Convs in run order: asr_res, then per block shortcut, conv1, conv2. Weights Cout * Cin * K bytes each.
@@ -39,11 +45,12 @@ function Get-KokoroDecoder16Layout {
     foreach($c in $list){ $bytes=[long]$c[2]*$c[1]*$c[3]; $convs.Add([ordered]@{Name=$c[0];Cin=$c[1];Cout=$c[2];K=$c[3];Offset=$w;Bytes=$bytes}); $w+=$bytes }
     # Parameter records (tables.bin): asr_res tables; F0 and N stride constants; per block AdaIN1 records, conv1 tables, AdaIN2
     # records, conv2 tables, shortcut tables, shortcut ratios, conv2 ratios, decode.3 pool constants.
-    $p=[ordered]@{AsrTables=0L;F0=2048L;N=2080L}; $pAt=2176L; $blockParams=[Collections.Generic.List[object]]::new()
+    $p=[ordered]@{AsrTables=0L;F0=2048L;N=2080L;IdentityE=2176L}; $pAt=6528L; $blockParams=[Collections.Generic.List[object]]::new()
     foreach($b in $blocks){
         $q=[ordered]@{}; $ob=$b.Cout/32
+        if($b.Cin -eq 1120){ $q['IdentitySc']=$pAt; $pAt+=256L*$b.Cin/32 }
         foreach($e in @(@('Records1',(32L*$b.Cin)),@('Tables1',(1024L*$ob)),@('Records2',(32L*$b.Cout)),@('Tables2',(1024L*$ob)),@('TablesSc',(1024L*$ob)),@('RatioSc',(128L*$ob)),@('Ratio2',(128L*$ob)))){ $q[$e[0]]=$pAt; $pAt+=$e[1] }
-        if($b.Up){ $q['Pool']=$pAt; $pAt+=512L*$b.Cin/32 }
+        if($b.Up){ $q['Pool']=$pAt; $pAt+=512L*$b.Cin/32; $q['Convert']=$pAt; $pAt+=384L*$ob }
         $blockParams.Add($q)
     }
     [pscustomobject]@{Frames=$F;Tiles=$T;Tiles2=$T2;OutputTiles=2*$T;PlaneStride=$planeStride;Regions=$regions;Small=$small;CurveBytes=$curveBytes
@@ -58,7 +65,10 @@ function Add-KokoroDecoder16JobSteps {
     param([Parameter(Mandatory)][AllowEmptyCollection()][Collections.Generic.List[hashtable]]$Steps,[Parameter(Mandatory)][AllowEmptyCollection()][Collections.Generic.List[object]]$Calls,
         [Parameter(Mandatory)][ValidateRange(2,4096)][int]$Frames,
         [int]$InputBase=20,[long]$InputOffset=0,[int]$WeightsBase=21,[long]$WeightsOffset=0,[int]$TablesBase=22,[long]$TablesOffset=0,
-        [int]$OutputBase=23,[long]$OutputOffset=256,[ValidateRange(-1,3)][int]$StopAfterBlock=-1)
+        [int]$OutputBase=23,[long]$OutputOffset=256,[ValidateRange(-1,4)][int]$StopAfterBlock=-1,
+        # With -StopAfterBlock: Shortcut dumps the block's output region after the shortcut (Scale), Conv1 the conv1 output C
+        # (1024-wide, F frames), instead of the block output.
+        [ValidateSet('Block','Shortcut','Conv1','Windows1','Pool','Coeff')][string]$DumpPoint='Block')
     $L=Get-KokoroDecoder16Layout -Frames $Frames
     $F=$Frames; $nT=$L.Tiles; $nT2=$L.Tiles2; $reg=$L.Regions; $sm=$reg.Small.Offset; $small=$L.Small; $planes=$reg.Planes.Offset
     $s=$Steps; $callList=$Calls
@@ -80,7 +90,7 @@ function Add-KokoroDecoder16JobSteps {
     $padName={param([int]$fr,[int]$width,[int]$halfword) [void]$padUsed.Add("$fr,$width,$halfword") }
     $tbw={param([int]$c) 64L*$c}
     $conv={param([long]$hi,[long]$lo,[int]$cin,[int]$cout,[int]$k,[int]$tiles) & $ptr 0 18 $hi; & $ptr 1 18 $lo; & $ptr 2 18 $reg.Weights.Offset; & $ptr 3 18 ($sm+$small.Tables); & $imm 4 $tiles; & $ptr 5 18 $planes; & $call "dec_conv_${cin}_${cout}_$k"; & $sync }
-    $combine={param([string]$mode,[int]$cout,[long]$out,[long]$ratio,[int]$tiles,[long]$skip,[int]$shift=0) & $ptr 0 18 $planes; & $ptr 1 18 $out; & $ptr 2 18 $ratio; & $imm 3 $tiles; & $call "dec_combine_$($mode.ToLower())_${cout}_${skip}_$shift"; [void]$combines.Add("$mode,$cout,$skip,$shift"); & $sync }
+    $combine={param([string]$mode,[int]$cout,[long]$out,[long]$ratio,[int]$tiles,[long]$skip) & $ptr 0 18 $planes; & $ptr 1 18 $out; & $ptr 2 18 $ratio; & $imm 3 $tiles; & $call "dec_combine_$($mode.ToLower())_${cout}_$skip"; [void]$combines.Add("$mode,$cout,$skip"); & $sync }
     $adain={param([long]$x,[int]$width,[int]$fr,[int]$tiles,[long]$records,[string]$output,[long]$hi,[long]$lo)
         & $fill ($sm+$small.Moments) (16L*$width) 0
         & $ptr 0 18 $x; & $ptr 1 18 ($sm+$small.Moments); & $imm 2 $tiles; & $call "dec_moments_$width"; & $sync
@@ -106,9 +116,11 @@ function Add-KokoroDecoder16JobSteps {
         & $ptr 0 18 ($sm+$small.Curves+$target[3]*$L.CurveBytes); & $ptr 1 18 $reg[$target[0]].Offset; & $ptr 2 18 ($sm+$small.Stride+32*$target[3])
         & $call "dec_stride_$($target[1])_$($target[2])"; [void]$stride.Add("$($target[1]),$($target[2])") }
     # asr_res: conv1x1 over E (zero weights past 512) into channels 1024..1087 of both wide tensors (Conv mode).
-    & $ptr 0 18 $reg.E.Offset; & $ptr 1 18 $reg.WinLo.Offset; & $imm 2 ($nT*(& $tbw 544)/128); & $call 'dec_lowwindow'; & $sync
+    # asr_res and the encode shortcut read E rescaled into one conv-input scale (identity windows; the weights fold that scale).
+    & $dma 18 ($sm+$small.Km) $TablesBase ($TablesOffset+$L.Params.IdentityE) 4352
+    & $ptr 0 18 $reg.E.Offset; & $ptr 1 18 $reg.WinHi.Offset; & $ptr 2 18 $reg.WinLo.Offset; & $ptr 3 18 ($sm+$small.Km); & $imm 4 $nT; & $call 'dec_identity_544'; & $sync
     & $weights 0; & $dma 18 ($sm+$small.Tables) $TablesBase ($TablesOffset+$L.Params.AsrTables) 2048
-    & $conv $reg.E.Offset $reg.WinLo.Offset 544 64 1 $nT
+    & $conv $reg.WinHi.Offset $reg.WinLo.Offset 544 64 1 $nT
     $combines=[Collections.Generic.HashSet[string]]::new()
     foreach($x in 'XA','XB'){ & $combine 'Conv' 64 ($reg[$x].Offset+32*2048) 0 $nT ((1120-64)*64) }
 
@@ -118,17 +130,23 @@ function Add-KokoroDecoder16JobSteps {
         $xOff=$reg[$src].Offset
         $outOff=if($b.Up){$reg.S.Offset}else{$reg[$dst].Offset}; $skip=if($b.Up){0L}else{[long](1120-$cout)*64}
         # Shortcut (F frames) into the output (decode.3: into S, doubled later).
-        & $ptr 0 18 $xOff; & $ptr 1 18 $reg.WinLo.Offset; & $imm 2 ($nT*$inW/128); & $call 'dec_lowwindow'; & $sync
+        # The shortcut reads its input rescaled into one conv-input scale (encode: E's windows from asr_res are still there).
+        if($j -gt 0){
+            & $dma 18 ($sm+$small.Km) $TablesBase ($TablesOffset+$q.IdentitySc) (256L*$cin/32)
+            & $ptr 0 18 $xOff; & $ptr 1 18 $reg.WinHi.Offset; & $ptr 2 18 $reg.WinLo.Offset; & $ptr 3 18 ($sm+$small.Km); & $imm 4 $nT; & $call "dec_identity_$cin"; & $sync
+        }
         & $weights $ci; & $dma 18 ($sm+$small.Tables) $TablesBase ($TablesOffset+$q.TablesSc) (1024L*$ob); & $dma 18 ($sm+$small.RatioA) $TablesBase ($TablesOffset+$q.RatioSc) (128L*$ob)
-        & $conv $xOff $reg.WinLo.Offset $cin $cout 1 $nT
-        $shift=if($b.Up){1}else{0}
-        & $combine 'Scale' $cout $outOff ($sm+$small.RatioA) $nT $skip $shift
+        & $conv $reg.WinHi.Offset $reg.WinLo.Offset $cin $cout 1 $nT
+        & $combine 'Scale' $cout $outOff ($sm+$small.RatioA) $nT $skip
+        if($j -eq $StopAfterBlock -and $DumpPoint -eq 'Shortcut'){ & $dma $OutputBase $OutputOffset 18 $outOff $(if($b.Up){$nT*(& $tbw 512)}else{$reg[$dst].Bytes}); break }
         # AdaIN1 + LeakyReLU, conv1.
         $cf=$F; $ct=$nT
         if($b.Up){
             & $fill $reg.A.Offset $reg.A.Bytes 0x80008000L
             & $adain $xOff $cin $F $nT $q.Records1 'Tensor' $reg.A.Offset 0
+            if($j -eq $StopAfterBlock -and $DumpPoint -eq 'Coeff'){ & $dma $OutputBase $OutputOffset 18 ($sm+$small.Moments) (16L*$cin); & $dma $OutputBase ($OutputOffset+18432) 18 ($sm+$small.Km) (8L*$cin); & $dma $OutputBase ($OutputOffset+36864) 18 ($sm+$small.Records) (32L*$cin); break }
             & $pad $reg.A.Offset $F $cin 0x8000; & $padName $F $cin 0x8000; & $sync
+            if($j -eq $StopAfterBlock -and $DumpPoint -eq 'Pool'){ & $dma $OutputBase $OutputOffset 18 $reg.A.Offset ($nT*$inW) }
             & $dma 18 ($sm+$small.Pool) $TablesBase ($TablesOffset+$q.Pool) (512L*$cin/32)
             & $ptr 0 18 $reg.A.Offset; & $ptr 1 18 ($reg.WinHi.Offset+$inW); & $ptr 2 18 ($reg.WinLo.Offset+$inW); & $ptr 3 18 ($sm+$small.Pool); & $imm 4 $nT; & $call "dec_pool_$cin"; & $sync
             $cf=2*$F; $ct=$nT2
@@ -136,10 +154,12 @@ function Add-KokoroDecoder16JobSteps {
             & $adain $xOff $cin $F $nT $q.Records1 'Windows' ($reg.WinHi.Offset+$inW) ($reg.WinLo.Offset+$inW)
         }
         & $windowsFix $cin $cf $ct
+        if($j -eq $StopAfterBlock -and $DumpPoint -in 'Windows1','Pool'){ $at0=if($DumpPoint -eq 'Pool'){$nT*$inW}else{0L}; & $dma $OutputBase ($OutputOffset+$at0) 18 ($reg.WinHi.Offset+$inW) ($ct*$inW); & $dma $OutputBase ($OutputOffset+$at0+$ct*$inW) 18 ($reg.WinLo.Offset+$inW) ($ct*$inW); break }
         & $weights ($ci+1); & $dma 18 ($sm+$small.Tables) $TablesBase ($TablesOffset+$q.Tables1) (1024L*$ob)
         & $conv ($reg.WinHi.Offset+$inW) ($reg.WinLo.Offset+$inW) $cin $cout 3 $ct
         & $combine 'Conv' $cout $reg.C.Offset 0 $ct 0
         & $pad $reg.C.Offset $cf $cout 0x8000; & $padName $cf $cout 0x8000; & $sync
+        if($j -eq $StopAfterBlock -and $DumpPoint -eq 'Conv1'){ & $dma $OutputBase $OutputOffset 18 $reg.C.Offset ($ct*(& $tbw $cout)); break }
         # AdaIN2 + LeakyReLU, conv2 added onto the shortcut.
         $cw=& $tbw $cout
         & $adain $reg.C.Offset $cout $cf $ct $q.Records2 'Windows' ($reg.WinHi.Offset+$cw) ($reg.WinLo.Offset+$cw)
@@ -148,8 +168,11 @@ function Add-KokoroDecoder16JobSteps {
         & $conv ($reg.WinHi.Offset+$cw) ($reg.WinLo.Offset+$cw) $cout $cout 3 $ct
         if($b.Up){
             & $ptr 0 18 $reg.S.Offset; & $ptr 1 18 $reg.O.Offset; & $imm 2 $nT; & $call 'dec_framedouble_512'; & $sync
-            & $combine 'Residual' $cout $reg.O.Offset ($sm+$small.RatioB) $ct 0 1
+            & $combine 'Residual' $cout $reg.O.Offset ($sm+$small.RatioB) $ct 0
             & $pad $reg.O.Offset $cf 512 0x8000; & $padName $cf 512 0x8000; & $sync
+            # decode.3 holds its output in its own scales; one conversion into the generator's input scales saturates there.
+            & $dma 18 ($sm+$small.Pool) $TablesBase ($TablesOffset+$q.Convert) 6144
+            & $ptr 0 18 $reg.O.Offset; & $ptr 1 18 ($sm+$small.Pool); & $imm 2 $ct; & $call 'dec_convert_512'; & $sync
             & $dma $OutputBase $OutputOffset 18 $reg.O.Offset $L.OutputBytes
         } else {
             & $combine 'Residual' $cout $reg[$dst].Offset ($sm+$small.RatioB) $nT $skip
@@ -166,13 +189,15 @@ function Get-KokoroDecoder16Bodies {
     param([Parameter(Mandatory)]$Job)
     $L=$Job.Layout; $ps=$L.PlaneStride
     $bodies=[Collections.Generic.List[object]]::new()
-    $bodies.Add(@('dec_lowwindow',@(New-KokoroLowWindow16Steps -LabelPrefix 'declow')))
+    $bodies.Add(@('dec_identity_544',@(New-KokoroAdaInLeaky16Steps -Channels 544 -Output Windows -Identity -LabelPrefix 'decident_544')))
+    $bodies.Add(@('dec_identity_1120',@(New-KokoroAdaInLeaky16Steps -Channels 1120 -Output Windows -Identity -LabelPrefix 'decident_1120')))
     $bodies.Add(@('dec_framedouble_512',@(New-KokoroFrameDouble16Steps -Channels 512 -LabelPrefix 'decdouble')))
+    $bodies.Add(@('dec_convert_512',@(New-KokoroScaleConvert16Steps -Channels 512 -LabelPrefix 'decconvert')))
     $bodies.Add(@('dec_pool_1120',@(New-KokoroPool2Steps -Channels 1120 -LabelPrefix 'decpool')))
     foreach($shape in @(@(544,64,1),@(544,1024,1),@(544,1024,3),@(1024,1024,3),@(1120,1024,1),@(1120,1024,3),@(1120,512,1),@(1120,512,3),@(512,512,3))){
         $bodies.Add(@("dec_conv_$($shape[0])_$($shape[1])_$($shape[2])",@(New-KokoroHmxConvPlanesLoopSteps -InputChannels $shape[0] -OutputChannels $shape[1] -Kernel $shape[2] -WeightPlanes 1 -PlaneStride $ps -LabelPrefix "decconv_$($shape -join '_')"))) }
-    foreach($c in $Job.Combines){ $m,$ch,$skip,$shift=$c -split ','
-        $bodies.Add(@("dec_combine_$($m.ToLower())_${ch}_${skip}_$shift",@(New-KokoroPlaneCombineLoopSteps -Mode $m -Channels ([int]$ch) -PlaneStride $ps -OutputTileSkip ([long]$skip) -RatioShift ([int]$shift) -LabelPrefix "deccombine_$($m.ToLower())_${ch}_${skip}_$shift"))) }
+    foreach($c in $Job.Combines){ $m,$ch,$skip=$c -split ','
+        $bodies.Add(@("dec_combine_$($m.ToLower())_${ch}_$skip",@(New-KokoroPlaneCombineLoopSteps -Mode $m -Channels ([int]$ch) -PlaneStride $ps -OutputTileSkip ([long]$skip) -LabelPrefix "deccombine_$($m.ToLower())_${ch}_$skip"))) }
     foreach($w in 544,1120,1024,512){
         $bodies.Add(@("dec_moments_$w",@(New-KokoroAdaInMoments16LoopSteps -Channels $w -LabelPrefix "decmoments_$w")))
         $bodies.Add(@("dec_coeff_$w",@(New-KokoroAdaInAffineCoefficientsLoopSteps -Channels $w -LabelPrefix "deccoeff_$w")))
@@ -189,11 +214,11 @@ function Get-KokoroDecoder16Bodies {
 # Buffers: config, input (asr, F0 curve, N curve), weights, tables, output (decoder output at 256, or a block's output with
 # -StopAfterBlock).
 function New-KokoroDecoder16RunSteps {
-    param([Parameter(Mandatory)][ValidateRange(2,4096)][int]$Frames,[ValidateRange(-1,3)][int]$StopAfterBlock=-1)
+    param([Parameter(Mandatory)][ValidateRange(2,4096)][int]$Frames,[ValidateRange(-1,4)][int]$StopAfterBlock=-1,[ValidateSet('Block','Shortcut','Conv1','Windows1','Pool','Coeff')][string]$DumpPoint='Block')
     . (Join-Path $PSScriptRoot 'Kokoro.ResBlockRun.ps1')
     foreach($file in 'Kokoro.HmxConvPlanes.ps1','Kokoro.PlaneCombine.ps1','Kokoro.AdaInMoments16.ps1','Kokoro.AdaInTurnsCoefficients.ps1','Kokoro.AdaInLeaky16.ps1','Kokoro.Decoder16.ps1','Kokoro.DmaCopy.ps1') { . (Join-Path $PSScriptRoot $file) }
     $L=Get-KokoroDecoder16Layout -Frames $Frames
-    $outputBytes=256L+$(if($StopAfterBlock -ge 0){$L.Regions.XA.Bytes}else{$L.OutputBytes})
+    $outputBytes=256L+$(if($StopAfterBlock -ge 0){[math]::Max($L.Regions.XA.Bytes,($L.Tiles+2*$L.Tiles2)*71680L)}else{$L.OutputBytes})
     $s=[Collections.Generic.List[hashtable]]::new()
     $calls=[Collections.Generic.List[object]]::new()
     $imm={param([int]$r,[long]$v) $u=[uint32]($v -band 0xffffffffL);$s.Add(@{Op='lo';x=$r;i=($u -band 65535)});$s.Add(@{Op='hi';x=$r;i=($u -shr 16)})}
@@ -221,7 +246,7 @@ function New-KokoroDecoder16RunSteps {
     foreach($r in 16,18,20,22,24,26){$s.Add(@{Op='store-d';s=29;t=$r;Offset=(($r-16)*4)})}
     $s.Add(@{Op='addi';d=24;s=29;i=(64+63)}); & $imm 0 -64; $s.Add(@{Op='and';d=24;s=24;t=0})
     $s.Add(@{Op='hwticks';d=26})
-    $job=Add-KokoroDecoder16JobSteps -Steps $s -Calls $calls -Frames $Frames -OutputBase 23 -OutputOffset 256 -StopAfterBlock $StopAfterBlock
+    $job=Add-KokoroDecoder16JobSteps -Steps $s -Calls $calls -Frames $Frames -OutputBase 23 -OutputOffset 256 -StopAfterBlock $StopAfterBlock -DumpPoint $DumpPoint
     $s.Add(@{Op='hwticks';d=0});$s.Add(@{Op='store-d';s=23;t=26;Offset=0});$s.Add(@{Op='store-d';s=23;t=0;Offset=8})
     $s.Add(@{Op='imm';d=0;i=1});$s.Add(@{Op='store';s=23;t=0;Offset=44})
     foreach($r in 16,18,20,22,24,26){$s.Add(@{Op='load-d';d=$r;s=29;Offset=(($r-16)*4)})}

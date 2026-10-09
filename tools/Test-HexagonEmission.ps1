@@ -14,13 +14,15 @@ param(
     [ValidateRange(32, 2048)][int] $ConvInputChannels = 1120,
     [ValidateRange(64, 2048)][int] $ConvOutputChannels = 1024,
     [ValidateSet('Windows','Tensor')][string] $LeakyOutput = 'Windows',
+    [switch] $LeakyIdentity,
     # KokoroDecoderPass: one pass of src/emit/Kokoro.Decoder16.ps1.
-    [ValidateSet('PadRows16','LowWindow16','FrameDouble16','Pool2','StrideConv16')][string] $DecoderPass = 'PadRows16',
+    [ValidateSet('PadRows16','LowWindow16','FrameDouble16','Pool2','StrideConv16','ScaleConvert16')][string] $DecoderPass = 'PadRows16',
     [ValidateRange(1, 1048576)][int] $DecoderFrames = 65,
     [ValidateSet(0, 0x8000)][int] $DecoderHalfword = 0x8000,
     [ValidateRange(0, 2047)][int] $DecoderChannel = 1088,
     [ValidateRange(0, 1048576)][long] $CombineOutputTileSkip = 0,
-    [ValidateRange(-1, 3)][int] $DecoderStopAfterBlock = -1,
+    [ValidateRange(-1, 4)][int] $DecoderStopAfterBlock = -1,
+    [ValidateSet('Block','Shortcut','Conv1','Windows1','Pool','Coeff')][string] $DecoderDumpPoint = 'Block',
     [ValidateSet(1, 3, 5)][int] $ConvDilation = 1,
     [switch] $ConvOutputPlanes,
     [ValidateSet(1,2)][int] $ConvWeightPlanes = 1,
@@ -55,7 +57,7 @@ $pmuArgs=if($ResidentPmuEvents){@{ResidentPmuEvents=$ResidentPmuEvents}}else{@{}
 $result=& (Join-Path $PSScriptRoot 'Emit-HexagonProbe.ps1') -OutputDirectory $output `
     -Kernel $Kernel -ResBlockFrames $ResBlockFrames -ResBlockKernel $ResBlockKernel -IntegerChannels $IntegerChannels -LinearRows $LinearRows -LinearInputChannels $LinearInputChannels `
     -LinearOutputChannels $LinearOutputChannels -LinearVectorOutputTiles:$LinearVectorOutputTiles `
-    -AdaInFrames $AdaInFrames -AdaInChannels $AdaInChannels -AdaInVectorConvolution:$AdaInVectorConvolution -ConvChannels $ConvChannels -ConvInputChannels $ConvInputChannels -ConvOutputChannels $ConvOutputChannels -LeakyOutput $LeakyOutput -DecoderPass $DecoderPass -DecoderFrames $DecoderFrames -DecoderHalfword $DecoderHalfword -DecoderChannel $DecoderChannel -CombineOutputTileSkip $CombineOutputTileSkip -DecoderStopAfterBlock $DecoderStopAfterBlock -ConvKernel $ConvKernel -ConvDilation $ConvDilation -ConvOutputPlanes:$ConvOutputPlanes -ConvWeightPlanes $ConvWeightPlanes -CombineMode $CombineMode -CombineGroups $CombineGroups -ResidentCostProbePasses $ResidentCostProbePasses -ResidentCostProbeTurnsBody:$ResidentCostProbeTurnsBody -ConvTiles $ConvTiles -RegionBody:$RegionBody `
+    -AdaInFrames $AdaInFrames -AdaInChannels $AdaInChannels -AdaInVectorConvolution:$AdaInVectorConvolution -ConvChannels $ConvChannels -ConvInputChannels $ConvInputChannels -ConvOutputChannels $ConvOutputChannels -LeakyOutput $LeakyOutput -LeakyIdentity:$LeakyIdentity -DecoderPass $DecoderPass -DecoderFrames $DecoderFrames -DecoderHalfword $DecoderHalfword -DecoderChannel $DecoderChannel -CombineOutputTileSkip $CombineOutputTileSkip -DecoderStopAfterBlock $DecoderStopAfterBlock -DecoderDumpPoint $DecoderDumpPoint -ConvKernel $ConvKernel -ConvDilation $ConvDilation -ConvOutputPlanes:$ConvOutputPlanes -ConvWeightPlanes $ConvWeightPlanes -CombineMode $CombineMode -CombineGroups $CombineGroups -ResidentCostProbePasses $ResidentCostProbePasses -ResidentCostProbeTurnsBody:$ResidentCostProbeTurnsBody -ConvTiles $ConvTiles -RegionBody:$RegionBody `
     -ProfileBreakdown:$ProfileBreakdown -BypassAdaInCoefficients:$BypassAdaInCoefficients -BypassStatisticsAndCoefficients:$BypassStatisticsAndCoefficients -BypassHmxCompute:$BypassHmxCompute -Force:$Force -ResidentHvxThreads $ResidentHvxThreads -ResidentBatchTiles $ResidentBatchTiles -ResidentCompactOutput:$ResidentCompactOutput -Stage16StopAfter $Stage16StopAfter -Stage16Kernels $Stage16Kernels -Stage16Channels $Stage16Channels @pmuArgs
 $wslOutput=(& wsl.exe --exec wslpath -a $output 2>$null | Select-Object -Last 1).Trim()
 if($LASTEXITCODE -ne 0 -or -not $wslOutput.StartsWith('/')) { throw 'Cannot resolve output directory in WSL' }

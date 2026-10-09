@@ -112,9 +112,6 @@ function New-KokoroPlaneCombineLoopSteps {
         [Parameter(Mandatory)][ValidateRange(2048, 1073741824)][long] $PlaneStride,
         # Bytes added to the output pointer after each tile: the output is a wider tensor (tile stride 64 * Channels + skip).
         [ValidateRange(0, 1048576)][long] $OutputTileSkip = 0,
-        # 1: the product is doubled after the Q15 multiply (ratios up to 2, stored halved): the decoder's last block, whose
-        # output scales are the generator's.
-        [ValidateRange(0, 1)][int] $RatioShift = 0,
         [string] $LabelPrefix = 'planecombineloop',
         [switch] $NoReturn
     )
@@ -148,7 +145,7 @@ function New-KokoroPlaneCombineLoopSteps {
         $s.Add(@{Op='vxor';d=$g[0];s=$g[0];t=29})
     }
     $s.Add(@{Op='vadd-h-sat';d=4;s=0;t=2})
-    if ($Mode -ne 'Conv') { $s.Add(@{Op='vmpy-h-rnd-sat';d=4;s=4;t=20}); if ($RatioShift) { $s.Add(@{Op='vadd-h-sat';d=4;s=4;t=4}) } }
+    if ($Mode -ne 'Conv') { $s.Add(@{Op='vmpy-h-rnd-sat';d=4;s=4;t=20}) }
     if ($Mode -eq 'Residual') {
         $s.Add(@{Op='vload';d=5;s=1;Offset=0})
         $s.Add(@{Op='vxor';d=5;s=5;t=29})

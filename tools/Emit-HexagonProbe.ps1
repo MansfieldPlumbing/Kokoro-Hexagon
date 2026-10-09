@@ -13,13 +13,15 @@ param(
     [ValidateRange(32, 2048)][int] $ConvInputChannels = 1120,
     [ValidateRange(64, 2048)][int] $ConvOutputChannels = 1024,
     [ValidateSet('Windows','Tensor')][string] $LeakyOutput = 'Windows',
+    [switch] $LeakyIdentity,
     # KokoroDecoderPass: one pass of src/emit/Kokoro.Decoder16.ps1.
-    [ValidateSet('PadRows16','LowWindow16','FrameDouble16','Pool2','StrideConv16')][string] $DecoderPass = 'PadRows16',
+    [ValidateSet('PadRows16','LowWindow16','FrameDouble16','Pool2','StrideConv16','ScaleConvert16')][string] $DecoderPass = 'PadRows16',
     [ValidateRange(1, 1048576)][int] $DecoderFrames = 65,
     [ValidateSet(0, 0x8000)][int] $DecoderHalfword = 0x8000,
     [ValidateRange(0, 2047)][int] $DecoderChannel = 1088,
     [ValidateRange(0, 1048576)][long] $CombineOutputTileSkip = 0,
-    [ValidateRange(-1, 3)][int] $DecoderStopAfterBlock = -1,
+    [ValidateRange(-1, 4)][int] $DecoderStopAfterBlock = -1,
+    [ValidateSet('Block','Shortcut','Conv1','Windows1','Pool','Coeff')][string] $DecoderDumpPoint = 'Block',
     [ValidateSet(1, 3, 5)][int] $ConvDilation = 1,
     [switch] $ConvOutputPlanes,
     [ValidateSet(1,2)][int] $ConvWeightPlanes = 1,
@@ -319,7 +321,7 @@ if($Kernel -eq 'KokoroR0Sub0') {
     Write-NewOrIdenticalFile (Join-Path $OutputDirectory 'runner-layout.json') ([Text.Encoding]::UTF8.GetBytes(($run.Layout | ConvertTo-Json -Depth 6))) -AllowOverwrite:$Force
 } elseif($Kernel -eq 'KokoroDecoder16Run') {
     . (Join-Path $PSScriptRoot '..\src\emit\Kokoro.DecoderRun16.ps1')
-    $run=New-KokoroDecoder16RunSteps -Frames $DecoderFrames -StopAfterBlock $DecoderStopAfterBlock
+    $run=New-KokoroDecoder16RunSteps -Frames $DecoderFrames -StopAfterBlock $DecoderStopAfterBlock -DumpPoint $DecoderDumpPoint
     $steps=@($run.Steps)
     # The phone harness (tools/Invoke-GeneratorTailProbe.ps1) runs every generator job under the tail skel's name.
     $symbol='kokoro_generator_tail_skel_handle_invoke'; $soname='libkokoro_generator_tail_skel.so'
@@ -387,11 +389,12 @@ if($Kernel -eq 'KokoroR0Sub0') {
         'LowWindow16' { New-KokoroLowWindow16Steps }
         'FrameDouble16' { New-KokoroFrameDouble16Steps -Channels $ConvInputChannels }
         'Pool2' { New-KokoroPool2Steps -Channels $ConvInputChannels }
-        'StrideConv16' { New-KokoroStrideConv16Steps -Frames $DecoderFrames -Channels $ConvInputChannels -Channel $DecoderChannel } })
+        'StrideConv16' { New-KokoroStrideConv16Steps -Frames $DecoderFrames -Channels $ConvInputChannels -Channel $DecoderChannel }
+        'ScaleConvert16' { New-KokoroScaleConvert16Steps -Channels $ConvInputChannels } })
     $symbol='kokoro_decoder_pass'; $soname='libkokoro_decoder_pass.so'
 } elseif($Kernel -eq 'KokoroAdaInLeaky16') {
     . (Join-Path $PSScriptRoot '..' 'src' 'emit' 'Kokoro.AdaInLeaky16.ps1')
-    $steps=@(New-KokoroAdaInLeaky16Steps -Channels $ConvInputChannels -Output $LeakyOutput)
+    $steps=@(New-KokoroAdaInLeaky16Steps -Channels $ConvInputChannels -Output $LeakyOutput -Identity:$LeakyIdentity)
     $symbol='kokoro_adain_leaky16'; $soname='libkokoro_adain_leaky16.so'
 } elseif($Kernel -eq 'KokoroAdaInTurnsCoefficients') {
     . (Join-Path $PSScriptRoot '..' 'src' 'emit' 'Kokoro.AdaInTurnsCoefficients.ps1')

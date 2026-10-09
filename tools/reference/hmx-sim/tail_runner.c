@@ -14,6 +14,9 @@ static int acquire(void *attr,unsigned timeout){(void)attr;(void)timeout;return 
 static int getvtcm(void *attr,void **ptr,unsigned *length){(void)attr;*ptr=(void*)(cfg(0x38)<<16);*length=VTCM_BYTES;return 0;}
 static int load(const char *root,const char *name,void *dest,size_t bytes){char path[1024];if(snprintf(path,sizeof(path),"%s/%s",root,name)>=(int)sizeof(path))return 1;FILE*f=fopen(path,"rb");if(!f)return 1;size_t n=fread(dest,1,bytes,f);int extra=fgetc(f);fclose(f);return n!=bytes||extra!=EOF;}
 static int save(const char *root,const char *name,const void *data,size_t bytes){char path[1024];if(snprintf(path,sizeof(path),"%s/%s",root,name)>=(int)sizeof(path))return 1;FILE*f=fopen(path,"wb");if(!f)return 1;size_t n=fwrite(data,1,bytes,f);fclose(f);return n!=bytes;}
+#ifndef EXPECT_STAGE
+#define EXPECT_STAGE 7
+#endif
 struct arg {void *ptr;unsigned bytes;};
 int main(int argc,char **argv){
  if(argc!=2)return 2;
@@ -27,6 +30,7 @@ int main(int argc,char **argv){
  unsigned stage=*(unsigned*)(output+36),codes=*(unsigned*)(output+40),done=*(unsigned*)(output+44);
  if(save(argv[1],"simulator-output.bin",output,sizeof(output)))return 4;
  printf("TailRunnerRc=%d Stage=%u Done=%u CodesOffset=%u\n",rc,stage,done,codes);
+ if(!rc&&stage==EXPECT_STAGE&&done==1)printf("RunnerOk=1\n");
  fflush(stdout);
- return rc||stage!=7||done!=1;
+ return rc||stage!=EXPECT_STAGE||done!=1;
 }

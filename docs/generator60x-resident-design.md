@@ -56,19 +56,16 @@ crouton plus the next tile, so the operand extent, not its base, decides. Planne
 conv-input window lies inside one 4 MiB page; the layout puts the small regions first and
 refuses any layout that breaks the rule. Not yet tested on a phone.
 
-## Fit at 4 MiB (2048-byte alignment, 2-byte representation)
-
-| Region | Bytes |
-| --- | ---: |
-| conv-input window, `B + 2` tiles | 8,192 × (B + 2) |
-| conv2 output staging, `B` tiles | 8,192 × B |
-| weights, one stage, K = 11 | 180,224 |
-| parameter record, moments, input moments, mean parameters, saved skip tile, 18 coefficient sets | 36,880 (38,912 aligned) |
-| DMA descriptors | 0 (DDR frame) |
-| `R`, `C` | 2 × 8,192 × tiles |
-
-`B = 16`: 225 tiles, 7,200 frames (1.50 s of audio at 24 kHz, hop 5). `B = 8`: 233 tiles,
-7,456 frames. 7,801 frames never fits at 4 MiB in this representation (`R` + `C` leave
-196,608 B; the fixed regions need at least 251,904 B). With dense u8 `R`/`C` at `B = 16`
-the limit is about 451 tiles (14,432 frames, 3.0 s). Longer groups take the tiled path.
-The current emission uses 64 KiB region alignment (4,653,056 B at 7,801 frames, 8 MiB tier).
+Correction (2026-10-09, decoder job): the fault is at 1 MiB boundaries, not only 4 MiB. Two `:single` reads with dY 0x11800
+(1120-channel tiles) faulted the same way (exception 0x26, badva at the activation and weight operands): Rs at VTCM offset
+0x1EE800 and Rs at 0xEE800. Operand contract: Qualcomm Hexagon V81 HMX PRM, 80-N2040-62 Rev. AA, sec. 4.4.1 (V81, not V73):
+`activation ... :single` builds one tile from two 2 KiB croutons, the first at Rs[31:11] and the second at Rs + dY, dY a
+signed byte displacement in Rt[31:11] (spatial offset Rs[10:7], Rs[1]; channels Rs[6:2]..Rt[6:2]). In both faults the second
+crouton starts exactly on a boundary (0x200000, 0x100000), so the two croutons of one read lay in different 1 MiB pages.
+The V73 HVX PRM, 80-N2040-54 Rev. AB, sec. 3.3, requires VTCM to be translated like other memory and forbids
+scatter/gather regions from crossing a page. Exception 0x26 is the coprocessor VMEM address error in the V73 PRM (Table 8-15), not a read TLB miss (0x70).
+Hypothesis [open]: the two croutons of one `:single` read may not lie in different regions, either translation pages
+or a fixed HMX access region; the region was at most 1 MiB in the simulator and is not yet measured on the phone. Planned
+probes: a 2 KiB-step boundary sweep at fixed dY, a negative dY, and `:single` against a plain read of the same bytes. The decoder layout keeps each HMX-read region plus one
+tile and a crouton inside one 1 MiB page, which satisfies the rule under either mapping (`Get-KokoroDecoder16Layout`). The
+generator's 4 MiB check is weaker; its layouts have not been audited against 1 MiB.

@@ -14,7 +14,8 @@
 # r3 constants, 256 bytes per block: K[32] at 0, M[32] at 128 (int32), r4 tiles >= 1. Uses r5..r15, v0..v21, v29..v31;
 # r16..r27 are untouched.
 function New-KokoroAdaInLeaky16Steps {
-    param([ValidateRange(32,2048)][int]$Channels=1120,[ValidateSet('Windows','Tensor')][string]$Output='Windows',
+    # -Identity: no LeakyReLU, y alone (constant K, M = 0: a per-channel rescale of a stored tensor into one conv-input scale).
+    param([ValidateRange(32,2048)][int]$Channels=1120,[ValidateSet('Windows','Tensor')][string]$Output='Windows',[switch]$Identity,
         [string]$LabelPrefix='adainleaky16',[switch]$NoReturn)
     if ($Channels % 32) { throw 'Channels must be whole 32-channel blocks' }
     $s = [Collections.Generic.List[hashtable]]::new()
@@ -49,9 +50,11 @@ function New-KokoroAdaInLeaky16Steps {
         $s.Add(@{Op='vmpye-w-uh';d=$p[0];s=$p[1];t=14})                         # y = K * x * 2^16 >> 31 + M
         $s.Add(@{Op='vmpyo-acc-w-h-rnd-sat-shift';d=$p[0];s=$p[1];t=14})
         $s.Add(@{Op='vadd-w';d=$p[0];s=$p[0];t=15})
-        $s.Add(@{Op='vmpye-w-uh';d=3;s=$p[0];t=16})                             # 0.2 y
-        $s.Add(@{Op='vmpyo-acc-w-h-rnd-sat-shift';d=3;s=$p[0];t=16})
-        $s.Add(@{Op='vmax-w';d=$p[0];s=$p[0];t=3})                              # LeakyReLU
+        if (-not $Identity) {
+            $s.Add(@{Op='vmpye-w-uh';d=3;s=$p[0];t=16})                         # 0.2 y
+            $s.Add(@{Op='vmpyo-acc-w-h-rnd-sat-shift';d=3;s=$p[0];t=16})
+            $s.Add(@{Op='vmax-w';d=$p[0];s=$p[0];t=3})                          # LeakyReLU
+        }
         $s.Add(@{Op='vmax-w';d=$p[0];s=$p[0];t=17})
         $s.Add(@{Op='vmin-w';d=$p[0];s=$p[0];t=18})
     }

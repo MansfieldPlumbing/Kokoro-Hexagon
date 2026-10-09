@@ -16,6 +16,9 @@ static uint32_t lcg = 2026;
 static int32_t rnd(int32_t lo, int32_t hi) { lcg = lcg * 1103515245u + 12345u; uint32_t r = (lcg >> 1) ^ (lcg << 15); return lo + (int32_t)(r % (uint32_t)(hi - lo + 1)); }
 static int32_t sat32(int64_t v) { return v > INT32_MAX ? INT32_MAX : v < INT32_MIN ? INT32_MIN : (int32_t)v; }
 static int32_t q31(int32_t a, int32_t b) { return sat32(((int64_t)a * b + ((int64_t)1 << 30)) >> 31); }
+#ifndef IDENT
+#define IDENT 0
+#endif
 static int16_t X[T][CH]; static int32_t K[CH], M[CH];
 int main(void) {
   unsigned char* v = (unsigned char*)(cfg(0x38) << 16);
@@ -33,7 +36,7 @@ int main(void) {
   int bad = 0, shown = 0, clamped = 0, negative = 0;
   for (int t = 0; t < T; t++) for (int c = 0; c < CH; c++) {
     int32_t y = (int32_t)((uint32_t)q31((int32_t)X[t][c] * 65536, K[c]) + (uint32_t)M[c]);
-    int32_t l = q31(y, 429496730); if (l > y) { y = l; negative++; }
+    int32_t l = q31(y, 429496730); if (!IDENT && l > y) { y = l; negative++; }
     if (y > 32767 || y < -32768) clamped++;
     int32_t o = y > 32767 ? 32767 : y < -32768 ? -32768 : y;
     size_t at = ((size_t)(t / 32) * (CH / 32) + c / 32) * 2048 + 2 * IDX(t % 32, c % 32);
@@ -42,6 +45,6 @@ int main(void) {
     else ok = (int)(hi[at] | hi[at + 1] << 8) - 32768 == o;
     if (!ok) { bad++; if (shown++ < 6) printf("t=%d c=%d x=%d K=%ld M=%ld expected %ld hi %u/%u lo %u/%u\n", t, c, X[t][c], (long)K[c], (long)M[c], (long)o, hi[at], hi[at + 1], lo[at], lo[at + 1]); }
   }
-  printf("adain-leaky16 %s C=%d tiles=%d mismatches=%d/%d negative=%d clamped=%d %s\n", OUT ? "tensor" : "windows", CH, NT, bad, T * CH, negative, clamped, bad ? "FAIL" : "PASS");
+  printf("adain-leaky16%s %s C=%d tiles=%d mismatches=%d/%d negative=%d clamped=%d %s\n", IDENT ? " identity" : "", OUT ? "tensor" : "windows", CH, NT, bad, T * CH, negative, clamped, bad ? "FAIL" : "PASS");
   return bad != 0;
 }

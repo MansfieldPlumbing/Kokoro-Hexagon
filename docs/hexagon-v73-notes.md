@@ -35,3 +35,19 @@ The DSP image does not export the `libqurt.a` trap stubs (`qurt_pmu_*`,
 `qurt_hvx_get_units`, futex, HVX lock); emit their trap sequences inline (SDK 6.4.0.2
 `computev73/lib/pic/libqurt.a`, SHA-256 `8e0ba5fd…`). `qurt_thread_create/join/exit` are
 imports, as the SDK multithreading example uses them from a skel.
+
+## HMX operands
+
+Source: Qualcomm Hexagon V81 HMX PRM, 80-N2040-62 Rev. AA (FP16 examples; V81, not V73), Tables 1-2 and sec. 4.4.1;
+local copy `build/reference-docs/` (SHA-256 14DB2946...4231939). Our emitted forms match its field layout:
+
+| Operand | Fields (V81) | Ours (`Kokoro.HmxConvPlanes.ps1`) |
+| --- | --- | --- |
+| activation Rs | [31:11] 2 KiB-aligned crouton; [10:7],[1] spatial offset; [6:2] first input channel | crouton + row offset ((row >> 1) << 7) + ((row & 1) << 1), channel 0 |
+| activation Rt | [31:11] dY (single) or crouton count dC (deep); [10:7],[1] spatial mask; [6:2] last channel | dY = one tile (CB * 2048) \| 0x7FF: all-Y mask, channel 31 |
+| weight Rs | [31:7] address; [5] negate | 2 KiB weight block |
+| weight Rt | [31:7] dW, distance to the last weight, "only used for exception checking"; [6:0] all 1s | 0x7FF: dW 0x780, the last 128 B vector of the block |
+
+`:single` takes the bottom of the crouton at Rs and the top of the crouton at Rs + dY (dY may be negative) to form one
+tile, so its footprint is two 2 KiB croutons. The manual states no page or region rule; see the VTCM correction in
+`docs/generator60x-resident-design.md` for the simulator faults where the second crouton started on a 1 MiB boundary.
