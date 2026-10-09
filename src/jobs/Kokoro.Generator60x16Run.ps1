@@ -27,8 +27,9 @@ function Get-KokoroGenerator60x16Layout {
     $small=[ordered]@{Parameters=0;Moments=$record;InputMoments=($record+16*$Channels);PrivateMoments=($record+32*$Channels);Kms=($record+80*$Channels)}
     $smallBytes=[long]([math]::Ceiling(($small.Kms+12*$Channels)/32768)*32768)
     $regions=[ordered]@{}; $at=0L
-    # HMX activation reads must not straddle a 4 MiB VTCM page: both windows come first.
-    $list=@(@('Window',(($BatchTiles+2)*$tileBytes)),@('WindowLow',(($BatchTiles+2)*$tileBytes)),@('Planes',(6L*$BatchTiles*$tileBytes)),@('Weights',(2L*$Channels*$Channels*11)),@('Small',$smallBytes),@('Residual',$bytes),@('ConvOutput',$bytes))
+    # HMX activation reads must not straddle a 4 MiB VTCM page: both windows come first. ConvOutput carries four tiles of
+    # slack: the front interleave writes past the stage input (7,801 frames fitted only by 64 KiB rounding; 7,321 did not).
+    $list=@(@('Window',(($BatchTiles+2)*$tileBytes)),@('WindowLow',(($BatchTiles+2)*$tileBytes)),@('Planes',(6L*$BatchTiles*$tileBytes)),@('Weights',(2L*$Channels*$Channels*11)),@('Small',$smallBytes),@('Residual',$bytes),@('ConvOutput',($bytes+4L*$tileBytes)))
     foreach($r in $list){ $regions[$r[0]]=[ordered]@{Offset=$at;Bytes=[long]$r[1]}; $at+=& $al $r[1] }
     $page=4194304
     foreach($name in 'Window','WindowLow'){ $w=$regions[$name]; if([math]::Floor($w.Offset/$page) -ne [math]::Floor(($w.Offset+$w.Bytes-1)/$page)){throw 'Conv-input window crosses a 4 MiB VTCM boundary'} }
@@ -124,7 +125,7 @@ function New-KokoroGenerator60x16RunSteps {
         $upHi=$R.Residual.Offset; $upLo=$upHi+($decTiles+2)*32768L
         if($upLo+($decTiles+2)*32768L -gt $R.Residual.Offset+$R.Residual.Bytes){throw 'ups[0] input planes exceed the residual region'}
         if([math]::Floor($upHi/4194304) -ne [math]::Floor(($upLo+($decTiles+2)*32768L-1)/4194304)){throw 'ups[0] input planes cross a 4 MiB VTCM boundary'}
-        if((10*$qPairs+5)/16 -gt [math]::Floor((& $al64 $tensorBytes)/$tileBytes)){throw 'The interleave writes past the target region'}
+        if((10*$qPairs+5)/16 -gt [math]::Floor($R.ConvOutput.Bytes/$tileBytes)){throw 'The interleave writes past the target region'}
         $noiseSlot=[long]([math]::Ceiling(($scratchOffset+131072)/4096)*4096); $r0Slot=$noiseSlot+[long]([math]::Ceiling($tensorBytes/4096)*4096)
         $outputBytes=192+$r0Slot+$tensorBytes; $r0Base=25; $r0Offset=$r0Slot
     }
@@ -140,7 +141,7 @@ function New-KokoroGenerator60x16RunSteps {
         $offFrontWeights=& $al64 $layout.VtcmBytes; $offFrontTables=$offFrontWeights+393216; $offUpPhase=$offFrontTables+65536
         $vtcmBytes=[math]::Max($vtcmBytes,(& $al64 ($offUpPhase+$upTiles*16384L)))
         if($R.Residual.Offset+2L*($upTiles+2)*16384 -gt 4194304){throw 'ups[1] input planes cross a 4 MiB VTCM boundary'}
-        if(($tiles+4)*8192L -gt (& $al64 $tensorBytes)){throw 'The interleave needs four tiles of slack after the stage input'}
+        if(($tiles+4)*8192L -gt $R.ConvOutput.Bytes){throw 'The interleave needs four tiles of slack after the stage input'}
         $noiseSlot=[long]([math]::Ceiling(($scratchOffset+131072)/4096)*4096); $r0Slot=$noiseSlot+[long]([math]::Ceiling($tensorBytes/4096)*4096)
         $outputBytes=192+$r0Slot+$tensorBytes; $r0Base=25; $r0Offset=$r0Slot
     }
