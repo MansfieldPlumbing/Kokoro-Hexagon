@@ -9,7 +9,15 @@
 #include <stdio.h>
 #include <string.h>
 static unsigned cfg(int off){ unsigned b; __asm__ volatile("%0 = cfgbase":"=r"(b)); b<<=16; return *(volatile unsigned*)(b+off); }
+#ifndef CH
 #define CH 128
+#endif
+#ifndef LOOP
+#define LOOP 0
+#endif
+/* LOOP 1: New-KokoroAdaInAffineCoefficientsLoopSteps, output per block K[32] at 64 b, M[32] at 64 b + 32 (words), no S. */
+#define KAT(c) (LOOP ? 64 * ((c) / 32) + (c) % 32 : (c))
+#define MAT(c) (LOOP ? 64 * ((c) / 32) + 32 + (c) % 32 : CH + (c))
 #define N 777
 typedef void (*fn_t)(const void* moments, const void* params, void* out, unsigned n);
 static uint32_t lcg = 31337;
@@ -18,8 +26,8 @@ static int rnd(int lo, int hi) { return lo + (int)(rnd32() % (unsigned)(hi - lo 
 static uint32_t isqrt64(uint64_t d) { uint32_t r = 0; for (int b = 30; b >= 0; b--) { uint32_t c = r | (1u << b); if ((uint64_t)c * c <= d) r = c; } return r; }
 int main(void) {
   unsigned char* v = (unsigned char*)(cfg(0x38) << 16);
-  int32_t* mom = (int32_t*)v; unsigned char* par = v + 8192; int32_t* out = (int32_t*)(v + 16384);
-  int32_t S1[CH], A2[CH], AB[CH], B2[CH], Mb[CH], Sv[CH]; int64_t Ka[CH]; uint64_t eps[CH];
+  int32_t* mom = (int32_t*)v; unsigned char* par = v + (CH > 128 ? 65536 : 8192); int32_t* out = (int32_t*)(v + (CH > 128 ? 131072 : 16384));
+  static int32_t S1[CH], A2[CH], AB[CH], B2[CH], Mb[CH], Sv[CH]; static int64_t Ka[CH]; static uint64_t eps[CH];
   for (int c = 0; c < CH; c++) {
     int spread = rnd(50, 30000), centre = rnd(-2000, 2000);
     int64_t s1 = 0, a2 = 0, ab = 0, b2 = 0;
@@ -46,13 +54,13 @@ int main(void) {
     int64_t prod = (int64_t)K * S1[c]; uint64_t ap = (uint64_t)(prod < 0 ? -prod : prod), dv = (uint64_t)N << 15;
     int32_t q = (int32_t)((ap + (dv >> 1)) / dv); if (prod < 0) q = -q;
     int32_t M = Mb[c] - q;
-    if (out[c] != K || out[CH + c] != M || out[2 * CH + c] != Sv[c]) {
+    if (out[KAT(c)] != K || out[MAT(c)] != M || (!LOOP && out[2 * CH + c] != Sv[c])) {
       bad++; if (shown++ < 6) printf("c=%d K %ld/%ld M %ld/%ld S %ld/%ld S1=%ld A2=%ld AB=%ld B2=%ld Ka=%lld sq=%lld D=%llu root=%lu\n",
-        c, (long)out[c], (long)K, (long)out[CH + c], (long)M, (long)out[2 * CH + c], (long)Sv[c], (long)S1[c], (long)A2[c], (long)AB[c],
+        c, (long)out[KAT(c)], (long)K, (long)out[MAT(c)], (long)M, (long)out[2 * CH + c], (long)Sv[c], (long)S1[c], (long)A2[c], (long)AB[c],
         (long)B2[c], (long long)Ka[c], (long long)sq, (unsigned long long)D, (unsigned long)root); }
     double ideal = (double)Ka[c] * N / sqrt((double)D);
-    double rel = fabs((out[c] - ideal) / ideal); if (rel > worst) worst = rel;
+    double rel = fabs((out[KAT(c)] - ideal) / ideal); if (rel > worst) worst = rel;
   }
-  printf("adain-turns-coefficients C=%d N=%d mismatches=%d/%d worst K relative error vs real=%.3g %s\n", CH, N, bad, CH, worst, bad ? "FAIL" : "PASS");
+  printf("adain-%s-coefficients C=%d N=%d mismatches=%d/%d worst K relative error vs real=%.3g %s\n", LOOP ? "affine-loop" : "turns", CH, N, bad, CH, worst, bad ? "FAIL" : "PASS");
   return bad != 0;
 }

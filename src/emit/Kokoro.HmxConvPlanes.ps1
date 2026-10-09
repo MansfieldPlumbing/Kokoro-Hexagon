@@ -92,3 +92,85 @@ function New-KokoroHmxConvPlanesSteps {
     if (-not $NoReturn) { $s.Add(@{Op='return'}) }
     $s.ToArray()
 }
+
+# The same conv for the decoder's shapes (docs/decoder-design.md): any whole number of 32-channel input blocks and 64-channel
+# output groups, kernel 1 or 3. Output groups are a loop (code size independent of the channel count) and each tap walks
+# its activation pointer by register, so offsets are not bound by addi's range. Calling convention, weight order, table
+# layout and plane output as New-KokoroHmxConvPlanesSteps; also uses r6, r7 and r28 (caller-saved).
+function New-KokoroHmxConvPlanesLoopSteps {
+    param(
+        [ValidateRange(32, 2048)][int] $InputChannels = 1120,
+        [ValidateRange(64, 2048)][int] $OutputChannels = 1024,
+        [ValidateSet(1, 3, 5, 7, 11)][int] $Kernel = 3,
+        [ValidateSet(1, 3, 5)][int] $Dilation = 1,
+        [ValidateSet(1, 2)][int] $WeightPlanes = 1,
+        [Parameter(Mandatory)][ValidateRange(2048, 1073741824)][long] $PlaneStride,
+        [string] $LabelPrefix = 'hmxconvloop',
+        [switch] $NoReturn
+    )
+    if ($InputChannels % 32) { throw 'Input channels must be whole 32-channel blocks' }
+    if ($OutputChannels % 64) { throw 'Output channels must be whole 64-channel groups' }
+    $cb = $InputChannels / 32; $ob = $OutputChannels / 32; $groups = $OutputChannels / 64
+    $accGroups = if ($WeightPlanes -eq 2) { 3 } else { 2 }
+    $groupWeights = $Kernel * $cb * 2048; $wlOffset = $groups * $groupWeights
+    $half = ($Kernel - 1) / 2
+    if ($Dilation * $half -gt 31) { throw 'Tap shift exceeds one crouton' }
+    if ($PlaneStride % 2048 -ne 0) { throw 'Plane stride must keep 2 KB tile alignment' }
+    $s = [Collections.Generic.List[hashtable]]::new()
+    $imm = { param([int]$r,[long]$v) $u=[uint32]($v -band 0xffffffffL); $s.Add(@{Op='lo';x=$r;i=($u -band 65535)}); $s.Add(@{Op='hi';x=$r;i=($u -shr 16)}) }
+    # d = s + v, through r15 when v is outside addi's range.
+    $addc = { param([int]$d,[int]$src,[long]$v)
+        if ($v -ge -32768 -and $v -le 32767) { $s.Add(@{Op='addi'; d=$d; s=$src; i=[int]$v}) }
+        else { & $imm 15 $v; $s.Add(@{Op='add'; d=$d; s=$src; t=15}) } }
+    $dy = $cb * 2048
+    & $imm 9 ($dy -bor 0x7ff)                          # :single activation range
+    $s.Add(@{Op='imm'; d=10; i=0x7ff})                # weight :deep range
+    $s.Add(@{Op='imm'; d=11; i=0})                    # store Rt, loop compare zero
+    $macs = { param([int]$act,[int]$wt)
+        $s.Add(@{Op='addi'; d=12; s=$wt; i=0})
+        for ($k = 0; $k -lt $Kernel; $k++) {
+            $shift = $Dilation * ($k - $half)
+            $tile = [math]::Floor($shift / 32); $row = $shift - 32 * $tile
+            & $addc 8 $act (($tile * $cb) * 2048 + (($row -shr 1) -shl 7) + (($row -band 1) -shl 1))
+            for ($c = 0; $c -lt $cb; $c++) {
+                $s.Add(@{Op='hmx-pair'; Act='act-ub-single'; Wt='wt-b-deep'; s=8; t=9; u=12; v=10})
+                $s.Add(@{Op='addi'; d=8; s=8; i=2048})
+                $s.Add(@{Op='addi'; d=12; s=12; i=2048})
+            }
+        }
+    }
+    $s.Add(@{Op='label'; Name="${LabelPrefix}_tile"})
+    $s.Add(@{Op='addi'; d=7; s=2; i=0})               # group weights
+    $s.Add(@{Op='addi'; d=28; s=3; i=0})              # group column tables
+    $s.Add(@{Op='imm'; d=6; i=$groups})
+    $s.Add(@{Op='label'; Name="${LabelPrefix}_group"})
+    foreach ($group in 0..($accGroups - 1)) {
+        $s.Add(@{Op='mxclracc'})
+        if ($group -eq 0) { & $macs 0 7 }
+        elseif ($group -eq 1) {
+            & $macs 1 7
+            if ($WeightPlanes -eq 2) { & $addc 13 7 $wlOffset; & $macs 0 13 }
+        } else { & $addc 13 7 $wlOffset; & $macs 1 13 }
+        foreach ($h in 0, 1) {
+            foreach ($plane in 0, 1) {
+                $p = 2 * $group + $plane
+                $s.Add(@{Op='addi'; d=14; s=28; i=(512 * $accGroups * $h + 256 * $p)})
+                $s.Add(@{Op='bias-mxmem2'; s=14})
+                & $addc 14 5 ($p * $PlaneStride + 2048 * $h)
+                $s.Add(@{Op=$(if ($plane -eq 0) { 'mxmem-after-retain-sat-ub' } else { 'mxmem-after-ub' }); s=14; t=11})
+            }
+        }
+    }
+    & $addc 7 7 $groupWeights
+    $s.Add(@{Op='addi'; d=28; s=28; i=(1024 * $accGroups)})
+    $s.Add(@{Op='addi'; d=5; s=5; i=4096})            # two output blocks per group: after the loop r5 has moved OB * 2048
+    $s.Add(@{Op='addi'; d=6; s=6; i=-1})
+    $s.Add(@{Op='gtu'; d=0; s=6; t=11})
+    $s.Add(@{Op='jump-p'; u=0; Label="${LabelPrefix}_group"})
+    & $addc 0 0 $dy; & $addc 1 1 $dy
+    $s.Add(@{Op='addi'; d=4; s=4; i=-1})
+    $s.Add(@{Op='gtu'; d=0; s=4; t=11})
+    $s.Add(@{Op='jump-p'; u=0; Label="${LabelPrefix}_tile"})
+    if (-not $NoReturn) { $s.Add(@{Op='return'}) }
+    $s.ToArray()
+}

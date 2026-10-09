@@ -98,3 +98,70 @@ function New-KokoroPlaneCombineSteps {
     if (-not $NoReturn) { $s.Add(@{Op='return'}) }
     $s.ToArray()
 }
+
+# Two-group combine for the decoder's channel counts (docs/decoder-design.md): any whole number of 32-channel blocks, a
+# loop over blocks, per-block ratios read from memory. Modes as New-KokoroPlaneCombineSteps, plus
+#   -Mode Scale: R = sat(v * ratio_c), stored biased (no R input): the first term of a sum that a Residual pass completes,
+#                as the decoder block's shortcut before (conv2 + conv1x1) / sqrt(2).
+# r2 = ratios (Residual, Scale): 128 bytes per block, Q15 in both halfwords of word lane j (channel 32*ob + j).
+# Uses r4..r15 and v0..v5, v20, v29..v31; r16..r27 are untouched.
+function New-KokoroPlaneCombineLoopSteps {
+    param(
+        [ValidateSet('Conv','Residual','Scale')][string] $Mode = 'Conv',
+        [ValidateRange(32, 2048)][int] $Channels = 1024,
+        [Parameter(Mandatory)][ValidateRange(2048, 1073741824)][long] $PlaneStride,
+        [string] $LabelPrefix = 'planecombineloop',
+        [switch] $NoReturn
+    )
+    if ($Channels % 32) { throw 'Channels must be whole 32-channel blocks' }
+    if ($PlaneStride % 2048 -ne 0) { throw 'Plane stride must keep 2 KB tile alignment' }
+    $ob = $Channels / 32
+    $s = [Collections.Generic.List[hashtable]]::new()
+    $imm = { param([int]$r,[long]$v) $u=[uint32]($v -band 0xffffffffL); $s.Add(@{Op='lo';x=$r;i=($u -band 65535)}); $s.Add(@{Op='hi';x=$r;i=($u -shr 16)}) }
+    & $imm 13 0xFF00FF00L; $s.Add(@{Op='vsplat';d=31;s=13})
+    & $imm 13 0x00FF00FFL; $s.Add(@{Op='vsplat';d=30;s=13})
+    & $imm 13 0x80008000L; $s.Add(@{Op='vsplat';d=29;s=13})
+    $s.Add(@{Op='imm';d=8;i=8}); $s.Add(@{Op='imm';d=7;i=0})
+    & $imm 10 $PlaneStride
+    $s.Add(@{Op='addi';d=15;s=3;i=0})
+    $s.Add(@{Op='label';Name="${LabelPrefix}_tile"})
+    $s.Add(@{Op='addi';d=4;s=2;i=0})                                    # ratio vector of block 0
+    $s.Add(@{Op='imm';d=5;i=$ob})
+    $s.Add(@{Op='label';Name="${LabelPrefix}_block"})
+    if ($Mode -ne 'Conv') { $s.Add(@{Op='vload';d=20;s=4;Offset=0}) }
+    $s.Add(@{Op='imm';d=14;i=16})
+    $s.Add(@{Op='label';Name="${LabelPrefix}_pair"})
+    $s.Add(@{Op='vload';d=0;s=0;Offset=0})
+    $s.Add(@{Op='add';d=11;s=0;t=10}); $s.Add(@{Op='vload';d=1;s=11;Offset=0})
+    $s.Add(@{Op='add';d=11;s=11;t=10}); $s.Add(@{Op='vload';d=2;s=11;Offset=0})
+    $s.Add(@{Op='add';d=11;s=11;t=10}); $s.Add(@{Op='vload';d=3;s=11;Offset=0})
+    foreach ($g in @(@(0,1),@(2,3))) {
+        $s.Add(@{Op='vand';d=$g[0];s=$g[0];t=31})
+        $s.Add(@{Op='vlsr-uw';d=$g[1];s=$g[1];t=8})
+        $s.Add(@{Op='vand';d=$g[1];s=$g[1];t=30})
+        $s.Add(@{Op='vor';d=$g[0];s=$g[0];t=$g[1]})
+        $s.Add(@{Op='vxor';d=$g[0];s=$g[0];t=29})
+    }
+    $s.Add(@{Op='vadd-h-sat';d=4;s=0;t=2})
+    if ($Mode -ne 'Conv') { $s.Add(@{Op='vmpy-h-rnd-sat';d=4;s=4;t=20}) }
+    if ($Mode -eq 'Residual') {
+        $s.Add(@{Op='vload';d=5;s=1;Offset=0})
+        $s.Add(@{Op='vxor';d=5;s=5;t=29})
+        $s.Add(@{Op='vadd-h-sat';d=4;s=5;t=4})
+    }
+    $s.Add(@{Op='vxor';d=4;s=4;t=29})
+    $s.Add(@{Op='vstore';s=1;t=4;Offset=0})
+    $s.Add(@{Op='addi';d=0;s=0;i=128}); $s.Add(@{Op='addi';d=1;s=1;i=128})
+    $s.Add(@{Op='addi';d=14;s=14;i=-1})
+    $s.Add(@{Op='gtu';d=0;s=14;t=7})
+    $s.Add(@{Op='jump-p';u=0;Label="${LabelPrefix}_pair"})
+    $s.Add(@{Op='addi';d=4;s=4;i=128})
+    $s.Add(@{Op='addi';d=5;s=5;i=-1})
+    $s.Add(@{Op='gtu';d=0;s=5;t=7})
+    $s.Add(@{Op='jump-p';u=0;Label="${LabelPrefix}_block"})
+    $s.Add(@{Op='addi';d=15;s=15;i=-1})
+    $s.Add(@{Op='gtu';d=0;s=15;t=7})
+    $s.Add(@{Op='jump-p';u=0;Label="${LabelPrefix}_tile"})
+    if (-not $NoReturn) { $s.Add(@{Op='return'}) }
+    $s.ToArray()
+}

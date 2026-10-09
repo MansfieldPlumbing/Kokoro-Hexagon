@@ -52,3 +52,54 @@ function New-KokoroAdaInMoments16Steps {
     if (-not $NoReturn) { $s.Add(@{Op='return'}) }
     $s.ToArray()
 }
+
+# The same moments for the decoder's channel counts (docs/decoder-design.md): any whole number of 32-channel blocks, a loop
+# over blocks with register strides (tile stride 64 * Channels bytes). Same record and contract; also uses r3, r4, r6, r9.
+function New-KokoroAdaInMoments16LoopSteps {
+    param([ValidateRange(32,2048)][int]$Channels=1120,[string]$LabelPrefix='adainmoments16loop',[switch]$NoReturn)
+    if ($Channels % 32) { throw 'Channels must be whole 32-channel blocks' }
+    $s = [Collections.Generic.List[hashtable]]::new()
+    $imm = { param([int]$r,[long]$v) $u=[uint32]($v -band 0xffffffffL); $s.Add(@{Op='lo';x=$r;i=($u -band 65535)}); $s.Add(@{Op='hi';x=$r;i=($u -shr 16)}) }
+    & $imm 13 0x80008000L; $s.Add(@{Op='vsplat';d=31;s=13})
+    & $imm 13 0x00FF00FFL; $s.Add(@{Op='vsplat';d=30;s=13})
+    & $imm 12 0x00010001L
+    $s.Add(@{Op='imm';d=8;i=8}); $s.Add(@{Op='imm';d=7;i=0})
+    & $imm 9 ($Channels*64-2048)                # from the end of a block's tile to the same block of the next tile
+    $s.Add(@{Op='addi';d=4;s=0;i=0}); $s.Add(@{Op='addi';d=6;s=1;i=0})
+    $s.Add(@{Op='imm';d=3;i=($Channels/32)})
+    $s.Add(@{Op='label';Name="${LabelPrefix}_block"})
+    foreach ($v in 0..7) { $s.Add(@{Op='vxor';d=$v;s=$v;t=$v}) }
+    $s.Add(@{Op='addi';d=5;s=4;i=0})
+    $s.Add(@{Op='addi';d=15;s=2;i=0})
+    $s.Add(@{Op='label';Name="${LabelPrefix}_tile"})
+    $s.Add(@{Op='imm';d=14;i=16})
+    $s.Add(@{Op='label';Name="${LabelPrefix}_vec"})
+    $s.Add(@{Op='vload';d=8;s=5;Offset=0})
+    $s.Add(@{Op='vxor';d=8;s=8;t=31})
+    $s.Add(@{Op='vmpy-acc-ww-h-r';d=0;s=8;t=12})
+    $s.Add(@{Op='vasr-h';d=9;s=8;t=8})
+    $s.Add(@{Op='vand';d=10;s=8;t=30})
+    $s.Add(@{Op='vmpy-acc-ww-h-h';d=2;s=9;t=9})
+    $s.Add(@{Op='vmpy-acc-ww-h-h';d=4;s=9;t=10})
+    $s.Add(@{Op='vmpy-acc-ww-h-h';d=6;s=10;t=10})
+    $s.Add(@{Op='addi';d=5;s=5;i=128})
+    $s.Add(@{Op='addi';d=14;s=14;i=-1})
+    $s.Add(@{Op='gtu';d=0;s=14;t=7})
+    $s.Add(@{Op='jump-p';u=0;Label="${LabelPrefix}_vec"})
+    $s.Add(@{Op='add';d=5;s=5;t=9})
+    $s.Add(@{Op='addi';d=15;s=15;i=-1})
+    $s.Add(@{Op='gtu';d=0;s=15;t=7})
+    $s.Add(@{Op='jump-p';u=0;Label="${LabelPrefix}_tile"})
+    for ($q = 0; $q -lt 4; $q++) {
+        $s.Add(@{Op='vadd-w';d=(2*$q);s=(2*$q);t=(2*$q+1)})
+        $s.Add(@{Op='vload';d=11;s=6;Offset=(128*$q)})
+        $s.Add(@{Op='vadd-w';d=(2*$q);s=(2*$q);t=11})
+        $s.Add(@{Op='vstore';s=6;t=(2*$q);Offset=(128*$q)})
+    }
+    $s.Add(@{Op='addi';d=4;s=4;i=2048}); $s.Add(@{Op='addi';d=6;s=6;i=512})
+    $s.Add(@{Op='addi';d=3;s=3;i=-1})
+    $s.Add(@{Op='gtu';d=0;s=3;t=7})
+    $s.Add(@{Op='jump-p';u=0;Label="${LabelPrefix}_block"})
+    if (-not $NoReturn) { $s.Add(@{Op='return'}) }
+    $s.ToArray()
+}

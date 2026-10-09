@@ -6,7 +6,10 @@
 #include <stdio.h>
 #include <string.h>
 static unsigned cfg(int off){ unsigned b; __asm__ volatile("%0 = cfgbase":"=r"(b)); b<<=16; return *(volatile unsigned*)(b+off); }
+#ifndef CH
 #define CH 128
+#endif
+#define REC_AT ((size_t)NT * CH * 64 > 262144 ? 1048576 : 262144)
 #define NT 7
 #define IDX(i, j) (64 * ((i) / 2) + 2 * (j) + ((i) % 2))
 typedef void (*fn_t)(const void* in, void* record, unsigned tiles);
@@ -17,7 +20,7 @@ static int32_t pre[4][CH];
 int main(void) {
   unsigned char* v = (unsigned char*)(cfg(0x38) << 16);
   unsigned r; __asm__ volatile("%0 = ssr":"=r"(r)); r |= 1u << 26; __asm__ volatile("ssr = %0; isync"::"r"(r));
-  unsigned char* in = v; int32_t* rec = (int32_t*)(v + 262144);
+  unsigned char* in = v; int32_t* rec = (int32_t*)(v + REC_AT);
   for (int t = 0; t < NT * 32; t++) for (int c = 0; c < CH; c++) {
     X[t][c] = (t == 0) ? -32768 : (t == 1) ? 32767 : (int16_t)rnd(-32768, 32767);
     size_t at = ((size_t)(t / 32) * (CH / 32) + c / 32) * 2048 + 2 * IDX(t % 32, c % 32);

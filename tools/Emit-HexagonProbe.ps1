@@ -2,17 +2,20 @@
 [CmdletBinding()]
 param(
     [string] $OutputDirectory = (Join-Path $PSScriptRoot '..\build\hexagon-emission\emitted'),
-    [ValidateSet('Probe','KokoroAffine','KokoroAdaIn','KokoroAdaInResBlock','KokoroAdaInStatistics','KokoroAdaInIntegerCoefficients','KokoroAdaInIntegerAffine','KokoroSnakeInteger','KokoroResidualInteger','KokoroAlbertSoftmax3','KokoroAlbertAttention3','KokoroAlbertAttentionOutput3','KokoroAlbertConnectedAttention3','KokoroConvTile','KokoroLinearTile','KokoroR0Sub0','KokoroHmxLock','KokoroHmxMatrix','KokoroHmxConv','KokoroHmxConvPlanes','KokoroPlaneCombine','KokoroAdaInMoments16','KokoroAdaInTurnsCoefficients','KokoroHmxConvRun','KokoroResBlockRun','KokoroBranchAverageInteger','KokoroGenerator60xRun','KokoroLeakyReluInteger','KokoroVtcmQuery','KokoroDmaCopy','KokoroDmaBench','KokoroAdaInSnakeInteger','KokoroAdaInSnakeTurns','KokoroGenerator60xResidentRun','KokoroGenerator60x16Run','KokoroGeneratorTailRun','KokoroGeneratorTail16Run','KokoroGeneratorStage16TailRun','KokoroResBlock16Run','KokoroGeneratorFrontStageTailRun','KokoroGeneratorFront10x16Run','KokoroGeneratorWhole16Run','KokoroHarmonicStft16Run','KokoroHarmonicSource16Run','KokoroGeneratorWholeSource16Run')][string] $Kernel='Probe',
+    [ValidateSet('Probe','KokoroAffine','KokoroAdaIn','KokoroAdaInResBlock','KokoroAdaInStatistics','KokoroAdaInIntegerCoefficients','KokoroAdaInIntegerAffine','KokoroSnakeInteger','KokoroResidualInteger','KokoroAlbertSoftmax3','KokoroAlbertAttention3','KokoroAlbertAttentionOutput3','KokoroAlbertConnectedAttention3','KokoroConvTile','KokoroLinearTile','KokoroR0Sub0','KokoroHmxLock','KokoroHmxMatrix','KokoroHmxConv','KokoroHmxConvPlanes','KokoroHmxConvPlanesLoop','KokoroPlaneCombine','KokoroPlaneCombineLoop','KokoroAdaInMoments16','KokoroAdaInMoments16Loop','KokoroAdaInTurnsCoefficients','KokoroAdaInAffineCoefficientsLoop','KokoroHmxConvRun','KokoroResBlockRun','KokoroBranchAverageInteger','KokoroGenerator60xRun','KokoroLeakyReluInteger','KokoroVtcmQuery','KokoroDmaCopy','KokoroDmaBench','KokoroAdaInSnakeInteger','KokoroAdaInSnakeTurns','KokoroGenerator60xResidentRun','KokoroGenerator60x16Run','KokoroGeneratorTailRun','KokoroGeneratorTail16Run','KokoroGeneratorStage16TailRun','KokoroResBlock16Run','KokoroGeneratorFrontStageTailRun','KokoroGeneratorFront10x16Run','KokoroGeneratorWhole16Run','KokoroHarmonicStft16Run','KokoroHarmonicSource16Run','KokoroGeneratorWholeSource16Run')][string] $Kernel='Probe',
     [ValidateRange(2, 32768)][int] $ResBlockFrames = 7801,
     [ValidateSet(3,7,11)][int] $ResBlockKernel = 3,
     [ValidateSet(128,256)][int] $IntegerChannels = 128,
     [ValidateRange(1, 64)][int] $ConvTiles = 8,
     [ValidateSet(128, 256)][int] $ConvChannels = 128,
-    [ValidateSet(3, 7, 11)][int] $ConvKernel = 3,
+    [ValidateSet(1, 3, 7, 11)][int] $ConvKernel = 3,
+    # KokoroHmxConvPlanesLoop: decoder shapes (docs/decoder-design.md).
+    [ValidateRange(32, 2048)][int] $ConvInputChannels = 1120,
+    [ValidateRange(64, 2048)][int] $ConvOutputChannels = 1024,
     [ValidateSet(1, 3, 5)][int] $ConvDilation = 1,
     [switch] $ConvOutputPlanes,
     [ValidateSet(1,2)][int] $ConvWeightPlanes = 1,
-    [ValidateSet('Conv','Residual')][string] $CombineMode = 'Conv',
+    [ValidateSet('Conv','Residual','Scale')][string] $CombineMode = 'Conv',
     [ValidateSet(2,3)][int] $CombineGroups = 2,
     [ValidateRange(0,3)][int] $ResidentCostProbePasses = 0,
     [switch] $ResidentCostProbeTurnsBody,
@@ -337,14 +340,31 @@ if($Kernel -eq 'KokoroR0Sub0') {
     # Plane stride for the simulator harness: 3 output tiles of ConvChannels/32 blocks.
     $steps=@(New-KokoroHmxConvPlanesSteps -InputChannels $ConvChannels -OutputChannels $ConvChannels -Kernel $ConvKernel -Dilation $ConvDilation -WeightPlanes $ConvWeightPlanes -PlaneStride (3*($ConvChannels/32)*2048))
     $symbol='kokoro_hmx_conv_planes'; $soname='libkokoro_hmx_conv_planes.so'
+} elseif($Kernel -eq 'KokoroHmxConvPlanesLoop') {
+    . (Join-Path $PSScriptRoot '..\src\emit\Kokoro.HmxConvPlanes.ps1')
+    # Plane stride for the simulator harness: 3 output tiles of ConvOutputChannels/32 blocks.
+    $steps=@(New-KokoroHmxConvPlanesLoopSteps -InputChannels $ConvInputChannels -OutputChannels $ConvOutputChannels -Kernel $ConvKernel -Dilation $ConvDilation -WeightPlanes $ConvWeightPlanes -PlaneStride (3*($ConvOutputChannels/32)*2048))
+    $symbol='kokoro_hmx_conv_planes_loop'; $soname='libkokoro_hmx_conv_planes_loop.so'
 } elseif($Kernel -eq 'KokoroPlaneCombine') {
     . (Join-Path $PSScriptRoot '..' 'src' 'emit' 'Kokoro.PlaneCombine.ps1')
     $steps=@(New-KokoroPlaneCombineSteps -Mode $CombineMode -Channels $ConvChannels -Groups $CombineGroups -PlaneStride (3*($ConvChannels/32)*2048))
     $symbol='kokoro_plane_combine'; $soname='libkokoro_plane_combine.so'
+} elseif($Kernel -eq 'KokoroPlaneCombineLoop') {
+    . (Join-Path $PSScriptRoot '..' 'src' 'emit' 'Kokoro.PlaneCombine.ps1')
+    $steps=@(New-KokoroPlaneCombineLoopSteps -Mode $CombineMode -Channels $ConvOutputChannels -PlaneStride (3*($ConvOutputChannels/32)*2048))
+    $symbol='kokoro_plane_combine_loop'; $soname='libkokoro_plane_combine_loop.so'
+} elseif($Kernel -eq 'KokoroAdaInMoments16Loop') {
+    . (Join-Path $PSScriptRoot '..' 'src' 'emit' 'Kokoro.AdaInMoments16.ps1')
+    $steps=@(New-KokoroAdaInMoments16LoopSteps -Channels $ConvInputChannels)
+    $symbol='kokoro_adain_moments16_loop'; $soname='libkokoro_adain_moments16_loop.so'
 } elseif($Kernel -eq 'KokoroAdaInMoments16') {
     . (Join-Path $PSScriptRoot '..' 'src' 'emit' 'Kokoro.AdaInMoments16.ps1')
     $steps=@(New-KokoroAdaInMoments16Steps -Channels $ConvChannels)
     $symbol='kokoro_adain_moments16'; $soname='libkokoro_adain_moments16.so'
+} elseif($Kernel -eq 'KokoroAdaInAffineCoefficientsLoop') {
+    . (Join-Path $PSScriptRoot '..' 'src' 'emit' 'Kokoro.AdaInTurnsCoefficients.ps1')
+    $steps=@(New-KokoroAdaInAffineCoefficientsLoopSteps -Channels $ConvInputChannels)
+    $symbol='kokoro_adain_affine_coefficients_loop'; $soname='libkokoro_adain_affine_coefficients_loop.so'
 } elseif($Kernel -eq 'KokoroAdaInTurnsCoefficients') {
     . (Join-Path $PSScriptRoot '..' 'src' 'emit' 'Kokoro.AdaInTurnsCoefficients.ps1')
     $steps=@(New-KokoroAdaInTurnsCoefficientsSteps -Channels $ConvChannels)
