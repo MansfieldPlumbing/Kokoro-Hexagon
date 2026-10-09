@@ -32,6 +32,12 @@ twice, or written as a scratch script, is a missing command: add it here.
   AlbertLinear -Linear name[,name...] [-Path] [-Soc] [-Runs]
                               One ALBERT linear (mapping_in, query.0 .. ffn_output.11, bert_encoder) on the phone: job input
                               from the capture, emit, run, decode, SNR against stock. Default capture stock-albert-capture-hello.
+  AlbertLayerNorm -Norm name[,name...] [-Path] [-Soc] [-Runs]
+                              One ALBERT LayerNorm (attention.0 .. attention.11, full.0 .. full.11) on the phone from the
+                              captured input sum: SNR against stock, and against a host float LayerNorm of the stored input.
+  AlbertGelu -Repeat r[,r...] [-Path] [-Soc] [-Runs]
+                              gelu_new of repeat r (0..11) on the phone from the captured ffn output: SNR against stock and
+                              against the host model of the table arithmetic (Invoke-KokoroGeluTable).
   Api      [-Pattern]         Index of every function in this file, src/ and tools/*.psm1: name, file:line, parameters,
                               summary. Start here before reading source.
   Find     -Pattern           Search project source, docs and receipts (not build/).
@@ -46,7 +52,7 @@ ANATOMY OF A DSP JOB (read these, in this order, instead of exploring)
   2. Job               src/jobs/Kokoro.<Name>Run.ps1: Get-Kokoro<Name>Layout (VTCM regions, buffer sizes) and
                        New-Kokoro<Name>RunSteps (the checked resource wrapper copied from New-KokoroResBlockRunSteps up to
                        its connected_job label, then this job's DMA, calls and bodies). Smallest example:
-                       src/jobs/Kokoro.AlbertLinear16Run.ps1.
+                       src/jobs/Kokoro.Albert16Run.ps1 (New-KokoroWrappedJobSteps: src/jobs/Kokoro.WrappedJob.ps1).
   3. Emitter entry     tools/Emit-HexagonProbe.ps1: -Kernel <Name>, its parameters, runner-layout.json (the runner contract:
                        Tiles, InputBytes, OutputBytes, PcmOffset, Samples; Samples=1 = no playback).
   4. Emission          Invoke-KokoroEmission (tools/Kokoro.Evaluator.psm1), cached by source key under build/evaluator/emit.
@@ -64,7 +70,7 @@ pwsh -NoProfile -File ./Invoke-KokoroHexagon.ps1 Run -Case benchmark-0-sm8550 -H
 [CmdletBinding()]
 param(
     [Parameter(Position = 0)]
-    [ValidateSet('Status', 'Ratchet', 'Run', 'Emit', 'Check', 'Compare', 'JobInput', 'Capture', 'StockCapture', 'Albert', 'AlbertError', 'AlbertLinear', 'Api', 'Find', 'Tools')]
+    [ValidateSet('Status', 'Ratchet', 'Run', 'Emit', 'Check', 'Compare', 'JobInput', 'Capture', 'StockCapture', 'Albert', 'AlbertError', 'AlbertLinear', 'AlbertLayerNorm', 'AlbertGelu', 'Api', 'Find', 'Tools')]
     [string] $Command = 'Status',
     [string] $Case,
     [string] $Kernel,
@@ -86,6 +92,8 @@ param(
     [ValidateRange(1, 100)]
     [int] $Seed = 17,
     [string] $Linear,
+    [string] $Norm,
+    [string] $Repeat,
     [ValidateSet('SM8550', 'SM8635')]
     [string] $Soc = 'SM8550'
 )
@@ -261,7 +269,7 @@ function Read-KokoroAlbertLinear {
     [pscustomobject]@{ X = $x; W = $w; B = $b; Y = $y; Cin = $cin; Cout = $cout; Tokens = $tokens }
 }
 
-# Job input for one ALBERT linear (src/jobs/Kokoro.AlbertLinear16Run.ps1) from a capture: activations.bin (X, one LSB),
+# Job input for one ALBERT linear (src/jobs/Kokoro.Albert16Run.ps1) from a capture: activations.bin (X, one LSB),
 # weights.bin, tables.bin (identity then conv tables), expected-f32.bin (captured Y [channel][token]), fixture.json.
 # Scales come from this capture (a kernel check, not a calibrated deployment).
 function New-KokoroAlbertLinearInput {
@@ -302,22 +310,212 @@ function Invoke-KokoroDeviceJob {
         Lines = @($out | ForEach-Object { "$_" } | Where-Object { $_ -match '^(Run=|Median|InvokeRc|Stage)' }) }
 }
 
+# Emits a diagnostic tensor job, runs it on the phone with a job input directory, and returns the output tensor bytes
+# (from runner-layout.json OutputOffset), the count of halfwords at the int16 limits, DSP time and the skel identity.
+function Invoke-KokoroTensorJob {
+    param([Parameter(Mandatory)][string] $Kernel, [Parameter(Mandatory)][hashtable] $Parameters, [Parameter(Mandatory)][string] $InputDirectory, [string] $Soc = 'SM8550', [int] $Runs = 3)
+    Import-Evaluator
+    $e = Invoke-KokoroEmission -Kernel $Kernel -Parameters $Parameters
+    $run = Invoke-KokoroDeviceJob -EmissionDirectory $e.Directory -InputDirectory $InputDirectory -Soc $Soc -Runs $Runs
+    $layout = Get-Content (Join-Path $e.Directory 'runner-layout.json') -Raw | ConvertFrom-Json
+    $tensor = [byte[]]::new($layout.OutputBytes - $layout.OutputOffset); [Array]::Copy($run.Output, $layout.OutputOffset, $tensor, 0, $tensor.Length)
+    $saturated = 0; for ($i = 0; $i -lt $tensor.Length; $i += 2) { $u = $tensor[$i] -bor ([int]$tensor[$i + 1] -shl 8); if ($u -le 1 -or $u -ge 65535) { $saturated++ } }
+    [pscustomobject]@{ Tensor = $tensor; Saturated = $saturated; MedianMs = $run.MedianMs; Skel = $e.LibrarySHA256.Substring(0, 16); Emission = $e.Key }
+}
+
+function Read-KokoroExpected([string] $Directory, [int] $Count) {
+    $v = [float[]]::new($Count); [Buffer]::BlockCopy([IO.File]::ReadAllBytes((Join-Path $Directory 'expected-f32.bin')), 0, $v, 0, 4 * $Count); , $v
+}
+
+# A fresh job input directory under build/ (an existing one is replaced).
+function New-KokoroInputDirectory([string] $Name) {
+    $dir = Join-Path $Build $Name
+    if (Test-Path $dir) { Remove-Item -LiteralPath $dir -Recurse -Force }
+    $dir
+}
+
 # One ALBERT linear on the phone, compared with the stock capture: build the job input, emit, run, decode, SNR.
 function Test-KokoroAlbertLinear {
     param([Parameter(Mandatory)][string] $Linear, [string] $CaptureDirectory = (Join-Path $Build 'stock-albert-capture-hello'), [string] $Soc = 'SM8550', [int] $Runs = 3)
-    Import-Evaluator
-    $dir = Join-Path $Build "albert/linear-$Linear"
-    if (Test-Path $dir) { Remove-Item $dir -Recurse -Force }
+    $dir = New-KokoroInputDirectory "albert/linear-$Linear"
     $fx = New-KokoroAlbertLinearInput -CaptureDirectory $CaptureDirectory -Linear $Linear -OutputDirectory $dir
-    $e = Invoke-KokoroEmission -Kernel KokoroAlbertLinear16Run -Parameters @{ AlbertInputChannels = $fx.Cin; AlbertOutputChannels = $fx.Cout; AlbertTokens = $fx.Tokens }
-    $run = Invoke-KokoroDeviceJob -EmissionDirectory $e.Directory -InputDirectory $dir -Soc $Soc -Runs $Runs
-    $layout = Get-Content (Join-Path $e.Directory 'runner-layout.json') -Raw | ConvertFrom-Json
-    $tensor = [byte[]]::new($layout.OutputBytes - $layout.OutputOffset); [Array]::Copy($run.Output, $layout.OutputOffset, $tensor, 0, $tensor.Length)
-    $y = ConvertFrom-KokoroCroutons16 -Bytes $tensor -Frames $fx.Tokens -Units ([double[]]$fx.Units)
-    $expected = [float[]]::new($fx.Cout * $fx.Tokens); [Buffer]::BlockCopy([IO.File]::ReadAllBytes((Join-Path $dir 'expected-f32.bin')), 0, $expected, 0, 4 * $expected.Length)
-    $saturated = 0; for ($i = 0; $i -lt $tensor.Length; $i += 2) { $u = $tensor[$i] -bor ([int]$tensor[$i + 1] -shl 8); if ($u -le 1 -or $u -ge 65535) { $saturated++ } }
-    [pscustomobject]@{ Linear = $Linear; Shape = "$($fx.Cout) x $($fx.Cin)"; Tokens = $fx.Tokens; Soc = $Soc; SnrDb = Get-KokoroSnr $y $expected; MedianMs = $run.MedianMs
-        Saturated = $saturated; Skel = $e.LibrarySHA256.Substring(0, 16); Emission = $e.Key; Input = $dir }
+    $r = Invoke-KokoroTensorJob -Kernel KokoroAlbertLinear16Run -Parameters @{ AlbertInputChannels = $fx.Cin; AlbertOutputChannels = $fx.Cout; AlbertTokens = $fx.Tokens } -InputDirectory $dir -Soc $Soc -Runs $Runs
+    $y = ConvertFrom-KokoroCroutons16 -Bytes $r.Tensor -Frames $fx.Tokens -Units ([double[]]$fx.Units)
+    [pscustomobject]@{ Linear = $Linear; Shape = "$($fx.Cout) x $($fx.Cin)"; Tokens = $fx.Tokens; Soc = $Soc; SnrDb = Get-KokoroSnr $y (Read-KokoroExpected $dir ($fx.Cout * $fx.Tokens))
+        MedianMs = $r.MedianMs; Saturated = $r.Saturated; Skel = $r.Skel; Emission = $r.Emission; Input = $dir }
+}
+
+# LayerNorm constants for New-KokoroLayerNorm16Steps: per 32-channel block g[32] = round(gamma / sOut * 2^6) and
+# B[32] = round(beta / sOut) (int32), then epsD = max(1, round(eps * C^2 / sIn^2)) (int64). sOut: output LSB per channel.
+function ConvertTo-KokoroLayerNormTable {
+    param([Parameter(Mandatory)][float[]] $Gamma, [Parameter(Mandatory)][float[]] $Beta, [Parameter(Mandatory)][double[]] $OutScales,
+        [Parameter(Mandatory)][double] $InputLsb, [Parameter(Mandatory)][double] $Epsilon)
+    $channels = $Gamma.Length; if ($channels % 32) { throw 'Channels must be whole 32-channel blocks' }
+    $bytes = [byte[]]::new([long]([math]::Ceiling((256L * $channels / 32 + 8) / 128) * 128))
+    for ($c = 0; $c -lt $channels; $c++) {
+        $g = [long](Get-Even ($Gamma[$c] / $OutScales[$c] * 64)); $b = [long](Get-Even ($Beta[$c] / $OutScales[$c]))
+        if ([math]::Abs($g) -ge 2147483647 -or [math]::Abs($b) -gt 32767) { throw "LayerNorm channel ${c}: g $g or B $b out of range" }
+        $at = 256 * [math]::Floor($c / 32) + 4 * ($c % 32)
+        [BitConverter]::GetBytes([int]$g).CopyTo($bytes, $at); [BitConverter]::GetBytes([int]$b).CopyTo($bytes, $at + 128)
+    }
+    $epsD = [long][math]::Max(1, (Get-Even ($Epsilon * $channels * $channels / ($InputLsb * $InputLsb))))
+    [BitConverter]::GetBytes($epsD).CopyTo($bytes, 256 * $channels / 32)
+    , $bytes
+}
+
+# gelu_new (transformers NewGELUActivation: 0.5 x (1 + tanh(sqrt(2 / pi) (x + 0.044715 x^3)))) as relu(x) + r(|x|), where
+# r(a) = gelu_new(-a) = -a sigma(-a) is even, smooth and below 1e-7 past a = 5.5. Table: 257 ordinates of r on
+# a = Range * k / 256 (k = 0..256), Q17 (|r| < 0.25), for 256-interval linear interpolation with an 8-bit fraction
+# (the Kokoro.SnakeInteger.ps1 vlut16 lookup). Returns the ordinates as int[].
+function New-KokoroGeluTable {
+    param([double] $Range = 5.5)
+    $c = [math]::Sqrt(2 / [math]::PI)
+    , [int[]]@(for ($k = 0; $k -le 256; $k++) { $a = $Range * $k / 256; $x = -$a; [int](Get-Even (0.5 * $x * (1 + [math]::Tanh($c * ($x + 0.044715 * $x * $x * $x))) * 131072)) })
+}
+
+# The table GELU of 16-bit inputs, as the DSP kernel computes it: x = round(v / sIn); a = |x| sIn / Range in Q16, clamped
+# to 65535; index a >> 8, fraction a & 255; r = T[i] + ((T[i + 1] - T[i]) f >> 8); y = max(x sIn, 0) + r / 2^17.
+function Invoke-KokoroGeluTable {
+    param([Parameter(Mandatory)][float[]] $Values, [Parameter(Mandatory)][double] $InputLsb, [double] $Range = 5.5)
+    $T = New-KokoroGeluTable -Range $Range; $y = [float[]]::new($Values.Length)
+    for ($i = 0; $i -lt $Values.Length; $i++) {
+        $x = [math]::Max(-32767, [math]::Min(32767, [int](Get-Even ($Values[$i] / $InputLsb))))
+        $a = [int][math]::Min(65535, [math]::Floor([math]::Abs($x) * $InputLsb / $Range * 65536))
+        $k = $a -shr 8; $f = $a -band 255; $r = $T[$k] + ((($T[$k + 1] - $T[$k]) * $f) -shr 8)
+        $y[$i] = [float]([math]::Max($x * $InputLsb, 0) + $r / 131072.0)
+    }
+    , $y
+}
+
+
+# A 256-entry vlut16 table as four 128-byte vectors (entry i in vector i >> 6 at halfword 2 (i mod 32) + (i mod 64) >> 5),
+# the shuffled order Kokoro.SnakeInteger.ps1 and Kokoro.Gelu16.ps1 look up (V73 HVX PRM vlut16).
+function ConvertTo-KokoroLut16Vectors {
+    param([Parameter(Mandatory)][int[]] $Entries)
+    if ($Entries.Count -lt 256) { throw 'A vlut16 table has 256 entries' }
+    $bytes = [byte[]]::new(512)
+    for ($i = 0; $i -lt 256; $i++) {
+        $v = $Entries[$i]; if ($v -lt 0 -or $v -gt 65535) { throw "Table entry $i ($v) is not a u16" }
+        $at = $i % 64; [BitConverter]::GetBytes([uint16]$v).CopyTo($bytes, 128 * [math]::Floor($i / 64) + 2 * (2 * ($at % 32) + [math]::Floor($at / 32)))
+    }
+    , $bytes
+}
+
+# Kokoro.Gelu16.ps1 constants: Ma, Ka, Kb (int32) at 0, 4, 8, then the negated Q17 table q = -r at 128 (640 bytes).
+function ConvertTo-KokoroGeluConstants {
+    param([Parameter(Mandatory)][double] $InputLsb, [Parameter(Mandatory)][double] $OutputLsb, [double] $Range = 5.5)
+    $bytes = [byte[]]::new(640)
+    $ma = [long](Get-Even ($InputLsb / $Range * 2147483648)); $ka = [long](Get-Even ($InputLsb / $OutputLsb * 32768)); $kb = [long](Get-Even (0.25 / $OutputLsb))
+    foreach ($k in $ma, $ka, $kb) { if ($k -lt 1 -or $k -gt 2147483647) { throw "GELU constant $k out of range" } }
+    [BitConverter]::GetBytes([int]$ma).CopyTo($bytes, 0); [BitConverter]::GetBytes([int]$ka).CopyTo($bytes, 4); [BitConverter]::GetBytes([int]$kb).CopyTo($bytes, 8)
+    $q = [int[]]@((New-KokoroGeluTable -Range $Range) | ForEach-Object { -$_ })
+    if ($q[0] -ne 0 -or $q[256] -ne 0) { throw 'The GELU table must start and end at 0 (index i + 1 wraps).' }
+    (ConvertTo-KokoroLut16Vectors -Entries $q[0..255]).CopyTo($bytes, 128)
+    , $bytes
+}
+
+# Job input for one ALBERT gelu_new (KokoroAlbertGelu16Run): the captured ffn output of repeat r as input (one LSB),
+# expected = the captured activation output; output LSB per tensor from its peak.
+function New-KokoroAlbertGeluInput {
+    param([Parameter(Mandatory)][string] $CaptureDirectory, [Parameter(Mandatory)][int] $Repeat, [Parameter(Mandatory)][string] $OutputDirectory, [double] $Margin = 1.25)
+    Import-CaptureKernels
+    $cap = Read-KokoroCapture -Directory $CaptureDirectory
+    if ($cap.Json.block -ne 'albert') { throw 'Not an ALBERT capture (StockCapture -Block albert).' }
+    $xt = Read-KokoroCaptureTensor -Capture $cap -Name "bert.layer.$Repeat.ffn.output"; $yt = Read-KokoroCaptureTensor -Capture $cap -Name "bert.layer.$Repeat.activation.output"
+    $channels = $cap.Json.tensors."bert.layer.$Repeat.ffn.output".shape[-1]; $tokens = $xt.Length / $channels
+    $x = [float[]]::new($xt.Length); $y = [float[]]::new($xt.Length)
+    for ($k = 0; $k -lt $tokens; $k++) { for ($c = 0; $c -lt $channels; $c++) { $x[$c * $tokens + $k] = $xt[$k * $channels + $c]; $y[$c * $tokens + $k] = $yt[$k * $channels + $c] } }
+    $sIn = [math]::Max((Get-KokoroAbsMax -Values $x), 1e-12) * $Margin / 32767; $sOut = [math]::Max((Get-KokoroAbsMax -Values $y), 1e-12) * $Margin / 32767
+    $inScales = [double[]]::new($channels); [Array]::Fill($inScales, $sIn)
+    $out = [IO.Path]::GetFullPath($OutputDirectory); [void][IO.Directory]::CreateDirectory($out)
+    [IO.File]::WriteAllBytes((Join-Path $out 'activations.bin'), (ConvertTo-KokoroCroutons16 -Values $x -Frames $tokens -Scales $inScales))
+    [IO.File]::WriteAllBytes((Join-Path $out 'weights.bin'), [byte[]]::new(128))
+    [IO.File]::WriteAllBytes((Join-Path $out 'tables.bin'), (ConvertTo-KokoroGeluConstants -InputLsb $sIn -OutputLsb $sOut))
+    $ybytes = [byte[]]::new(4 * $y.Length); [Buffer]::BlockCopy($y, 0, $ybytes, 0, $ybytes.Length); [IO.File]::WriteAllBytes((Join-Path $out 'expected-f32.bin'), $ybytes)
+    $fixture = [ordered]@{ Repeat = $Repeat; Capture = [IO.Path]::GetFullPath($CaptureDirectory); Channels = $channels; Tokens = $tokens; InputLsb = $sIn; OutputLsb = $sOut; Margin = $Margin }
+    $fixture | ConvertTo-Json | Set-Content (Join-Path $out 'fixture.json') -Encoding utf8NoBOM
+    [pscustomobject]@{ Repeat = $Repeat; Channels = $channels; Tokens = $tokens; InputLsb = $sIn; OutputLsb = $sOut; X = $x }
+}
+
+# One ALBERT gelu_new on the phone against the stock capture, and against the host model of the kernel's table arithmetic.
+function Test-KokoroAlbertGelu {
+    param([Parameter(Mandatory)][int] $Repeat, [string] $CaptureDirectory = (Join-Path $Build 'stock-albert-capture-hello'), [string] $Soc = 'SM8550', [int] $Runs = 3)
+    $dir = New-KokoroInputDirectory "albert/gelu-$Repeat"
+    $fx = New-KokoroAlbertGeluInput -CaptureDirectory $CaptureDirectory -Repeat $Repeat -OutputDirectory $dir
+    $expected = Read-KokoroExpected $dir ($fx.Channels * $fx.Tokens)
+    $model = Invoke-KokoroGeluTable -Values $fx.X -InputLsb $fx.InputLsb
+    $r = Invoke-KokoroTensorJob -Kernel KokoroAlbertGelu16Run -Parameters @{ AlbertInputChannels = $fx.Channels; AlbertTokens = $fx.Tokens } -InputDirectory $dir -Soc $Soc -Runs $Runs
+    $units = [double[]]::new($fx.Channels); [Array]::Fill($units, $fx.OutputLsb)
+    $y = ConvertFrom-KokoroCroutons16 -Bytes $r.Tensor -Frames $fx.Tokens -Units $units
+    [pscustomobject]@{ Repeat = $Repeat; Channels = $fx.Channels; Tokens = $fx.Tokens; Soc = $Soc; SnrDb = Get-KokoroSnr $y $expected; ModelDb = Get-KokoroSnr $model $expected
+        VsModelDb = Get-KokoroSnr $y $model; MedianMs = $r.MedianMs; Saturated = $r.Saturated; Skel = $r.Skel; Emission = $r.Emission; Input = $dir }
+}
+# Every ALBERT LayerNorm after the embeddings, by short name: attention.<r> (input layer.r.input + attention.dense output)
+# and full.<r> (input attention.LayerNorm output + ffn_output output), r = 0..11. Inputs are the stock sums.
+function Get-KokoroAlbertLayerNorm {
+    param([string] $Name)
+    $layer = 'bert.encoder.albert_layer_groups.0.albert_layers.0'
+    $all = for ($r = 0; $r -lt 12; $r++) {
+        [pscustomobject]@{ Name = "attention.$r"; Inputs = @("bert.layer.$r.input", "bert.layer.$r.attention.dense.output"); Parameter = "$layer.attention.LayerNorm"; Output = "bert.layer.$r.attention.LayerNorm.output" }
+        [pscustomobject]@{ Name = "full.$r"; Inputs = @("bert.layer.$r.attention.LayerNorm.output", "bert.layer.$r.ffn_output.output"); Parameter = "$layer.full_layer_layer_norm"; Output = "bert.layer.$r.output" }
+    }
+    if (-not $Name) { return $all }
+    $hit = $all | Where-Object Name -eq $Name
+    if (-not $hit) { throw "No ALBERT LayerNorm '$Name' (attention.0 .. attention.11, full.0 .. full.11)." }
+    $hit
+}
+
+# Job input for one ALBERT LayerNorm (KokoroAlbertLayerNorm16Run) from a capture: activations.bin (the stock input sum, one
+# LSB), weights.bin (unused), tables.bin, expected-f32.bin (captured output [channel][token]), fixture.json.
+function New-KokoroAlbertLayerNormInput {
+    param([Parameter(Mandatory)][string] $CaptureDirectory, [Parameter(Mandatory)][string] $Norm, [Parameter(Mandatory)][string] $OutputDirectory, [double] $Margin = 1.25)
+    Import-CaptureKernels
+    $cap = Read-KokoroCapture -Directory $CaptureDirectory
+    if ($cap.Json.block -ne 'albert') { throw 'Not an ALBERT capture (StockCapture -Block albert).' }
+    $n = Get-KokoroAlbertLayerNorm $Norm
+    $a = Read-KokoroCaptureTensor -Capture $cap -Name $n.Inputs[0]; $b = Read-KokoroCaptureTensor -Capture $cap -Name $n.Inputs[1]
+    $y32 = Read-KokoroCaptureTensor -Capture $cap -Name $n.Output
+    $gamma = Read-KokoroCaptureTensor -Capture $cap -Name "$($n.Parameter).weight"; $beta = Read-KokoroCaptureTensor -Capture $cap -Name "$($n.Parameter).bias"
+    $channels = $gamma.Length; $tokens = $a.Length / $channels
+    $x = [float[]]::new($a.Length); $y = [float[]]::new($a.Length)
+    for ($k = 0; $k -lt $tokens; $k++) { for ($c = 0; $c -lt $channels; $c++) { $x[$c * $tokens + $k] = $a[$k * $channels + $c] + $b[$k * $channels + $c]; $y[$c * $tokens + $k] = $y32[$k * $channels + $c] } }
+    $sIn = [math]::Max((Get-KokoroAbsMax -Values $x), 1e-12) * $Margin / 32767
+    $inScales = [double[]]::new($channels); [Array]::Fill($inScales, $sIn)
+    $peak = (Get-KokoroChannelStats -Values $y -Channels $channels).AbsMax
+    $outScales = [double[]]::new($channels); for ($c = 0; $c -lt $channels; $c++) { $outScales[$c] = [math]::Max($peak[$c], 1e-6) * $Margin / 32767 }
+    $out = [IO.Path]::GetFullPath($OutputDirectory); [void][IO.Directory]::CreateDirectory($out)
+    [IO.File]::WriteAllBytes((Join-Path $out 'activations.bin'), (ConvertTo-KokoroCroutons16 -Values $x -Frames $tokens -Scales $inScales))
+    [IO.File]::WriteAllBytes((Join-Path $out 'weights.bin'), [byte[]]::new(128))
+    [IO.File]::WriteAllBytes((Join-Path $out 'tables.bin'), (ConvertTo-KokoroLayerNormTable -Gamma $gamma -Beta $beta -OutScales $outScales -InputLsb $sIn -Epsilon ([double]$cap.Json.layerNormEps)))
+    $ybytes = [byte[]]::new(4 * $y.Length); [Buffer]::BlockCopy($y, 0, $ybytes, 0, $ybytes.Length); [IO.File]::WriteAllBytes((Join-Path $out 'expected-f32.bin'), $ybytes)
+    $fixture = [ordered]@{ Norm = $Norm; Capture = [IO.Path]::GetFullPath($CaptureDirectory); Phonemes = $cap.Json.phonemes; Channels = $channels; Tokens = $tokens
+        InputLsb = $sIn; Epsilon = $cap.Json.layerNormEps; Margin = $Margin; Units = $outScales }
+    $fixture | ConvertTo-Json -Depth 4 | Set-Content (Join-Path $out 'fixture.json') -Encoding utf8NoBOM
+    [pscustomobject]$fixture
+}
+
+# One ALBERT LayerNorm on the phone against the stock capture. Also reports a host float LayerNorm of the stored
+# (quantized) input, so input quantization and kernel arithmetic error are told apart.
+function Test-KokoroAlbertLayerNorm {
+    param([Parameter(Mandatory)][string] $Norm, [string] $CaptureDirectory = (Join-Path $Build 'stock-albert-capture-hello'), [string] $Soc = 'SM8550', [int] $Runs = 3)
+    $dir = New-KokoroInputDirectory "albert/layernorm-$Norm"
+    $fx = New-KokoroAlbertLayerNormInput -CaptureDirectory $CaptureDirectory -Norm $Norm -OutputDirectory $dir
+    $channels = $fx.Channels; $T = $fx.Tokens; $expected = Read-KokoroExpected $dir ($channels * $T)
+    $cap = Read-KokoroCapture -Directory $CaptureDirectory; $n = Get-KokoroAlbertLayerNorm $Norm
+    $gamma = Read-KokoroCaptureTensor -Capture $cap -Name "$($n.Parameter).weight"; $beta = Read-KokoroCaptureTensor -Capture $cap -Name "$($n.Parameter).bias"
+    $lsb = [double[]]::new($channels); [Array]::Fill($lsb, [double]$fx.InputLsb)
+    $xq = ConvertFrom-KokoroCroutons16 -Bytes ([IO.File]::ReadAllBytes((Join-Path $dir 'activations.bin'))) -Frames $T -Units $lsb
+    $hostA16 = [float[]]::new($channels * $T)
+    for ($k = 0; $k -lt $T; $k++) {
+        $m = 0.0; for ($c = 0; $c -lt $channels; $c++) { $m += $xq[$c * $T + $k] }; $m /= $channels
+        $v = 0.0; for ($c = 0; $c -lt $channels; $c++) { $d = $xq[$c * $T + $k] - $m; $v += $d * $d }; $v /= $channels
+        $inv = 1 / [math]::Sqrt($v + [double]$fx.Epsilon)
+        for ($c = 0; $c -lt $channels; $c++) { $hostA16[$c * $T + $k] = [float](($xq[$c * $T + $k] - $m) * $inv * $gamma[$c] + $beta[$c]) }
+    }
+    $r = Invoke-KokoroTensorJob -Kernel KokoroAlbertLayerNorm16Run -Parameters @{ AlbertInputChannels = $channels; AlbertTokens = $T } -InputDirectory $dir -Soc $Soc -Runs $Runs
+    $y = ConvertFrom-KokoroCroutons16 -Bytes $r.Tensor -Frames $T -Units ([double[]]$fx.Units)
+    [pscustomobject]@{ Norm = $Norm; Channels = $channels; Tokens = $T; Soc = $Soc; SnrDb = Get-KokoroSnr $y $expected; HostA16Db = Get-KokoroSnr $hostA16 $expected
+        VsHostA16Db = Get-KokoroSnr $y $hostA16; MedianMs = $r.MedianMs; Saturated = $r.Saturated; Skel = $r.Skel; Emission = $r.Emission; Input = $dir }
 }
 
 # ---- API index ----------------------------------------------------------------------------------------------------------
@@ -448,11 +646,11 @@ switch ($Command) {
         }
         $inputRoot = Join-Path $Build "inputs/kokoro/$($manifest.model.revision)"
         $inputs = @{}
-        foreach ($name in 'kokoro-v1_0.pth', 'config.json', "voices\$Voice.pt") {
-            $pin = @($manifest.model.files | Where-Object path -CEQ $name); $file = Join-Path $inputRoot $name
-            if ($pin.Count -ne 1 -or -not (Test-Path $file)) { throw "Missing pinned stock input $name (tools/Get-KokoroModelInput.ps1 fetches it)." }
-            if ((Get-Item $file).Length -ne $pin[0].bytes -or (Get-FileHash $file).Hash -cne $pin[0].sha256) { throw "Stock input integrity mismatch: $name" }
-            $inputs[$name] = @{ path = $file; sha256 = $pin[0].sha256 }
+        foreach ($inputName in 'kokoro-v1_0.pth', 'config.json', "voices\$Voice.pt") {
+            $pin = @($manifest.model.files | Where-Object path -CEQ $inputName); $file = Join-Path $inputRoot $inputName
+            if ($pin.Count -ne 1 -or -not (Test-Path $file)) { throw "Missing pinned stock input $inputName (tools/Get-KokoroModelInput.ps1 fetches it)." }
+            if ((Get-Item $file).Length -ne $pin[0].bytes -or (Get-FileHash $file).Hash -cne $pin[0].sha256) { throw "Stock input integrity mismatch: $inputName" }
+            $inputs[$inputName] = @{ path = $file; sha256 = $pin[0].sha256 }
         }
         $script = @{ albert = 'capture_stock_albert.py'; decoder = 'capture_stock_decoder.py'; generator = 'capture_stock_generator.py' }[$Block]
         $spec = @{ sourceCommit = $StockCommit; sourceRoot = $sourceRoot; sourceFiles = @($sourceFiles); inputs = $inputs; phonemes = $Phonemes; voice = $Voice
@@ -508,10 +706,24 @@ switch ($Command) {
     }
     'AlbertLinear' {
         if (-not $Linear) { throw 'AlbertLinear needs -Linear (mapping_in, query.0 .. ffn_output.11, bert_encoder).' }
-        $results = foreach ($name in ($Linear -split ',' | ForEach-Object Trim | Where-Object { $_ })) {
-            $a = @{ Linear = $name; Soc = $Soc }; if ($Path) { $a.CaptureDirectory = $(if ([IO.Path]::IsPathRooted($Path)) { $Path } else { Join-Path $Build $Path }) }; if ($Runs) { $a.Runs = $Runs }
+        $results = foreach ($item in ($Linear -split ',' | ForEach-Object Trim | Where-Object { $_ })) {
+            $a = @{ Linear = $item; Soc = $Soc }; if ($Path) { $a.CaptureDirectory = $(if ([IO.Path]::IsPathRooted($Path)) { $Path } else { Join-Path $Build $Path }) }; if ($Runs) { $a.Runs = $Runs }
             $r = Test-KokoroAlbertLinear @a; Write-Host ('{0,-14} {1,-12} {2,7} dB  {3} ms  saturated {4}' -f $r.Linear, $r.Shape, $r.SnrDb, $r.MedianMs, $r.Saturated); $r }
         $results | Format-Table Linear, Shape, Tokens, Soc, SnrDb, MedianMs, Saturated, Skel -AutoSize | Out-String -Width 160
+    }
+    'AlbertLayerNorm' {
+        if (-not $Norm) { throw 'AlbertLayerNorm needs -Norm (attention.0 .. attention.11, full.0 .. full.11).' }
+        $results = foreach ($item in ($Norm -split ',' | ForEach-Object Trim | Where-Object { $_ })) {
+            $a = @{ Norm = $item; Soc = $Soc }; if ($Path) { $a.CaptureDirectory = $(if ([IO.Path]::IsPathRooted($Path)) { $Path } else { Join-Path $Build $Path }) }; if ($Runs) { $a.Runs = $Runs }
+            $r = Test-KokoroAlbertLayerNorm @a; Write-Host ('{0,-14} {1,7} dB  host A16 {2,7} dB  vs host {3,7} dB  {4} ms  saturated {5}' -f $r.Norm, $r.SnrDb, $r.HostA16Db, $r.VsHostA16Db, $r.MedianMs, $r.Saturated); $r }
+        $results | Format-Table Norm, Channels, Tokens, Soc, SnrDb, HostA16Db, VsHostA16Db, MedianMs, Saturated, Skel -AutoSize | Out-String -Width 180
+    }
+    'AlbertGelu' {
+        if (-not $Repeat) { throw 'AlbertGelu needs -Repeat (0..11, comma list).' }
+        $results = foreach ($item in ($Repeat -split ',' | ForEach-Object Trim | Where-Object { $_ })) {
+            $a = @{ Repeat = [int]$item; Soc = $Soc }; if ($Path) { $a.CaptureDirectory = $(if ([IO.Path]::IsPathRooted($Path)) { $Path } else { Join-Path $Build $Path }) }; if ($Runs) { $a.Runs = $Runs }
+            $r = Test-KokoroAlbertGelu @a; Write-Host ('gelu.{0,-9} {1,7} dB  model {2,7} dB  vs model {3,7} dB  {4} ms  saturated {5}' -f $r.Repeat, $r.SnrDb, $r.ModelDb, $r.VsModelDb, $r.MedianMs, $r.Saturated); $r }
+        $results | Format-Table Repeat, Channels, Tokens, Soc, SnrDb, ModelDb, VsModelDb, MedianMs, Saturated, Skel -AutoSize | Out-String -Width 180
     }
     'Api' { Get-KokoroApi -Pattern $Pattern | Format-Table -AutoSize -Wrap | Out-String -Width 220 }
     'Find' {
