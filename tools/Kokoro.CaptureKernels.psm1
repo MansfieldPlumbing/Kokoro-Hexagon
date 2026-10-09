@@ -161,6 +161,27 @@ function Get-PackWeightPlanesShapedKernel {
     $script:Kernels.PackWeightPlanesShaped = $kk; $kk
 }
 
+function Get-FoldConvWeightsKernel {
+    # (float[] w [o][i][k] with cinReal inputs, int cout, int cinReal, int cinPad, int K, double[] inScale [cinReal],
+    # float[] dst [o][cinPad][k], double[] wMax [o]): dst = w * inScale_i (weights per input LSB), inputs cinReal..cinPad-1
+    # zero; wMax_o = max |dst| of the row. Decoder fixture (tools/New-KokoroDecoderFixture.ps1).
+    if ($script:Kernels.ContainsKey('FoldConvWeights')) { return $script:Kernels.FoldConvWeights }
+    $E = [Expression]
+    $w = $E::Parameter([float[]], 'w'); $cout = $E::Parameter([int], 'cout'); $cinReal = $E::Parameter([int], 'cinReal'); $cinPad = $E::Parameter([int], 'cinPad')
+    $taps = $E::Parameter([int], 'K'); $scale = $E::Parameter([double[]], 'inScale'); $dst = $E::Parameter([float[]], 'dst'); $wMax = $E::Parameter([double[]], 'wMax')
+    $o = $E::Variable([int], 'o'); $i = $E::Variable([int], 'i'); $k = $E::Variable([int], 'k'); $v = $E::Variable([double], 'v')
+    $abs = [Math].GetMethod('Abs', [Type[]]@([double])); $mx = [Math].GetMethod('Max', [Type[]]@([double], [double]))
+    $src = $E::ArrayIndex($w, $E::Add($E::Multiply($E::Add($E::Multiply($o, $cinReal), $i), $taps), $k))
+    $inner = $E::Block(
+        $E::Assign($v, $E::Multiply($E::Convert($src, [double]), $E::ArrayIndex($scale, $i))),
+        $E::Assign($E::ArrayAccess($dst, $E::Add($E::Multiply($E::Add($E::Multiply($o, $cinPad), $i), $taps), $k)), $E::Convert($v, [float])),
+        $E::Assign($E::ArrayAccess($wMax, $o), $E::Call($mx, $E::ArrayIndex($wMax, $o), $E::Call($abs, $v))))
+    $body = $E::Block([ParameterExpression[]]@($o, $i, $k, $v),
+        (New-For $o (New-Int 0) $cout (New-For $i (New-Int 0) $cinReal (New-For $k (New-Int 0) $taps $inner))))
+    $kk = $E::Lambda([Action[float[], int, int, int, int, double[], float[], double[]]], $body, [ParameterExpression[]]@($w, $cout, $cinReal, $cinPad, $taps, $scale, $dst, $wMax)).Compile()
+    $script:Kernels.FoldConvWeights = $kk; $kk
+}
+
 function Get-SplitPlanesKernel {
     # (byte[] u16 biased halfwords, byte[] hi, byte[] lo): per halfword i, hi odd byte = high byte of u16 ((q >> 8) + 128),
     # lo odd byte = low byte (q & 255); even bytes zero. The two HMX conv-input planes (Kokoro.AdaInSnakeTurns.ps1 layout).
@@ -377,4 +398,4 @@ function Get-Conv1dKernel {
     $script:Kernels.Conv1d = $k; $k
 }
 
-Export-ModuleMember -Function Get-QuantizeRowsKernel, Get-SplitPlanesKernel, Get-LowLowWindowShapedKernel, Get-Conv1dKernel, Get-PackWeightPlanesShapedKernel, Get-LowLowWindowKernel, Get-QuantizeCroutons16Kernel, Get-PackWeightPlanesKernel, Get-Mean3Kernel, Get-Croutons16ErrorKernel, Get-ChannelStatsKernel, Get-DecodeCroutons16Kernel, Get-InterleavePlanesKernel
+Export-ModuleMember -Function Get-FoldConvWeightsKernel, Get-QuantizeRowsKernel, Get-SplitPlanesKernel, Get-LowLowWindowShapedKernel, Get-Conv1dKernel, Get-PackWeightPlanesShapedKernel, Get-LowLowWindowKernel, Get-QuantizeCroutons16Kernel, Get-PackWeightPlanesKernel, Get-Mean3Kernel, Get-Croutons16ErrorKernel, Get-ChannelStatsKernel, Get-DecodeCroutons16Kernel, Get-InterleavePlanesKernel
