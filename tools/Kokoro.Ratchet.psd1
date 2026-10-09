@@ -4,6 +4,16 @@
 # capability gap stays visible until the case runs. Inputs under build/ are capture-derived and not committed.
 # Benchmark passages: kokoro-coreml-ane 484907d iOSDemo/iOSDemo/Resources/benchmark_data.json (docs/speed-target.md).
 @{
+    # Named setups: emitter parameters that override a case's accepted parameters
+    # (Invoke-KokoroExperiment -Setup, Compare-KokoroSetup). Add a line to try a configuration.
+    Setups = @{
+        Baseline = @{}
+        Threads2 = @{ ResidentHvxThreads = 2 }
+        Threads3 = @{ ResidentHvxThreads = 3 }
+        Batch16 = @{ ResidentBatchTiles = 16 }
+        Batch32 = @{ ResidentBatchTiles = 32 }
+        Batch44 = @{ ResidentBatchTiles = 44 }
+    }
     Cases = @(
         @{
             Name = 'decoder-generator-hello-sm8550'

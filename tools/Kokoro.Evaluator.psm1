@@ -5,7 +5,7 @@ Kokoro evaluator: runs a DSP job candidate on a phone, scores it against stock, 
 
 .DESCRIPTION
 One candidate = an emitter kernel with its parameters, run on an input (a capture-derived fixture directory). The
-evaluator emits it (cached by a hash of the parameters and every emitter source file), runs it on the attached phone of
+evaluator emits it (cached by a hash of the parameters and every file in src/hexagon, src/kernels and src/jobs), runs it on the attached phone of
 the SoC (tools/Invoke-GeneratorTailProbe.ps1; unchanged staged files are not pushed again), scores PCM against the stock
 PCM in the input (tools/Measure-KokoroPcmSnr.ps1), writes the WAV, and appends one row to build/evaluator/experiments.tsv.
 Correctness gates timing: a candidate below its PCM floor is 'discard' whatever its speed.
@@ -30,7 +30,7 @@ $script:Standards = @{
 }
 
 function Get-KokoroSourceKey {
-    $files = @(Get-ChildItem (Join-Path $script:Root 'src/emit') -Filter '*.ps1' -File) + @(Get-Item (Join-Path $script:Root 'tools/Emit-HexagonProbe.ps1'))
+    $files = @(foreach ($d in 'hexagon', 'kernels', 'jobs') { Get-ChildItem (Join-Path $script:Root "src/$d") -Filter '*.ps1' -File }) + @(Get-Item (Join-Path $script:Root 'tools/Emit-HexagonProbe.ps1'))
     $lines = foreach ($f in ($files | Sort-Object FullName)) { "$($f.Name)=$((Get-FileHash -LiteralPath $f.FullName).Hash)" }
     [Convert]::ToHexString([Security.Cryptography.SHA256]::HashData([Text.Encoding]::UTF8.GetBytes(($lines -join "`n"))))
 }
@@ -58,14 +58,49 @@ function Invoke-KokoroEmission {
     [pscustomobject]@{ Kernel = $Kernel; Key = $key; Directory = $dir; LibrarySHA256 = (Get-FileHash -LiteralPath (Join-Path $dir 'libkokoro_generator_tail_skel.so')).Hash }
 }
 
+function Test-KokoroKernel {
+    <#
+    .SYNOPSIS Emits kernels (any tools/Emit-HexagonProbe.ps1 -Kernel, with -Parameters) and checks their instruction bytes
+    against the SDK assembler (tools/Test-HexagonEmission.ps1). One line per kernel; cached by kernel, parameters and the
+    emitter sources. This is the cheap first check for a new or changed kernel, before the simulator or a phone.
+    #>
+    param([Parameter(Mandatory)][string[]]$Kernel, [hashtable]$Parameters = @{})
+    $sourceKey = Get-KokoroSourceKey
+    foreach ($k in @($Kernel | ForEach-Object { $_.Split(',') } | Where-Object { $_ })) {
+        $pairs = foreach ($n in ($Parameters.Keys | Sort-Object)) { "$n=$($Parameters[$n])" }
+        $key = [Convert]::ToHexString([Security.Cryptography.SHA256]::HashData([Text.Encoding]::UTF8.GetBytes("$k`n$($pairs -join "`n")`n$sourceKey"))).Substring(0, 16)
+        $dir = Join-Path $script:Root "build/evaluator/kernel/$k-$key"
+        $row = [ordered]@{ Kernel = $k; Parameters = ($pairs -join ' '); CodeBytes = $null; AssemblerMatch = $false; Reason = '' }
+        try {
+            # Test-HexagonEmission.ps1 writes its verdict to <dir>/<kernel>/check-<guid>/verification.json.
+            if (-not (Test-Path -LiteralPath $dir) -or -not (Get-ChildItem -LiteralPath $dir -Recurse -Filter 'verification.json' | Select-Object -First 1)) {
+                $arguments = @('-NoProfile', '-File', (Join-Path $script:Root 'tools/Test-HexagonEmission.ps1'), '-Kernel', $k, '-OutputDirectory', $dir, '-Force')
+                foreach ($n in ($Parameters.Keys | Sort-Object)) { $v = $Parameters[$n]; if ($v -is [bool]) { if ($v) { $arguments += "-$n" } } else { $arguments += "-$n", "$v" } }
+                $out = & $script:Pwsh @arguments 2>&1
+                if ($LASTEXITCODE) { throw (($out | Select-Object -Last 3) -join ' | ') }
+            }
+            $v = Get-ChildItem -LiteralPath $dir -Recurse -Filter 'verification.json' | Select-Object -First 1 | Get-Content -Raw | ConvertFrom-Json
+            $row.CodeBytes = $v.CodeBytes; $row.AssemblerMatch = [bool]$v.InstructionBytesMatch
+        } catch { $row.Reason = "$_" }
+        Write-Host ('{0,-6} {1,-36} {2,7} bytes {3}' -f $(if ($row.AssemblerMatch) { 'PASS' } else { 'FAIL' }), $k, $row.CodeBytes, $row.Reason) -ForegroundColor $(if ($row.AssemblerMatch) { 'Green' } else { 'Yellow' })
+        if (-not $row.AssemblerMatch) { Write-Host "  ! $($script:Standards.Fail)" -ForegroundColor DarkYellow }
+        [pscustomobject]$row
+    }
+}
+
 function Invoke-KokoroExperiment {
     <#
     .SYNOPSIS Runs one candidate of a ratchet case (the case's parameters, overridden by -Parameters) on the phone and
     scores it. Prints one line; returns the full result. Status: keep (meets every accepted value and improves one),
     hold (meets them, no gain beyond noise), discard (misses one), crash (did not produce output).
     #>
-    param([Parameter(Mandatory)][string]$Case, [hashtable]$Parameters = @{}, [string]$Hypothesis = '', [ValidateRange(1, 20)][int]$Runs = 3)
+    param([Parameter(Mandatory)][string]$Case, [hashtable]$Parameters = @{}, [string]$Setup, [string]$Hypothesis = '', [ValidateRange(1, 20)][int]$Runs = 3)
     $c = Get-KokoroRatchetCase $Case
+    if ($Setup) {
+        $s = (Import-PowerShellDataFile $script:RatchetPath).Setups[$Setup]; if ($null -eq $s) { throw "No setup '$Setup' in $script:RatchetPath." }
+        $merged = @{}; foreach ($k in $s.Keys) { $merged[$k] = $s[$k] }; foreach ($k in $Parameters.Keys) { $merged[$k] = $Parameters[$k] }; $Parameters = $merged
+        if (-not $Hypothesis) { $Hypothesis = "setup $Setup" }
+    }
     $p = @{}; foreach ($k in $c.Parameters.Keys) { $p[$k] = $c.Parameters[$k] }; foreach ($k in $Parameters.Keys) { $p[$k] = $Parameters[$k] }
     $label = ($p.Keys | Sort-Object | ForEach-Object { "$_=$($p[$_])" }) -join ' '
     $r = [ordered]@{ Case = $c.Name; Setup = $label; Status = 'crash'; MedianMs = $null; PcmSnrDb = $null; Clipped = $null; PcmSHA256 = $null; Wav = $null; Reason = '' }
@@ -110,6 +145,22 @@ function Invoke-KokoroSweep {
     foreach ($c in $combos) { Invoke-KokoroExperiment -Case $Case -Parameters $c -Hypothesis $Hypothesis -Runs $Runs }
 }
 
+function Compare-KokoroSetup {
+    <#
+    .SYNOPSIS Runs named setups (tools/Kokoro.Ratchet.psd1 Setups) on one case and prints them fastest first, with
+    the change against Baseline. Every run is also an experiment-log row.
+    #>
+    param([Parameter(Mandatory)][string]$Case, [string[]]$Setup = @('Baseline'), [int]$Runs = 3)
+    $names = @($Setup | ForEach-Object { $_.Split(',') } | Where-Object { $_ }); if ('Baseline' -notin $names) { $names = @('Baseline') + $names }
+    $rows = foreach ($n in $names) { $r = Invoke-KokoroExperiment -Case $Case -Setup $n -Runs $Runs 6>$null; [pscustomobject]@{ Setup = $n; Status = $r.Status; MedianMs = $r.MedianMs; PcmSnrDb = $r.PcmSnrDb; Clipped = $r.Clipped; Pcm = $(if ($r.PcmSHA256) { $r.PcmSHA256.Substring(0, 8) }); Reason = $r.Reason } }
+    $base = ($rows | Where-Object Setup -eq 'Baseline').MedianMs
+    foreach ($r in ($rows | Sort-Object { if ($null -eq $_.MedianMs) { [double]::MaxValue } else { $_.MedianMs } })) {
+        $delta = if ($base -and $r.MedianMs) { '{0:+0.0;-0.0}%' -f (100 * ($r.MedianMs - $base) / $base) } else { '' }
+        Write-Host ('{0,-10} {1,-8} {2,9} ms {3,7}  {4,6} dB  clip {5}  pcm {6}  {7}' -f $r.Setup, $r.Status, $r.MedianMs, $delta, $r.PcmSnrDb, $r.Clipped, $r.Pcm, $r.Reason)
+    }
+    $rows
+}
+
 function Test-KokoroRatchet {
     <# .SYNOPSIS Runs every ratchet case (or -Case) with its accepted setup and prints one line for the commit message. #>
     param([string[]]$Case, [int]$Runs = 3)
@@ -138,4 +189,4 @@ function Update-KokoroRatchet {
     Write-Host "Ratchet moved for $($c.Name); commit tools/Kokoro.Ratchet.psd1 with the change and its score line." -ForegroundColor Green
 }
 
-Export-ModuleMember -Function Get-KokoroSourceKey, Get-KokoroRatchetCase, Invoke-KokoroEmission, Invoke-KokoroExperiment, Invoke-KokoroSweep, Test-KokoroRatchet, Update-KokoroRatchet
+Export-ModuleMember -Function Get-KokoroSourceKey, Get-KokoroRatchetCase, Invoke-KokoroEmission, Test-KokoroKernel, Invoke-KokoroExperiment, Invoke-KokoroSweep, Compare-KokoroSetup, Test-KokoroRatchet, Update-KokoroRatchet
