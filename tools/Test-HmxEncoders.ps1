@@ -10,7 +10,7 @@ param(
 )
 $ErrorActionPreference = 'Stop'
 
-. (Join-Path $PSScriptRoot '..\src\emit\Hexagon.ps1')
+. (Join-Path $PSScriptRoot '..\src\hexagon\Hexagon.ps1')
 
 Write-Host "================================================================="
 Write-Host " Phase 1: Named HMX & Pcycle Encoder Exhaustive Validation Suite "

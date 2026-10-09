@@ -24,8 +24,8 @@ param(
     [string[]] $Body = @('AdaInSnakeInteger','AdaInSnakeTurns','AdaInStatisticsAccumulate','ResidualInteger','BranchAverageInteger','AdaInMoments16','PlaneCombineConv','PlaneCombineResidual')
 )
 $ErrorActionPreference='Stop'
-$emit=Join-Path $PSScriptRoot '..\src\emit'
-. (Join-Path $emit 'Hexagon.ps1')
+$emit=Join-Path $PSScriptRoot '..\src\kernels'
+. (Join-Path $PSScriptRoot '..\src\hexagon\Hexagon.ps1')
 foreach($f in 'Kokoro.AdaInSnakeInteger.ps1','Kokoro.AdaInSnakeTurns.ps1','Kokoro.AdaInStatisticsAccumulate.ps1','Kokoro.ResidualInteger.ps1','Kokoro.BranchAverageInteger.ps1','Kokoro.AdaInMoments16.ps1','Kokoro.PlaneCombine.ps1'){ . (Join-Path $emit $f) }
 
 # Op -> class. Fields that hold vector registers are listed per class below.

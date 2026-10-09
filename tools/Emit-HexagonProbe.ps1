@@ -14,7 +14,7 @@ param(
     [ValidateRange(64, 2048)][int] $ConvOutputChannels = 1024,
     [ValidateSet('Windows','Tensor')][string] $LeakyOutput = 'Windows',
     [switch] $LeakyIdentity,
-    # KokoroDecoderPass: one pass of src/emit/Kokoro.Decoder16.ps1.
+    # KokoroDecoderPass: one pass of src/kernels/Kokoro.Decoder16.ps1.
     [ValidateSet('PadRows16','LowWindow16','FrameDouble16','Pool2','StrideConv16','ScaleConvert16')][string] $DecoderPass = 'PadRows16',
     [ValidateRange(1, 1048576)][int] $DecoderFrames = 65,
     [ValidateSet(0, 0x8000)][int] $DecoderHalfword = 0x8000,
@@ -131,7 +131,7 @@ $null=[Management.Automation.Language.Parser]::ParseInput($text,[ref]$tokens,[re
 if($errors.Count) { throw 'Writer adapter does not parse' }
 Write-NewOrIdenticalFile $adapter ([Text.Encoding]::UTF8.GetBytes($text)) -AllowOverwrite:$Force
 . $adapter
-. (Join-Path $PSScriptRoot '..\src\emit\Hexagon.ps1')
+. (Join-Path $PSScriptRoot '..\src\hexagon\Hexagon.ps1')
 $script:ElfConstants=$null
 $elf=Get-ElfConstants
 $header=Import-LibSourceText 'ELF.h'
@@ -154,7 +154,7 @@ if($Kernel -eq 'KokoroR0Sub0') {
     $weights=Get-Content $WeightManifest -Raw | ConvertFrom-Json
     $weightPath=Join-Path (Split-Path $WeightManifest) 'r0_static.bin'
     if((Get-FileHash $weightPath).Hash -ne $weights.Sha256 -or (Get-Item $weightPath).Length -ne $weights.Bytes) { throw 'Existing weights fail their manifest' }
-    . (Join-Path $PSScriptRoot '..\src\emit\Kokoro.R0Sub0.ps1')
+    . (Join-Path $PSScriptRoot '..\src\kernels\Kokoro.R0Sub0.ps1')
     $steps=@(New-KokoroR0Sub0Steps -Nodes $nodes -Frames 7681 -Channels $weights.Channels -WeightBytes $weights.Bytes -Weights $weights.Values)
     $symbol='kokoro_r0sub0_skel_handle_invoke'; $soname='libkokoro_r0sub0_skel.so'
     Write-NewOrIdenticalFile (Join-Path $OutputDirectory 'lowered.json') ([Text.Encoding]::UTF8.GetBytes(($nodes | ConvertTo-Json -Depth 6))) -AllowOverwrite:$Force
@@ -169,104 +169,104 @@ if($Kernel -eq 'KokoroR0Sub0') {
     $weightPath=Join-Path (Split-Path $WeightManifest) 'r0_static.bin'
     if((Get-FileHash $weightPath).Hash -ne $weights.Sha256 -or (Get-Item $weightPath).Length -ne $weights.Bytes) { throw 'Existing weights fail their manifest' }
     if($Kernel -eq 'KokoroAffine') {
-        . (Join-Path $PSScriptRoot '..\src\emit\Kokoro.Affine.ps1')
+        . (Join-Path $PSScriptRoot '..\src\kernels\Kokoro.Affine.ps1')
         $steps=@(New-KokoroAdaInAffineSteps -Nodes $nodes -Channels $weights.Channels -GainOffset $weights.Values.'adain1.0.gain'.Offset -ShiftOffset $weights.Values.'adain1.0.shift'.Offset -WeightBytes $weights.Bytes)
         $symbol='kqnn_affine_skel_handle_invoke'; $soname='libkqnn_affine_skel.so'
     } else {
         if(($weights.Values.'convs1.0.weight'.Shape -join ',') -ne '1,3,128,128' -or
             ($weights.Values.'convs1.0.bias'.Shape -join ',') -ne '128') { throw 'Unexpected convolution weight layout' }
-        . (Join-Path $PSScriptRoot '..\src\emit\Kokoro.ConvTile.ps1')
+        . (Join-Path $PSScriptRoot '..\src\kernels\Kokoro.ConvTile.ps1')
         $steps=@(New-KokoroConvTileSteps -Nodes $nodes -Channels $weights.Channels -WeightOffset $weights.Values.'convs1.0.weight'.Offset -BiasOffset $weights.Values.'convs1.0.bias'.Offset -WeightBytes $weights.Bytes)
         $symbol='kokoro_conv_skel_handle_invoke'; $soname='libkokoro_conv_skel.so'
     }
     Write-NewOrIdenticalFile (Join-Path $OutputDirectory 'lowered.json') ([Text.Encoding]::UTF8.GetBytes(($nodes | ConvertTo-Json -Depth 6))) -AllowOverwrite:$Force
 } elseif($Kernel -eq 'KokoroAdaIn') {
-    . (Join-Path $PSScriptRoot '..\src\emit\Kokoro.AdaIn.ps1')
+    . (Join-Path $PSScriptRoot '..\src\kernels\Kokoro.AdaIn.ps1')
     $steps=@(New-KokoroAdaInSteps -Frames $AdaInFrames -Channels $AdaInChannels)
     $symbol='kokoro_adain_skel_handle_invoke'; $soname='libkokoro_adain_skel.so'
 } elseif($Kernel -eq 'KokoroAdaInResBlock') {
-    . (Join-Path $PSScriptRoot '..\src\emit\Kokoro.AdaIn.ps1')
-    . (Join-Path $PSScriptRoot '..\src\emit\Kokoro.AdaInResBlock.ps1')
+    . (Join-Path $PSScriptRoot '..\src\kernels\Kokoro.AdaIn.ps1')
+    . (Join-Path $PSScriptRoot '..\src\kernels\Kokoro.AdaInResBlock.ps1')
     $steps=@(New-KokoroAdaInResBlockSteps -Frames $AdaInFrames -VectorConvolution:$AdaInVectorConvolution)
     $symbol='kokoro_adain_resblock_skel_handle_invoke'; $soname='libkokoro_adain_resblock_skel.so'
 } elseif($Kernel -eq 'KokoroAlbertSoftmax3') {
-    . (Join-Path $PSScriptRoot '..\src\emit\Kokoro.AlbertSoftmax3.ps1')
+    . (Join-Path $PSScriptRoot '..\src\kernels\Kokoro.AlbertSoftmax3.ps1')
     $steps=@(New-KokoroAlbertSoftmax3Steps)
     $symbol='kokoro_albert_softmax3_skel_handle_invoke'; $soname='libkokoro_albert_softmax3_skel.so'
 } elseif($Kernel -eq 'KokoroAlbertAttention3') {
-    . (Join-Path $PSScriptRoot '..\src\emit\Kokoro.AlbertAttention3.ps1')
+    . (Join-Path $PSScriptRoot '..\src\kernels\Kokoro.AlbertAttention3.ps1')
     $steps=if ($RegionBody) { @(New-KokoroAlbertAttention3Steps -RegionBody -LabelPrefix 'encoded_context' -DomainFailureLabel 'encoding_domain') } else { @(New-KokoroAlbertAttention3Steps) }
     $symbol='kokoro_albert_attention3_skel_handle_invoke'; $soname='libkokoro_albert_attention3_skel.so'
 } elseif($Kernel -eq 'KokoroAlbertAttentionOutput3') {
-    . (Join-Path $PSScriptRoot '..\src\emit\Kokoro.AlbertAttentionOutput3.ps1')
+    . (Join-Path $PSScriptRoot '..\src\kernels\Kokoro.AlbertAttentionOutput3.ps1')
     $steps=if ($RegionBody) { @(New-KokoroAlbertAttentionOutput3Steps -RegionBody -LabelPrefix 'encoded_output' -DomainFailureLabel 'encoding_domain') } else { @(New-KokoroAlbertAttentionOutput3Steps) }
     $symbol='kokoro_albert_attention_output3_skel_handle_invoke'; $soname='libkokoro_albert_attention_output3_skel.so'
 } elseif($Kernel -eq 'KokoroAlbertConnectedAttention3') {
-    . (Join-Path $PSScriptRoot '..\src\emit\Kokoro.AlbertConnectedAttention3.ps1')
+    . (Join-Path $PSScriptRoot '..\src\kernels\Kokoro.AlbertConnectedAttention3.ps1')
     $steps=@(New-KokoroAlbertConnectedAttention3Steps)
     $symbol='kokoro_albert_connected_attention3_skel_handle_invoke'; $soname='libkokoro_albert_connected_attention3_skel.so'
 } elseif($Kernel -eq 'KokoroHmxLock') {
-    . (Join-Path $PSScriptRoot '..\src\emit\Kokoro.HmxLockProbe.ps1')
+    . (Join-Path $PSScriptRoot '..\src\hexagon\Kokoro.HmxLockProbe.ps1')
     $steps=@(New-KokoroHmxLockSteps)
     $symbol='kokoro_hmx_lock_skel_handle_invoke'; $soname='libkokoro_hmx_lock_skel.so'
 } elseif($Kernel -eq 'KokoroHmxMatrix') {
-    . (Join-Path $PSScriptRoot '..\src\emit\Kokoro.HmxMatrixProbe.ps1')
+    . (Join-Path $PSScriptRoot '..\src\hexagon\Kokoro.HmxMatrixProbe.ps1')
     $steps=@(New-KokoroHmxMatrixSteps)
     $symbol='kokoro_hmx_matrix_skel_handle_invoke'; $soname='libkokoro_hmx_matrix_skel.so'
 } elseif($Kernel -eq 'KokoroAdaInStatistics') {
-    . (Join-Path $PSScriptRoot '..\src\emit\Kokoro.AdaInStatistics.ps1')
+    . (Join-Path $PSScriptRoot '..\src\kernels\Kokoro.AdaInStatistics.ps1')
     $steps=@(New-KokoroAdaInStatisticsSteps -Channels $IntegerChannels)
     $symbol='kokoro_adain_statistics'; $soname='libkokoro_adain_statistics.so'
 } elseif($Kernel -eq 'KokoroAdaInIntegerCoefficients') {
-    . (Join-Path $PSScriptRoot '..\src\emit\Kokoro.AdaInInteger.ps1')
+    . (Join-Path $PSScriptRoot '..\src\kernels\Kokoro.AdaInInteger.ps1')
     $steps=@(New-KokoroAdaInIntegerCoefficientsSteps -Channels $IntegerChannels)
     $symbol='kokoro_adain_integer_coefficients'; $soname='libkokoro_adain_integer_coefficients.so'
 } elseif($Kernel -eq 'KokoroAdaInIntegerAffine') {
-    . (Join-Path $PSScriptRoot '..\src\emit\Kokoro.AdaInInteger.ps1')
+    . (Join-Path $PSScriptRoot '..\src\kernels\Kokoro.AdaInInteger.ps1')
     $steps=@(New-KokoroAdaInIntegerAffineSteps -Channels $IntegerChannels)
     $symbol='kokoro_adain_integer_affine'; $soname='libkokoro_adain_integer_affine.so'
 } elseif($Kernel -eq 'KokoroAdaInSnakeInteger') {
-    . (Join-Path $PSScriptRoot '..\src\emit\Kokoro.AdaInSnakeInteger.ps1')
+    . (Join-Path $PSScriptRoot '..\src\kernels\Kokoro.AdaInSnakeInteger.ps1')
     $steps=@(New-KokoroAdaInSnakeIntegerSteps)
     $symbol='kokoro_adain_snake_integer'; $soname='libkokoro_adain_snake_integer.so'
 } elseif($Kernel -eq 'KokoroAdaInSnakeTurns') {
-    . (Join-Path $PSScriptRoot '..\src\emit\Kokoro.AdaInSnakeTurns.ps1')
+    . (Join-Path $PSScriptRoot '..\src\kernels\Kokoro.AdaInSnakeTurns.ps1')
     $steps=@(New-KokoroAdaInSnakeTurnsSteps)
     $symbol='kokoro_adain_snake_turns'; $soname='libkokoro_adain_snake_turns.so'
 } elseif($Kernel -eq 'KokoroSnakeInteger') {
-    . (Join-Path $PSScriptRoot '..\src\emit\Kokoro.SnakeInteger.ps1')
+    . (Join-Path $PSScriptRoot '..\src\kernels\Kokoro.SnakeInteger.ps1')
     $steps=@(New-KokoroSnakeIntegerSteps -Channels $IntegerChannels)
     $symbol='kokoro_snake_integer'; $soname='libkokoro_snake_integer.so'
 } elseif($Kernel -eq 'KokoroResidualInteger') {
-    . (Join-Path $PSScriptRoot '..\src\emit\Kokoro.ResidualInteger.ps1')
+    . (Join-Path $PSScriptRoot '..\src\kernels\Kokoro.ResidualInteger.ps1')
     $steps=@(New-KokoroResidualIntegerSteps -Channels $IntegerChannels)
     $symbol='kokoro_residual_integer'; $soname='libkokoro_residual_integer.so'
 } elseif($Kernel -eq 'KokoroHmxConv') {
-    . (Join-Path $PSScriptRoot '..\src\emit\Kokoro.HmxConv.ps1')
+    . (Join-Path $PSScriptRoot '..\src\kernels\Kokoro.HmxConv.ps1')
     $steps=@(New-KokoroHmxConvSteps -InputChannels $ConvChannels -OutputChannels $ConvChannels -Kernel $ConvKernel -Dilation $ConvDilation -OutputPlanes:$ConvOutputPlanes)
     $symbol='kokoro_hmx_conv'; $soname='libkokoro_hmx_conv.so'
 } elseif($Kernel -eq 'KokoroLeakyReluInteger') {
-    . (Join-Path $PSScriptRoot '..\src\emit\Kokoro.LeakyReluInteger.ps1')
+    . (Join-Path $PSScriptRoot '..\src\kernels\Kokoro.LeakyReluInteger.ps1')
     $steps=@(New-KokoroLeakyReluIntegerSteps -Channels $IntegerChannels)
     $symbol='kokoro_leaky_relu_integer'; $soname='libkokoro_leaky_relu_integer.so'
 } elseif($Kernel -eq 'KokoroBranchAverageInteger') {
-    . (Join-Path $PSScriptRoot '..\src\emit\Kokoro.BranchAverageInteger.ps1')
+    . (Join-Path $PSScriptRoot '..\src\kernels\Kokoro.BranchAverageInteger.ps1')
     $steps=@(New-KokoroBranchAverageIntegerSteps -Channels $IntegerChannels)
     $symbol='kokoro_branch_average_integer'; $soname='libkokoro_branch_average_integer.so'
 } elseif($Kernel -eq 'KokoroGenerator60xRun') {
-    . (Join-Path $PSScriptRoot '..\src\emit\Kokoro.Generator60xRun.ps1')
+    . (Join-Path $PSScriptRoot '..\src\jobs\Kokoro.Generator60xRun.ps1')
     $run=New-KokoroGenerator60xRunSteps -Frames $ResBlockFrames -ProfileBreakdown:$ProfileBreakdown -BypassAdaInCoefficients:$BypassAdaInCoefficients -BypassStatisticsAndCoefficients:$BypassStatisticsAndCoefficients -BypassHmxCompute:$BypassHmxCompute
     $steps=@($run.Steps)
     $symbol='kokoro_resblock_run_skel_handle_invoke'; $soname='libkokoro_resblock_run_skel.so'
     Write-NewOrIdenticalFile (Join-Path $OutputDirectory 'runner-layout.json') ([Text.Encoding]::UTF8.GetBytes(($run.Layout | ConvertTo-Json))) -AllowOverwrite:$Force
 } elseif($Kernel -eq 'KokoroGeneratorTailRun') {
-    . (Join-Path $PSScriptRoot '..\src\emit\Kokoro.GeneratorTailRun.ps1')
+    . (Join-Path $PSScriptRoot '..\src\jobs\Kokoro.GeneratorTailRun.ps1')
     $run=New-KokoroGeneratorTailRunSteps -Frames $ResBlockFrames
     $steps=@($run.Steps)
     $symbol='kokoro_generator_tail_skel_handle_invoke'; $soname='libkokoro_generator_tail_skel.so'
     Write-NewOrIdenticalFile (Join-Path $OutputDirectory 'runner-layout.json') ([Text.Encoding]::UTF8.GetBytes(($run.Layout | ConvertTo-Json -Depth 6))) -AllowOverwrite:$Force
 } elseif($Kernel -eq 'KokoroGeneratorStage16TailRun') {
-    . (Join-Path $PSScriptRoot '..\src\emit\Kokoro.Generator60x16Run.ps1')
+    . (Join-Path $PSScriptRoot '..\src\jobs\Kokoro.Generator60x16Run.ps1')
     $run=New-KokoroGenerator60x16RunSteps -Frames $ResBlockFrames -HvxThreads $ResidentHvxThreads -BatchTiles $ResidentBatchTiles -Tail
     $steps=@($run.Steps)
     # The tail harness (src/runspace/KokoroGeneratorTailProbe.ps1) loads this name and plays the PCM.
@@ -274,125 +274,125 @@ if($Kernel -eq 'KokoroR0Sub0') {
     Write-NewOrIdenticalFile (Join-Path $OutputDirectory 'runner-layout.json') ([Text.Encoding]::UTF8.GetBytes(($run.Layout | ConvertTo-Json -Depth 6))) -AllowOverwrite:$Force
 } elseif($Kernel -eq 'KokoroResBlock16Run') {
     # One or more 16-bit resblocks without the tail, under the generic tail harness (completion word 1 for one block).
-    . (Join-Path $PSScriptRoot '..\src\emit\Kokoro.Generator60x16Run.ps1')
+    . (Join-Path $PSScriptRoot '..\src\jobs\Kokoro.Generator60x16Run.ps1')
     $run=New-KokoroGenerator60x16RunSteps -Frames $ResBlockFrames -HvxThreads $ResidentHvxThreads -BatchTiles $ResidentBatchTiles -Kernels $Stage16Kernels -Channels $Stage16Channels -GenericHarness -StopAfterStage $Stage16StopAfter -DumpPoint $Stage16DumpPoint
     $steps=@($run.Steps)
     $symbol='kokoro_generator_tail_skel_handle_invoke'; $soname='libkokoro_generator_tail_skel.so'
     Write-NewOrIdenticalFile (Join-Path $OutputDirectory 'runner-layout.json') ([Text.Encoding]::UTF8.GetBytes(($run.Layout | ConvertTo-Json -Depth 6))) -AllowOverwrite:$Force
 } elseif($Kernel -eq 'KokoroGeneratorFrontStageTailRun') {
     # The 128-channel front, the 16-bit stage and the tail in one job (tail harness plays the PCM).
-    . (Join-Path $PSScriptRoot '..\src\emit\Kokoro.Generator60x16Run.ps1')
+    . (Join-Path $PSScriptRoot '..\src\jobs\Kokoro.Generator60x16Run.ps1')
     $run=New-KokoroGenerator60x16RunSteps -Frames $ResBlockFrames -HvxThreads $ResidentHvxThreads -BatchTiles $ResidentBatchTiles -Front -Tail
     $steps=@($run.Steps)
     $symbol='kokoro_generator_tail_skel_handle_invoke'; $soname='libkokoro_generator_tail_skel.so'
     Write-NewOrIdenticalFile (Join-Path $OutputDirectory 'runner-layout.json') ([Text.Encoding]::UTF8.GetBytes(($run.Layout | ConvertTo-Json -Depth 6))) -AllowOverwrite:$Force
 } elseif($Kernel -eq 'KokoroGeneratorWholeSource16Run') {
     # The whole generator with the harmonic source: decoder output, f0 and z to PCM (tail harness plays the PCM) under the generic tail harness (completion word 1).
-    . (Join-Path $PSScriptRoot '..\src\emit\Kokoro.Generator60x16Run.ps1')
+    . (Join-Path $PSScriptRoot '..\src\jobs\Kokoro.Generator60x16Run.ps1')
     $run=New-KokoroGenerator60x16RunSteps -Frames $ResBlockFrames -HvxThreads $ResidentHvxThreads -BatchTiles $ResidentBatchTiles -Whole -Source
     $steps=@($run.Steps)
     $symbol='kokoro_generator_tail_skel_handle_invoke'; $soname='libkokoro_generator_tail_skel.so'
     Write-NewOrIdenticalFile (Join-Path $OutputDirectory 'runner-layout.json') ([Text.Encoding]::UTF8.GetBytes(($run.Layout | ConvertTo-Json -Depth 6))) -AllowOverwrite:$Force
 } elseif($Kernel -eq 'KokoroDecoderGenerator16Run') {
     # The decoder then the whole generator with the harmonic source: asr, F0_curve, N_curve, f0 and z to PCM, one DSP job.
-    . (Join-Path $PSScriptRoot '..\src\emit\Kokoro.Generator60x16Run.ps1')
+    . (Join-Path $PSScriptRoot '..\src\jobs\Kokoro.Generator60x16Run.ps1')
     $run=New-KokoroGenerator60x16RunSteps -Frames $ResBlockFrames -HvxThreads $ResidentHvxThreads -BatchTiles $ResidentBatchTiles -Whole -Source -Decoder
     $steps=@($run.Steps)
     $symbol='kokoro_generator_tail_skel_handle_invoke'; $soname='libkokoro_generator_tail_skel.so'
     Write-NewOrIdenticalFile (Join-Path $OutputDirectory 'runner-layout.json') ([Text.Encoding]::UTF8.GetBytes(($run.Layout | ConvertTo-Json -Depth 6))) -AllowOverwrite:$Force
 } elseif($Kernel -eq 'KokoroHarmonicSource16Run') {
     # The harmonic source and STFT (f0 -> har planes, signal copy) under the generic tail harness (completion word 1).
-    . (Join-Path $PSScriptRoot '..\src\emit\Kokoro.HarmonicSource16Run.ps1')
+    . (Join-Path $PSScriptRoot '..\src\jobs\Kokoro.HarmonicSource16Run.ps1')
     $run=New-KokoroHarmonicSource16RunSteps -Frames $ResBlockFrames
     $steps=@($run.Steps)
     $symbol='kokoro_generator_tail_skel_handle_invoke'; $soname='libkokoro_generator_tail_skel.so'
     Write-NewOrIdenticalFile (Join-Path $OutputDirectory 'runner-layout.json') ([Text.Encoding]::UTF8.GetBytes(($run.Layout | ConvertTo-Json -Depth 6))) -AllowOverwrite:$Force
 } elseif($Kernel -eq 'KokoroHarmonicStft16Run') {
     # The harmonic-source STFT (merged source -> har planes) under the generic tail harness (completion word 1).
-    . (Join-Path $PSScriptRoot '..\src\emit\Kokoro.HarmonicStft16Run.ps1')
+    . (Join-Path $PSScriptRoot '..\src\jobs\Kokoro.HarmonicStft16Run.ps1')
     $run=New-KokoroHarmonicStft16RunSteps -Frames $ResBlockFrames
     $steps=@($run.Steps)
     $symbol='kokoro_generator_tail_skel_handle_invoke'; $soname='libkokoro_generator_tail_skel.so'
     Write-NewOrIdenticalFile (Join-Path $OutputDirectory 'runner-layout.json') ([Text.Encoding]::UTF8.GetBytes(($run.Layout | ConvertTo-Json -Depth 6))) -AllowOverwrite:$Force
 } elseif($Kernel -eq 'KokoroGeneratorWhole16Run') {
     # The whole generator in one job: decoder output and har to PCM (tail harness plays the PCM).
-    . (Join-Path $PSScriptRoot '..\src\emit\Kokoro.Generator60x16Run.ps1')
+    . (Join-Path $PSScriptRoot '..\src\jobs\Kokoro.Generator60x16Run.ps1')
     $run=New-KokoroGenerator60x16RunSteps -Frames $ResBlockFrames -HvxThreads $ResidentHvxThreads -BatchTiles $ResidentBatchTiles -Whole
     $steps=@($run.Steps)
     $symbol='kokoro_generator_tail_skel_handle_invoke'; $soname='libkokoro_generator_tail_skel.so'
     Write-NewOrIdenticalFile (Join-Path $OutputDirectory 'runner-layout.json') ([Text.Encoding]::UTF8.GetBytes(($run.Layout | ConvertTo-Json -Depth 6))) -AllowOverwrite:$Force
 } elseif($Kernel -eq 'KokoroGeneratorFront10x16Run') {
     # The 256-channel front and resblocks.0-2 with their mean, under the generic tail harness.
-    . (Join-Path $PSScriptRoot '..\src\emit\Kokoro.Generator60x16Run.ps1')
+    . (Join-Path $PSScriptRoot '..\src\jobs\Kokoro.Generator60x16Run.ps1')
     $run=New-KokoroGenerator60x16RunSteps -Frames $ResBlockFrames -HvxThreads $ResidentHvxThreads -BatchTiles $ResidentBatchTiles -Channels 256 -Front -GenericHarness
     $steps=@($run.Steps)
     $symbol='kokoro_generator_tail_skel_handle_invoke'; $soname='libkokoro_generator_tail_skel.so'
     Write-NewOrIdenticalFile (Join-Path $OutputDirectory 'runner-layout.json') ([Text.Encoding]::UTF8.GetBytes(($run.Layout | ConvertTo-Json -Depth 6))) -AllowOverwrite:$Force
 } elseif($Kernel -eq 'KokoroDecoder16Run') {
-    . (Join-Path $PSScriptRoot '..\src\emit\Kokoro.DecoderRun16.ps1')
+    . (Join-Path $PSScriptRoot '..\src\jobs\Kokoro.DecoderRun16.ps1')
     $run=New-KokoroDecoder16RunSteps -Frames $DecoderFrames -StopAfterBlock $DecoderStopAfterBlock -DumpPoint $DecoderDumpPoint -RuntimeFrames:$DecoderRuntimeFrames
     $steps=@($run.Steps)
     # The phone harness (tools/Invoke-GeneratorTailProbe.ps1) runs every generator job under the tail skel's name.
     $symbol='kokoro_generator_tail_skel_handle_invoke'; $soname='libkokoro_generator_tail_skel.so'
     Write-NewOrIdenticalFile (Join-Path $OutputDirectory 'runner-layout.json') ([Text.Encoding]::UTF8.GetBytes(($run.Layout | ConvertTo-Json -Depth 6))) -AllowOverwrite:$Force
 } elseif($Kernel -eq 'KokoroGeneratorTail16Run') {
-    . (Join-Path $PSScriptRoot '..\src\emit\Kokoro.GeneratorTail16Run.ps1')
+    . (Join-Path $PSScriptRoot '..\src\jobs\Kokoro.GeneratorTail16Run.ps1')
     $run=New-KokoroGeneratorTail16RunSteps -Frames $ResBlockFrames -DumpLogits:$TailDumpLogits
     $steps=@($run.Steps)
     $symbol='kokoro_generator_tail_skel_handle_invoke'; $soname='libkokoro_generator_tail_skel.so'
     Write-NewOrIdenticalFile (Join-Path $OutputDirectory 'runner-layout.json') ([Text.Encoding]::UTF8.GetBytes(($run.Layout | ConvertTo-Json -Depth 6))) -AllowOverwrite:$Force
 } elseif($Kernel -eq 'KokoroGenerator60x16Run') {
-    . (Join-Path $PSScriptRoot '..\src\emit\Kokoro.Generator60x16Run.ps1')
+    . (Join-Path $PSScriptRoot '..\src\jobs\Kokoro.Generator60x16Run.ps1')
     $pmu=if($ResidentPmuEvents){@{PmuEvents=$ResidentPmuEvents}}else{@{}}
     $run=New-KokoroGenerator60x16RunSteps -Frames $ResBlockFrames -HvxThreads $ResidentHvxThreads -BatchTiles $ResidentBatchTiles -StopAfterStage $Stage16StopAfter -DumpPoint $Stage16DumpPoint -Kernels $Stage16Kernels @pmu
     $steps=@($run.Steps)
     $symbol='kokoro_resblock_run_skel_handle_invoke'; $soname='libkokoro_resblock_run_skel.so'
     Write-NewOrIdenticalFile (Join-Path $OutputDirectory 'runner-layout.json') ([Text.Encoding]::UTF8.GetBytes(($run.Layout | ConvertTo-Json -Depth 6))) -AllowOverwrite:$Force
 } elseif($Kernel -eq 'KokoroGenerator60xResidentRun') {
-    . (Join-Path $PSScriptRoot '..\src\emit\Kokoro.Generator60xResidentRun.ps1')
+    . (Join-Path $PSScriptRoot '..\src\jobs\Kokoro.Generator60xResidentRun.ps1')
     $pmu=if($ResidentPmuEvents){@{PmuEvents=$ResidentPmuEvents}}else{@{}}
     $run=New-KokoroGenerator60xResidentRunSteps -Frames $ResBlockFrames -CostProbePasses $ResidentCostProbePasses -CostProbeTurnsBody:$ResidentCostProbeTurnsBody -HvxThreads $ResidentHvxThreads -BatchTiles $ResidentBatchTiles -CompactOutput:$ResidentCompactOutput @pmu
     $steps=@($run.Steps)
     $symbol='kokoro_resblock_run_skel_handle_invoke'; $soname='libkokoro_resblock_run_skel.so'
     Write-NewOrIdenticalFile (Join-Path $OutputDirectory 'runner-layout.json') ([Text.Encoding]::UTF8.GetBytes(($run.Layout | ConvertTo-Json -Depth 6))) -AllowOverwrite:$Force
 } elseif($Kernel -eq 'KokoroResBlockRun') {
-    . (Join-Path $PSScriptRoot '..\src\emit\Kokoro.ResBlockRun.ps1')
+    . (Join-Path $PSScriptRoot '..\src\jobs\Kokoro.ResBlockRun.ps1')
     $run=New-KokoroResBlockRunSteps -Frames $ResBlockFrames -Kernel $ResBlockKernel
     $steps=@($run.Steps)
     $symbol='kokoro_resblock_run_skel_handle_invoke'; $soname='libkokoro_resblock_run_skel.so'
     Write-NewOrIdenticalFile (Join-Path $OutputDirectory 'runner-layout.json') ([Text.Encoding]::UTF8.GetBytes(($run.Layout | ConvertTo-Json))) -AllowOverwrite:$Force
 } elseif($Kernel -eq 'KokoroHmxConvPlanes') {
-    . (Join-Path $PSScriptRoot '..\src\emit\Kokoro.HmxConvPlanes.ps1')
+    . (Join-Path $PSScriptRoot '..\src\kernels\Kokoro.HmxConvPlanes.ps1')
     # Plane stride for the simulator harness: 3 output tiles of ConvChannels/32 blocks.
     $steps=@(New-KokoroHmxConvPlanesSteps -InputChannels $ConvChannels -OutputChannels $ConvChannels -Kernel $ConvKernel -Dilation $ConvDilation -WeightPlanes $ConvWeightPlanes -PlaneStride (3*($ConvChannels/32)*2048))
     $symbol='kokoro_hmx_conv_planes'; $soname='libkokoro_hmx_conv_planes.so'
 } elseif($Kernel -eq 'KokoroHmxConvPlanesLoop') {
-    . (Join-Path $PSScriptRoot '..\src\emit\Kokoro.HmxConvPlanes.ps1')
+    . (Join-Path $PSScriptRoot '..\src\kernels\Kokoro.HmxConvPlanes.ps1')
     # Plane stride for the simulator harness: 3 output tiles of ConvOutputChannels/32 blocks.
     $steps=@(New-KokoroHmxConvPlanesLoopSteps -InputChannels $ConvInputChannels -OutputChannels $ConvOutputChannels -Kernel $ConvKernel -Dilation $ConvDilation -WeightPlanes $ConvWeightPlanes -PlaneStride (3*($ConvOutputChannels/32)*2048))
     $symbol='kokoro_hmx_conv_planes_loop'; $soname='libkokoro_hmx_conv_planes_loop.so'
 } elseif($Kernel -eq 'KokoroPlaneCombine') {
-    . (Join-Path $PSScriptRoot '..' 'src' 'emit' 'Kokoro.PlaneCombine.ps1')
+    . (Join-Path $PSScriptRoot '..' 'src' 'kernels' 'Kokoro.PlaneCombine.ps1')
     $steps=@(New-KokoroPlaneCombineSteps -Mode $CombineMode -Channels $ConvChannels -Groups $CombineGroups -PlaneStride (3*($ConvChannels/32)*2048))
     $symbol='kokoro_plane_combine'; $soname='libkokoro_plane_combine.so'
 } elseif($Kernel -eq 'KokoroPlaneCombineLoop') {
-    . (Join-Path $PSScriptRoot '..' 'src' 'emit' 'Kokoro.PlaneCombine.ps1')
+    . (Join-Path $PSScriptRoot '..' 'src' 'kernels' 'Kokoro.PlaneCombine.ps1')
     $steps=@(New-KokoroPlaneCombineLoopSteps -Mode $CombineMode -Channels $ConvOutputChannels -PlaneStride (3*($ConvOutputChannels/32)*2048) -OutputTileSkip $CombineOutputTileSkip)
     $symbol='kokoro_plane_combine_loop'; $soname='libkokoro_plane_combine_loop.so'
 } elseif($Kernel -eq 'KokoroAdaInMoments16Loop') {
-    . (Join-Path $PSScriptRoot '..' 'src' 'emit' 'Kokoro.AdaInMoments16.ps1')
+    . (Join-Path $PSScriptRoot '..' 'src' 'kernels' 'Kokoro.AdaInMoments16.ps1')
     $steps=@(New-KokoroAdaInMoments16LoopSteps -Channels $ConvInputChannels)
     $symbol='kokoro_adain_moments16_loop'; $soname='libkokoro_adain_moments16_loop.so'
 } elseif($Kernel -eq 'KokoroAdaInMoments16') {
-    . (Join-Path $PSScriptRoot '..' 'src' 'emit' 'Kokoro.AdaInMoments16.ps1')
+    . (Join-Path $PSScriptRoot '..' 'src' 'kernels' 'Kokoro.AdaInMoments16.ps1')
     $steps=@(New-KokoroAdaInMoments16Steps -Channels $ConvChannels)
     $symbol='kokoro_adain_moments16'; $soname='libkokoro_adain_moments16.so'
 } elseif($Kernel -eq 'KokoroAdaInAffineCoefficientsLoop') {
-    . (Join-Path $PSScriptRoot '..' 'src' 'emit' 'Kokoro.AdaInTurnsCoefficients.ps1')
+    . (Join-Path $PSScriptRoot '..' 'src' 'kernels' 'Kokoro.AdaInTurnsCoefficients.ps1')
     $steps=@(New-KokoroAdaInAffineCoefficientsLoopSteps -Channels $ConvInputChannels)
     $symbol='kokoro_adain_affine_coefficients_loop'; $soname='libkokoro_adain_affine_coefficients_loop.so'
 } elseif($Kernel -eq 'KokoroDecoderPass') {
-    . (Join-Path $PSScriptRoot '..' 'src' 'emit' 'Kokoro.Decoder16.ps1')
+    . (Join-Path $PSScriptRoot '..' 'src' 'kernels' 'Kokoro.Decoder16.ps1')
     $steps=@(switch($DecoderPass){
         'PadRows16' { New-KokoroPadRows16Steps -Frames $DecoderFrames -Channels $ConvInputChannels -Halfword $DecoderHalfword }
         'LowWindow16' { New-KokoroLowWindow16Steps }
@@ -402,32 +402,32 @@ if($Kernel -eq 'KokoroR0Sub0') {
         'ScaleConvert16' { New-KokoroScaleConvert16Steps -Channels $ConvInputChannels } })
     $symbol='kokoro_decoder_pass'; $soname='libkokoro_decoder_pass.so'
 } elseif($Kernel -eq 'KokoroAdaInLeaky16') {
-    . (Join-Path $PSScriptRoot '..' 'src' 'emit' 'Kokoro.AdaInLeaky16.ps1')
+    . (Join-Path $PSScriptRoot '..' 'src' 'kernels' 'Kokoro.AdaInLeaky16.ps1')
     $steps=@(New-KokoroAdaInLeaky16Steps -Channels $ConvInputChannels -Output $LeakyOutput -Identity:$LeakyIdentity)
     $symbol='kokoro_adain_leaky16'; $soname='libkokoro_adain_leaky16.so'
 } elseif($Kernel -eq 'KokoroAdaInTurnsCoefficients') {
-    . (Join-Path $PSScriptRoot '..' 'src' 'emit' 'Kokoro.AdaInTurnsCoefficients.ps1')
+    . (Join-Path $PSScriptRoot '..' 'src' 'kernels' 'Kokoro.AdaInTurnsCoefficients.ps1')
     $steps=@(New-KokoroAdaInTurnsCoefficientsSteps -Channels $ConvChannels)
     $symbol='kokoro_adain_turns_coefficients'; $soname='libkokoro_adain_turns_coefficients.so'
 } elseif($Kernel -eq 'KokoroHmxConvRun') {
-    . (Join-Path $PSScriptRoot '..\src\emit\Kokoro.HmxConvRun.ps1')
+    . (Join-Path $PSScriptRoot '..\src\jobs\Kokoro.HmxConvRun.ps1')
     $run=New-KokoroHmxConvRunSteps -Channels $ConvChannels -Kernel $ConvKernel -Dilation $ConvDilation -Tiles $ConvTiles
     $steps=@($run.Steps)
     $symbol='kokoro_hmx_conv_run_skel_handle_invoke'; $soname='libkokoro_hmx_conv_run_skel.so'
 } elseif($Kernel -eq 'KokoroDmaCopy') {
-    . (Join-Path $PSScriptRoot '..\src\emit\Kokoro.DmaCopy.ps1')
+    . (Join-Path $PSScriptRoot '..\src\hexagon\Kokoro.DmaCopy.ps1')
     $steps=@(New-KokoroDmaCopySteps)
     $symbol='kokoro_dma_copy'; $soname='libkokoro_dma_copy.so'
 } elseif($Kernel -eq 'KokoroDmaBench') {
-    . (Join-Path $PSScriptRoot '..\src\emit\Kokoro.DmaBenchProbe.ps1')
+    . (Join-Path $PSScriptRoot '..\src\hexagon\Kokoro.DmaBenchProbe.ps1')
     $steps=@(New-KokoroDmaBenchSteps)
     $symbol='kokoro_dma_bench_skel_handle_invoke'; $soname='libkokoro_dma_bench_skel.so'
 } elseif($Kernel -eq 'KokoroVtcmQuery') {
-    . (Join-Path $PSScriptRoot '..\src\emit\Kokoro.VtcmQueryProbe.ps1')
+    . (Join-Path $PSScriptRoot '..\src\hexagon\Kokoro.VtcmQueryProbe.ps1')
     $steps=@(New-KokoroVtcmQuerySteps)
     $symbol='kokoro_vtcm_query_skel_handle_invoke'; $soname='libkokoro_vtcm_query_skel.so'
 } elseif($Kernel -eq 'KokoroLinearTile') {
-    . (Join-Path $PSScriptRoot '..\src\emit\Kokoro.LinearTile.ps1')
+    . (Join-Path $PSScriptRoot '..\src\kernels\Kokoro.LinearTile.ps1')
     $steps=@(New-KokoroLinearTileSteps -Rows $LinearRows `
         -InputChannels $LinearInputChannels -OutputChannels $LinearOutputChannels `
         -VectorOutputTiles:$LinearVectorOutputTiles)

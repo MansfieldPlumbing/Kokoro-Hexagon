@@ -5,7 +5,7 @@ Quantizes and packs one real stock-captured convolution tile for the HMX runner.
 PowerShell build-time packing only. Per-output-channel symmetric W8, shared
 activation/output scales, and real halo rows preserve the selected tile's
 convolution inputs. This fixture does not establish connected residual quality.
-Layouts: src/emit/Kokoro.HmxConv.ps1. Column-table scaling research reference:
+Layouts: src/kernels/Kokoro.HmxConv.ps1. Column-table scaling research reference:
 onnxsim 0dd9980a50045a5079b4fd6c30a21300725e0f3b hmx_qconv.h:1-25.
 #>
 [CmdletBinding()]

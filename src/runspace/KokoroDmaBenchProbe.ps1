@@ -1,5 +1,5 @@
 #requires -Version 7.0
-# Device harness for the emitted DMA bench skel (src/emit/Kokoro.DmaBenchProbe.ps1).
+# Device harness for the emitted DMA bench skel (src/hexagon/Kokoro.DmaBenchProbe.ps1).
 # One unsigned-PD session, one handle; method 2 (sc 0x02010100), three invocations of one
 # native tensor (244 tiles x 8192 B) with fresh random data each time.
 $root = [IO.Path]::Combine($Activity.FilesDir.AbsolutePath, 'kokoro-fl')

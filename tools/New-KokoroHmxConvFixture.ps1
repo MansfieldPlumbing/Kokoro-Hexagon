@@ -5,7 +5,7 @@ Builds the inputs and exact expected output for the emitted HMX conv runner.
 
 .DESCRIPTION
 Signed int8 activations and weights in [-8, 8] from a fixed LCG, packed exactly as
-src/emit/Kokoro.HmxConv.ps1 consumes them (see tools/reference/hmx-sim/emitted_conv.c):
+src/kernels/Kokoro.HmxConv.ps1 consumes them (see tools/reference/hmx-sim/emitted_conv.c):
 activations u8 = x + 128 in time-major croutons with one halo tile of 128 on each side,
 weights in (group, tap, input block) order, 256-byte column tables (fp16 0.125 scale,
 int32 -128*sum(w) + 128*4096). Expected = sat_u8(floor(acc / 4096) + 128) at the odd bytes

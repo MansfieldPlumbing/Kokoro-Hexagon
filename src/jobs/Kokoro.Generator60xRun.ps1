@@ -5,7 +5,7 @@
 function New-KokoroGenerator60xRunSteps {
  param([ValidateRange(2,32768)][int]$Frames=7801,[switch]$ProfileBreakdown,[switch]$BypassAdaInCoefficients,[switch]$BypassStatisticsAndCoefficients,[switch]$BypassHmxCompute)
  . (Join-Path $PSScriptRoot 'Kokoro.ResBlockRun.ps1')
- . (Join-Path $PSScriptRoot 'Kokoro.BranchAverageInteger.ps1')
+ . (Join-Path $PSScriptRoot '../kernels/Kokoro.BranchAverageInteger.ps1')
  $blocks=@(3,7,11|ForEach-Object {New-KokoroResBlockRunSteps -Frames $Frames -Kernel $_ -ProfileBreakdown:$ProfileBreakdown -BypassAdaInCoefficients:$BypassAdaInCoefficients -BypassStatisticsAndCoefficients:$BypassStatisticsAndCoefficients -BypassHmxCompute:$BypassHmxCompute})
  $bytes=$blocks[0].Layout.InputBytes
  $stride=[int]([math]::Ceiling($blocks[0].Layout.OutputBytes/128)*128)

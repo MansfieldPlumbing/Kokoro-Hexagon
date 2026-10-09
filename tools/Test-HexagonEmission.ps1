@@ -15,7 +15,7 @@ param(
     [ValidateRange(64, 2048)][int] $ConvOutputChannels = 1024,
     [ValidateSet('Windows','Tensor')][string] $LeakyOutput = 'Windows',
     [switch] $LeakyIdentity,
-    # KokoroDecoderPass: one pass of src/emit/Kokoro.Decoder16.ps1.
+    # KokoroDecoderPass: one pass of src/kernels/Kokoro.Decoder16.ps1.
     [ValidateSet('PadRows16','LowWindow16','FrameDouble16','Pool2','StrideConv16','ScaleConvert16')][string] $DecoderPass = 'PadRows16',
     [ValidateRange(1, 1048576)][int] $DecoderFrames = 65,
     [ValidateSet(0, 0x8000)][int] $DecoderHalfword = 0x8000,
@@ -104,7 +104,7 @@ if($emitted.Length -ne $textBytes.Length) { throw 'Reference code size mismatch'
 for($index=0;$index -lt $emitted.Length;$index++) {
     if($emitted[$index] -ne $textBytes[$index]) { throw "Reference instruction mismatch at byte $index" }
 }
-. (Join-Path $PSScriptRoot '..\src\emit\Hexagon.ps1')
+. (Join-Path $PSScriptRoot '..\src\hexagon\Hexagon.ps1')
 $rejections=0
 $badOps = @(
     @{Op='imm';d=32;i=1},

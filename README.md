@@ -12,7 +12,9 @@ device receipts (each with numbers, artifact hashes and commit).
 
 | Path | Contents |
 |---|---|
-| `src/emit` | Hexagon instruction encoders and HMX/HVX kernels (the ELF writer is `tools/Emit-HexagonProbe.ps1`) |
+| `src/hexagon` | Hexagon instruction encoder, DMA copy and hardware probes (the ELF writer is `tools/Emit-HexagonProbe.ps1`) |
+| `src/kernels` | HMX/HVX kernel body generators (convolution, AdaIN, Snake, combine, STFT, harmonic source, decoder pieces, ALBERT attention) |
+| `src/jobs` | DSP job assemblies: decoder, generator stages and tail, harmonic source, resblock runners |
 | `src/models` | Checkpoint readers and weight conversion |
 | `src/runspace` | Native binding, AAudio, dspqueue layout, device harnesses |
 | `tools` | Fixture builders (from stock PyTorch captures), emission checks, device runners, scorers |

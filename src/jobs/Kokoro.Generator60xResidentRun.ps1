@@ -54,7 +54,7 @@ function New-KokoroGenerator60xResidentRunSteps {
         [ValidateCount(8,8)][ValidateRange(0,1023)][int[]]$PmuEvents,[ValidateRange(1,4)][int]$HvxThreads=1,[switch]$CompactOutput)
     if($CostProbeTurnsBody -and $CostProbePasses -lt 1){throw 'CostProbeTurnsBody needs CostProbePasses >= 1'}
     . (Join-Path $PSScriptRoot 'Kokoro.ResBlockRun.ps1')
-    foreach($file in 'Kokoro.HmxConv.ps1','Kokoro.AdaInInteger.ps1','Kokoro.ResidualInteger.ps1','Kokoro.AdaInSnakeInteger.ps1','Kokoro.AdaInSnakeTurns.ps1','Kokoro.AdaInStatisticsAccumulate.ps1','Kokoro.DmaCopy.ps1','Kokoro.BranchAverageInteger.ps1') { . (Join-Path $PSScriptRoot $file) }
+    foreach($file in '../kernels/Kokoro.HmxConv.ps1','../kernels/Kokoro.AdaInInteger.ps1','../kernels/Kokoro.ResidualInteger.ps1','../kernels/Kokoro.AdaInSnakeInteger.ps1','../kernels/Kokoro.AdaInSnakeTurns.ps1','../kernels/Kokoro.AdaInStatisticsAccumulate.ps1','../hexagon/Kokoro.DmaCopy.ps1','../kernels/Kokoro.BranchAverageInteger.ps1') { . (Join-Path $PSScriptRoot $file) }
     $layout=Get-KokoroGenerator60xResidentLayout -Frames $Frames -BatchTiles $BatchTiles -CostProbe:($CostProbePasses -gt 0)
     $tiles=$layout.Tiles; $tensorBytes=$layout.TensorBytes; $batch=$BatchTiles
     $offResidual=$layout.Regions.Residual.Offset; $offConvOutput=$layout.Regions.ConvOutput.Offset; $offWindow=$layout.Regions.Window.Offset; $offStaging=$layout.Regions.Staging.Offset; $offWeights=$layout.Regions.Weights.Offset

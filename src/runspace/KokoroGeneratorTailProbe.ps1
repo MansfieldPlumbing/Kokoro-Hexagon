@@ -1,5 +1,5 @@
 #requires -Version 7.0
-# Device harness for the emitted generator tail job (src/emit/Kokoro.GeneratorTailRun.ps1).
+# Device harness for the emitted generator tail job (src/jobs/Kokoro.GeneratorTailRun.ps1).
 # One unsigned-PD session, one handle; Runs invocations of method 2 (sc 0x02040100). Run 0's
 # whole output buffer is saved for host verification; every run's PCM must be identical.
 # The PCM is then played once through AAudio at 24 kHz mono.

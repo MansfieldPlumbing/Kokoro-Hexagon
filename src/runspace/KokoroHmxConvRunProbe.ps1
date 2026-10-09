@@ -1,5 +1,5 @@
 #requires -Version 7.0
-# Device harness for the emitted HMX conv runner (src/emit/Kokoro.HmxConvRun.ps1).
+# Device harness for the emitted HMX conv runner (src/jobs/Kokoro.HmxConvRun.ps1).
 # One unsigned-PD session, one handle; Runs invocations of method 2 (sc 0x02040100), each
 # re-acquiring its own VTCM/HMX context. Every output's odd bytes are compared with the
 # fixture's exact integer reference; ticks are the DSP c31:30 counter (19.2 MHz) around the conv.

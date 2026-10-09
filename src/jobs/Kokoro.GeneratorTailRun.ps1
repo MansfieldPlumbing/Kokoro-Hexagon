@@ -78,7 +78,7 @@ function New-KokoroTailFrameSteps {
 function New-KokoroGeneratorTailRunSteps {
     param([ValidateRange(2,32768)][int]$Frames=7801,[ValidateRange(1,64)][int]$BatchTiles=16)
     . (Join-Path $PSScriptRoot 'Kokoro.ResBlockRun.ps1')
-    foreach($file in 'Kokoro.HmxConv.ps1','Kokoro.LeakyReluInteger.ps1','Kokoro.DmaCopy.ps1') { . (Join-Path $PSScriptRoot $file) }
+    foreach($file in '../kernels/Kokoro.HmxConv.ps1','../kernels/Kokoro.LeakyReluInteger.ps1','../hexagon/Kokoro.DmaCopy.ps1') { . (Join-Path $PSScriptRoot $file) }
     $layout=Get-KokoroGeneratorTailLayout -Frames $Frames -BatchTiles $BatchTiles
     $tiles=$layout.Tiles; $tensorBytes=$layout.TensorBytes; $batch=$BatchTiles
     $offWindow=$layout.Regions.Window.Offset; $offCoarse=$layout.Regions.CodesCoarse.Offset; $offFine=$layout.Regions.CodesFine.Offset

@@ -20,7 +20,7 @@ function New-KokoroHmxConvRunSteps {
         [ValidateSet(1, 3, 5)][int] $Dilation = 1,
         [ValidateRange(1, 64)][int] $Tiles = 8
     )
-    . (Join-Path $PSScriptRoot 'Kokoro.HmxConv.ps1')
+    . (Join-Path $PSScriptRoot '../kernels/Kokoro.HmxConv.ps1')
     $cb = $Channels / 32; $groups = $Channels / 64
     $pad = 1
     $actBytes = ($Tiles + 2 * $pad) * $cb * 2048

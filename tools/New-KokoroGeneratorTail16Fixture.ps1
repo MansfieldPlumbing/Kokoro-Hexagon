@@ -40,7 +40,7 @@ $out = [IO.Path]::GetFullPath($OutputDirectory)
 if (-not $out.StartsWith($build, [StringComparison]::OrdinalIgnoreCase) -or (Test-Path -LiteralPath $out)) { throw 'Use a new directory in build/.' }
 Import-Module (Join-Path $PSScriptRoot 'Kokoro.CaptureMath.psm1') -Force
 Import-Module (Join-Path $PSScriptRoot 'Kokoro.CaptureKernels.psm1') -Force
-. (Join-Path $PSScriptRoot '../src/emit/Kokoro.TailSpectrum16.ps1')
+. (Join-Path $PSScriptRoot '../src/kernels/Kokoro.TailSpectrum16.ps1')
 function Get-Even([double]$x) { [math]::Round($x, [MidpointRounding]::ToEven) }
 
 $stageDir = [IO.Path]::GetFullPath($StageFixture)

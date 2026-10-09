@@ -1,6 +1,6 @@
 #requires -Version 7.4
 <# .SYNOPSIS
-Packs the stock decoder front for src/emit/Kokoro.DecoderRun16.ps1 (docs/decoder-design.md) from a stock decoder capture.
+Packs the stock decoder front for src/jobs/Kokoro.DecoderRun16.ps1 (docs/decoder-design.md) from a stock decoder capture.
 .DESCRIPTION
 Stock Kokoro dfb907a02bba8152ca444717ca5d78747ccb4bec istftnet.py Decoder.forward up to the generator. Weights W8 per output
 channel (one plane, absmax / 127) of the folded checkpoint tensors, per input LSB of the tensor each conv reads: conv1 and
@@ -28,7 +28,7 @@ $out = [IO.Path]::GetFullPath($OutputDirectory)
 if (-not $out.StartsWith($build, [StringComparison]::OrdinalIgnoreCase) -or (Test-Path -LiteralPath $out)) { throw 'Use a new directory in build/.' }
 Import-Module (Join-Path $PSScriptRoot 'Kokoro.CaptureMath.psm1') -Force
 Import-Module (Join-Path $PSScriptRoot 'Kokoro.CaptureKernels.psm1') -Force
-. (Join-Path $PSScriptRoot '../src/emit/Kokoro.DecoderRun16.ps1')
+. (Join-Path $PSScriptRoot '../src/jobs/Kokoro.DecoderRun16.ps1')
 function Get-Even([double]$x) { [math]::Round($x, [MidpointRounding]::ToEven) }
 
 $cap = Read-KokoroCapture -Directory $CaptureDirectory

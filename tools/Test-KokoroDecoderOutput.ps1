@@ -1,6 +1,6 @@
 #requires -Version 7.4
 <# .SYNOPSIS
-Compares a decoder job's output buffer (src/emit/Kokoro.DecoderRun16.ps1, simulator or phone) with the stock capture.
+Compares a decoder job's output buffer (src/jobs/Kokoro.DecoderRun16.ps1, simulator or phone) with the stock capture.
 .DESCRIPTION
 The decoder output (512-wide croutons at offset 256, 2F frames) is decoded with the generator's DecoderScales; with
 -StopAfterBlock n the buffer holds block n's output (1120-wide croutons, F frames; channels 0..1023) in that block's output

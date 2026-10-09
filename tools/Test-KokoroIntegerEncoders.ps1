@@ -5,7 +5,7 @@ Checks integer AdaIN/Snake instruction fields against the pinned V73 assembler.
 [CmdletBinding()]
 param([Parameter(Mandatory)][string]$OutputDirectory)
 $ErrorActionPreference='Stop'
-. (Join-Path $PSScriptRoot '../src/emit/Hexagon.ps1')
+. (Join-Path $PSScriptRoot '../src/hexagon/Hexagon.ps1')
 $build=[IO.Path]::GetFullPath((Join-Path $PSScriptRoot '../build'))+[IO.Path]::DirectorySeparatorChar
 $out=[IO.Path]::GetFullPath($OutputDirectory)
 if (-not $out.StartsWith($build,[StringComparison]::OrdinalIgnoreCase) -or (Test-Path $out)) { throw 'Choose a new build/ directory.' }

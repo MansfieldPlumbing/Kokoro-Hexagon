@@ -1,5 +1,5 @@
 #requires -Version 7.0
-# Device harness for the emitted VTCM query skel (src/emit/Kokoro.VtcmQueryProbe.ps1).
+# Device harness for the emitted VTCM query skel (src/hexagon/Kokoro.VtcmQueryProbe.ps1).
 # One unsigned-PD session, one handle; method 2 (sc 0x02010100) for application IDs 0..8, each
 # querying that ID's VTCM partition and acquiring all of it with HMX under that application type.
 $root = [IO.Path]::Combine($Activity.FilesDir.AbsolutePath, 'kokoro-fl')

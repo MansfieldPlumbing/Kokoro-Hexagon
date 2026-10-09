@@ -7,7 +7,7 @@
 # parameter records; output telemetry + aligned five-buffer workspace + six coefficients.
 function New-KokoroResBlockRunSteps {
  param([ValidateRange(2,32768)][int]$Frames=7801,[ValidateSet(3,7,11)][int]$Kernel=3,[switch]$ProfileBreakdown,[switch]$BypassAdaInCoefficients,[switch]$BypassStatisticsAndCoefficients,[switch]$BypassHmxCompute)
- foreach($file in 'Kokoro.HmxConv.ps1','Kokoro.HmxConvRun.ps1','Kokoro.AdaInStatistics.ps1','Kokoro.AdaInInteger.ps1','Kokoro.SnakeInteger.ps1','Kokoro.ResidualInteger.ps1') { . (Join-Path $PSScriptRoot $file) }
+ foreach($file in '../kernels/Kokoro.HmxConv.ps1','Kokoro.HmxConvRun.ps1','../kernels/Kokoro.AdaInStatistics.ps1','../kernels/Kokoro.AdaInInteger.ps1','../kernels/Kokoro.SnakeInteger.ps1','../kernels/Kokoro.ResidualInteger.ps1') { . (Join-Path $PSScriptRoot $file) }
  $tiles=[int][math]::Ceiling($Frames/32); $bytes=$tiles*8192
  $outputBytes=192+5*$bytes+6144
  $base=New-KokoroHmxConvRunSteps -Channels 128 -Kernel $Kernel -Dilation 1 -Tiles 8

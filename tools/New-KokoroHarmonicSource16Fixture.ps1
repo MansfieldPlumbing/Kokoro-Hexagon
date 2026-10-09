@@ -3,7 +3,7 @@
 Packs the 16-bit harmonic source and STFT (frame-rate f0 -> har) for Kokoro.HarmonicSource16Run.ps1.
 .DESCRIPTION
 Stock Kokoro dfb907a02bba8152ca444717ca5d78747ccb4bec istftnet.py SineGen / SourceModuleHnNSF (closed form in
-src/emit/Kokoro.HarmonicSource16.ps1) and TorchSTFT.transform. The capture must record SineGen's random draws
+src/kernels/Kokoro.HarmonicSource16.ps1) and TorchSTFT.transform. The capture must record SineGen's random draws
 (tools/reference/capture_stock_generator.py, generator.m_source.l_sin_gen.randn.0).
   f0     the captured frame-rate f0 as int32 Q16 Hz
   z      sum_h w_h g_h from the captured standard normal draws g (l_linear weights w), Q12 halfwords; the job scales it by
@@ -25,7 +25,7 @@ $build = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '../build')) + [IO.Path
 $out = [IO.Path]::GetFullPath($OutputDirectory)
 if (-not $out.StartsWith($build, [StringComparison]::OrdinalIgnoreCase) -or (Test-Path -LiteralPath $out)) { throw 'Use a new directory in build/.' }
 Import-Module (Join-Path $PSScriptRoot 'Kokoro.CaptureMath.psm1') -Force
-foreach ($f in 'Kokoro.StftPolar16.ps1', 'Kokoro.HarmonicStft16Run.ps1', 'Kokoro.HarmonicSource16.ps1', 'Kokoro.HarmonicSource16Run.ps1') { . (Join-Path $PSScriptRoot "../src/emit/$f") }
+foreach ($f in 'kernels/Kokoro.StftPolar16.ps1', 'jobs/Kokoro.HarmonicStft16Run.ps1', 'kernels/Kokoro.HarmonicSource16.ps1', 'jobs/Kokoro.HarmonicSource16Run.ps1') { . (Join-Path $PSScriptRoot "../src/$f") }
 function Get-Even([double]$x) { [math]::Round($x, [MidpointRounding]::ToEven) }
 
 [void][IO.Directory]::CreateDirectory($out)
