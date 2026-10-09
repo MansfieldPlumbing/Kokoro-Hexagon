@@ -202,3 +202,14 @@ phone measurements establish achieved speed and time to first audio.
   operations there; take Pwsh from GitHub at the commit pinned in
   `lib/manifest.json`.
 - Ask before deleting, pushing or rewriting history.
+
+<!-- shared-pwsh-mission:start -->
+## Shared PowerShell library
+
+Run first: `pwsh -NoProfile -File C:/Dev/Pwsh-Development/tools/Get-ProjectContext.ps1 -Project C:/Dev/Kokoro-Hexagon`.
+C:/Dev/Pwsh-Development is the shared library for our PowerShell projects: purpose (`docs/mission/MISSION.md`,
+`TELOS.md`), the projects briefing (`briefings/projects-and-thesis.md`), the reference manuals (`Find-Reference`),
+shared checks (`Test-PowerShellCasePair`) and upstream source search (`Search-Vendor.ps1`). It is read for guidance;
+product inputs still come from this project's pinned sources. It supports this project's deliverable and does not
+replace it.
+<!-- shared-pwsh-mission:end -->
