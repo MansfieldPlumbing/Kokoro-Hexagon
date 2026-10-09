@@ -55,12 +55,17 @@ try {
     foreach ($n in 'activations.bin', 'weights.bin', 'tables.bin') { $files += , @((Join-Path $fixture $n), "$target/$n") }
     foreach ($file in $files) {
         $name = Split-Path $file[1] -Leaf; $destination = $file[1]
+        # Unchanged staged files (same SHA-256 already at the destination) are not pushed again: variant sweeps change
+        # only the skel, not the 30-70 MB of weights.
+        $localHash = (Get-FileHash $file[0]).Hash
+        $present = ((& $run @('shell', "run-as $Package sha256sum $destination 2>/dev/null || true")) -join '').Split(' ')[0]
+        if ($present -eq $localHash) { continue }
         $null = & $run @('push', $file[0], "$temp/$name")
         $existing = (& $run @('shell', "if run-as $Package test -f $destination; then echo yes; fi")) -join ''
         if ($existing -eq 'yes') { $null = & $run @('shell', "run-as $Package cp $destination $backup/$name"); $replaced.Add($destination) }
         $null = & $run @('shell', "run-as $Package cp $temp/$name $destination")
         $deviceHash = (& $run @('shell', 'run-as', $Package, 'sha256sum', $destination) -join '').Split(' ')[0]
-        if ($deviceHash -ne (Get-FileHash $file[0]).Hash) { throw "Staged artifact hash mismatch for $name" }
+        if ($deviceHash -ne $localHash) { throw "Staged artifact hash mismatch for $name" }
     }
     $null = & $run @('shell', "run-as $Package truncate -s 0 $target/receipt.txt")
     $changed = $true
