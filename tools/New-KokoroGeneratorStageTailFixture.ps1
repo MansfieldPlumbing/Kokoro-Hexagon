@@ -52,6 +52,6 @@ $join = { param([string]$n) $parts = @(foreach ($pair in $sets) { , (& $read $pa
 if ($TailFixture) { [IO.File]::WriteAllBytes((Join-Path $out 'expected-pcm-f32.bin'), (& $read $tailDir 'expected-pcm-f32.bin')) }
 else { [IO.File]::WriteAllBytes((Join-Path $out 'expected-f32.bin'), (& $read $stageDir 'expected-f32.bin')) }
 $files = @(Get-ChildItem -LiteralPath $out -File | ForEach-Object { [ordered]@{ Name = $_.Name; Bytes = $_.Length; SHA256 = (Get-FileHash $_.FullName).Hash } })
-[ordered]@{ Graph = $(if ($TailFixture) { 'Generator60x16Tail' } else { 'Generator60x16' }); Frames = $stage.Frames; Tiles = $stage.Tiles; Samples = $(if ($TailFixture) { $tail.Samples } else { 1 }); OutputScales = $stage.OutputScales; StageFixture = $stageDir; TailFixture = $(if ($TailFixture) { $tailDir } else { $null }); Files = $files } |
+[ordered]@{ Graph = $(if ($TailFixture) { 'Generator60x16Tail' } else { 'Generator60x16' }); Frames = $stage.Frames; Tiles = $stage.Tiles; Samples = $(if ($TailFixture) { $tail.Samples } else { 1 }); OutputScales = $stage.OutputScales; StageFixture = $stageDir; TailFixture = $(if ($TailFixture) { $tailDir } else { $null }); NoiseResFixture = $(if ($FrontFixture) { $noiseDir } else { $null }); FrontFixture = $(if ($FrontFixture) { $frontDir } else { $null }); Files = $files } |
     ConvertTo-Json -Depth 4 | Set-Content -LiteralPath (Join-Path $out 'fixture.json') -Encoding utf8NoBOM
 [pscustomobject]@{ Directory = $out; Frames = $stage.Frames }

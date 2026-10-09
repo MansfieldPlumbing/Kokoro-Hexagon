@@ -63,6 +63,73 @@ function Invoke-KokoroEmission {
     [pscustomobject]@{ Kernel = $Kernel; Key = $key; Directory = $dir; LibrarySHA256 = (Get-FileHash -LiteralPath (Join-Path $dir 'libkokoro_generator_tail_skel.so')).Hash }
 }
 
+function New-KokoroJobInput {
+    <#
+    .SYNOPSIS Rebuilds a job input (a fixture tree) for other stock captures by replaying a reference tree's builders.
+    .DESCRIPTION Reads the reference fixture.json recursively. Each node's builder comes from its Graph; its parameters
+    from the recorded keys (captures, calibration captures, child fixtures, margins and settings), passing only the
+    parameters the builder declares. -CaptureMap replaces capture folders (old full path -> new full path); calibration
+    captures stay, so scales stay fixed across sentences. Children are built first, each once. With an empty map the
+    replay must reproduce the reference byte for byte.
+    #>
+    param([Parameter(Mandatory)][string]$Reference, [hashtable]$CaptureMap = @{}, [Parameter(Mandatory)][string]$OutputDirectory)
+    $builders = @{ Decoder16 = 'New-KokoroDecoderFixture.ps1'; Generator60x16 = 'New-KokoroGenerator60x16Fixture.ps1'; GeneratorFront10x16 = 'New-KokoroGeneratorFront10x16Fixture.ps1'
+        GeneratorFront16 = 'New-KokoroGeneratorFront16Fixture.ps1'; Generator60x16Tail = 'New-KokoroGeneratorStageTailFixture.ps1'; GeneratorTail16 = 'New-KokoroGeneratorTail16Fixture.ps1'
+        Generator16Whole = 'New-KokoroGeneratorWholeFixture.ps1'; HarmonicSource16 = 'New-KokoroHarmonicSource16Fixture.ps1'; HarmonicStft16 = 'New-KokoroHarmonicStft16Fixture.ps1' }
+    $childKeys = 'TenFixture', 'SixtyFixture', 'FrontFixture', 'SourceFixture', 'DecoderFixture', 'StageFixture', 'TailFixture', 'NoiseResFixture', 'UpInputScaleFixture'
+    $settingKeys = 'Margin', 'TurnsBits', 'Module', 'Blocks', 'MagnitudeRange', 'MergeUnit'
+    $built = @{}; $out = [IO.Path]::GetFullPath($OutputDirectory); $null = New-Item -ItemType Directory -Force $out
+    # Fixtures built before 2026-10-09 do not record a chained stage's -FrontFixture/-NoiseResFixture. A chained stage's
+    # activations.bin is its front fixture's inputs.bin byte for byte, so the front is found by content in the tree.
+    $fronts = @{}
+    $walk = $null; $walk = { param([string]$d) $j = Get-Content -LiteralPath (Join-Path $d 'fixture.json') -Raw | ConvertFrom-Json
+        $in = Join-Path $d 'inputs.bin'; if ($j.Graph -like 'GeneratorFront*' -and (Test-Path -LiteralPath $in)) { $fronts[(Get-FileHash -LiteralPath $in).Hash] = [IO.Path]::GetFullPath($d) }
+        foreach ($k in $childKeys) { if ($j.PSObject.Properties[$k] -and $j.$k) { & $walk $j.$k } } }
+    & $walk $Reference
+    # With a capture map, every capture the tree records must be mapped: mixing two sentences' captures fails here,
+    # not six builders later (2026-10-09: per-block resblock captures were missed).
+    if ($CaptureMap.Count) {
+        $recorded = [Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
+        $scan = $null; $scan = { param([string]$d) $j = Get-Content -LiteralPath (Join-Path $d 'fixture.json') -Raw | ConvertFrom-Json
+            if ($j.PSObject.Properties['Captures']) { foreach ($c in $j.Captures) { [void]$recorded.Add([IO.Path]::GetFullPath($c.Directory)) } }
+            if ($j.PSObject.Properties['Capture'] -and $j.Capture) { [void]$recorded.Add([IO.Path]::GetFullPath($j.Capture)) }
+            foreach ($k in $childKeys) { if ($j.PSObject.Properties[$k] -and $j.$k) { & $scan $j.$k } } }
+        & $scan $Reference
+        $unmapped = @($recorded | Where-Object { -not $CaptureMap.ContainsKey($_) })
+        if ($unmapped) { throw "Captures recorded in the reference tree but not in -CaptureMap: $($unmapped -join '; ')" }
+    }
+    $map = { param([string]$d) $full = [IO.Path]::GetFullPath($d); if ($CaptureMap.ContainsKey($full)) { $CaptureMap[$full] } else { $full } }
+    $build = $null
+    $build = {
+        param([string]$refDir)
+        $refDir = [IO.Path]::GetFullPath($refDir); if ($built.ContainsKey($refDir)) { return $built[$refDir] }
+        $j = Get-Content -LiteralPath (Join-Path $refDir 'fixture.json') -Raw | ConvertFrom-Json
+        $graph = $j.Graph; if ($graph -eq 'Generator60x16' -and $j.PSObject.Properties['StageFixture']) { $graph = 'Generator60x16Tail' }   # a stage-only chained fixture
+        $tool = $builders[$graph]; if (-not $tool) { throw "No builder known for Graph '$($j.Graph)' ($refDir)." }
+        $declared = [Management.Automation.Language.Parser]::ParseFile((Join-Path $script:Root "tools/$tool"), [ref]$null, [ref]$null).ParamBlock.Parameters | ForEach-Object { $_.Name.VariablePath.UserPath }
+        $a = @{}
+        if ($graph -like 'Generator60x16*' -and $tool -eq 'New-KokoroGeneratorStageTailFixture.ps1' -and -not ($j.PSObject.Properties['FrontFixture'] -and $j.FrontFixture)) {
+            $act = Join-Path $refDir 'activations.bin'; $front = $fronts[(Get-FileHash -LiteralPath $act).Hash]
+            if ($front) { $fj = Get-Content -LiteralPath (Join-Path $front 'fixture.json') -Raw | ConvertFrom-Json; $a.FrontFixture = & $build $front; $a.NoiseResFixture = & $build $fj.NoiseResFixture }
+        }
+        foreach ($k in $childKeys) { if ($j.PSObject.Properties[$k] -and $j.$k -and $k -in $declared) { $a[$k] = & $build $j.$k } }
+        $caps = @(); if ($j.PSObject.Properties['Captures']) { $caps = @($j.Captures | ForEach-Object { $_.Directory }) } elseif ($j.PSObject.Properties['Capture']) { $caps = @($j.Capture) }
+        if ($caps -and 'CaptureDirectory' -in $declared) { $a.CaptureDirectory = @($caps | Select-Object -Unique | ForEach-Object { & $map $_ }) }
+        $cals = @(); if ($j.PSObject.Properties['CalibrationCaptures']) { $cals = @($j.CalibrationCaptures | ForEach-Object { if ($_ -is [string]) { $_ } else { $_.Directory } }) }
+        if (-not $cals -and $j.PSObject.Properties['StftFixture']) { $cals = @((Get-Content -LiteralPath (Join-Path $j.StftFixture 'fixture.json') -Raw | ConvertFrom-Json).CalibrationCaptures | ForEach-Object { if ($_ -is [string]) { $_ } else { $_.Directory } }) }
+        if ($cals -and 'CalibrationDirectory' -in $declared) { $a.CalibrationDirectory = @($cals) }
+        foreach ($k in $settingKeys) { if ($j.PSObject.Properties[$k] -and $null -ne $j.$k -and $k -in $declared) { $a[$k] = $j.$k } }
+        if ($a.ContainsKey('CaptureDirectory') -and (Get-Command (Join-Path $script:Root "tools/$tool")).Parameters['CaptureDirectory'].ParameterType -eq [string]) { $a.CaptureDirectory = $a.CaptureDirectory[0] }
+        $dest = Join-Path $out (Split-Path $refDir -Leaf); if ($refDir.EndsWith('\stft')) { $dest = Join-Path $out 'stft-' }
+        $a.OutputDirectory = $dest
+        Write-Host ("  {0,-44} {1}" -f (Split-Path $refDir -Leaf), $tool) -ForegroundColor DarkGray
+        $null = & (Join-Path $script:Root "tools/$tool") @a
+        $built[$refDir] = $dest
+        $dest
+    }
+    & $build $Reference
+}
+
 function Test-KokoroKernel {
     <#
     .SYNOPSIS Emits kernels (any tools/Emit-HexagonProbe.ps1 -Kernel, with -Parameters) and checks their instruction bytes
@@ -131,12 +198,15 @@ function Invoke-KokoroExperiment {
         $gain = ($r.MedianMs -lt $c.MedianMsCeiling * (1 - $c.NoiseFraction)) -or ($r.PcmSnrDb -gt $c.PcmSnrDbFloor + 0.1)
         $r.Status = if ($misses) { 'discard' } elseif ($gain) { 'keep' } else { 'hold' }
         $r.Reason = $misses -join '; '
+        # A case with no accepted values yet: its first run is a measurement, not a pass; the values it sets are
+        # committed with the case (and Test-KokoroRatchet does not count it as passing).
+        if ($null -eq $c.MedianMsCeiling -or $null -eq $c.PcmSnrDbFloor) { $r.Status = 'measured'; $r.Reason = 'no accepted values yet: this run sets them' }
     } catch { if (-not $r.Reason) { $r.Reason = "$_" } }
     $null = New-Item -ItemType Directory -Force (Split-Path $script:LogPath)
     if (-not (Test-Path $script:LogPath)) { [IO.File]::WriteAllText($script:LogPath, "time`tcommit`tcase`tsetup`tstatus`tmedian_ms`tpcm_db`tclipped`tpcm_sha256`treason`thypothesis`n") }
     $commit = (git -C $script:Root rev-parse --short HEAD 2>$null) + $(if (git -C $script:Root status --porcelain 2>$null) { '+' } else { '' })
     [IO.File]::AppendAllText($script:LogPath, ((@((Get-Date).ToString('s'), $commit, $r.Case, $r.Setup, $r.Status, $r.MedianMs, $r.PcmSnrDb, $r.Clipped, $r.PcmSHA256, $r.Reason, $Hypothesis) -join "`t") + "`n"))
-    $color = @{ keep = 'Green'; hold = 'Gray'; discard = 'Yellow'; crash = 'Red' }[$r.Status]
+    $color = @{ keep = 'Green'; hold = 'Gray'; discard = 'Yellow'; crash = 'Red'; measured = 'Cyan' }[$r.Status]
     Write-Host ("{0,-8} {1}  [{2}]  {3} ms  {4} dB  clip {5}  pcm {6}  {7}" -f $r.Status.ToUpper(), $c.Name, $label, $r.MedianMs, $r.PcmSnrDb, $r.Clipped, $(if ($r.PcmSHA256) { $r.PcmSHA256.Substring(0, 8) }), $r.Reason) -ForegroundColor $color
     if ($r.Status -in 'discard', 'crash') { Write-Host "  ! $($script:Standards.Fail)" -ForegroundColor DarkYellow } elseif ($r.Status -eq 'keep') { Write-Host "  ! $($script:Standards.Pass)" -ForegroundColor DarkYellow }
     [pscustomobject]$r
@@ -168,15 +238,30 @@ function Compare-KokoroSetup {
 }
 
 function Test-KokoroRatchet {
-    <# .SYNOPSIS Runs every ratchet case (or -Case) with its accepted setup and prints one line for the commit message. #>
+    <#
+    .SYNOPSIS Runs every ratchet case (or -Case) with its accepted setup, prints one line for the commit message, writes
+    a JSON receipt beside the experiment log, and returns the receipt. Any regression or crash, and any requested case
+    that is neither run nor marked blocked, throws after the receipt is written (a nonzero exit under pwsh -File).
+    #>
     param([string[]]$Case, [int]$Runs = 3)
-    $cases = Get-KokoroRatchetCase | Where-Object { -not $Case -or $_.Name -in $Case }
+    $all = @(Get-KokoroRatchetCase)
+    $unknown = @($Case | Where-Object { $_ -and $_ -notin $all.Name })
+    $cases = @($all | Where-Object { -not $Case -or $_.Name -in $Case })
     $blocked = @($cases | Where-Object { $_.Blocked })
     foreach ($c in $blocked) { Write-Host ("BLOCKED  {0}  ({1})  {2}" -f $c.Name, $c.Audio, $c.Blocked) -ForegroundColor DarkGray }
     $results = @(foreach ($c in ($cases | Where-Object { -not $_.Blocked })) { Invoke-KokoroExperiment -Case $c.Name -Runs $Runs })
     $bad = @($results | Where-Object Status -in 'discard', 'crash'); $better = @($results | Where-Object Status -eq 'keep')
     $line = "ratchet: {0} run, {1} regressions, {2} improved, {3} blocked" -f $results.Count, $bad.Count, $better.Count, $blocked.Count
-    Write-Host $line -ForegroundColor $(if ($bad.Count) { 'Yellow' } else { 'Green' })
+    $unaccepted = @($results | Where-Object Status -eq 'measured')
+    $receipt = [ordered]@{ Line = $line; Passed = (-not $bad.Count -and -not $unknown.Count -and -not $unaccepted.Count -and $results.Count -gt 0); Date = (Get-Date).ToString('o')
+        Commit = (git -C $script:Root rev-parse HEAD 2>$null); Dirty = [bool](git -C $script:Root status --porcelain 2>$null)
+        Results = @($results | ForEach-Object { [ordered]@{ Case = $_.Case; Setup = $_.Setup; Status = $_.Status; MedianMs = $_.MedianMs; PcmSnrDb = $_.PcmSnrDb; Clipped = $_.Clipped; PcmSHA256 = $_.PcmSHA256; Reason = $_.Reason } })
+        Blocked = @($blocked | ForEach-Object { [ordered]@{ Case = $_.Name; Reason = $_.Blocked } }); UnknownCases = $unknown }
+    $receiptPath = Join-Path (Split-Path $script:LogPath) 'ratchet-latest.json'
+    [IO.File]::WriteAllText($receiptPath, ($receipt | ConvertTo-Json -Depth 5))
+    Write-Host $line -ForegroundColor $(if ($receipt.Passed) { 'Green' } else { 'Yellow' })
+    [pscustomobject]$receipt
+    if (-not $receipt.Passed) { throw "Ratchet failed: $line$(if ($unknown) { "; unknown cases: $($unknown -join ', ')" })$(if (-not $results.Count) { '; no case ran' }) (receipt $receiptPath)" }
 }
 
 function Update-KokoroRatchet {
@@ -195,4 +280,4 @@ function Update-KokoroRatchet {
     Write-Host "Ratchet moved for $($c.Name); commit tools/Kokoro.Ratchet.psd1 with the change and its score line." -ForegroundColor Green
 }
 
-Export-ModuleMember -Function Get-KokoroSourceKey, Get-KokoroRatchetCase, Invoke-KokoroEmission, Test-KokoroKernel, Invoke-KokoroExperiment, Invoke-KokoroSweep, Compare-KokoroSetup, Test-KokoroRatchet, Update-KokoroRatchet
+Export-ModuleMember -Function Get-KokoroSourceKey, Get-KokoroRatchetCase, Invoke-KokoroEmission, Test-KokoroKernel, New-KokoroJobInput, Invoke-KokoroExperiment, Invoke-KokoroSweep, Compare-KokoroSetup, Test-KokoroRatchet, Update-KokoroRatchet
