@@ -8,31 +8,47 @@ The fastest, most efficient Kokoro-82M text-to-speech on Android: stock Kokoro
 weights, authored in PowerShell, with the model math running on the Hexagon
 DSP (HMX and HVX) through machine code this project emits itself.
 
-The scoreboard is end-to-end real-time factor and time to first audio on the
+The benchmark comparison is end-to-end real-time factor and time to first audio on the
 SM8550 and SM8635 phones, against the best other Kokoro build on the same phone.
 
-## Where we stand (2026-10-08)
+## Where we stand (2026-10-09)
 
 Kokoro-Hexagon is notable for how it is made: the model path is
 authored only in PowerShell, which emits the Hexagon machine code and ELF itself. No C, C++, LLVM or QNN produces any of it.
 
-Measured on SM8550, hello-world sentence (1.625 s of audio), receipts in `docs/results/`:
+### Benchmark comparison: published on-device Kokoro-82M results
+
+Speed is audio length divided by synthesis time (higher is faster). Each project measured on its own device, input and
+stage coverage, so read each row with its scope. Rows are what each project published; we have not rerun them.
+
+| Build | Device | Precision | Runs on | Scope timed | Audio | Time | Speed |
+| --- | --- | --- | --- | --- | ---: | ---: | ---: |
+| Kokoro-Hexagon (incomplete) | SM8550 | W8 weights, 16-bit act. | Hexagon HMX + HVX | decoder + generator only, DSP time, no dispatch | 1.625 s | 106.8 ms | 15.2x |
+| kokoro-coreml-ane `484907d` | iPhone 16 Pro | fp16 + int8 palettized | ANE + GPU + CPU | phonemes to PCM, warm | 1.50 s | 132 ms | 11.4x |
+| kokoro-coreml-ane `484907d` | iPhone 16 Pro | fp16 + int8 palettized | ANE + GPU + CPU | phonemes to PCM, warm | 8.07 s | 407 ms | 19.8x |
+| kokoro-coreml-ane `484907d` | iPhone 16 Pro | fp16 + int8 palettized | ANE + GPU + CPU | phonemes to PCM, mean of 6 passages | 1.5-28 s | | 16.9x |
+| kokoro-coreml `a3f1ff2` (paper, table iphone) | iPhone 15 Pro Max | | Core ML, staged | warm median, release | 3 s | 426 ms | 6.6x |
+| kokoro-coreml `a3f1ff2` (paper, table iphone) | iPhone 15 Pro Max | | Core ML, staged | warm median, release | 30 s | 3742 ms | 7.3x |
+| kokoro-offline-tts-android `af85992` | S24 Ultra (SM8650) | | QNN HTP + CPU | generator | | | 3.2-3.8x |
+| kokoro-ios `4d6d1d8` | iPhone 13 Pro | | MLX | warm, release build | | | 3.3x |
+
+What Kokoro-Hexagon does not cover yet: ALBERT, the text encoder and the predictors on the DSP; host dispatch (139-170 ms
+per synchronous invoke against 106.8 ms on the DSP); audio longer than about 2.3 s per job; SM8635. The like-for-like
+run is the six kokoro-coreml-ane benchmark passages (`docs/speed-target.md`).
+### Kokoro-Hexagon stages, SM8550, hello world (1.625 s), receipts in `docs/results/`
 
 | What runs on the DSP | vs stock PyTorch | DSP time | RTF of that part |
 | --- | ---: | ---: | ---: |
-| Whole generator with the harmonic source and STFT, one job, from decoder output and f0 | 37.24 dB PCM | 95.57 ms | 0.059 |
-| Whole generator, captured har | 42.05 dB PCM | 79.71 ms | 0.049 |
+| Decoder + whole generator + harmonic source, one job, from asr, F0 and N | 31.99 dB PCM | 106.8 ms | 0.066 |
+| Decoder alone | 41.54 dB | 14.4 ms | 0.009 |
+| Whole generator with the harmonic source and STFT, from decoder output and f0 | 37.24 dB PCM | 95.57 ms | 0.059 |
 | Harmonic source + STFT alone (f0 to har) | 64.62 dB | 3.95 ms | 0.002 |
 
-Stock against itself with only the source in float64 agrees at 40.83 dB PCM, so 37.24 dB is near what any faithful port
-can reach against stock's float32 output.
+Stock against itself with only the source in float64 agrees at 40.83 dB PCM, so about 40 dB is what a faithful port can
+reach against stock's float32 output.
 
-The best published Kokoro on Android (kokoro-offline-tts-android, S24 Ultra, SM8650, QNN HTP): generator RTF 0.26-0.31 with
-the harmonic source and iSTFT on the CPU, first PCM median 950 ms. That is a different chip and a different split of the
-work, so it is an indication only; a claim of being faster needs both builds on the same phone.
-
-Not yet measured: the decoder, predictors, text encoder and ALBERT on the DSP; whole-model RTF; time to first audio;
-anything on SM8635.
+Not yet measured: the predictors, text encoder and ALBERT on the DSP; whole-model speed with dispatch; time to first
+audio; audio longer than about 2.3 s (decoder and generator keep the whole sequence in VTCM); anything on SM8635.
 
 ## How it is built
 
