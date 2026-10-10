@@ -61,8 +61,8 @@ sentences), not by a new learner.
 | --- | --- |
 | Supplied whole-utterance moments reproduce the one pass exactly | done, bit-exact (`docs/results/decoder-supplied-moments-sm8550-20261010.md`) |
 | Normalization is the decoder's chunking error | done: two chunks 12.21 dB against one pass with their own moments, 61.97 dB with supplied moments |
-| 1. Zero correction reproduces ordinary chunked decoding bit for bit | `-Moments Corrected`, SM8550 |
-| 2. Oracle corrections reproduce the supplied-moments result | `-Moments SuppliedExport` then `Corrected`, SM8550 |
+| 1. Zero correction reproduces ordinary chunked decoding bit for bit | done, bit-exact (`docs/results/decoder-coefficient-correction-sm8550-20261010.md`) |
+| 2. Oracle corrections reproduce the supplied-moments result | done, bit-exact, 61.97 dB stitched; the correction costs about 0.06 ms per chunk |
 | 3. Learned r(t) on held-out sentences: how much of the 12.21-to-61.97 dB gap it closes | after end to end |
 | 4. Runtime: the controller lowered through PSLowering, corrections supplied per chunk | after 3 |
 | Generator sites take the same modes | next DSP change |
