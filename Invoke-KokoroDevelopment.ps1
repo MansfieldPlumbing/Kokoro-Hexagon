@@ -10,6 +10,7 @@ twice, or written as a scratch script, is a missing command: add it here.
 
   Status                      Project state, next step, cases, commands (default). Reads the repository only:
                               no adb, no phone, no network. Phone access is only in Run, Ratchet and Compare.
+  Verify                      Check tracked source, repository hygiene, handoff, Status, tests and optional case pairs.
   Ratchet  [-Case]            Case-pair check, then every unblocked ratchet case on the phone; throws on regression.
   Run      -Case [-Hypothesis] [-Runs]
                               Emit the case's kernel, run it on the phone, print input hashes, receipt and result.
@@ -81,7 +82,7 @@ pwsh -NoProfile -File ./Invoke-KokoroDevelopment.ps1 Run -Case benchmark-0-sm855
 [CmdletBinding()]
 param(
     [Parameter(Position = 0)]
-    [ValidateSet('Status', 'Ratchet', 'Run', 'Emit', 'Check', 'Compare', 'JobInput', 'Capture', 'StockCapture', 'Albert', 'AlbertError', 'AlbertLinear', 'AlbertLayerNorm', 'AlbertGelu', 'AlbertAttention', 'AlbertEmbed', 'AlbertJob', 'Api', 'Find', 'Tools')]
+    [ValidateSet('Status', 'Verify', 'Ratchet', 'Run', 'Emit', 'Check', 'Compare', 'JobInput', 'Capture', 'StockCapture', 'Albert', 'AlbertError', 'AlbertLinear', 'AlbertLayerNorm', 'AlbertGelu', 'AlbertAttention', 'AlbertEmbed', 'AlbertJob', 'Api', 'Find', 'Tools')]
     [string] $Command = 'Status',
     [string] $Case,
     [string] $Kernel,
@@ -137,6 +138,33 @@ function Get-Phone {
 }
 
 function Resume-Phone { $adb = Get-Adb; foreach ($p in Get-Phone) { & $adb -s $p.Serial shell input keyevent KEYCODE_WAKEUP | Out-Null } }
+
+function Test-KokoroCasePairs {
+    $sharedLibrary = Join-Path $Shared 'tools/SharedLibrary.psm1'
+    if (-not (Test-Path -LiteralPath $sharedLibrary)) {
+        return 'SKIP case-pairs: shared library not present'
+    }
+    Import-Module $sharedLibrary
+    $ps = @(git -C $Root ls-files '*.ps1' '*.psm1') | ForEach-Object { Join-Path $Root $_ }
+    if ($LASTEXITCODE -ne 0) { throw 'git ls-files failed.' }
+    $findings = @(Test-PowerShellCasePair -Path $ps -MaxResults ([int]::MaxValue) 6>$null)
+    $known = (Import-PowerShellDataFile (Join-Path $Root 'tools/Kokoro.CasePairs.psd1')).Known
+    $knownKeys = [Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
+    $currentKeys = [Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
+    foreach ($entry in $known) { [void]$knownKeys.Add("$($entry.File)`0$($entry.Names)") }
+    $newFindings = foreach ($finding in $findings) {
+        $key = "$($finding.File)`0$($finding.Names)"
+        [void]$currentKeys.Add($key)
+        if (-not $knownKeys.Contains($key)) { "$($finding.File) $($finding.Names)" }
+    }
+    foreach ($entry in $known) {
+        if (-not $currentKeys.Contains("$($entry.File)`0$($entry.Names)")) {
+            Write-Host "resolved: $($entry.File) $($entry.Names)"
+        }
+    }
+    if ($newFindings) { throw ('new findings: ' + ($newFindings -join '; ')) }
+    "PASS case-pairs: $($findings.Count) known, 0 new"
+}
 
 function Get-NextStep {
     $handoff = Get-ChildItem (Join-Path $Root 'docs') -Filter 'handoff-*.md' | Sort-Object Name | Select-Object -Last 1
@@ -1011,14 +1039,90 @@ switch ($Command) {
         }
         ''
         'Commands (Get-Help ./Invoke-KokoroDevelopment.ps1 -Full):'
-        '  Status Ratchet Run Emit Check Compare JobInput Capture Albert Find Tools'
+        '  Status Verify Ratchet Run Emit Check Compare JobInput Capture Albert Find Tools'
         'Contract: AGENTS.md. Reference manuals: Find-Reference (Pwsh-Development/tools/SharedLibrary.psm1).'
+    }
+    'Verify' {
+        $pwsh = Join-Path $PSHOME $(if ($IsWindows) { 'pwsh.exe' } else { 'pwsh' })
+        $commandValues = ($MyInvocation.MyCommand.Parameters['Command'].Attributes |
+            Where-Object { $_ -is [Management.Automation.ValidateSetAttribute] }).ValidValues
+        $checks = [ordered]@{
+            'parse' = {
+                $files = @(git -C $Root -c core.quotepath=false ls-files '*.ps1' '*.psm1' '*.psd1')
+                if ($LASTEXITCODE -ne 0) { throw 'git ls-files failed.' }
+                $failures = [Collections.Generic.List[string]]::new()
+                foreach ($file in $files) {
+                    $tokens = $null; $parseErrors = $null
+                    $null = [System.Management.Automation.Language.Parser]::ParseFile(
+                        (Join-Path $Root $file), [ref]$tokens, [ref]$parseErrors)
+                    foreach ($parseError in $parseErrors) {
+                        $failures.Add("${file}:$($parseError.Extent.StartLineNumber): $($parseError.Message)")
+                    }
+                }
+                if ($failures.Count) { throw ($failures -join '; ') }
+            }
+            'build-untracked' = {
+                $files = @(git -C $Root ls-files build)
+                if ($LASTEXITCODE -ne 0) { throw 'git ls-files build failed.' }
+                if ($files.Count) { throw ('tracked build files: ' + ($files -join ', ')) }
+            }
+            'size' = {
+                $files = @(git -C $Root -c core.quotepath=false ls-files)
+                if ($LASTEXITCODE -ne 0) { throw 'git ls-files failed.' }
+                $oversized = foreach ($file in $files) {
+                    $length = (Get-Item -LiteralPath (Join-Path $Root $file)).Length
+                    if ($length -gt 1MB) { "${file}: $length bytes" }
+                }
+                if ($oversized) { throw ($oversized -join '; ') }
+            }
+            'handoff' = {
+                $next = Get-NextStep
+                $newest = Get-ChildItem (Join-Path $Root 'docs') -Filter 'handoff-*.md' |
+                    Sort-Object Name | Select-Object -Last 1
+                if (-not $newest -or $next.Handoff -cne $newest.Name) { throw 'Get-NextStep did not return the newest handoff.' }
+                if (-not $next.Steps.Count) { throw "$($next.Handoff) has no next steps." }
+                foreach ($step in $next.Steps) {
+                    if ($step -notmatch '^\d+\. ') { throw "Unnumbered step: $step" }
+                    $namedCommand = $false
+                    foreach ($name in [regex]::Matches($step, '`([^`]+)`')) {
+                        if ($commandValues -ccontains $name.Groups[1].Value) { $namedCommand = $true }
+                    }
+                    if (-not $namedCommand -and $step -cnotmatch 'new command `[A-Za-z][A-Za-z0-9]*`') {
+                        throw "Step has no entrypoint command or new command name: $step"
+                    }
+                }
+            }
+            'status' = {
+                $output = & $pwsh -NoProfile -File $PSCommandPath Status 2>&1 | Out-String
+                if ($LASTEXITCODE -ne 0) { throw "Status exited ${LASTEXITCODE}: $output" }
+            }
+            'Test-DspQueueLayout' = {
+                $output = & $pwsh -NoProfile -File (Join-Path $Root 'tools/Test-DspQueueLayout.ps1') 2>&1 | Out-String
+                if ($LASTEXITCODE -ne 0) { throw "Test-DspQueueLayout exited ${LASTEXITCODE}: $output" }
+            }
+            'Test-SplitBreathGroups' = {
+                $output = & $pwsh -NoProfile -File (Join-Path $Root 'tools/Test-SplitBreathGroups.ps1') 2>&1 | Out-String
+                if ($LASTEXITCODE -ne 0) { throw "Test-SplitBreathGroups exited ${LASTEXITCODE}: $output" }
+            }
+            'case-pairs' = { Test-KokoroCasePairs }
+        }
+        $failed = $false
+        foreach ($name in $checks.Keys) {
+            try {
+                $result = & $checks[$name]
+                if ($name -eq 'case-pairs') { $result } else { "PASS $name" }
+            }
+            catch {
+                $failed = $true
+                'FAIL {0}: {1}' -f $name, ($_.Exception.Message -replace '\s+', ' ')
+            }
+        }
+        if ($failed) { exit 1 }
+        exit 0
     }
     'Ratchet' {
         Resume-Phone
-        Import-Module (Join-Path $Shared 'tools/SharedLibrary.psm1')
-        $ps = @(git -C $Root ls-files '*.ps1' '*.psm1') | ForEach-Object { Join-Path $Root $_ }
-        "case pairs: $(Test-PowerShellCasePair -Path $ps -Quiet)"
+        Test-KokoroCasePairs
         Import-Evaluator
         if ($Case) { Test-KokoroRatchet -Case $Case } else { Test-KokoroRatchet }
     }

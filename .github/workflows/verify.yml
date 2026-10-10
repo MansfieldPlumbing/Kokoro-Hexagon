@@ -1,0 +1,31 @@
+name: verify
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: windows-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+      - shell: pwsh
+        run: |
+          $archive = Join-Path $env:RUNNER_TEMP 'PowerShell-7.7.0-preview.5-win-x64.zip'
+          Invoke-WebRequest -Uri 'https://github.com/PowerShell/PowerShell/releases/download/v7.7.0-preview.5/PowerShell-7.7.0-preview.5-win-x64.zip' -OutFile $archive
+          if ((Get-FileHash -LiteralPath $archive -Algorithm SHA256).Hash -cne 'BA727D1890F7DBCBA05286BC0E61FC9F168DE9BA2A1003C4934BCE8E38BBFD1B') {
+            throw 'PowerShell archive SHA-256 mismatch.'
+          }
+          Expand-Archive -LiteralPath $archive -DestinationPath "$env:RUNNER_TEMP\pwsh"
+      - shell: pwsh
+        run: |
+          $version = & "$env:RUNNER_TEMP\pwsh\pwsh.exe" -NoProfile -Command '$PSVersionTable.PSVersion.ToString()'
+          if ($LASTEXITCODE -ne 0 -or $version -cne '7.7.0-preview.5') {
+            throw "Unexpected PowerShell version: $version"
+          }
+      - shell: pwsh
+        run: '& "$env:RUNNER_TEMP\pwsh\pwsh.exe" -NoProfile -File ./Invoke-KokoroDevelopment.ps1 Verify'

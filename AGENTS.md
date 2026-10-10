@@ -6,11 +6,23 @@ The machine-wide rules in `C:\Dev\AGENTS.md` apply.
 
     pwsh -NoProfile -File ./Invoke-KokoroDevelopment.ps1
 
+Run `Verify` before every commit; CI runs the same command on every push.
+
 It prints the commit, the next step and every command, reading only the repository (no adb or phone; phone access is
 only in `Run`, `Ratchet` and `Compare`) (stock captures, ALBERT error, emit,
 kernel check, phone runs, ratchet, job inputs, search). Do the work through its commands. A step typed by hand twice,
 or written as a scratch script, is a missing command: add it to `Invoke-KokoroDevelopment.ps1` and use it. Scripts under
 `tools/` are being absorbed into it as they are used.
+
+## How agents edit and run
+
+1. Edit files with the editor tool. Never edit source through shell string replacement (ReadAllText,
+   .Replace, .Contains anchors, Set-Content, sed).
+2. Do project work through Invoke-KokoroDevelopment.ps1 commands, not adb, inline pwsh -Command blocks or
+   new scripts. A shell command over about 10 lines, or one typed twice, is a missing command: add it to the
+   entrypoint in the same change and use it.
+3. Number each item in a handoff's "## Next" and name its entrypoint command, or "new command `<Name>`" for a
+   command the item adds. Verify checks this.
 
 ## Mission
 
