@@ -261,6 +261,25 @@ function Get-InterleavePlanesKernel {
     $kk = [Expression]::Lambda([Action[byte[], int, byte[], int, int, byte[]]], $body, [ParameterExpression[]]@($hi, $ho, $lo, $lo2, $n, $dst)).Compile()
     $script:Kernels.InterleavePlanes = $kk; $kk
 }
+function Get-ColumnPeaksKernel {
+    # (float[] v [row][column], float[] add (same shape, or length 0), int columns, double[] peak [column]): peak[c] =
+    # max(peak[c], |v + add|) over the rows. Token-major captures ([T][C]) per channel; with add, the peaks of a sum.
+    if ($script:Kernels.ContainsKey('ColumnPeaks')) { return $script:Kernels.ColumnPeaks }
+    $v = [Expression]::Parameter([float[]], 'v'); $add = [Expression]::Parameter([float[]], 'add'); $cols = [Expression]::Parameter([int], 'cols'); $pk = [Expression]::Parameter([double[]], 'pk')
+    $i = [Expression]::Variable([int], 'i'); $c = [Expression]::Variable([int], 'c'); $x = [Expression]::Variable([double], 'x')
+    $abs = [Math].GetMethod('Abs', [Type[]]@([double])); $max = [Math].GetMethod('Max', [Type[]]@([double], [double]))
+    $value = [Expression]::Convert([Expression]::ArrayIndex($v, $i), [double])
+    $sum = [Expression]::Condition([Expression]::GreaterThan([Expression]::ArrayLength($add), (New-Int 0)),
+        [Expression]::Add($value, [Expression]::Convert([Expression]::ArrayIndex($add, $i), [double])), $value)
+    $inner = [Expression]::Block(
+        [Expression]::Assign($c, [Expression]::Modulo($i, $cols)),
+        [Expression]::Assign($x, [Expression]::Call($abs, $sum)),
+        [Expression]::Assign([Expression]::ArrayAccess($pk, $c), [Expression]::Call($max, [Expression]::ArrayIndex($pk, $c), $x)))
+    $body = [Expression]::Block([ParameterExpression[]]@($i, $c, $x), (New-For $i (New-Int 0) ([Expression]::ArrayLength($v)) $inner))
+    $k = [Expression]::Lambda([Action[float[], float[], int, double[]]], $body, [ParameterExpression[]]@($v, $add, $cols, $pk)).Compile()
+    $script:Kernels.ColumnPeaks = $k; $k
+}
+
 function Get-ChannelStatsKernel {
     # (float[] v [c][f], int channels, double[] absMax, double[] sum, double[] sumSquares): per-channel
     # accumulation in double over f = v.Length / channels values.
@@ -398,4 +417,4 @@ function Get-Conv1dKernel {
     $script:Kernels.Conv1d = $k; $k
 }
 
-Export-ModuleMember -Function Get-FoldConvWeightsKernel, Get-QuantizeRowsKernel, Get-SplitPlanesKernel, Get-LowLowWindowShapedKernel, Get-Conv1dKernel, Get-PackWeightPlanesShapedKernel, Get-LowLowWindowKernel, Get-QuantizeCroutons16Kernel, Get-PackWeightPlanesKernel, Get-Mean3Kernel, Get-Croutons16ErrorKernel, Get-ChannelStatsKernel, Get-DecodeCroutons16Kernel, Get-InterleavePlanesKernel
+Export-ModuleMember -Function Get-FoldConvWeightsKernel, Get-QuantizeRowsKernel, Get-SplitPlanesKernel, Get-LowLowWindowShapedKernel, Get-Conv1dKernel, Get-PackWeightPlanesShapedKernel, Get-LowLowWindowKernel, Get-QuantizeCroutons16Kernel, Get-PackWeightPlanesKernel, Get-Mean3Kernel, Get-Croutons16ErrorKernel, Get-ChannelStatsKernel, Get-ColumnPeaksKernel, Get-DecodeCroutons16Kernel, Get-InterleavePlanesKernel

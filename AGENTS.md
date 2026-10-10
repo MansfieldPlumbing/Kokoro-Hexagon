@@ -14,12 +14,15 @@ or written as a scratch script, is a missing command: add it to `Invoke-KokoroHe
 
 ## Mission
 
-The fastest, most efficient Kokoro-82M text-to-speech on Android: stock Kokoro
-weights, authored in PowerShell, with the model math running on the Hexagon
-DSP (HMX and HVX) through machine code this project emits itself.
+The fastest, most efficient Kokoro-82M text-to-speech on Android, authored in
+PowerShell, with the model math running on the Hexagon DSP (HMX and HVX)
+through machine code this project emits itself.
 
-The benchmark comparison is end-to-end real-time factor and time to first audio on the
-SM8550 and SM8635 phones, against the best other Kokoro build on the same phone.
+The priority is end to end with publishable benchmarks: stock Kokoro from
+phonemes to PCM on the phone, end-to-end real-time factor and time to first
+audio on the SM8550 and SM8635 phones, against the best other Kokoro build on
+the same phone, with receipts anyone can check. After that is published, the
+model itself is open to change (see "Model changes").
 
 ## Where we stand (2026-10-09)
 
@@ -81,8 +84,23 @@ audio; audio longer than about 2.3 s (decoder and generator keep the whole seque
 - Activations keep one HMX-native layout from the decoder through the iSTFT.
   HVX work (AdaIN, Snake, residuals, source, STFT/iSTFT) reads and writes that
   layout, so no stage spends time converting layouts between operators.
-- The model is stock Kokoro, every stage. Changing its architecture (for
-  example replacing AdaIN) is a team decision.
+- Model changes, in two phases:
+  1. Now, until the end-to-end benchmarks are published: the model is stock
+     Kokoro (stock weights and architecture, every stage), so the comparison
+     with other builds is like for like. How each stage is computed is ours:
+     better math is encouraged when its error against stock is measured
+     (Snake by phase turns, gelu_new by a table, softmax by an exp2
+     polynomial), as are fused operators and jobs, scales and affines folded
+     into weights and tables, layouts, operator order and precision plans.
+     Pruning or cutting part of the model without retraining is allowed when it
+     removes an obstacle to end to end: measure its error against stock and
+     label any benchmark that uses it (as quantization already is).
+  2. After that: Kokoro itself may change (a "Kokoro 2.0"): reshaping the
+     graph and its weights, narrowing or pruning the
+     ALBERT FFN, distilling ALBERT, replacing AdaIN, retraining for the integer
+     path. Ship it as a named variant beside stock and measure it against the
+     stock baseline (`d_en`, durations, PCM and listening on held-out text);
+     the stock receipts stay.
 
 ## Order of work
 
@@ -92,7 +110,11 @@ audio; audio longer than about 2.3 s (decoder and generator keep the whole seque
    current one plays. Stock Kokoro already runs each text chunk independently
    (`KPipeline` splits at punctuation, at most 510 phonemes, voice style
    `pack[len(ps)-1]`), so AdaIN statistics computed over each group are stock
-   behavior. Fold AdaIN's style terms into per-channel scale and offset when a
+   behavior at stock's own split points. Splitting shorter text earlier (for
+   time to first audio) changes ALBERT context, AdaIN statistics and the style
+   row: label it an approximation in any comparison with stock. Phonemize the
+   whole text once (`CoreDriver.Run`, as `KPipeline` runs g2p on the whole
+   segment) and split its tokens. Fold AdaIN's style terms into per-channel scale and offset when a
    voice loads. Accumulate each group's mean and variance in the epilogue of
    the conv that produces it, and apply them as one fused multiply-add.
 
@@ -138,7 +160,9 @@ audio; audio longer than about 2.3 s (decoder and generator keep the whole seque
 
 Render independent stock breath groups with exact full-group AdaIN statistics,
 retaining chunk-length voice-style selection. Render the next group while the
-current one plays. Preserve stock equations and the integer whole-DSP contract.
+current one plays. Until the end-to-end benchmarks are published, keep stock
+weights and architecture (any math that computes them, with its error measured
+against stock) and the integer whole-DSP contract.
 Performance targets and competitor results guide investigation; only matched
 phone measurements establish achieved speed and time to first audio.
 

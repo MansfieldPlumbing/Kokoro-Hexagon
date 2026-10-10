@@ -22,9 +22,10 @@ twice, or written as a scratch script, is a missing command: add it here.
   JobInput -Reference -CaptureMap -OutputDirectory
                               Build a test case's job input from stock captures; prints which inputs match the reference.
   Capture  -Path [-Pattern]   List a stock capture's tensors: name, shape, bytes, hash prefix, and its capture spec.
-  StockCapture [-Block albert|decoder|generator] [-Phonemes] [-Voice] [-Seed] [-OutputDirectory]
+  StockCapture [-Block albert|decoder|generator] [-Phonemes] [-Voice] [-Seed] [-PhonemesFrom capture] [-OutputDirectory]
                               Run pinned stock PyTorch Kokoro on Windows (reference only) and record one block's tensors
-                              under build/ with source, checkpoint and voice integrity checks.
+                              under build/ with source, checkpoint and voice integrity checks. -PhonemesFrom reuses the phonemes,
+                              voice and seed of another capture (a calibration set from existing sentences).
   Albert   [-Path]            ALBERT stage map: stock modules (pinned source), checkpoint tensors, captures, DSP kernels.
   AlbertError -Path           Per ALBERT linear (12 repeats of q, k, v, dense, ffn, ffn_output, plus the 128->768 mapping
                               and bert_encoder): output SNR against the stock capture with int8 per-output-channel
@@ -44,6 +45,10 @@ twice, or written as a scratch script, is a missing command: add it here.
   AlbertEmbed [-Path] [-Soc] [-Runs]
                               The ALBERT embeddings (token-id gather + position + type) and their LayerNorm on the phone from the
                               captured token ids, against the captured embeddings output.
+  AlbertJob [-Path test] [-Soc] [-Runs] [-StopAfter operator]
+                              The whole of ALBERT + bert_encoder in one DSP job from the test capture's token ids (default
+                              hello world), every LSB planned from the calibration captures (bench1-3, howareyou): SNR of d_en
+                              and of the stream after mapping_in and after each of the 12 repeats.
   Api      [-Pattern]         Index of every function in this file, src/ and tools/*.psm1: name, file:line, parameters,
                               summary. Start here before reading source.
   Find     -Pattern           Search project source, docs and receipts (not build/).
@@ -76,7 +81,7 @@ pwsh -NoProfile -File ./Invoke-KokoroHexagon.ps1 Run -Case benchmark-0-sm8550 -H
 [CmdletBinding()]
 param(
     [Parameter(Position = 0)]
-    [ValidateSet('Status', 'Ratchet', 'Run', 'Emit', 'Check', 'Compare', 'JobInput', 'Capture', 'StockCapture', 'Albert', 'AlbertError', 'AlbertLinear', 'AlbertLayerNorm', 'AlbertGelu', 'AlbertAttention', 'AlbertEmbed', 'Api', 'Find', 'Tools')]
+    [ValidateSet('Status', 'Ratchet', 'Run', 'Emit', 'Check', 'Compare', 'JobInput', 'Capture', 'StockCapture', 'Albert', 'AlbertError', 'AlbertLinear', 'AlbertLayerNorm', 'AlbertGelu', 'AlbertAttention', 'AlbertEmbed', 'AlbertJob', 'Api', 'Find', 'Tools')]
     [string] $Command = 'Status',
     [string] $Case,
     [string] $Kernel,
@@ -97,6 +102,8 @@ param(
     [string] $Voice = 'af_heart',
     [ValidateRange(1, 100)]
     [int] $Seed = 17,
+    [string] $PhonemesFrom,
+    [string] $StopAfter,
     [string] $Linear,
     [string] $Norm,
     [string] $Repeat,
@@ -182,12 +189,14 @@ function ConvertFrom-KokoroCroutons16 {
     , $v
 }
 
-# Identity table rescaling a stored tensor (LSB Scales[c]) into one conv-input LSB Common (> every scale).
+# Identity table rescaling a stored tensor (LSB Scales[c]) into one conv-input LSB Common: K = Scales[c] / Common * 2^15 as
+# int32 (New-KokoroAdaInLeaky16Steps -Identity computes K x / 2^15 and clamps to int16), so a gain above 1 is allowed: the
+# windows fill their 16 bits from the input's own peak, whatever the LSB the tensor is stored in.
 function ConvertTo-KokoroIdentityTable {
     param([Parameter(Mandatory)][double[]] $Scales, [Parameter(Mandatory)][int] $Channels, [Parameter(Mandatory)][double] $Common)
     $bytes = [byte[]]::new(256L * $Channels / 32)
     for ($c = 0; $c -lt $Scales.Length; $c++) {
-        $k = [long](Get-Even ($Scales[$c] / $Common * 32768)); if ($k -lt 1 -or $k -gt 32767) { throw "Identity K $k out of Q15 range at channel $c" }
+        $k = [long](Get-Even ($Scales[$c] / $Common * 32768)); if ($k -lt 1 -or $k -gt [int]::MaxValue) { throw "Identity K $k out of int32 range at channel $c" }
         [BitConverter]::GetBytes([int]$k).CopyTo($bytes, 256 * [math]::Floor($c / 32) + 4 * ($c % 32))
     }
     , $bytes
@@ -200,28 +209,34 @@ function ConvertTo-KokoroIdentityTable {
 function ConvertTo-KokoroConvPack {
     param([Parameter(Mandatory)][float[]] $Weight, [float[]] $Bias, [Parameter(Mandatory)][int] $Cout, [Parameter(Mandatory)][int] $CinReal,
         [Parameter(Mandatory)][int] $Cin, [int] $K = 1, [Parameter(Mandatory)][double[]] $InScale, [Parameter(Mandatory)][double[]] $Peak,
-        [double] $Margin = 1.25)
+        [double] $Margin = 1.25,
+        # With InScale all 1, the weights are quantized in weight units (the same bytes for any input LSB, so a weight shared
+        # by layers with different input LSBs packs once) and WindowLsb, the conv-input LSB, enters only units, L and bias.
+        [double] $WindowLsb = 1.0)
     if ($Weight.Length -ne $Cout * $CinReal * $K) { throw "Weight has $($Weight.Length) values, expected $Cout x $CinReal x $K" }
     $fold = [float[]]::new($Cout * $Cin * $K); $wMax = [double[]]::new($Cout)
     (Get-FoldConvWeightsKernel).Invoke($Weight, $Cout, $CinReal, $Cin, $K, $InScale, $fold, $wMax)
     $sW = [double[]]::new($Cout); $Ls = [int[]]::new($Cout); $units = [double[]]::new($Cout); $coarse = 0
     for ($o = 0; $o -lt $Cout; $o++) {
         $nd = [math]::Max($Peak[$o] * $Margin / 32767, 1e-30)
-        $sW[$o] = if ($wMax[$o] -gt 0) { $wMax[$o] / 127 } else { $nd / 16384 }
-        $Lo = [math]::Max(2, [int][math]::Ceiling([math]::Log($nd / $sW[$o], 2)))
-        if ($Lo -gt 14) { $Lo = 14; $sW[$o] = $nd / 16384; $coarse++ }
+        $sW[$o] = if ($wMax[$o] -gt 0) { $wMax[$o] / 127 } else { $nd / 16384 / $WindowLsb }
+        $Lo = [math]::Max(2, [int][math]::Ceiling([math]::Log($nd / ($sW[$o] * $WindowLsb), 2)))
+        if ($Lo -gt 14) { $Lo = 14; $sW[$o] = $nd / 16384 / $WindowLsb; $coarse++ }
         $Ls[$o] = $Lo
     }
     $bytes = [long]$Cout * $Cin * $K
     $wh = [byte[]]::new($bytes); $wl = [byte[]]::new($bytes); $sumH = [long[]]::new($Cout); $sumL = [long[]]::new($Cout)
     if ((Get-PackWeightPlanesShapedKernel).Invoke($fold, $Cout, $Cin, $K, $sW, $wh, $wl, $sumH, $sumL) -ne 0) { throw 'Weight overflow' }
     foreach ($h in $sumH) { if ($h -ne 0) { throw 'W8 weights left a high plane' } }
+    # Each accumulator group carries the low byte's mean, 127.5 input LSB times the weight row sum, which cancels only in
+    # their sum; at 2^-L it must leave room in each group's 16-bit window (Measure-KokoroConvWindows checks real inputs).
+    for ($o = 0; $o -lt $Cout; $o++) { $offset = 127.5 * [math]::Abs($sumL[$o]) / [math]::Pow(2, $Ls[$o]); if ($offset -gt 16384) { throw ("Output ${o}: accumulator-group offset {0:N0} at L {1} leaves too little of the 16-bit window: the conv-input windows are too coarse for this input (size them from the input's peak)" -f $offset, $Ls[$o]) } }
     $tables = [byte[]]::new(1024L * $Cout / 32)
     for ($o = 0; $o -lt $Cout; $o++) {
-        $Lo = $Ls[$o]; $units[$o] = $sW[$o] * [math]::Pow(2, $Lo)
+        $Lo = $Ls[$o]; $units[$o] = $sW[$o] * $WindowLsb * [math]::Pow(2, $Lo)
         if ($Peak[$o] -gt 32767 * $units[$o]) { throw "Output ${o}: peak $($Peak[$o]) exceeds the 16-bit window ($(32767 * $units[$o]))" }
         $ob = [int][math]::Floor($o / 32); $cc = $o % 32
-        $bq = if ($Bias) { [long](Get-Even ($Bias[$o] / $sW[$o])) } else { 0L }
+        $bq = if ($Bias) { [long](Get-Even ($Bias[$o] / ($sW[$o] * $WindowLsb))) } else { 0L }
         $lg = @(($Lo - 8), $Lo); $half = foreach ($x in $lg) { if ($x -ge 1) { [long][math]::Pow(2, $x - 1) } else { 0L } }
         $biasG = @((-128L * $sumL[$o] + [long][math]::Pow(2, $lg[0] + 15) + $half[0]), ($bq + [long][math]::Pow(2, $lg[1] + 15) + $half[1]))
         for ($pl = 0; $pl -lt 4; $pl++) {
@@ -234,6 +249,31 @@ function ConvertTo-KokoroConvPack {
         }
     }
     [pscustomobject]@{ Weights = $wl; Tables = $tables; Units = $units; L = "$(($Ls | Measure-Object -Minimum).Minimum)..$(($Ls | Measure-Object -Maximum).Maximum)"; CoarsenedRows = $coarse }
+}
+
+# The two HMX accumulator-group windows of a W8 linear as the conv stores them (docs/generator60x-16bit-design.md "Conv":
+# x = (h - 128) 256 + l in the conv-input LSB; win(A1) = 256 sum (h - 128) Wq / 2^L, win(A2) = (sum l Wq + bq) / 2^L,
+# each through a 16-bit window), for given inputs: how many values leave int16 (the high plane saturates). Weight [o][i],
+# Values token-major [T][Cin] (real units), WindowLsb the conv-input LSB, Units the deployed output LSB per channel.
+function Measure-KokoroConvWindows {
+    param([Parameter(Mandatory)][float[]] $Weight, [Parameter(Mandatory)][float[]] $Bias, [Parameter(Mandatory)][float[]] $Values,
+        [Parameter(Mandatory)][double] $WindowLsb, [Parameter(Mandatory)][double[]] $Units)
+    $cout = $Bias.Length; $cin = $Weight.Length / $cout; $tokens = $Values.Length / $cin
+    $hi = [int[]]::new($Values.Length); $lo = [int[]]::new($Values.Length)
+    for ($i = 0; $i -lt $Values.Length; $i++) { $x = [int][math]::Max(-32767, [math]::Min(32767, [math]::Round($Values[$i] / $WindowLsb))); $hi[$i] = $x -shr 8; $lo[$i] = $x -band 255 }
+    $over1 = 0; $over2 = 0; $worst1 = 0.0; $worst2 = 0.0; $channels = [Collections.Generic.HashSet[int]]::new(); $lValues = [Collections.Generic.List[int]]::new()
+    for ($o = 0; $o -lt $cout; $o++) {
+        $m = 0.0; for ($i = 0; $i -lt $cin; $i++) { $m = [math]::Max($m, [math]::Abs($Weight[$o * $cin + $i])) }; $sW = $m / 127
+        $q = [int[]]::new($cin); for ($i = 0; $i -lt $cin; $i++) { $q[$i] = [int][math]::Round($Weight[$o * $cin + $i] / $sW) }
+        $shift = [int][math]::Round([math]::Log($Units[$o] / ($sW * $WindowLsb), 2)); $lValues.Add($shift); $scale = [math]::Pow(2, $shift)
+        $bq = [math]::Round($Bias[$o] / ($sW * $WindowLsb))
+        for ($k = 0; $k -lt $tokens; $k++) {
+            $g1 = 0L; $g2 = 0L; for ($i = 0; $i -lt $cin; $i++) { $g1 += $hi[$k * $cin + $i] * $q[$i]; $g2 += $lo[$k * $cin + $i] * $q[$i] }
+            $w1 = [math]::Abs(256.0 * $g1 / $scale); $w2 = [math]::Abs(($g2 + $bq) / $scale)
+            $worst1 = [math]::Max($worst1, $w1); $worst2 = [math]::Max($worst2, $w2)
+            if ($w1 -gt 32767) { $over1++; [void]$channels.Add($o) }; if ($w2 -gt 32767) { $over2++; [void]$channels.Add($o) } } }
+    [pscustomobject]@{ Values = $tokens * $cout; OverA1 = $over1; WorstA1 = [math]::Round($worst1); OverA2 = $over2; WorstA2 = [math]::Round($worst2); Channels = $channels.Count
+        LMin = ($lValues | Measure-Object -Minimum).Minimum; LMax = ($lValues | Measure-Object -Maximum).Maximum }
 }
 
 function Get-KokoroSnr([float[]] $Values, [float[]] $Reference) {
@@ -637,6 +677,212 @@ function Test-KokoroAlbertEmbed {
     [pscustomobject]@{ Tokens = $fx.Tokens; Vocab = $fx.Vocab; Soc = $Soc; SnrDb = Get-KokoroSnr $y (Read-KokoroExpected $dir (128 * $fx.Tokens)); MedianMs = $r.MedianMs
         Saturated = $r.Saturated; Skel = $r.Skel; Emission = $r.Emission; Input = $dir }
 }
+
+# Per-column absolute peaks of a token-major [rows][Columns] tensor (System.Numerics.Vector<float> per chunk).
+function Get-KokoroColumnPeaks {
+    param([Parameter(Mandatory)][float[]] $Values, [Parameter(Mandatory)][int] $Columns, [float[]] $Add)
+    $peak = [double[]]::new($Columns)
+    $extra = [float[]]::new(0); if ($Add) { $extra = $Add }        # an empty array returned through $( ) would arrive as $null
+    (Get-ColumnPeaksKernel).Invoke($Values, $extra, $Columns, $peak)
+    , $peak
+}
+function ConvertTo-KokoroChannelMajor([float[]] $Values, [int] $Columns) {
+    $rows = $Values.Length / $Columns; $o = [float[]]::new($Values.Length)
+    for ($r = 0; $r -lt $rows; $r++) { for ($c = 0; $c -lt $Columns; $c++) { $o[$c * $rows + $r] = $Values[$r * $Columns + $c] } }
+    , $o
+}
+
+# Job input for the connected ALBERT job (KokoroAlbert16Run): every LSB planned from the calibration captures (never the
+# test capture), packed as the job's layout says (src/jobs/Kokoro.Albert16Run.ps1 Get-KokoroAlbert16Layout). The test
+# capture supplies only the token ids and the expected outputs (d_en, and the stream after mapping_in and each repeat).
+function New-KokoroAlbertJobInput {
+    param([Parameter(Mandatory)][string] $TestCapture, [Parameter(Mandatory)][string[]] $CalibrationCaptures, [Parameter(Mandatory)][string] $OutputDirectory, [double] $Margin = 1.25)
+    Import-CaptureKernels
+    . (Join-Path $Root 'src/jobs/Kokoro.Albert16Run.ps1')
+    $test = Read-KokoroCapture -Directory $TestCapture
+    $cals = @(foreach ($d in $CalibrationCaptures) { Read-KokoroCapture -Directory $d })
+    if ($test.Json.block -ne 'albert' -or @($cals | Where-Object { $_.Json.block -ne 'albert' }).Count) { throw 'ALBERT captures required (StockCapture -Block albert).' }
+    $idBytes = [IO.File]::ReadAllBytes((Join-Path $test.Root $test.Json.tensors.'bert.input_ids'.file)); $tokens = $idBytes.Length / 4
+    $L = Get-KokoroAlbert16Layout -Tokens $tokens
+    $read = { param($cap, [string] $name) , (Read-KokoroCaptureTensor -Capture $cap -Name $name) }
+    # Calibration peaks: per tensor, or per channel (token-major tensors), optionally of the sum of two tensors.
+    $peakCache = @{}
+    $peakChannels = { param([string] $name, [int] $columns, [string] $plus) $key = "$name|$columns|$plus"; if ($peakCache.ContainsKey($key)) { return , $peakCache[$key] }; $p = [double[]]::new($columns)
+        foreach ($cap in $cals) { $v = & $read $cap $name; $a = if ($plus) { & $read $cap $plus } else { $null }; $q = Get-KokoroColumnPeaks -Values $v -Columns $columns -Add $a; for ($i = 0; $i -lt $columns; $i++) { $p[$i] = [math]::Max($p[$i], $q[$i]) } }
+        $peakCache[$key] = $p; , $p }
+    $peakTensor = { param([string] $name, [int] $columns, [string] $plus) ((& $peakChannels $name $columns $plus) | Measure-Object -Maximum).Maximum }
+    $lsbOf = { param([double] $peak) [math]::Max($peak, 1e-9) * $Margin / 32767 }
+    $parameter = { param([string] $name) , (& $read $test $name) }      # checkpoint tensors (identical in every capture)
+    $layer = 'bert.encoder.albert_layer_groups.0.albert_layers.0'
+    $weights = [byte[]]::new($L.WeightBytes); $tables = [byte[]]::new($L.ParameterBytes)
+    $put = { param([string] $record, [byte[]] $bytes) $rec = $L.Tables[$record]; if ($bytes.Length -gt $rec.Bytes) { throw "$record tables: $($bytes.Length) bytes > $($rec.Bytes)" }; [Array]::Copy($bytes, 0, $tables, $rec.Offset, $bytes.Length) }
+    $packed = @{}; $convUnits = [ordered]@{}
+    # One linear: identity from its input's per-channel LSB, W8 pack (weights checked identical across repeats), tables,
+    # and for Scale / Residual the Q15 ratios into the target LSB. Returns the conv output units.
+    # The conv-input windows take their LSB from the input's own calibration peak (InputPeak): a window that uses few of its
+    # 16 bits leaves the two accumulator groups' low-byte offset (127.5 input LSB times the weight row sum) large next to
+    # 2^L, and their 16-bit windows overflow (ffn.0 with the stream LSB: 432 of 2048 channels, Measure-KokoroConvWindows).
+    $linear = { param([string] $record, [string] $weight, [string] $parameterName, [double[]] $inputLsb, [double[]] $peak, [double] $targetLsb, [double] $inputPeak)
+        $rec = $L.Tables[$record]; $cin = $rec.Cin; $cout = $rec.Cout
+        $common = if ($inputPeak -gt 0) { $inputPeak * $Margin / 32767 } else { ($inputLsb | Measure-Object -Maximum).Maximum * 32768 / 32767 }
+        $ones = [double[]]::new($cin); [Array]::Fill($ones, 1.0)
+        $pack = ConvertTo-KokoroConvPack -Weight (& $parameter "$parameterName.weight") -Bias (& $parameter "$parameterName.bias") -Cout $cout -CinReal $cin -Cin $cin -K 1 -InScale $ones -WindowLsb $common -Peak $peak -Margin $Margin
+        if ($packed.ContainsKey($weight)) { if (-not [Linq.Enumerable]::SequenceEqual([byte[]]$packed[$weight], [byte[]]$pack.Weights)) { throw "$record W8 weights differ from the first repeat" } }
+        else { $packed[$weight] = $pack.Weights; [Array]::Copy($pack.Weights, 0, $weights, $L.Weights[$weight].Offset, $pack.Weights.Length) }
+        $bytes = [Collections.Generic.List[byte]]::new()
+        $bytes.AddRange([byte[]](ConvertTo-KokoroIdentityTable -Scales $inputLsb -Channels $cin -Common $common)); $bytes.AddRange([byte[]]$pack.Tables)
+        if ($rec.Mode -ne 'Conv' -and $targetLsb -gt 0) {   # target 0: units only (the ratios are written by a later pack)
+            $ratios = [byte[]]::new(128L * $cout / 32)
+            for ($o = 0; $o -lt $cout; $o++) { $q = [long](Get-Even ($pack.Units[$o] / $targetLsb * 32768)); if ($q -lt 1 -or $q -gt 32767) { throw "$record output ${o}: Q15 ratio $($pack.Units[$o] / $targetLsb) out of range" }
+                [BitConverter]::GetBytes([uint32]($q -bor ($q -shl 16))).CopyTo($ratios, 128 * [math]::Floor($o / 32) + 4 * ($o % 32)) }
+            $bytes.AddRange($ratios) }
+        & $put $record $bytes.ToArray(); $convUnits[$record] = $pack.Units
+        , $pack.Units }
+    $uniform = { param([int] $n, [double] $v) $a = [double[]]::new($n); [Array]::Fill($a, $v); , $a }
+    # Stream LSB: holds its peaks with margin and exceeds every conv unit added into it (Q15 ratio < 1).
+    $streamLsb = { param([double] $need, [double[]] $units) [math]::Max($need, (($units | Measure-Object -Maximum).Maximum) * 1.0001) }
+    $eps = [double]$test.Json.layerNormEps
+
+    # Embeddings and their LayerNorm.
+    $word = & $parameter 'bert.embeddings.word_embeddings.weight'; $position = & $parameter 'bert.embeddings.position_embeddings.weight'; $type = & $parameter 'bert.embeddings.token_type_embeddings.weight'
+    $posType = [float[]]::new(128 * $tokens)
+    for ($k = 0; $k -lt $tokens; $k++) { for ($c = 0; $c -lt 128; $c++) { $posType[$c * $tokens + $k] = $position[$k * 128 + $c] + $type[$c] } }
+    $sumLsb = ((Get-KokoroAbsMax -Values $word) + (Get-KokoroAbsMax -Values $position) + (Get-KokoroAbsMax -Values $type)) * $Margin / 32767
+    $wordRows = ConvertTo-KokoroEmbeddingRows -Table $word -Channels 128 -Lsb $sumLsb; [Array]::Copy($wordRows, 0, $weights, $L.Weights.word.Offset, $wordRows.Length)
+    $uE = [double[]]@(foreach ($p in (& $peakChannels 'bert.embeddings.output' 128)) { & $lsbOf $p })
+    & $put 'embed.ln' (ConvertTo-KokoroLayerNormTable -Gamma (& $parameter 'bert.embeddings.LayerNorm.weight') -Beta (& $parameter 'bert.embeddings.LayerNorm.bias') -OutScales $uE -InputLsb $sumLsb -Epsilon $eps)
+    # mapping_in -> H (Scale): the stream LSB of repeat 0 also holds h + dense of repeat 0.
+    $mapPeak = & $peakChannels 'bert.encoder.embedding_hidden_mapping_in.output' 768
+    $sH = [double[]]::new(13)
+    # A conv output unit lies in [nd, 2 nd) with nd = peak * Margin / 32767 (ConvertTo-KokoroConvPack, unless its L floor of 2
+    # binds), so a stream that a dense output is added into reserves 2 nd of that dense output (its exact units depend on
+    # this stream LSB); the dense pack then checks the reservation held.
+    $denseBound = { param([int] $repeat) 2 * (& $lsbOf (& $peakTensor "bert.layer.$repeat.attention.dense.output" 768)) * 1.0001 }
+    $need0 = [math]::Max((& $lsbOf ([math]::Max(($mapPeak | Measure-Object -Maximum).Maximum, (& $peakTensor 'bert.layer.0.input' 768 'bert.layer.0.attention.dense.output')))), (& $denseBound 0))
+    # Pack once to learn the units, then fix the target and pack again with it (the units do not depend on the target).
+    $units = & $linear 'mapping' 'mapping' 'bert.encoder.embedding_hidden_mapping_in' $uE $mapPeak 0 (& $peakTensor 'bert.embeddings.output' 128)
+    $sH[0] = & $streamLsb $need0 $units
+    $null = & $linear 'mapping' 'mapping' 'bert.encoder.embedding_hidden_mapping_in' $uE $mapPeak $sH[0] (& $peakTensor 'bert.embeddings.output' 128)
+    $plan = [ordered]@{ SumLsb = $sumLsb; Stream = $null; A1 = [double[]]::new(12); F = [double[]]::new(12); G = [double[]]::new(12) }
+    # Output LSB of every operator (per channel), with the stock tensor it is compared with under -StopAfter.
+    $opUnits = [ordered]@{}; $opUnits['embed.ln'] = $uE; $opUnits['mapping'] = (& $uniform 768 $sH[0])
+    for ($r = 0; $r -lt 12; $r++) {
+        $hLsb = & $uniform 768 $sH[$r]
+        $uq = & $linear "q.$r" 'q' "$layer.attention.query" $hLsb (& $peakChannels "bert.layer.$r.attention.query.output" 768) 0 (& $peakTensor "bert.layer.$r.input" 768)
+        $uk = & $linear "k.$r" 'k' "$layer.attention.key" $hLsb (& $peakChannels "bert.layer.$r.attention.key.output" 768) 0 (& $peakTensor "bert.layer.$r.input" 768)
+        $uv = & $linear "v.$r" 'v' "$layer.attention.value" $hLsb (& $peakChannels "bert.layer.$r.attention.value.output" 768) 0 (& $peakTensor "bert.layer.$r.input" 768)
+        $opUnits["q.$r"] = $uq; $opUnits["k.$r"] = $uk; $opUnits["v.$r"] = $uv; $opUnits["attention.$r"] = $uv; $opUnits["dense.$r"] = (& $uniform 768 $sH[$r])
+        # Attention: k to one LSB per head, q' with q'_c k'_c in one LSB U_h (|q'| <= 2047), as New-KokoroAlbertAttentionInput.
+        $qPeak = & $peakChannels "bert.layer.$r.attention.query.output" 768; $kPeak = & $peakChannels "bert.layer.$r.attention.key.output" 768
+        $headLsb = [double[]]::new(12); $qRatios = [double[]]::new(768); $kRatios = [double[]]::new(768)
+        for ($h = 0; $h -lt 12; $h++) {
+            $km = 0.0; $qm = 0.0; for ($c = 64 * $h; $c -lt 64 * $h + 64; $c++) { $km = [math]::Max($km, $kPeak[$c]); $qm = [math]::Max($qm, $qPeak[$c]) }
+            $headK = $km * $Margin / 32767; $headLsb[$h] = $qm * $Margin / 2047 * $headK
+            for ($c = 64 * $h; $c -lt 64 * $h + 64; $c++) { $kRatios[$c] = $uk[$c] / $headK; $qRatios[$c] = $uq[$c] * $headK / $headLsb[$h] }
+        }
+        & $put "attention.$r" ([byte[]]((ConvertTo-KokoroScaleConvertTable -Ratios $qRatios) + (ConvertTo-KokoroScaleConvertTable -Ratios $kRatios) + (ConvertTo-KokoroAttentionConstants -HeadLsb $headLsb -Tokens $tokens)))
+        # dense (Residual into H, LSB sH[r]); the context keeps v's units.
+        $udense = & $linear "dense.$r" 'dense' "$layer.attention.dense" $uv (& $peakChannels "bert.layer.$r.attention.dense.output" 768) 0 (& $peakTensor "bert.layer.$r.attention.dense.input" 768)
+        if (($udense | Measure-Object -Maximum).Maximum -ge $sH[$r]) { throw ("Repeat {0}: dense units up to {1:E3} reach the stream LSB {2:E3} (dense peak {3:E3}, context window LSB {4:E3})" -f $r, ($udense | Measure-Object -Maximum).Maximum, $sH[$r], (& $peakTensor "bert.layer.$r.attention.dense.output" 768), ((($uv | Measure-Object -Maximum).Maximum) * 32768 / 32767)) }
+        $null = & $linear "dense.$r" 'dense' "$layer.attention.dense" $uv (& $peakChannels "bert.layer.$r.attention.dense.output" 768) $sH[$r] (& $peakTensor "bert.layer.$r.attention.dense.input" 768)
+        # LayerNorm(h + dense) -> A1 (one LSB, holding a1 + ffn_output and above the ffn_output units).
+        $ffnOutPeak = & $peakChannels "bert.layer.$r.ffn_output.output" 768
+        $needA = & $lsbOf ([math]::Max((& $peakTensor "bert.layer.$r.attention.LayerNorm.output" 768), (& $peakTensor "bert.layer.$r.attention.LayerNorm.output" 768 "bert.layer.$r.ffn_output.output")))
+        $geluPeak = & $peakTensor "bert.layer.$r.activation.output" 2048; $plan.G[$r] = & $lsbOf $geluPeak
+        $uffnOut = & $linear "ffn_output.$r" 'ffn_output' "$layer.ffn_output" (& $uniform 2048 $plan.G[$r]) $ffnOutPeak 0 $geluPeak
+        $plan.A1[$r] = & $streamLsb $needA $uffnOut
+        & $put "ln_attention.$r" (ConvertTo-KokoroLayerNormTable -Gamma (& $parameter "$layer.attention.LayerNorm.weight") -Beta (& $parameter "$layer.attention.LayerNorm.bias") -OutScales (& $uniform 768 $plan.A1[$r]) -InputLsb $sH[$r] -Epsilon $eps)
+        # ffn (Scale into F, one LSB above the ffn units), gelu, ffn_output (Residual into A1).
+       $ffnPeak = & $peakChannels "bert.layer.$r.ffn.output" 2048
+        $uffn = & $linear "ffn.$r" 'ffn' "$layer.ffn" (& $uniform 768 $plan.A1[$r]) $ffnPeak 0 (& $peakTensor "bert.layer.$r.attention.LayerNorm.output" 768)
+        $plan.F[$r] = & $streamLsb (& $lsbOf (($ffnPeak | Measure-Object -Maximum).Maximum)) $uffn
+        $null = & $linear "ffn.$r" 'ffn' "$layer.ffn" (& $uniform 768 $plan.A1[$r]) $ffnPeak $plan.F[$r] (& $peakTensor "bert.layer.$r.attention.LayerNorm.output" 768)
+        & $put "gelu.$r" (ConvertTo-KokoroGeluConstants -InputLsb $plan.F[$r] -OutputLsb $plan.G[$r])
+        $opUnits["ln_attention.$r"] = (& $uniform 768 $plan.A1[$r]); $opUnits["ffn.$r"] = (& $uniform 768 $plan.F[$r]); $opUnits["gelu.$r"] = (& $uniform 768 $plan.G[$r]); $opUnits["ffn_output.$r"] = (& $uniform 768 $plan.A1[$r])
+        $null = & $linear "ffn_output.$r" 'ffn_output' "$layer.ffn_output" (& $uniform 2048 $plan.G[$r]) $ffnOutPeak $plan.A1[$r] $geluPeak
+        # LayerNorm(a1 + ffn_output) -> H: the next repeat's stream (holding h + dense of repeat r + 1), or the final output.
+        $needH = & $lsbOf ((& $peakTensor "bert.layer.$r.output" 768))
+        if ($r -lt 11) { $needH = [math]::Max($needH, [math]::Max((& $lsbOf (& $peakTensor "bert.layer.$($r + 1).input" 768 "bert.layer.$($r + 1).attention.dense.output")), (& $denseBound ($r + 1)))) }
+        $sH[$r + 1] = $needH; $opUnits["ln_full.$r"] = (& $uniform 768 $sH[$r + 1])
+        & $put "ln_full.$r" (ConvertTo-KokoroLayerNormTable -Gamma (& $parameter "$layer.full_layer_layer_norm.weight") -Beta (& $parameter "$layer.full_layer_layer_norm.bias") -OutScales (& $uniform 768 $sH[$r + 1]) -InputLsb $plan.A1[$r] -Epsilon $eps)
+    }
+   $dPeak = [double[]]::new(512); foreach ($cap in $cals) { $st = Get-KokoroChannelStats -Values (& $read $cap 'd_en') -Channels 512; for ($i = 0; $i -lt 512; $i++) { $dPeak[$i] = [math]::Max($dPeak[$i], $st.AbsMax[$i]) } }
+    $uD = & $linear 'bert_encoder' 'bert_encoder' 'bert_encoder' (& $uniform 768 $sH[12]) $dPeak 0 (& $peakTensor 'bert.layer.11.output' 768)
+    $plan.Stream = $sH
+    # Inputs, expected outputs.
+    $scales = & $uniform 128 $sumLsb
+    $pt16 = ConvertTo-KokoroCroutons16 -Values $posType -Frames $tokens -Scales $scales; for ($i = 1; $i -lt $pt16.Length; $i += 2) { $pt16[$i] = $pt16[$i] -bxor 0x80 }
+    $jobInput = [byte[]]::new($L.InputBytes); [Array]::Copy($idBytes, $jobInput, $idBytes.Length); [Array]::Copy($pt16, 0, $jobInput, $L.IdBytes, $pt16.Length)
+    $out = [IO.Path]::GetFullPath($OutputDirectory); [void][IO.Directory]::CreateDirectory($out)
+    [IO.File]::WriteAllBytes((Join-Path $out 'activations.bin'), $jobInput); [IO.File]::WriteAllBytes((Join-Path $out 'weights.bin'), $weights); [IO.File]::WriteAllBytes((Join-Path $out 'tables.bin'), $tables)
+    $write = { param([string] $file, [float[]] $v) $b = [byte[]]::new(4 * $v.Length); [Buffer]::BlockCopy($v, 0, $b, 0, $b.Length); [IO.File]::WriteAllBytes((Join-Path $out $file), $b) }
+    & $write 'expected-d_en-f32.bin' (& $read $test 'd_en')
+    & $write 'expected-h0-f32.bin' (ConvertTo-KokoroChannelMajor (& $read $test 'bert.encoder.embedding_hidden_mapping_in.output') 768)
+    for ($r = 0; $r -lt 12; $r++) { & $write "expected-h$($r + 1)-f32.bin" (ConvertTo-KokoroChannelMajor (& $read $test "bert.layer.$r.output") 768) }
+    $fixture = [ordered]@{ Test = $test.Root; Calibration = @($cals | ForEach-Object { $_.Root }); Phonemes = $test.Json.phonemes; Tokens = $tokens; Margin = $Margin
+        StreamLsb = $sH; A1Lsb = $plan.A1; FLsb = $plan.F; GLsb = $plan.G; SumLsb = $sumLsb; DUnits = $uD }
+    $fixture | ConvertTo-Json -Depth 4 | Set-Content (Join-Path $out 'fixture.json') -Encoding utf8NoBOM
+    $opUnits['bert_encoder'] = $uD; $opUnits | ConvertTo-Json -Depth 3 -Compress | Set-Content (Join-Path $out 'operator-units.json') -Encoding utf8NoBOM
+    $convUnits | ConvertTo-Json -Depth 3 -Compress | Set-Content (Join-Path $out 'conv-units.json') -Encoding utf8NoBOM
+    [pscustomobject]$fixture
+}
+
+# The stock tensor each operator's output is compared with (token-major, first 768 channels; a sum where the job adds
+# into the stream), for New-KokoroAlbert16RunSteps -StopAfter.
+function Get-KokoroAlbertOperatorReference {
+    param([Parameter(Mandatory)] $Capture, [Parameter(Mandatory)][string] $Operator)
+    $read = { param([string] $n) , (Read-KokoroCaptureTensor -Capture $Capture -Name $n) }
+    $name, $r = $Operator -split '\.'
+    $plus = { param([float[]] $a, [float[]] $b) $o = [float[]]::new($a.Length); for ($i = 0; $i -lt $a.Length; $i++) { $o[$i] = $a[$i] + $b[$i] }; , $o }
+    $first768 = { param([float[]] $v, [int] $cols) if ($cols -eq 768) { return , $v }; $rows = $v.Length / $cols; $o = [float[]]::new($rows * 768); for ($t = 0; $t -lt $rows; $t++) { [Array]::Copy($v, $t * $cols, $o, $t * 768, 768) }; , $o }
+    switch ($name) {
+        'embed' { return , (& $read 'bert.embeddings.output') }
+        'mapping' { return , (& $read 'bert.encoder.embedding_hidden_mapping_in.output') }
+        'q' { return , (& $read "bert.layer.$r.attention.query.output") }
+        'k' { return , (& $read "bert.layer.$r.attention.key.output") }
+        'v' { return , (& $read "bert.layer.$r.attention.value.output") }
+        'attention' { return , (& $read "bert.layer.$r.attention.dense.input") }
+        'dense' { return , (& $plus (& $read "bert.layer.$r.input") (& $read "bert.layer.$r.attention.dense.output")) }
+        'ln_attention' { return , (& $read "bert.layer.$r.attention.LayerNorm.output") }
+        'ffn' { return , (& $first768 (& $read "bert.layer.$r.ffn.output") 2048) }
+        'gelu' { return , (& $first768 (& $read "bert.layer.$r.activation.output") 2048) }
+        'ffn_output' { return , (& $plus (& $read "bert.layer.$r.attention.LayerNorm.output") (& $read "bert.layer.$r.ffn_output.output")) }
+        'ln_full' { return , (& $read "bert.layer.$r.output") }
+        default { throw "No reference for $Operator" }
+    }
+}
+
+# The connected ALBERT job on the phone: token ids -> d_en, with the stream after mapping_in and after each repeat.
+# Reports SNR against the test capture for d_en and every stream dump (error propagation through the 12 repeats).
+function Test-KokoroAlbertJob {
+    param([string] $TestCapture = (Join-Path $Build 'stock-albert-capture-hello'),
+        [string[]] $CalibrationCaptures = @('bench1', 'bench2', 'bench3', 'howareyou' | ForEach-Object { Join-Path $Build "stock-albert-capture-$_" }),
+        [string] $Soc = 'SM8550', [int] $Runs = 3, [string] $StopAfter)
+    $dir = New-KokoroInputDirectory 'albert/job'
+    $fx = New-KokoroAlbertJobInput -TestCapture $TestCapture -CalibrationCaptures $CalibrationCaptures -OutputDirectory $dir
+    Import-Evaluator
+    $parameters = @{ AlbertTokens = $fx.Tokens }; if ($StopAfter) { $parameters.AlbertStopAfter = $StopAfter }
+    $e = Invoke-KokoroEmission -Kernel KokoroAlbert16Run -Parameters $parameters
+    $run = Invoke-KokoroDeviceJob -EmissionDirectory $e.Directory -InputDirectory $dir -Soc $Soc -Runs $Runs
+    $layout = Get-Content (Join-Path $e.Directory 'runner-layout.json') -Raw | ConvertFrom-Json
+    $slice = { param([long] $at, [long] $n) $b = [byte[]]::new($n); [Array]::Copy($run.Output, $at, $b, 0, $n); , $b }
+    $expected = { param([string] $file, [int] $n) $v = [float[]]::new($n); [Buffer]::BlockCopy([IO.File]::ReadAllBytes((Join-Path $dir $file)), 0, $v, 0, 4 * $n); , $v }
+    $T = $fx.Tokens
+    $d = ConvertFrom-KokoroCroutons16 -Bytes (& $slice $layout.OutputOffset $layout.DBytes) -Frames $T -Units ([double[]]$fx.DUnits)
+    $stream = for ($i = 0; $i -le 12; $i++) {
+        $u = [double[]]::new(768); [Array]::Fill($u, [double]$fx.StreamLsb[$i])
+        $h = ConvertFrom-KokoroCroutons16 -Bytes (& $slice ($layout.DumpOffset + $i * $layout.HBytes) $layout.HBytes) -Frames $T -Units $u
+        Get-KokoroSnr $h (& $expected "expected-h$i-f32.bin" (768 * $T)) }
+    # -StopAfter: dump slot 1 holds that operator's output (first 768 channels), compared with its stock tensor.
+    $stopDb = $null
+    if ($StopAfter -and $StopAfter -notin 'embed.ln', 'bert_encoder') {
+        $units = [double[]]((Get-Content (Join-Path $dir 'operator-units.json') -Raw | ConvertFrom-Json).$StopAfter)[0..767]
+        $got = ConvertFrom-KokoroCroutons16 -Bytes (& $slice ($layout.DumpOffset + $layout.HBytes) $layout.HBytes) -Frames $T -Units $units
+        $stopDb = Get-KokoroSnr $got (ConvertTo-KokoroChannelMajor (Get-KokoroAlbertOperatorReference -Capture (Read-KokoroCapture -Directory $TestCapture) -Operator $StopAfter) 768)
+    }
+    [pscustomobject]@{ Tokens = $T; Soc = $Soc; DEnDb = Get-KokoroSnr $d (& $expected 'expected-d_en-f32.bin' (512 * $T)); StreamDb = $stream; MedianMs = $run.MedianMs
+        Skel = $e.LibrarySHA256.Substring(0, 16); Emission = $e.Key; Input = $dir; StopAfter = $StopAfter; Runs = $run.Lines; StopDb = $stopDb }
+}
 # Every ALBERT LayerNorm after the embeddings, by short name: attention.<r> (input layer.r.input + attention.dense output)
 # and full.<r> (input attention.LayerNorm output + ffn_output output), r = 0..11. Inputs are the stock sums.
 function Get-KokoroAlbertLayerNorm {
@@ -813,6 +1059,10 @@ switch ($Command) {
         }
     }
     'StockCapture' {
+        if ($PhonemesFrom) {
+            $from = Get-Content (Join-Path $(if ([IO.Path]::IsPathRooted($PhonemesFrom)) { $PhonemesFrom } else { Join-Path $Build $PhonemesFrom }) 'capture-spec.json') -Raw | ConvertFrom-Json
+            $Phonemes = $from.phonemes; $Voice = $from.voice; $Seed = $from.seed
+        }
         $manifest = Get-Content (Join-Path $Root 'lib/manifest.json') -Raw | ConvertFrom-Json
         if ($manifest.kokoroSource.commit -cne $StockCommit) { throw 'Stock source pin differs from lib/manifest.json.' }
         $out = if ($OutputDirectory) { [IO.Path]::GetFullPath($OutputDirectory) } else { Join-Path $Build "stock-$Block-capture-$([DateTime]::UtcNow.ToString('yyyyMMddTHHmmssZ'))" }
@@ -922,6 +1172,14 @@ switch ($Command) {
     'AlbertEmbed' {
         $a = @{ Soc = $Soc }; if ($Path) { $a.CaptureDirectory = $(if ([IO.Path]::IsPathRooted($Path)) { $Path } else { Join-Path $Build $Path }) }; if ($Runs) { $a.Runs = $Runs }
         Test-KokoroAlbertEmbed @a | Format-List
+    }
+    'AlbertJob' {
+        $a = @{ Soc = $Soc }; if ($StopAfter) { $a.StopAfter = $StopAfter }; if ($Path) { $a.TestCapture = $(if ([IO.Path]::IsPathRooted($Path)) { $Path } else { Join-Path $Build $Path }) }; if ($Runs) { $a.Runs = $Runs }
+        $r = Test-KokoroAlbertJob @a
+        'd_en {0} dB   {1} ms   tokens {2}   skel {3}' -f $r.DEnDb, $r.MedianMs, $r.Tokens, $r.Skel
+        'stream after mapping_in and each repeat (dB): ' + ($r.StreamDb -join '  ')
+        if ($r.StopAfter) { 'stopped after {0}: {1} dB against stock' -f $r.StopAfter, $r.StopDb }
+        $r.Runs | ForEach-Object { '  ' + $_ }
     }
     'Api' { Get-KokoroApi -Pattern $Pattern | Format-Table -AutoSize -Wrap | Out-String -Width 220 }
     'Find' {
