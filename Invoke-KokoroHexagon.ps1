@@ -142,8 +142,31 @@ function Get-NextStep {
     $handoff = Get-ChildItem (Join-Path $Root 'docs') -Filter 'handoff-*.md' | Sort-Object Name | Select-Object -Last 1
     $lines = Get-Content $handoff.FullName
     $start = ($lines | Select-String -Pattern '^## Next' | Select-Object -First 1).LineNumber
-    $steps = if ($start) { $lines[$start..($lines.Count - 1)] | Where-Object { $_ -match '^\d+\.\s' } | Select-Object -First 3 } else { @() }
-    [pscustomobject]@{ Handoff = $handoff.Name; Steps = $steps }
+    # A numbered item runs on over indented continuation lines; join them so no step is cut mid-sentence.
+    $steps = [Collections.Generic.List[string]]::new()
+    if ($start) {
+        foreach ($line in $lines[$start..($lines.Count - 1)]) {
+            if ($line -match '^\d+\.\s') { $steps.Add($line.Trim()) }
+            elseif ($steps.Count -and $line -match '^\s+\S') { $steps[-1] += ' ' + $line.Trim() }
+            elseif ($steps.Count -and $line -notmatch '^\s*$') { break }
+        }
+    }
+    [pscustomobject]@{ Handoff = $handoff.Name; Steps = @($steps | Select-Object -First 3) }
+}
+
+# Word-wraps text to the console width (120 when redirected) with a hanging indent; never truncates.
+function Format-Wrapped([string] $Text, [int] $Indent = 2, [int] $Hang = 0, [string] $Lead = '') {
+    $width = 120
+    if (-not [Console]::IsOutputRedirected) { try { $w = [Console]::WindowWidth; if ($w -ge 40) { $width = $w - 1 } } catch { } }
+    $line = (' ' * $Indent) + $Lead
+    $pad = ' ' * ($Indent + $Hang)
+    $fresh = $true
+    foreach ($word in $Text -split '\s+' | Where-Object { $_ }) {
+        if (-not $fresh -and $line.Length + 1 + $word.Length -gt $width) { $line; $line = $pad + $word }
+        else { $line += $(if ($fresh) { $word } else { ' ' + $word }) }
+        $fresh = $false
+    }
+    $line
 }
 
 function Show-InputHashes([string] $Directory) {
@@ -981,10 +1004,10 @@ switch ($Command) {
         "                $dirty uncommitted"
         $next = Get-NextStep
         "Next            ($($next.Handoff))"
-        $next.Steps | ForEach-Object { "  $_" }
+        $next.Steps | ForEach-Object { Format-Wrapped $_ -Hang 3 }
         'Ratchet cases'
         (Import-PowerShellDataFile (Join-Path $Root 'tools/Kokoro.Ratchet.psd1')).Cases | ForEach-Object {
-            '  {0,-32} {1}' -f $_.Name, $(if ($_.Blocked) { 'blocked: ' + $_.Blocked.Substring(0, [Math]::Min(70, $_.Blocked.Length)) } else { $_.Kernel })
+            Format-Wrapped $(if ($_.Blocked) { 'blocked: ' + $_.Blocked } else { $_.Kernel }) -Hang 33 -Lead ('{0,-32} ' -f $_.Name)
         }
         ''
         'Commands (Get-Help ./Invoke-KokoroHexagon.ps1 -Full):'
@@ -1186,7 +1209,7 @@ switch ($Command) {
         if (-not $Pattern) { throw 'Find needs -Pattern.' }
         $files = @(git -C $Root ls-files) | Where-Object { $_ -match '\.(ps1|psm1|psd1|md|json|py)$' } | ForEach-Object { Join-Path $Root $_ }
         Select-String -Path $files -Pattern $Pattern | Select-Object -First 60 |
-            ForEach-Object { '{0}:{1}: {2}' -f [IO.Path]::GetRelativePath($Root, $_.Path), $_.LineNumber, $_.Line.Trim().Substring(0, [Math]::Min(140, $_.Line.Trim().Length)) }
+            ForEach-Object { Format-Wrapped $_.Line.Trim() -Indent 0 -Hang 4 -Lead ('{0}:{1}: ' -f [IO.Path]::GetRelativePath($Root, $_.Path), $_.LineNumber) }
     }
     'Tools' {
         $groups = [ordered]@{
