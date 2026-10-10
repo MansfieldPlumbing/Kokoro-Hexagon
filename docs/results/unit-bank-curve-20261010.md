@@ -44,6 +44,24 @@ Findings:
   the selected units), and keep `t_en` unit selection as it is. The 10,000 and 43,679-sentence points are being
   captured.
 
+## Full curve with the right-weighted TargetCost (see `substitution-refinement-20261010.md`)
+
+Case-sensitive symbol matching. The capture completed: 43,679 sentences, 2,429,833 units, 2.4 GB, 4.3 h. Mean
+log-mel DTW distance over the nine held-out sentences (floor 0.64):
+
+| Bank | Units | Contexts | Full | `t_en` only | + N | + N + F0 | Selection time, 9 targets |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| 100 | 5,576 | 1,943 | 6.20 | | | | |
+| 1,000 | 55,152 | 4,600 | 5.50 | 1.64 | 2.98 | 4.76 | 5.4 s |
+| 10,000 | 556,417 | 7,792 | 5.14 | 1.28 | 2.68 | 4.44 | 18.1 s |
+| 43,679 | 2,429,833 | 9,862 | 4.90 | 1.17 | 2.70 | 4.32 | 43.3 s |
+
+- Sampled `t_en` keeps converging toward the floor (1.64, 1.28, 1.17).
+- Per-unit N and F0 do not improve with bank size. Their combined penalty stays about 3.1-3.2 at every size, so
+  growing the bank cannot fix prosody. It needs planning: phrase groups and grammar for F0, and the cause of N's
+  penalty at unit level.
+- Interpreted selection grows with the bank (43 s for nine sentences at full size), which is why it has to be lowered.
+
 ## Phrase-prosody transplant (1,000-sentence bank)
 
 Sampled `asr` and durations fixed. A phrase donor per target is chosen in PowerShell from target-visible features
