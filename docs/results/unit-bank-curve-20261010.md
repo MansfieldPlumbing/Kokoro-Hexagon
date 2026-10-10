@@ -44,4 +44,23 @@ Findings:
   the selected units), and keep `t_en` unit selection as it is. The 10,000 and 43,679-sentence points are being
   captured.
 
+## Phrase-prosody transplant (1,000-sentence bank)
+
+Sampled `asr` and durations fixed. A phrase donor per target is chosen in PowerShell from target-visible features
+only: the stress pattern over vowels, commas and final punctuation (edit distance 0-2 for these nine). Its contour is
+mapped onto the target's speech region by normalized time (no syllable anchoring).
+
+| Variant | F0 | N | Mean distance |
+| --- | --- | --- | ---: |
+| A | per unit | per unit | 5.74 |
+| B | donor phrase contour on unit voicing | per unit | 5.58 |
+| B2 | unit residual + donor phrase trend (21 half-frames) | per unit | 5.57 |
+| C | as B | donor phrase N | 8.59 |
+| C2 | as B2 | unit residual + donor phrase trend | 7.82 |
+
+- Phrase-level F0 helps a little (0.17, 7 of 9 sentences). Normalized-time warping is crude, and syllable-anchored
+  warping is the next test.
+- N must not come from a phrase donor, even as a slow trend. N is tied to its segments, so its 1.4 penalty has to be
+  addressed at unit level (joins and context), not with phrase templates.
+
 Scripts (experiment, not yet entrypoint commands): `build/unit-bank/scripts/`.
