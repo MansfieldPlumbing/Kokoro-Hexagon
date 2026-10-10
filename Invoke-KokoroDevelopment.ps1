@@ -109,13 +109,17 @@ param(
     [string] $Norm,
     [string] $Repeat,
     [ValidateSet('SM8550', 'SM8635')]
-    [string] $Soc = 'SM8550'
+    [string] $Soc = 'SM8550',
+    # Pwsh-Development checkout; CI passes its own (checkout cannot write outside the workspace).
+    [string] $SharedRoot,
+    # Verify: a missing shared library is a failure, not a skip (CI).
+    [switch] $RequireShared
 )
 
 $ErrorActionPreference = 'Stop'
 $Root = $PSScriptRoot
 $Build = Join-Path $Root 'build'
-$Shared = [IO.Path]::GetFullPath((Join-Path $Root '../Pwsh-Development'))
+$Shared = if ($SharedRoot) { [IO.Path]::GetFullPath($SharedRoot) } else { [IO.Path]::GetFullPath((Join-Path $Root '../Pwsh-Development')) }
 $StockSource = 'C:/Dev/.vendor/kokoro'
 $StockCommit = 'dfb907a02bba8152ca444717ca5d78747ccb4bec'   # lib/manifest.json kokoroSource.commit
 # Python runs only stock PyTorch Kokoro, to record reference tensors (AGENTS.md).
@@ -142,6 +146,7 @@ function Resume-Phone { $adb = Get-Adb; foreach ($p in Get-Phone) { & $adb -s $p
 function Test-KokoroCasePairs {
     $sharedLibrary = Join-Path $Shared 'tools/SharedLibrary.psm1'
     if (-not (Test-Path -LiteralPath $sharedLibrary)) {
+        if ($RequireShared) { throw "shared library not present at $Shared" }
         return 'SKIP case-pairs: shared library not present'
     }
     Import-Module $sharedLibrary

@@ -13,6 +13,13 @@ jobs:
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: MansfieldPlumbing/Pwsh-Development
+          ref: a80a28b3bbf82b11f733075e28033d5da9f5d66b
+          token: ${{ secrets.PWSH_DEVELOPMENT_TOKEN }}
+          path: Pwsh-Development
+          persist-credentials: false
       - shell: pwsh
         run: |
           $archive = Join-Path $env:RUNNER_TEMP 'PowerShell-7.7.0-preview.5-win-x64.zip'
@@ -28,4 +35,4 @@ jobs:
             throw "Unexpected PowerShell version: $version"
           }
       - shell: pwsh
-        run: '& "$env:RUNNER_TEMP\pwsh\pwsh.exe" -NoProfile -File ./Invoke-KokoroDevelopment.ps1 Verify'
+        run: '& "$env:RUNNER_TEMP\pwsh\pwsh.exe" -NoProfile -File ./Invoke-KokoroDevelopment.ps1 Verify -SharedRoot "$env:GITHUB_WORKSPACE/Pwsh-Development" -RequireShared'
