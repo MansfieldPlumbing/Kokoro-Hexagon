@@ -73,6 +73,13 @@ Listening (one listener, h0 "I can eat a peach for hours." and h5 "The children 
 all-features prediction with predicted durations, against stock): "sounds different, but not worse". The distance
 to stock counts a different but natural intonation as error, so it overstates the quality loss of this path.
 
+Independent recognition: the four WAVs (stock and table-driven, h0 and h5) were played through a speaker into
+ChatGPT's voice input, with no reference text. It transcribed 30 of 30 words correctly, for both versions of both
+sentences. The scope is narrow: two sentences, one recognizer, and a language model that favors plausible English.
+A pitch track of the PCM shows the table-driven F0 as a staircase of per-token levels, with isolated spikes (about
+380 Hz and 320 Hz) on short voiced tokens and a higher sentence start than stock (about 300 vs 210-240 Hz). Stock's
+own spikes in that plot are octave errors in the pitch estimate.
+
 With predicted durations this is the whole front end with no learned network at playback. At 4.68 it beats the
 unit-sampled prosody path (4.90 at the full bank) but is far from the 2.64 per-token ceiling. Next: state (previous
 token's values), a lookahead window, and per-token slope, as a damped command-response controller (Fujisaki /
