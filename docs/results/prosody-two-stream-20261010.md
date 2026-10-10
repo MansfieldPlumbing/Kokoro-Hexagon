@@ -69,6 +69,10 @@ predicted token level on the units' voicing):
 | + L1, R1, R2 | 4.53 | 5.14 |
 | All features | 4.06 | 4.68 |
 
+Listening (one listener, h0 "I can eat a peach for hours." and h5 "The children laughed at the funny little dog.",
+all-features prediction with predicted durations, against stock): "sounds different, but not worse". The distance
+to stock counts a different but natural intonation as error, so it overstates the quality loss of this path.
+
 With predicted durations this is the whole front end with no learned network at playback. At 4.68 it beats the
 unit-sampled prosody path (4.90 at the full bank) but is far from the 2.64 per-token ceiling. Next: state (previous
 token's values), a lookahead window, and per-token slope, as a damped command-response controller (Fujisaki /
