@@ -55,7 +55,7 @@ twice, or written as a scratch script, is a missing command: add it here.
   Tools                       The older scripts under tools/, grouped; to be absorbed into this file as they are used.
 
 LIBRARY
-  . ./Invoke-KokoroHexagon.ps1      loads every function below as an API without running a command (Api lists them).
+  . ./Invoke-KokoroDevelopment.ps1      loads every function below as an API without running a command (Api lists them).
 
 ANATOMY OF A DSP JOB (read these, in this order, instead of exploring)
   1. Kernel bodies     src/kernels/*.ps1: New-Kokoro*Steps return step lists (one per HVX/HMX routine; the header comment
@@ -73,10 +73,10 @@ ANATOMY OF A DSP JOB (read these, in this order, instead of exploring)
   7. Compare           decode (ConvertFrom-KokoroCroutons16) and Get-KokoroSnr against the capture.
 
 .EXAMPLE
-pwsh -NoProfile -File ./Invoke-KokoroHexagon.ps1
-pwsh -NoProfile -File ./Invoke-KokoroHexagon.ps1 AlbertLinear -Linear query.0
-pwsh -NoProfile -File ./Invoke-KokoroHexagon.ps1 Api -Pattern 'Conv|Croutons'
-pwsh -NoProfile -File ./Invoke-KokoroHexagon.ps1 Run -Case benchmark-0-sm8550 -Hypothesis 'layout slack'
+pwsh -NoProfile -File ./Invoke-KokoroDevelopment.ps1
+pwsh -NoProfile -File ./Invoke-KokoroDevelopment.ps1 AlbertLinear -Linear query.0
+pwsh -NoProfile -File ./Invoke-KokoroDevelopment.ps1 Api -Pattern 'Conv|Croutons'
+pwsh -NoProfile -File ./Invoke-KokoroDevelopment.ps1 Run -Case benchmark-0-sm8550 -Hypothesis 'layout slack'
 #>
 [CmdletBinding()]
 param(
@@ -993,7 +993,7 @@ function Get-KokoroApi {
     }
 }
 
-# Dot-sourced (. ./Invoke-KokoroHexagon.ps1): the functions above are the API; no command runs.
+# Dot-sourced (. ./Invoke-KokoroDevelopment.ps1): the functions above are the API; no command runs.
 if ($MyInvocation.InvocationName -eq '.') { return }
 
 switch ($Command) {
@@ -1010,7 +1010,7 @@ switch ($Command) {
             Format-Wrapped $(if ($_.Blocked) { 'blocked: ' + $_.Blocked } else { $_.Kernel }) -Hang 33 -Lead ('{0,-32} ' -f $_.Name)
         }
         ''
-        'Commands (Get-Help ./Invoke-KokoroHexagon.ps1 -Full):'
+        'Commands (Get-Help ./Invoke-KokoroDevelopment.ps1 -Full):'
         '  Status Ratchet Run Emit Check Compare JobInput Capture Albert Find Tools'
         'Contract: AGENTS.md. Reference manuals: Find-Reference (Pwsh-Development/tools/SharedLibrary.psm1).'
     }

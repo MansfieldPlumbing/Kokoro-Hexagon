@@ -5,7 +5,7 @@
 #   i = a >> 8, f = a & 255                256 intervals; q(0) = 0 and q(Range) rounds to 0, so i + 1 wraps to 0
 #   q = Q[i] + ((Q[i+1] - Q[i]) f >> 8)    Q17 table (|q| < 0.25), the Kokoro.SnakeInteger.ps1 vlut16 lookup
 #   y = clamp(q31(max(x, 0) 2^16, Ka) - q31(q 2^16, Kb), +-32767)   Ka = sIn / sOut * 2^15, Kb = 2^-2 / sOut
-# Table and interpolation: Invoke-KokoroHexagon.ps1 New-KokoroGeluTable / Invoke-KokoroGeluTable (the host model of this
+# Table and interpolation: Invoke-KokoroDevelopment.ps1 New-KokoroGeluTable / Invoke-KokoroGeluTable (the host model of this
 # arithmetic). Lookup: V73 HVX PRM 80-N2040-54 Rev AB pp.227-230 (vlut16), table shuffled as Kokoro.SnakeInteger.ps1.
 # Structure after MNN 43bc0686 htp-ops-lib/src/dsp/unary_ops.cc (table activation); arithmetic integer.
 #

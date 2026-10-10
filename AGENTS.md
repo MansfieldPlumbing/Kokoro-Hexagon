@@ -4,12 +4,12 @@ The machine-wide rules in `C:\Dev\AGENTS.md` apply.
 
 ## Start here
 
-    pwsh -NoProfile -File ./Invoke-KokoroHexagon.ps1
+    pwsh -NoProfile -File ./Invoke-KokoroDevelopment.ps1
 
 It prints the commit, the next step and every command, reading only the repository (no adb or phone; phone access is
 only in `Run`, `Ratchet` and `Compare`) (stock captures, ALBERT error, emit,
 kernel check, phone runs, ratchet, job inputs, search). Do the work through its commands. A step typed by hand twice,
-or written as a scratch script, is a missing command: add it to `Invoke-KokoroHexagon.ps1` and use it. Scripts under
+or written as a scratch script, is a missing command: add it to `Invoke-KokoroDevelopment.ps1` and use it. Scripts under
 `tools/` are being absorbed into it as they are used.
 
 ## Mission
@@ -240,7 +240,7 @@ phone measurements establish achieved speed and time to first audio.
 <!-- shared-pwsh-mission:start -->
 ## Shared PowerShell library
 
-Project entrypoint: `./Invoke-KokoroHexagon.ps1` (above). Machine-wide context:
+Project entrypoint: `./Invoke-KokoroDevelopment.ps1` (above). Machine-wide context:
 `pwsh -NoProfile -File C:/Dev/Pwsh-Development/tools/Get-ProjectContext.ps1 -Project C:/Dev/Kokoro-Hexagon`.
 C:/Dev/Pwsh-Development is the shared library for our PowerShell projects: purpose (`docs/mission/MISSION.md`,
 `TELOS.md`), the projects briefing (`briefings/projects-and-thesis.md`), the reference manuals (`Find-Reference`),

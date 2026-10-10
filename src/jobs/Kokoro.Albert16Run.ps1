@@ -2,7 +2,7 @@
 # Stock ALBERT operators at 16 bits on the DSP, one job per operator for checks against the stock capture. Kokoro
 # dfb907a02bba8152ca444717ca5d78747ccb4bec model.py (bert, bert_encoder); transformers modeling_albert.py (AlbertLayer,
 # AlbertEmbeddings). Each job runs inside New-KokoroWrappedJobSteps (Kokoro.WrappedJob.ps1). Host-side packing:
-# Invoke-KokoroHexagon.ps1 (ConvertTo-KokoroConvPack, ConvertTo-KokoroLayerNormTable).
+# Invoke-KokoroDevelopment.ps1 (ConvertTo-KokoroConvPack, ConvertTo-KokoroLayerNormTable).
 #
 # Linear: one nn.Linear over tokens as a kernel-1 Conv1d with tokens as frames, reusing the decoder's bodies unchanged:
 #   New-KokoroAdaInLeaky16Steps -Identity (stored tensor -> conv-input windows), New-KokoroHmxConvPlanesLoopSteps -Kernel 1

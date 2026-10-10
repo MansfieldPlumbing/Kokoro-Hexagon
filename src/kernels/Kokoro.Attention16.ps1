@@ -3,7 +3,7 @@
 # scores = q k^T / 8, softmax over the T keys (one unpadded sentence: no key is masked except the tile padding),
 # context = p v. transformers modeling_albert.py AlbertSdpaAttention (scaled_dot_product_attention). Structure after
 # MNN 43bc0686 htp-ops-lib/src/dsp/attention_common.hpp (row max, exp and sum, one reciprocal per row, scale);
-# arithmetic integer on HVX (Invoke-KokoroHexagon.ps1 Measure-KokoroAlbertAttention -Mode A12K16 models the precision).
+# arithmetic integer on HVX (Invoke-KokoroDevelopment.ps1 Measure-KokoroAlbertAttention -Mode A12K16 models the precision).
 #
 # Units: q is rescaled beforehand (New-KokoroScaleConvert16Steps) so that q'_c k_c has one LSB U_h per head, |q'| <= 2047;
 # k is 16-bit with any per-channel LSB; v keeps its per-channel LSB, which the context inherits.
