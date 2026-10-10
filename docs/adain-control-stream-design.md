@@ -27,10 +27,18 @@ sentences), not by a new learner.
 
 | Part | What it is |
 | --- | --- |
-| Representation | r(t), a time-indexed control trajectory with k channels (k measured, not assumed to be 1) |
+| Representation | r(t), a one-dimensional temporal control stream: a scalar first (k = 1), with more channels only if held-out measurements require them |
 | Actuation | Per AdaIN site, the DSP adds P_site * v(chunk) to the coefficients (`Km`) that the site computed from the chunk's own moments; P_site (channels x k) lives in `tables.bin` with the voice records; v(chunk) is r(t) aggregated for that chunk, in the job input |
 | Teacher | Stock math on our front end's own assembled inputs and noise draws: uninterrupted pass against chunked execution, recording per chunk and per site the coefficient difference |
 | Runtime | Deterministic PowerShell/CoreCLR over precomputed knowledge, lowered through PSLowering; no neural predictor, no reference decoder run at playback |
+
+With k = 1 each site reads the same scalar through its own per-channel sensitivities: K_c = K0_c + a_c v and
+M_c = M0_c + b_c v, where K0 and M0 are the coefficients the site computes from the chunk (or, in the end state, the
+voice's base coefficients) and a_c, b_c are fitted offline from teacher pairs. PowerShell learns the temporal behavior;
+the DSP spreads it across channels with fixed-point multiply-adds. The first test is whether the teacher's per-chunk
+coefficient corrections lie close to one such scalar relationship per site, scored by decoder output SNR against the
+one pass. Within a chunk v is constant (stock AdaIN holds coefficients constant over the normalized sequence);
+modulating them per frame is time-varying conditioning, a separate extension measured on its own.
 
 ## What it is not
 
@@ -66,7 +74,7 @@ sentences), not by a new learner.
 | 3. Learned r(t) on held-out sentences: how much of the 12.21-to-61.97 dB gap it closes | after end to end |
 | 4. Runtime: the controller lowered through PSLowering, corrections supplied per chunk | after 3 |
 | Generator sites take the same modes | next DSP change |
-| 5. End state: the front end supplies each site's coefficients directly; the DSP computes no moments | see below |
+| 5. End state: the front end supplies each site's coefficients directly; the DSP computes no moments | DSP side done: `-Moments Direct` bit-exact, decoder chunk 13.4 -> 2.9 ms (`docs/results/decoder-direct-coefficients-sm8550-20261010.md`); the front end producing them is open |
 
 ## End state: coefficients from the front end
 

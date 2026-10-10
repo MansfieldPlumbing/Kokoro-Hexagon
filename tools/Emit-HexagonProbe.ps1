@@ -32,7 +32,7 @@ param(
     [switch] $DecoderRuntimeFrames,
     # KokoroDecoder16Run AdaIN statistics: Accumulate, Export (records and coefficients after the output), Supplied (records
     # from the input) or Corrected (coefficient deltas from the input added to the accumulated coefficients).
-    [ValidateSet('Accumulate','Export','Supplied','SuppliedExport','Corrected')][string] $DecoderMoments = 'Accumulate',
+    [ValidateSet('Accumulate','Export','Supplied','SuppliedExport','Corrected','Direct')][string] $DecoderMoments = 'Accumulate',
     [ValidateSet(1, 3, 5)][int] $ConvDilation = 1,
     [switch] $ConvOutputPlanes,
     [ValidateSet(1,2)][int] $ConvWeightPlanes = 1,

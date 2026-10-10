@@ -18,8 +18,8 @@ output (512 channels, 130 frames), decoded with the fixture's `DecoderScales`.
   lose 0.04 dB. The decoder's chunking error is the AdaIN statistics.
 - The supplied path is exact: the whole utterance with its own exported records reproduces the one pass byte for byte.
 - A 41-frame chunk takes 13.4 ms against 14.4-14.6 ms for 65 frames, so most of a decoder job's time does not scale with
-  frames. The decoder streams its 31.7 MB of W8 weights through VTCM on every job; that this is the fixed cost is
-  inferred from the timings, not measured. Chunk size, or weights kept across chunks, decides the per-chunk cost.
+  frames. Corrected by `decoder-direct-coefficients-sm8550-20261010.md`: the fixed cost is the AdaIN coefficient path
+  (about 10.5 ms of a 13.4 ms chunk), not weight streaming as inferred here.
 - Not covered: the generator's AdaIN sites (still accumulated per job), moments from the bank or the linguistic stream
   instead of a one-pass export, and carried edge state instead of overlap.
 

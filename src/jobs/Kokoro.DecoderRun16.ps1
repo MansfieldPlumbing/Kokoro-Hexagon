@@ -90,8 +90,9 @@ function Add-KokoroDecoder16JobSteps {
         # accumulating, so a chunk normalizes as the whole utterance; Corrected accumulates, then adds each site's Km delta
         # (Layout.Input.KmDeltas + site KmOffset, int32 wrapping) to its coefficients. SuppliedExport runs as Supplied and
         # also exports each site's local coefficients (from this job's own moments) where Export puts coefficients: the
-        # supplied minus local difference is the exact Corrected delta on the supplied trajectory.
-        [ValidateSet('Accumulate','Export','Supplied','SuppliedExport','Corrected')][string]$Moments='Accumulate')
+        # supplied minus local difference is the exact Corrected delta on the supplied trajectory. Direct loads each site's
+        # absolute coefficients from the KmDeltas region and computes no moments and no coefficients.
+        [ValidateSet('Accumulate','Export','Supplied','SuppliedExport','Corrected','Direct')][string]$Moments='Accumulate')
     if($RuntimeFrames -and $StopAfterBlock -ge 0){throw 'Dump points need a fixed frame count'}
     if($Moments -ne 'Accumulate' -and $StopAfterBlock -ge 0){throw 'Exported or supplied moments need the whole decoder'}
     $L=Get-KokoroDecoder16Layout -Frames $Frames
@@ -131,7 +132,13 @@ function Add-KokoroDecoder16JobSteps {
     $adain={param([long]$x,[int]$width,[string]$fr,[string]$tiles,[long]$records,[string]$output,[long]$hi,[long]$lo)
         $site=$L.MomentSites[$siteIndex.Value]; $siteIndex.Value++
         if($site.Width -ne $width -or $site.Count -ne $fr){throw "AdaIN site $($site.Name) does not match the run order"}
-        $local=$Moments -ne 'Supplied'; $supplied=$Moments -in 'Supplied','SuppliedExport'
+        $local=$Moments -notin 'Supplied','Direct'; $supplied=$Moments -in 'Supplied','SuppliedExport'
+        if($Moments -eq 'Direct'){
+            # The site's coefficients from the input (the KmDeltas region holds absolute Km): no moments, no derivation.
+            & $dma 18 ($sm+$small.Km) $InputBase ($InputOffset+$L.Input.KmDeltas+$site.KmOffset) $site.KmBytes
+            & $ptr 0 18 $x; & $ptr 1 18 $hi; & $ptr 2 18 $lo; & $ptr 3 18 ($sm+$small.Km); & $cnt 4 $tiles; & $call "dec_leaky_$($output.ToLower())_$width"; & $sync
+            return
+        }
         if($local){
             & $fill ($sm+$small.Moments) (16L*$width) 0
             & $ptr 0 18 $x; & $ptr 1 18 ($sm+$small.Moments); & $cnt 2 $tiles; & $call "dec_moments_$width"; & $sync
@@ -295,7 +302,7 @@ function Get-KokoroDecoder16Bodies {
 # -StopAfterBlock).
 function New-KokoroDecoder16RunSteps {
     param([Parameter(Mandatory)][ValidateRange(2,4096)][int]$Frames,[ValidateRange(-1,4)][int]$StopAfterBlock=-1,[ValidateSet('Block','Shortcut','Conv1','Windows1','Pool','Coeff')][string]$DumpPoint='Block',[switch]$RuntimeFrames,
-        [ValidateSet('Accumulate','Export','Supplied','SuppliedExport','Corrected')][string]$Moments='Accumulate')
+        [ValidateSet('Accumulate','Export','Supplied','SuppliedExport','Corrected','Direct')][string]$Moments='Accumulate')
     . (Join-Path $PSScriptRoot 'Kokoro.ResBlockRun.ps1')
     foreach($file in '../kernels/Kokoro.HmxConvPlanes.ps1','../kernels/Kokoro.PlaneCombine.ps1','../kernels/Kokoro.AdaInMoments16.ps1','../kernels/Kokoro.AdaInTurnsCoefficients.ps1','../kernels/Kokoro.AdaInLeaky16.ps1','../kernels/Kokoro.Decoder16.ps1','../hexagon/Kokoro.DmaCopy.ps1') { . (Join-Path $PSScriptRoot $file) }
     $L=Get-KokoroDecoder16Layout -Frames $Frames
@@ -308,7 +315,7 @@ function New-KokoroDecoder16RunSteps {
     $base=@($wrapperSource.Steps);$start=-1
     for($i=0;$i -lt $base.Count;$i++){if($base[$i].Op -eq 'label' -and $base[$i].Name -eq 'connected_job'){$start=$i;break}}
     if($start -lt 0){throw 'Connected wrapper anchor changed'}
-    $inBytes=if($Moments -eq 'Corrected'){$L.CorrectedInputBytes}elseif($Moments -in 'Supplied','SuppliedExport'){$L.SuppliedInputBytes}elseif($RuntimeFrames){$L.RuntimeInputBytes}else{$L.InputBytes}; $minimum=@(4,$inBytes,$L.WeightBytes,$L.ParameterBytes,$outputBytes)
+    $inBytes=if($Moments -in 'Corrected','Direct'){$L.CorrectedInputBytes}elseif($Moments -in 'Supplied','SuppliedExport'){$L.SuppliedInputBytes}elseif($RuntimeFrames){$L.RuntimeInputBytes}else{$L.InputBytes}; $minimum=@(4,$inBytes,$L.WeightBytes,$L.ParameterBytes,$outputBytes)
     $oldVtcm=[long]$wrapperSource.Layout.VtcmBytes; $patched=@{request=0;check=0}
     for($i=0;$i -lt $start;$i++){
         $step=$base[$i].Clone()
