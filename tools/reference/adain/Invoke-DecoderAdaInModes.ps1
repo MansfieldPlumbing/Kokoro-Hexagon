@@ -62,7 +62,9 @@ function Invoke-Decoder([string]$mode, [string]$dir) {
 # a - b per int32, wrapping (vadd-w wraps).
 function Get-Delta([byte[]]$a, [byte[]]$b) { $d = [byte[]]::new($a.Length); for ($i = 0; $i -lt $a.Length; $i += 4) { $v = ([long][BitConverter]::ToInt32($a, $i) - [long][BitConverter]::ToInt32($b, $i)) -band 0xffffffffL; [BitConverter]::GetBytes([uint32]$v).CopyTo($d, $i) }; , $d }
 function Get-Snr([float[]]$ref, [float[]]$x) { $s = 0.0; $e = 0.0; for ($i = 0; $i -lt $ref.Length; $i++) { $s += [double]$ref[$i] * $ref[$i]; $d = [double]$ref[$i] - $x[$i]; $e += $d * $d }; if ($e -eq 0) { [double]::PositiveInfinity } else { 10 * [math]::Log10($s / $e) } }
-function Test-Same([byte[]]$x, [byte[]]$y) { if ([Linq.Enumerable]::SequenceEqual($x, $y)) { 'bit-exact' } else { $n = 0; for ($i = 0; $i -lt $x.Length; $i += 2) { if ($x[$i] -ne $y[$i] -or $x[$i + 1] -ne $y[$i + 1]) { $n++ } }; "DIFFERS in $n halfwords" } }
+# Any parity difference makes the script exit 1 (a gate, not only a report).
+$script:ParityFailures = 0
+function Test-Same([byte[]]$x, [byte[]]$y) { if ([Linq.Enumerable]::SequenceEqual($x, $y)) { 'bit-exact' } else { $script:ParityFailures++; $n = 0; for ($i = 0; $i -lt $x.Length; $i += 2) { if ($x[$i] -ne $y[$i] -or $x[$i + 1] -ne $y[$i + 1]) { $n++ } }; "DIFFERS in $n halfwords" } }
 
 $whole = Invoke-Decoder 'Export' (New-Input 'whole-export' 'Export' (New-ChunkActivations 0 $F) $F)
 $counts = @($lay.MomentSites | ForEach-Object { if ($_.Count -eq 'F2') { 2 * $F } else { $F } })
@@ -82,7 +84,8 @@ if ($DirectOnly) {
     $st = [float[]]::new(512 * 2 * $F)
     for ($c = 0; $c -lt 512; $c++) { for ($t = 0; $t -lt 2 * $F; $t++) { $p = if ($t -lt $mid) { $parts[0] } else { $parts[1] }; $st[$c * 2 * $F + $t] = $p.V[$c * 2 * $p.N + $t - 2 * $p.A] } }
     'Direct stitched: {0:N2} dB vs one pass on the DSP' -f (Get-Snr $wf $st)
-    return
+    if ($script:ParityFailures) { Write-Error "$($script:ParityFailures) parity check(s) failed"; exit 1 }
+    exit 0
 }
 $stitched = @{}
 foreach ($ab in @(@($a0, $b0), @($a1, $b1))) {
@@ -100,3 +103,4 @@ foreach ($kind in 'Own', 'Oracle') {
     for ($c = 0; $c -lt 512; $c++) { for ($t = 0; $t -lt 2 * $F; $t++) { $p = if ($t -lt $mid) { $stitched[$a0] } else { $stitched[$a1] }; $st[$c * 2 * $F + $t] = $p.$kind[$c * 2 * $p.N + $t - 2 * $p.A] } }
     '{0,-6} stitched: {1:N2} dB vs one pass on the DSP' -f $kind, (Get-Snr $wf $st)
 }
+if ($script:ParityFailures) { Write-Error "$($script:ParityFailures) parity check(s) failed"; exit 1 }

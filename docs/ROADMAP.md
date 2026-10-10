@@ -14,9 +14,9 @@ warm and cold with the same text. The reference bar is the best other Kokoro bui
 
 | Track | Where | Work | Gate |
 | --- | --- | --- | --- |
-| 1. Model on the DSP (main line; nothing below may block it) | this repository | VTCM layout per SoC, per-stage SNR trace, rest of the generator, decoder, predictors and ALBERT, then speech on both phones from precomputed phonemes; host-side timing breakdown | bit-exact against the V73 simulator, stage SNR against stock PyTorch captures, phone runs with artifact hashes |
-| 2. PSLowering | github.com/MansfieldPlumbing/PSLowering | counterexample-guided percept refinement: provenance-graph store, keep/revert loop, ordered gates, behavioral receipts and compiled output in the consolidated project | its current verification entrypoint; use the project's documented invocation |
-| 3. Text front end | this repository | typed spans (Money, Time, Cardinal, ...), reversible projection, SMA parse and non-executing bind, breath-group planner; consumes PSLowering's compiled output by pinned commit | phoneme parity with misaki (lexicon mode) and accuracy on human labels |
+| 1. Model on the DSP (main line; nothing below may block it) | this repository | Active (2026-10-10): speech end to end through the network-free front end (phonemizer, unit bank, PowerShell-learned tables) driving the DSP decoder and generator, in the order of the newest handoff's Next. Stock reference track: ALBERT, text encoder and predictors on the DSP for the stock phase-1 benchmark rows, after the variant speaks; host-side timing breakdown | bit-exact against the V73 simulator, stage SNR against stock PyTorch captures, phone runs with artifact hashes |
+| 2. PSPerception (refinement) and PSLowering (compilation) | github.com/MansfieldPlumbing/PSPerception, github.com/MansfieldPlumbing/PSLowering | PSPerception: counterexample-guided percept refinement (`Invoke-PerceptRefine`, `src/Refine.ps1`): observations, contradictions, proposals, keep/revert, retained percepts. PSLowering: compiles admitted typed PowerShell into CoreLib-only assemblies (`UnitKernels` at `1afabe05`) | each project's own verification entrypoint |
+| 3. Text front end | this repository | typed spans (Money, Time, Cardinal, ...), reversible projection, SMA parse and non-executing bind, breath-group planner; consumes PSPerception's refined output compiled by PSLowering, by pinned commit | phoneme parity with misaki (lexicon mode) and accuracy on human labels |
 | 4. Short bursts and first audio | this repository, PyTorch on Windows | Campaign 1 measurements below | listening plus measured gap closure |
 
 ## Track 1: VTCM
@@ -60,10 +60,10 @@ loads BART), run offline in an isolated Python 3.11 environment built from misak
 
 | | Question | Method |
 | --- | --- | --- |
-| E1 | Does refinement beat ordinary learning, and does SMA add information? | Variants on the dataset's own 90/10 split: A most-frequent; B Gorman-style per-word linear classifier; C PSLowering's refinement with B's features; D refinement with SMA features only; E refinement with both; F misaki with spaCy; G a perceptron port. Human labels are the truth. Primary score: macro accuracy across homographs with a paired bootstrap over homographs. C vs B tests refinement; E vs C tests SMA. Lives in PSLowering. |
+| E1 | Does refinement beat ordinary learning, and does SMA add information? | Variants on the dataset's own 90/10 split: A most-frequent; B Gorman-style per-word linear classifier; C PSPerception refinement with B's features; D refinement with SMA features only; E refinement with both; F misaki with spaCy; G a perceptron port. Human labels are the truth. Primary score: macro accuracy across homographs with a paired bootstrap over homographs. C vs B tests refinement; E vs C tests SMA. Lives in PSLowering. |
 | E2 | Why do short chunks sound worse? | Render a phrase alone and inside its sentence; swap in AdaIN statistics, durations and pitch, or the style row one at a time; report the fraction of the gap each closes. |
 | E3 | Is there only a small number of ways context shapes the rendering? | ALBERT context reach versus right-hand context; per AdaIN site, principal components for 99% of per-channel statistics and how well cheap-stage outputs predict them. |
-| E4 | Where can the first burst start? | Boundary, lookahead and VTCM fit, learned by PSLowering's refinement once track 1 speaks. |
+| E4 | Where can the first burst start? | Boundary, lookahead and VTCM fit, learned by PSPerception refinement once track 1 speaks. |
 
 Automated branches are fixed before the run and recorded in its receipt; they choose
 what to measure next and never adopt a change.

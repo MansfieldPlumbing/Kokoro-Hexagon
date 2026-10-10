@@ -38,6 +38,13 @@ audio on the SM8550 and SM8635 phones, against the best other Kokoro build on
 the same phone, with receipts anyone can check. After that is published, the
 model itself is open to change (see "Model changes").
 
+Active path (decided 2026-10-10; the newest `docs/handoff-*.md` Next sets the order): speech end to end on the phone
+through the network-free front end, in which the phonemizer, the unit bank and PowerShell-learned tables replace ALBERT,
+the text encoder and the predictors at playback and drive the DSP decoder and generator, chunked, with AdaIN steered by
+the front end (`docs/adain-control-stream-design.md`). Its benchmarks are labeled as the network-free Kokoro variant.
+The stock whole-model-on-DSP path below remains the reference track for the stock phase-1 benchmark rows; it does not
+block the active path.
+
 ## Where we stand (2026-10-09)
 
 Kokoro-Hexagon is notable for how it is made: the model path is

@@ -94,4 +94,5 @@ chunk plus one chunk's DSP time.
 
 ## Order
 
-End to end first (handoff Next item 2: generator modes, chunked `Speak`, dspqueue, AAudio), then the learned stream.
+End to end first (`docs/handoff-20261010.md` Next items 1-4: first speech through the DSP job, generator modes,
+selector, chunked `Speak` with dspqueue and AAudio), then the learned stream (item 5).
