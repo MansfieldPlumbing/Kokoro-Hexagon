@@ -66,7 +66,16 @@ sentences), not by a new learner.
 | 3. Learned r(t) on held-out sentences: how much of the 12.21-to-61.97 dB gap it closes | after end to end |
 | 4. Runtime: the controller lowered through PSLowering, corrections supplied per chunk | after 3 |
 | Generator sites take the same modes | next DSP change |
-| Later: skip local moments accumulation when the stream supplies coefficients directly | separate numerical validation |
+| 5. End state: the front end supplies each site's coefficients directly; the DSP computes no moments | see below |
+
+## End state: coefficients from the front end
+
+Trained on a large enough corpus and lowered to CoreCLR, the front end supplies each AdaIN site's coefficients (`Km`)
+for the utterance, and the DSP loads them instead of accumulating moments. The learning target is then the one-pass
+coefficients themselves, per utterance and site; they do not depend on where chunks are cut, so chunk boundaries drop
+out of the learning problem. Corrections on the chunk's own coefficients (steps 1-3) come first: they keep the local
+statistics as an anchor while the stream is imperfect. Each form is measured against the one pass on held-out
+sentences, and the DSP time saved by skipping moments is measured per site (decoder and generator separately).
 
 ## Streaming shape
 
