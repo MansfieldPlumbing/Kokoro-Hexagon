@@ -22,6 +22,10 @@ __pycache__/
 **/project.assets.json
 **/project.nuget.cache
 
+# Preserved training data, kept outside build/ so build cleanup cannot remove it; verify against
+# tools/reference/unit-bank/bank-manifest.json. Backed up off-machine, not in git.
+/data/
+
 # Qualcomm-header-derived reference data: kept local pending license review
 lib/qairt-2.46/
 
