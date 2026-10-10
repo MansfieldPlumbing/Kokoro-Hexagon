@@ -60,7 +60,7 @@ loads BART), run offline in an isolated Python 3.11 environment built from misak
 
 | | Question | Method |
 | --- | --- | --- |
-| E1 | Does refinement beat ordinary learning, and does SMA add information? | Variants on the dataset's own 90/10 split: A most-frequent; B Gorman-style per-word linear classifier; C PSPerception refinement with B's features; D refinement with SMA features only; E refinement with both; F misaki with spaCy; G a perceptron port. Human labels are the truth. Primary score: macro accuracy across homographs with a paired bootstrap over homographs. C vs B tests refinement; E vs C tests SMA. Lives in PSLowering. |
+| E1 | Does refinement beat ordinary learning, and does SMA add information? | Variants on the dataset's own 90/10 split: A most-frequent; B Gorman-style per-word linear classifier; C PSPerception refinement with B's features; D refinement with SMA features only; E refinement with both; F misaki with spaCy; G a perceptron port. Human labels are the truth. Primary score: macro accuracy across homographs with a paired bootstrap over homographs. C vs B tests refinement; E vs C tests SMA. Lives in PSPerception. |
 | E2 | Why do short chunks sound worse? | Render a phrase alone and inside its sentence; swap in AdaIN statistics, durations and pitch, or the style row one at a time; report the fraction of the gap each closes. |
 | E3 | Is there only a small number of ways context shapes the rendering? | ALBERT context reach versus right-hand context; per AdaIN site, principal components for 99% of per-channel statistics and how well cheap-stage outputs predict them. |
 | E4 | Where can the first burst start? | Boundary, lookahead and VTCM fit, learned by PSPerception refinement once track 1 speaks. |

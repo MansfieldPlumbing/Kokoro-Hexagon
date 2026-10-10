@@ -40,6 +40,21 @@ coefficient corrections lie close to one such scalar relationship per site, scor
 one pass. Within a chunk v is constant (stock AdaIN holds coefficients constant over the normalized sequence);
 modulating them per frame is time-varying conditioning, a separate extension measured on its own.
 
+Two separate experiments, in this order: representation sufficiency (can one shared scalar per chunk, through fitted
+per-site sensitivities, reproduce the oracle corrections well enough, scored by decoder output against the one pass)
+and then learnability (can the front end's features determine that scalar on held-out sentences). Training a
+controller is pointless until the first passes.
+
+The learning family is knowledge distillation into a deterministic acoustic program: stock Kokoro is the teacher,
+`tools/reference/unit-bank/Measure-ProsodyFeatures.ps1` is the baseline learner (frequency-weighted backoff tables over
+nine context keys, at least five observations per key), and the held-out split judges every feature. PSPerception
+refinement (`tools/reference/unit-bank/Invoke-UnitRefine.ps1`) proposes features but is not the judge: its admitted
+combination reached 55.4% held-out against 68.0% for R2, which came from the independent substitution evaluation
+(`docs/results/substitution-refinement-20261010.md`). AdaIN targets are per-site coefficient vectors, not per-token
+scalars, so the learner's targets and aggregation need extending, not just one more column. The teacher captures use
+voice `af_heart`; learned values and coefficient targets carry their voice. The trained tables are held in memory by
+the experiment and not yet persisted as a runtime bank (handoff Next item 3).
+
 ## What it is not
 
 - Not a per-unit database of AdaIN moments (about 94 GB at int16 for the 2.43M-unit bank).
