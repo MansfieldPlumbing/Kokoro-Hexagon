@@ -20,7 +20,7 @@ HMX handles convolutions and matrix multiplies; HVX handles the remaining model 
 
 The connected synthesis job produced an entire sentence on the S23's SM8550 and
 played it through the phone speaker using AAudio. All three runs produced identical
-PCM. Listening was accepted, with a separate observation that the opening “I” was weak.
+PCM.
 
 This is measured, audible speech faster than real time. Windows prepared the
 front-end inputs for this run; the phone executed the decoder, harmonic source,
@@ -28,7 +28,7 @@ generator and PCM playback. The 148.495 ms measures DSP execution. Median host
 invoke time was 179.790 ms. Complete text-to-audio latency and time to first audio
 will be measured once the resident front end is connected.
 
-The exact emitted library, inputs, output, receipt and listening verdict are banked
+The exact emitted library, inputs, output and device receipt are banked
 and protected by the `network-free-peach-sm8550` ratchet. See the
 [baseline receipt and artifact manifest](docs/results/bank-front-end-sm8550-20261010.md).
 
