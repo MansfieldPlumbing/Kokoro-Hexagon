@@ -30,6 +30,9 @@ param(
     [ValidateSet('Block','Shortcut','Conv1','Windows1','Pool','Coeff')][string] $DecoderDumpPoint = 'Block',
     # KokoroDecoder16Run: read the frame count at run time (DecoderFrames is the capacity).
     [switch] $DecoderRuntimeFrames,
+    # KokoroDecoder16Run AdaIN statistics: Accumulate, Export (records and coefficients after the output), Supplied (records
+    # from the input) or Corrected (coefficient deltas from the input added to the accumulated coefficients).
+    [ValidateSet('Accumulate','Export','Supplied','SuppliedExport','Corrected','Direct')][string] $DecoderMoments = 'Accumulate',
     [ValidateSet(1, 3, 5)][int] $ConvDilation = 1,
     [switch] $ConvOutputPlanes,
     [ValidateSet(1,2)][int] $ConvWeightPlanes = 1,
@@ -336,7 +339,7 @@ if($Kernel -eq 'KokoroR0Sub0') {
     Write-NewOrIdenticalFile (Join-Path $OutputDirectory 'runner-layout.json') ([Text.Encoding]::UTF8.GetBytes(($run.Layout | ConvertTo-Json -Depth 6))) -AllowOverwrite:$Force
 } elseif($Kernel -eq 'KokoroDecoder16Run') {
     . (Join-Path $PSScriptRoot '..\src\jobs\Kokoro.DecoderRun16.ps1')
-    $run=New-KokoroDecoder16RunSteps -Frames $DecoderFrames -StopAfterBlock $DecoderStopAfterBlock -DumpPoint $DecoderDumpPoint -RuntimeFrames:$DecoderRuntimeFrames
+    $run=New-KokoroDecoder16RunSteps -Frames $DecoderFrames -StopAfterBlock $DecoderStopAfterBlock -DumpPoint $DecoderDumpPoint -RuntimeFrames:$DecoderRuntimeFrames -Moments $DecoderMoments
     $steps=@($run.Steps)
     # The phone harness (tools/Invoke-GeneratorTailProbe.ps1) runs every generator job under the tail skel's name.
     $symbol='kokoro_generator_tail_skel_handle_invoke'; $soname='libkokoro_generator_tail_skel.so'

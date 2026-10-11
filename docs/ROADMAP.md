@@ -14,16 +14,16 @@ warm and cold with the same text. The reference bar is the best other Kokoro bui
 
 | Track | Where | Work | Gate |
 | --- | --- | --- | --- |
-| 1. Model on the DSP (main line; nothing below may block it) | this repository | VTCM layout per SoC, per-stage SNR trace, rest of the generator, decoder, predictors and ALBERT, then speech on both phones from precomputed phonemes; host-side timing breakdown | bit-exact against the V73 simulator, stage SNR against stock PyTorch captures, phone runs with artifact hashes |
-| 2. PSPerception | github.com/MansfieldPlumbing/PSPerception | counterexample-guided percept refinement: provenance-graph store, keep/revert loop, ordered gates, behavioral receipts, compiled output through PSLowering | its own `tests/Verify.ps1` |
-| 3. Text front end | this repository | typed spans (Money, Time, Cardinal, ...), reversible projection, SMA parse and non-executing bind, breath-group planner; consumes PSPerception's compiled output by pinned commit | phoneme parity with misaki (lexicon mode) and accuracy on human labels |
+| 1. Model on the DSP (main line; nothing below may block it) | this repository | Active (2026-10-10): speech end to end through the network-free front end (phonemizer, unit bank, PowerShell-learned tables) driving the DSP decoder and generator, in the order of the newest handoff's Next. Stock reference track: ALBERT, text encoder and predictors on the DSP for the stock phase-1 benchmark rows, after the variant speaks; host-side timing breakdown | bit-exact against the V73 simulator, stage SNR against stock PyTorch captures, phone runs with artifact hashes |
+| 2. PSPerception (refinement) and PSLowering (compilation) | github.com/MansfieldPlumbing/PSPerception, github.com/MansfieldPlumbing/PSLowering | PSPerception: counterexample-guided percept refinement (`Invoke-PerceptRefine`, `src/Refine.ps1`): observations, contradictions, proposals, keep/revert, retained percepts. PSLowering: compiles admitted typed PowerShell into CoreLib-only assemblies (`UnitKernels` at `1afabe05`) | each project's own verification entrypoint |
+| 3. Text front end | this repository | typed spans (Money, Time, Cardinal, ...), reversible projection, SMA parse and non-executing bind, breath-group planner; consumes PSPerception's refined output compiled by PSLowering, by pinned commit | phoneme parity with misaki (lexicon mode) and accuracy on human labels |
 | 4. Short bursts and first audio | this repository, PyTorch on Windows | Campaign 1 measurements below | listening plus measured gap closure |
 
 ## Track 1: VTCM
 
 Measured with an emitted probe (`docs/results/vtcm-capacity-20261007.md`):
 SM8550 grants 8 MiB, SM8635 grants 4 MiB, for every application ID tried.
-4 MiB is the design floor. The job queries VTCM at setup and picks its layout:
+4 MiB is the design floor. The runtime planner must query VTCM at setup and pick its layout:
 
 - general path: time tiles streamed through VTCM with DMA ping-pong, sized from the
   queried VTCM; AdaIN moments accumulated in the producing conv's epilogue, applied
@@ -31,13 +31,35 @@ SM8550 grants 8 MiB, SM8635 grants 4 MiB, for every application ID tried.
 - fast path: when a breath group fits, the whole group stays resident (HMX output is
   the next conv's input, skip connections rotate pointers).
 
-A short first breath group fits entirely on both phones, so the first job takes the
-fast path. SM8635's 4 MiB is the platform value (ExecuTorch's Qualcomm SoC table lists
+Use the resident path for the first execution chunk only when its checked layout fits the
+reported grant. SM8635's 4 MiB is the platform value (ExecuTorch's Qualcomm SoC table lists
 SM8635 and SM7675 as V73 with 4 MB; SM8550, SM8650, SM8750 and SM8850 have 8 MB).
 Planner contract: the runtime query is authoritative; at 8 MiB or more use the
 large-resident path where liveness permits; at 4 MiB the tiled path is required and the
 resident path applies only to groups that fit. Whether one V73 binary runs unchanged on
 V75 and later is a separate claim that needs its own phone receipts.
+
+Predict peak VTCM use analytically from simultaneously live activations, weights,
+scratch, DMA buffers, alignment and HMX page constraints. Report required bytes,
+queried capacity and the selected layout before dispatch. Tile supported time,
+channel, window and buffer dimensions while retaining linguistic context and
+acoustic state; a DSP job boundary need not be a
+word or prosodic boundary. Reduce internal convolution tile batches first. If fixed
+resident buffers still cannot fit, stream them through VTCM or choose a shorter
+execution tile while preserving model state, lookahead and AdaIN semantics.
+Allocation failure must select a smaller checked plan with a bounded
+retry, before publishing PCM or advancing persistent state; never continue a failed
+job as if it produced audio. Record the rejected and selected plans in the receipt.
+
+The first bank-front-end sentence exposed this requirement: its 22-tile layout
+requested 8,650,752 bytes and stopped at resource acquisition on SM8550. The same
+85-decoder-frame group with 14 tiles needs 8,126,464 bytes. This is a layout prediction;
+successful execution and speech require a separate phone receipt. The initial
+`Speak` gate checks the emitted layout against measured SM8550 capacity; the runtime
+query and automatic fallback remain to be implemented.
+The deferred [graph tiling design](vtcm-aware-graph-tiling-design.md) records the
+general compiler capability and its semantic invariants; the newest handoff's
+generator modes, runtime frames and selector work retain priority.
 
 Generator 60x liveness (stock `AdaINResBlock1.forward` and the three-resblock mean,
 `istftnet.py` at `dfb907a0`; 128 channels, u8, 998,528 B per tensor at 7,801 frames,
@@ -60,10 +82,10 @@ loads BART), run offline in an isolated Python 3.11 environment built from misak
 
 | | Question | Method |
 | --- | --- | --- |
-| E1 | Does refinement beat ordinary learning, and does SMA add information? | Variants on the dataset's own 90/10 split: A most-frequent; B Gorman-style per-word linear classifier; C PSPerception with B's features; D PSPerception with SMA features only; E PSPerception with both; F misaki with spaCy; G a perceptron port. Human labels are the truth. Primary score: macro accuracy across homographs with a paired bootstrap over homographs. C vs B tests PSPerception; E vs C tests SMA. Lives in PSPerception. |
+| E1 | Does refinement beat ordinary learning, and does SMA add information? | Variants on the dataset's own 90/10 split: A most-frequent; B Gorman-style per-word linear classifier; C PSPerception refinement with B's features; D refinement with SMA features only; E refinement with both; F misaki with spaCy; G a perceptron port. Human labels are the truth. Primary score: macro accuracy across homographs with a paired bootstrap over homographs. C vs B tests refinement; E vs C tests SMA. Lives in PSPerception. |
 | E2 | Why do short chunks sound worse? | Render a phrase alone and inside its sentence; swap in AdaIN statistics, durations and pitch, or the style row one at a time; report the fraction of the gap each closes. |
 | E3 | Is there only a small number of ways context shapes the rendering? | ALBERT context reach versus right-hand context; per AdaIN site, principal components for 99% of per-channel statistics and how well cheap-stage outputs predict them. |
-| E4 | Where can the first burst start? | Boundary, lookahead and VTCM fit, learned by PSPerception once track 1 speaks. |
+| E4 | Where can the first burst start? | Boundary, lookahead and VTCM fit, learned by PSPerception refinement once track 1 speaks. |
 
 Automated branches are fixed before the run and recorded in its receipt; they choose
 what to measure next and never adopt a change.

@@ -16,6 +16,22 @@
     }
     Cases = @(
         @{
+            Name = 'network-free-peach-sm8550'
+            Audio = '2.125 s, 85 decoder frames; bank front end, af_heart'
+            Receipt = 'docs/results/bank-front-end-sm8550-20261010.md'
+            BaselineManifest = 'docs/results/bank-front-end-sm8550-20261010.manifest.psd1'
+            Kernel = 'KokoroDecoderGenerator16Run'
+            Parameters = @{ ResBlockFrames = 10201; ResidentHvxThreads = 4; ResidentBatchTiles = 14 }
+            Input = 'data/baselines/network-free-peach-sm8550-20261010/input'
+            Soc = 'SM8550'
+            # Initial accepted values from the first three successful runs, not a change to an existing floor.
+            PcmSnrDbFloor = 31.29
+            ClippedCeiling = 0
+            MedianMsCeiling = 148.495
+            NoiseFraction = 0.03
+            PcmSHA256 = 'E6456751BDBCCE0D5CB38DA8226B4EEC8B1C514E16626755C5BD975699374054'
+        }
+        @{
             Name = 'decoder-generator-hello-sm8550'
             Receipt = 'docs/results/decoder-generator-sm8550-20261009.md'
             Kernel = 'KokoroDecoderGenerator16Run'

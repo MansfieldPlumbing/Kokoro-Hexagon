@@ -2,6 +2,7 @@
 import argparse
 import hashlib
 import importlib
+import importlib.util
 import json
 import pathlib
 import sys
@@ -75,6 +76,15 @@ def main():
                 save_values(prefix + '.' + str(i), value)
 
     handles = []
+    decoder_input = None
+    if 'decoderInput' in spec:
+        helper = pathlib.Path(__file__).with_name('capture_decoder_input.py')
+        if digest(helper) != spec['decoderInputToolSha256']:
+            raise ValueError('Decoder input helper integrity mismatch')
+        loader = importlib.util.spec_from_file_location('capture_decoder_input', helper)
+        module = importlib.util.module_from_spec(loader)
+        loader.loader.exec_module(module)
+        handles, decoder_input = module.install_decoder_input(model, spec, torch)
     handles.append(decoder.register_forward_pre_hook(lambda mod, values: save_values('decoder.input', values)))
     contracts = {}
     for name, module in decoder.named_modules():
@@ -121,6 +131,8 @@ def main():
                'torchVersion': torch.__version__, 'block': 'decoder', 'verifiedCheckpointTensors': verified_parameters, 'captureToolSha256': digest(__file__),
                'exportToolSha256': spec['exportToolSha256'], 'phonemes': phonemes, 'styleEntry': len(phonemes) - 1,
                'voice': spec['voice'], 'seed': spec['seed'], 'speed': 1, 'tensors': tensors, 'moduleContracts': contracts}
+    if decoder_input is not None:
+        capture['decoderInput'] = decoder_input
     (output / 'capture.json').write_text(json.dumps(capture, indent=2), encoding='utf-8')
     print(json.dumps({'capturedTensors': len(tensors), 'generatorInput': tensors['decoder.generator.input.0']['shape'], 'torchVersion': torch.__version__}))
 

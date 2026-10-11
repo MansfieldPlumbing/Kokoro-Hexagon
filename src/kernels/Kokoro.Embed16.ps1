@@ -3,7 +3,7 @@
 # + position_embeddings(0..T-1) + token_type_embeddings(0)), as a gather on 16-bit values (one LSB for the sum).
 # Structure after MNN 43bc0686 htp-ops-lib/src/dsp/shared_gather_ops.cc (row gather by index); layout native croutons.
 #   output = posType (copied), then per token t: output[t] += word[clamp(id_t, 0, Vocab - 1)], then biased (xor 0x8000).
-# Word rows are stored gather-ready (Invoke-KokoroHexagon.ps1 ConvertTo-KokoroEmbeddingRows): per id, Blocks vectors of
+# Word rows are stored gather-ready (Invoke-KokoroDevelopment.ps1 ConvertTo-KokoroEmbeddingRows): per id, Blocks vectors of
 # 128 B with channel 32 b + j in the even halfword of lane j (odd halfwords 0); an odd token shifts the row up 16 bits.
 # posType: signed int16 croutons (Blocks * 32 wide, tiles of 32 tokens), position + token type 0, rows past T zero.
 # Token ids are data: each is clamped to the vocabulary before it addresses a row.

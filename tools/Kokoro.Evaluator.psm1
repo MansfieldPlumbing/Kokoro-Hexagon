@@ -44,6 +44,20 @@ function Get-KokoroRatchetCase {
     $cases
 }
 
+function Test-KokoroBaselineManifest {
+    param([Parameter(Mandatory)][string]$Path)
+    $manifest = Import-PowerShellDataFile -LiteralPath (Join-Path $script:Root $Path)
+    if ($manifest.Schema -ne 1 -or -not $manifest.Files.Count) { throw 'Invalid baseline manifest.' }
+    $bundle = [IO.Path]::GetFullPath((Join-Path $script:Root $manifest.Bundle))
+    $prefix = $bundle + [IO.Path]::DirectorySeparatorChar
+    foreach ($file in $manifest.Files) {
+        $artifact = [IO.Path]::GetFullPath((Join-Path $bundle $file.Path))
+        if (-not $artifact.StartsWith($prefix, [StringComparison]::OrdinalIgnoreCase)) { throw 'Baseline path leaves its bundle.' }
+        if (-not (Test-Path -LiteralPath $artifact -PathType Leaf) -or (Get-Item -LiteralPath $artifact).Length -ne $file.Bytes -or
+            (Get-FileHash -LiteralPath $artifact).Hash -cne $file.SHA256) { throw "Baseline artifact integrity mismatch: $($file.Path)" }
+    }
+}
+
 function Invoke-KokoroEmission {
     <# .SYNOPSIS Emits one job (Emit-HexagonProbe.ps1 -Kernel with -Parameters) or returns the cached emission. #>
     param([Parameter(Mandatory)][string]$Kernel, [hashtable]$Parameters = @{}, [string]$SourceKey = (Get-KokoroSourceKey))
@@ -177,13 +191,16 @@ function Invoke-KokoroExperiment {
     $label = ($p.Keys | Sort-Object | ForEach-Object { "$_=$($p[$_])" }) -join ' '
     $r = [ordered]@{ Case = $c.Name; Setup = $label; Status = 'crash'; MedianMs = $null; PcmSnrDb = $null; Clipped = $null; PcmSHA256 = $null; Wav = $null; Reason = '' }
     try {
+        if ($c.BaselineManifest) { Test-KokoroBaselineManifest -Path $c.BaselineManifest }
         $e = Invoke-KokoroEmission -Kernel $c.Kernel -Parameters $p
         $inputDir = Join-Path $script:Root $c.Input
         $out = & $script:Pwsh -NoProfile -File (Join-Path $script:Root 'tools/Invoke-GeneratorTailProbe.ps1') -EmissionDirectory $e.Directory -FixtureDirectory $inputDir -Soc $c.Soc -Runs $Runs -TimeoutSeconds 300 2>&1
         $text = ($out | ForEach-Object { "$_" }) -join "`n"
         $field = { param([string]$n) $i = $text.IndexOf("$n="); if ($i -lt 0) { return $null }; $j = $i + $n.Length + 1; $k = $j; while ($k -lt $text.Length -and -not [char]::IsWhiteSpace($text[$k])) { $k++ }; $text.Substring($j, $k - $j) }
         $outputPath = & $field 'OutputPath'
-        if (-not $outputPath) { $r.Reason = "no output: $(($out | Select-Object -Last 3) -join ' | ')"; throw 'no output' }
+        if (-not $outputPath -or $text -notmatch '(?m)^Passed=True\s*$' -or $text -notmatch '(?m)^StartupRestored=True\s*$') {
+            $r.Reason = "phone run failed or startup was not restored: $(($out | Select-Object -Last 3) -join ' | ')"; throw 'invalid phone receipt'
+        }
         $r.MedianMs = [double](& $field 'MedianRegionMs')
         $wavDir = Join-Path $script:Root 'build/evaluator/wav'; $null = New-Item -ItemType Directory -Force $wavDir
         $r.Wav = Join-Path $wavDir ("{0}-{1}-{2:yyyyMMdd-HHmmss}.wav" -f $c.Name, $e.Key, (Get-Date))

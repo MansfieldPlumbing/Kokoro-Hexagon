@@ -1,16 +1,30 @@
 # Kokoro-Hexagon
 
-The machine-wide rules in `C:\Dev\AGENTS.md` apply.
+Follow [the shared agent rules](../Pwsh-Development/AGENTS.md). This file holds local project requirements and entrypoints.
+
 
 ## Start here
 
-    pwsh -NoProfile -File ./Invoke-KokoroHexagon.ps1
+    pwsh -NoProfile -File ./Invoke-KokoroDevelopment.ps1
+
+Run `Verify` before every commit; CI runs the same command on every push.
 
 It prints the commit, the next step and every command, reading only the repository (no adb or phone; phone access is
-only in `Run`, `Ratchet` and `Compare`) (stock captures, ALBERT error, emit,
-kernel check, phone runs, ratchet, job inputs, search). Do the work through its commands. A step typed by hand twice,
-or written as a scratch script, is a missing command: add it to `Invoke-KokoroHexagon.ps1` and use it. Scripts under
+only in `Run`, `Ratchet`, `Compare` and `Speak`) (stock captures, ALBERT error, emit,
+kernel check, phone runs, ratchet, job inputs, search). Do recurring project work through its commands. When a
+recurring operation earns a command, add it to `Invoke-KokoroDevelopment.ps1` and use it. A one-time audit or
+investigation may use a small temporary solution; a scratch script alone does not justify a permanent command. Scripts under
 `tools/` are being absorbed into it as they are used.
+
+## How agents edit and run
+
+1. Edit files with the editor tool. Never edit source through shell string replacement (ReadAllText,
+   .Replace, .Contains anchors, Set-Content, sed).
+2. Do recurring project work through Invoke-KokoroDevelopment.ps1 commands. Put a recurring operation in
+   that entrypoint when it reduces actual delivery friction. Command length or use of temporary scratch
+   alone does not justify permanent machinery. Preserve the existing phone-access boundary.
+3. Number each item in a handoff's "## Next" and name its entrypoint command, or "new command `<Name>`" for a
+   command the item adds. Verify checks this.
 
 ## Mission
 
@@ -23,6 +37,13 @@ phonemes to PCM on the phone, end-to-end real-time factor and time to first
 audio on the SM8550 and SM8635 phones, against the best other Kokoro build on
 the same phone, with receipts anyone can check. After that is published, the
 model itself is open to change (see "Model changes").
+
+Active path (decided 2026-10-10; the newest `docs/handoff-*.md` Next sets the order): speech end to end on the phone
+through the network-free front end, in which the phonemizer, the unit bank and PowerShell-learned tables replace ALBERT,
+the text encoder and the predictors at playback and drive the DSP decoder and generator, chunked, with AdaIN steered by
+the front end (`docs/adain-control-stream-design.md`). Its benchmarks are labeled as the network-free Kokoro variant.
+The stock whole-model-on-DSP path below remains the reference track for the stock phase-1 benchmark rows; it does not
+block the active path.
 
 ## Where we stand (2026-10-09)
 
@@ -142,9 +163,13 @@ audio; audio longer than about 2.3 s (decoder and generator keep the whole seque
    before adding code. Reuse the working path. Rewrite adopted algorithms in
    PowerShell; do not introduce another model implementation or compiler as a
    prerequisite. Reverse engineer only the gaps remaining after source search.
-3. For new instruction forms, use version-matched SDK assembler output to
-   establish the encoding, compare emitted bytes, then check the same emitted
-   bytes in the V73 simulator. SDK tools are validation references only.
+3. For new instruction forms, establish the encoding from the version-matched
+   manual and SDK assembler (or LLVM's Hexagon tables) and compare emitted
+   bytes; SDK tools are validation references only. Validate behavior on the
+   phone's DSP: the app is Pwsh and drives FastRPC directly, so the real
+   hardware is the test. Use the V73 simulator only for a question the phone
+   cannot answer (stepping a hang with no crash report, a target with no
+   device), and say which question.
 4. Use stock checkpoint weights and stock PyTorch captures on Windows for
    numerical comparison. Synthetic fixtures establish instruction semantics;
    real captures establish propagated model error. Keep those checks distinct.
@@ -236,15 +261,3 @@ phone measurements establish achieved speed and time to first audio.
   operations there; take Pwsh from GitHub at the commit pinned in
   `lib/manifest.json`.
 - Ask before deleting, pushing or rewriting history.
-
-<!-- shared-pwsh-mission:start -->
-## Shared PowerShell library
-
-Project entrypoint: `./Invoke-KokoroHexagon.ps1` (above). Machine-wide context:
-`pwsh -NoProfile -File C:/Dev/Pwsh-Development/tools/Get-ProjectContext.ps1 -Project C:/Dev/Kokoro-Hexagon`.
-C:/Dev/Pwsh-Development is the shared library for our PowerShell projects: purpose (`docs/mission/MISSION.md`,
-`TELOS.md`), the projects briefing (`briefings/projects-and-thesis.md`), the reference manuals (`Find-Reference`),
-shared checks (`Test-PowerShellCasePair`) and upstream source search (`Search-Vendor.ps1`). It is read for guidance;
-product inputs still come from this project's pinned sources. It supports this project's deliverable and does not
-replace it.
-<!-- shared-pwsh-mission:end -->
