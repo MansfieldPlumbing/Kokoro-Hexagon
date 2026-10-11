@@ -83,13 +83,19 @@ foreach ($cf in $chunks) {
     $base = [int]($cf.BaseName.Substring(6)) * 1000; $count = ($to.Bytes.Length - $to.Offset) / 8 - 1
     for ($ls = 0; $ls -lt $count; $ls++) {
         $s = $base + $ls; $ph = $order[$s].phonemes; $pad.Add((Get-Padded $ph)) | Out-Null
-        $t0 = Get-Item1 $to $ls; $t1 = Get-Item1 $to ($ls + 1); $frame = Get-Item1 $fo $ls
+        $t0 = [BitConverter]::ToInt64($to.Bytes, $to.Offset + 8 * $ls)
+        $t1 = [BitConverter]::ToInt64($to.Bytes, $to.Offset + 8 * ($ls + 1))
+        $frame = [BitConverter]::ToInt64($fo.Bytes, $fo.Offset + 8 * $ls)
         $padded = $pad[$s]
         for ($i = 0; $i -lt $t1 - $t0; $i++) {
-            $d = Get-Item1 $dur ($t0 + $i); $h0 = 2 * $frame; $h1 = 2 * ($frame + $d) - 1; $frame += $d
+            $d = [BitConverter]::ToInt16($dur.Bytes, [int]($dur.Offset + 2 * ($t0 + $i)))
+            $h0 = 2 * $frame; $h1 = 2 * ($frame + $d) - 1; $frame += $d
             $u = $uSent.Count
             $uSent.Add($s); $uTok.Add($i); $uDur.Add($d)
-            $uF0a.Add((Get-Item1 $f0 $h0)); $uF0b.Add((Get-Item1 $f0 $h1)); $uNa.Add((Get-Item1 $nn $h0)); $uNb.Add((Get-Item1 $nn $h1))
+            $uF0a.Add([double][BitConverter]::ToHalf($f0.Bytes, [int]($f0.Offset + 2 * $h0)))
+            $uF0b.Add([double][BitConverter]::ToHalf($f0.Bytes, [int]($f0.Offset + 2 * $h1)))
+            $uNa.Add([double][BitConverter]::ToHalf($nn.Bytes, [int]($nn.Offset + 2 * $h0)))
+            $uNb.Add([double][BitConverter]::ToHalf($nn.Bytes, [int]($nn.Offset + 2 * $h1)))
             $key = $padded.Substring($i + 1, 3); $list = $null
             if (-not $tri.TryGetValue($key, [ref]$list)) { $list = [Collections.Generic.List[int]]::new(); $tri[$key] = $list }; $list.Add($u)
             $sym = $padded[$i + 2]; if (-not $uni.ContainsKey($sym)) { $uni[$sym] = [Collections.Generic.List[int]]::new() }; $uni[$sym].Add($u)
@@ -113,5 +119,6 @@ foreach ($cf in $chunks) {
             if ($isLast) { break }
         }
     }
+    'indexed {0} sentences, {1} units; elapsed {2:N0} s' -f $sent, $uSent.Count, $sw.Elapsed.TotalSeconds
 }
 $results | ConvertTo-Json -Depth 6 | Set-Content "$Dir/big-selections.json" -Encoding utf8

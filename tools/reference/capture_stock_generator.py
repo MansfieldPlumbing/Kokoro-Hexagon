@@ -2,6 +2,7 @@
 import argparse
 import hashlib
 import importlib
+import importlib.util
 import json
 import pathlib
 import sys
@@ -93,13 +94,27 @@ def main():
         save('style', inputs[1])
         save('f0', inputs[2])
 
-    handles = [block.register_forward_pre_hook(pre_block)]
+    handles = []
+    decoder_input = None
+    if 'decoderInput' in spec:
+        helper = pathlib.Path(__file__).with_name('capture_decoder_input.py')
+        if digest(helper) != spec['decoderInputToolSha256']:
+            raise ValueError('Decoder input helper integrity mismatch')
+        loader = importlib.util.spec_from_file_location('capture_decoder_input', helper)
+        module = importlib.util.module_from_spec(loader)
+        loader.loader.exec_module(module)
+        handles, decoder_input = module.install_decoder_input(model, spec, torch)
+    handles.append(block.register_forward_pre_hook(pre_block))
     def save_values(prefix, values):
         if torch.is_tensor(values):
             save(prefix, values)
         elif isinstance(values, (tuple, list)):
             for i, value in enumerate(values):
                 save_values(prefix + '.' + str(i), value)
+
+    if decoder_input is not None:
+        handles.append(model.decoder.register_forward_pre_hook(
+            lambda mod, values: save_values('decoder.input', values)))
 
     # Original stock modules execute every operation. Hooks only serialize their
     # inputs/outputs and effective parameters; no alternate generator equations.
@@ -216,6 +231,8 @@ def main():
                'phonemes': phonemes, 'styleEntry': len(phonemes)-1,
                'voice': spec['voice'], 'seed': spec['seed'], 'speed': 1,
                'tensors': tensors, 'moduleContracts': contracts}
+    if decoder_input is not None:
+        capture['decoderInput'] = decoder_input
     (output / 'capture.json').write_text(json.dumps(capture, indent=2), encoding='utf-8')
     print(json.dumps({'capturedTensors': len(tensors), 'inputShape': tensors['input']['shape'],
                       'outputShape': tensors['output']['shape'], 'torchVersion': torch.__version__}))

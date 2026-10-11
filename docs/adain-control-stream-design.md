@@ -107,6 +107,22 @@ harmonic source's phase and noise state carry from chunk to chunk on the DSP, so
 and controller run ahead of the DSP; AAudio plays finished chunks. Time to first audio is the front end for the first
 chunk plus one chunk's DSP time.
 
+Execution chunks deliver computation tiles sized to fit VTCM, across supported time, channel, window and buffer
+dimensions. They need not coincide with words or spoken groups. Carry per-layer acoustic state and the necessary future context, and publish only each tile's new contiguous
+PCM span. Job boundaries must not introduce pauses. Whole-utterance style selection, AdaIN control, harmonic phase
+and randomness must remain consistent as execution granularity changes.
+
+Extend the existing aligned linguistic stream's word/group features and breath-group code for prosody and context;
+do not add an audio segmentation heuristic. Scott's example, "I can" | "eat a peach" | "for hours", describes useful
+spoken groups, not mandatory DSP job sizes. Grammatical expectations can develop incrementally ("eat" opens an
+object, "for" opens a complement) and persist across time tiles.
+
+Benchmark progressively smaller execution tiles against one uninterrupted pass, varying supported dimensions.
+Hold linguistic context, acoustic controls, utterance style and randomness fixed. Exact parity is the target for
+deterministic operators; quantify approximation error separately. Report sample ownership and error near joins,
+listening, peak memory, DSP time and first-audio latency. See the deferred shared
+[graph tiling design](vtcm-aware-graph-tiling-design.md). These are acceptance targets, not demonstrated results.
+
 ## Order
 
 End to end first (`docs/handoff-20261010.md` Next items 1-4: first speech through the DSP job, generator modes,

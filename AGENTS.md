@@ -10,7 +10,7 @@ Follow [the shared agent rules](../Pwsh-Development/AGENTS.md). This file holds 
 Run `Verify` before every commit; CI runs the same command on every push.
 
 It prints the commit, the next step and every command, reading only the repository (no adb or phone; phone access is
-only in `Run`, `Ratchet` and `Compare`) (stock captures, ALBERT error, emit,
+only in `Run`, `Ratchet`, `Compare` and `Speak`) (stock captures, ALBERT error, emit,
 kernel check, phone runs, ratchet, job inputs, search). Do recurring project work through its commands. When a
 recurring operation earns a command, add it to `Invoke-KokoroDevelopment.ps1` and use it. A one-time audit or
 investigation may use a small temporary solution; a scratch script alone does not justify a permanent command. Scripts under

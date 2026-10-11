@@ -23,7 +23,7 @@ warm and cold with the same text. The reference bar is the best other Kokoro bui
 
 Measured with an emitted probe (`docs/results/vtcm-capacity-20261007.md`):
 SM8550 grants 8 MiB, SM8635 grants 4 MiB, for every application ID tried.
-4 MiB is the design floor. The job queries VTCM at setup and picks its layout:
+4 MiB is the design floor. The runtime planner must query VTCM at setup and pick its layout:
 
 - general path: time tiles streamed through VTCM with DMA ping-pong, sized from the
   queried VTCM; AdaIN moments accumulated in the producing conv's epilogue, applied
@@ -31,13 +31,35 @@ SM8550 grants 8 MiB, SM8635 grants 4 MiB, for every application ID tried.
 - fast path: when a breath group fits, the whole group stays resident (HMX output is
   the next conv's input, skip connections rotate pointers).
 
-A short first breath group fits entirely on both phones, so the first job takes the
-fast path. SM8635's 4 MiB is the platform value (ExecuTorch's Qualcomm SoC table lists
+Use the resident path for the first execution chunk only when its checked layout fits the
+reported grant. SM8635's 4 MiB is the platform value (ExecuTorch's Qualcomm SoC table lists
 SM8635 and SM7675 as V73 with 4 MB; SM8550, SM8650, SM8750 and SM8850 have 8 MB).
 Planner contract: the runtime query is authoritative; at 8 MiB or more use the
 large-resident path where liveness permits; at 4 MiB the tiled path is required and the
 resident path applies only to groups that fit. Whether one V73 binary runs unchanged on
 V75 and later is a separate claim that needs its own phone receipts.
+
+Predict peak VTCM use analytically from simultaneously live activations, weights,
+scratch, DMA buffers, alignment and HMX page constraints. Report required bytes,
+queried capacity and the selected layout before dispatch. Tile supported time,
+channel, window and buffer dimensions while retaining linguistic context and
+acoustic state; a DSP job boundary need not be a
+word or prosodic boundary. Reduce internal convolution tile batches first. If fixed
+resident buffers still cannot fit, stream them through VTCM or choose a shorter
+execution tile while preserving model state, lookahead and AdaIN semantics.
+Allocation failure must select a smaller checked plan with a bounded
+retry, before publishing PCM or advancing persistent state; never continue a failed
+job as if it produced audio. Record the rejected and selected plans in the receipt.
+
+The first bank-front-end sentence exposed this requirement: its 22-tile layout
+requested 8,650,752 bytes and stopped at resource acquisition on SM8550. The same
+85-decoder-frame group with 14 tiles needs 8,126,464 bytes. This is a layout prediction;
+successful execution and speech require a separate phone receipt. The initial
+`Speak` gate checks the emitted layout against measured SM8550 capacity; the runtime
+query and automatic fallback remain to be implemented.
+The deferred [graph tiling design](vtcm-aware-graph-tiling-design.md) records the
+general compiler capability and its semantic invariants; the newest handoff's
+generator modes, runtime frames and selector work retain priority.
 
 Generator 60x liveness (stock `AdaINResBlock1.forward` and the three-resblock mean,
 `istftnet.py` at `dfb907a0`; 128 channels, u8, 998,528 B per tensor at 7,801 frames,

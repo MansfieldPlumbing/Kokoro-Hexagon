@@ -23,7 +23,7 @@ twice, or written as a scratch script, is a missing command: add it here.
   JobInput -Reference -CaptureMap -OutputDirectory
                               Build a test case's job input from stock captures; prints which inputs match the reference.
   Capture  -Path [-Pattern]   List a stock capture's tensors: name, shape, bytes, hash prefix, and its capture spec.
-  StockCapture [-Block albert|decoder|generator] [-Phonemes] [-Voice] [-Seed] [-PhonemesFrom capture] [-OutputDirectory]
+  StockCapture [-Block albert|decoder|generator] [-Phonemes] [-Voice] [-Seed] [-PhonemesFrom capture] [-DecoderInput json] [-OutputDirectory]
                               Run pinned stock PyTorch Kokoro on Windows (reference only) and record one block's tensors
                               under build/ with source, checkpoint and voice integrity checks. -PhonemesFrom reuses the phonemes,
                               voice and seed of another capture (a calibration set from existing sentences).
@@ -31,6 +31,11 @@ twice, or written as a scratch script, is a missing command: add it here.
   AlbertError -Path           Per ALBERT linear (12 repeats of q, k, v, dense, ffn, ffn_output, plus the 128->768 mapping
                               and bert_encoder): output SNR against the stock capture with int8 per-output-channel
                               weights (W8), 16-bit per-tensor activations (A16), both, and A8W8 for contrast.
+  Speak [-HeldOutIndex 0] [-Soc SM8550] [-Runs 3] [-OutputDirectory]
+                              First network-free variant sentence (at most 96 decoder frames): verify/restore the working
+                              bank, select units in PowerShell, assemble table prosody, capture the stock teacher on those
+                              inputs, pack the existing job, run and play through AAudio. Generated files stay under build/.
+  Zira -Text <sentence> [-OutputDirectory]  Windows speech API reference; returns typed phoneme/word events and a WAV.
   AlbertLinear -Linear name[,name...] [-Path] [-Soc] [-Runs]
                               One ALBERT linear (mapping_in, query.0 .. ffn_output.11, bert_encoder) on the phone: job input
                               from the capture, emit, run, decode, SNR against stock. Default capture stock-albert-capture-hello.
@@ -82,7 +87,7 @@ pwsh -NoProfile -File ./Invoke-KokoroDevelopment.ps1 Run -Case benchmark-0-sm855
 [CmdletBinding()]
 param(
     [Parameter(Position = 0)]
-    [ValidateSet('Status', 'Verify', 'Ratchet', 'Run', 'Emit', 'Check', 'Compare', 'JobInput', 'Capture', 'StockCapture', 'Albert', 'AlbertError', 'AlbertLinear', 'AlbertLayerNorm', 'AlbertGelu', 'AlbertAttention', 'AlbertEmbed', 'AlbertJob', 'Api', 'Find', 'Tools')]
+    [ValidateSet('Status', 'Verify', 'Ratchet', 'Run', 'Emit', 'Check', 'Compare', 'JobInput', 'Capture', 'StockCapture', 'Speak', 'Zira', 'Albert', 'AlbertError', 'AlbertLinear', 'AlbertLayerNorm', 'AlbertGelu', 'AlbertAttention', 'AlbertEmbed', 'AlbertJob', 'Api', 'Find', 'Tools')]
     [string] $Command = 'Status',
     [string] $Case,
     [string] $Kernel,
@@ -104,6 +109,10 @@ param(
     [ValidateRange(1, 100)]
     [int] $Seed = 17,
     [string] $PhonemesFrom,
+    [string] $DecoderInput,
+    [pscustomobject] $DecoderInputData,
+    [string] $Text,
+    [ValidateRange(0, 8)][int] $HeldOutIndex = 0,
     [string] $StopAfter,
     [string] $Linear,
     [string] $Norm,
@@ -407,9 +416,9 @@ function Invoke-KokoroDeviceJob {
     $text = ($out | ForEach-Object { "$_" }) -join "`n"
     $field = { param([string] $n) if ($text -match "(?m)\b$n=(\S+)") { $Matches[1] } }
     $outputPath = & $field 'OutputPath'
-    if (-not $outputPath) { throw "Phone run produced no output: $(($out | Select-Object -Last 4) -join ' | ')" }
+    if (-not $outputPath -or $text -notmatch '(?m)^Passed=True\s*$' -or $text -notmatch '(?m)^StartupRestored=True\s*$') { throw "Phone run failed or startup was not restored: $(($out | Select-Object -Last 4) -join ' | ')" }
     [pscustomobject]@{ Output = [IO.File]::ReadAllBytes($outputPath); OutputPath = $outputPath; MedianMs = [double](& $field 'MedianRegionMs')
-        Lines = @($out | ForEach-Object { "$_" } | Where-Object { $_ -match '^(Run=|Median|InvokeRc|Stage)' }) }
+        Lines = @($out | ForEach-Object { "$_" } | Where-Object { $_ -match '^(Run=|Median|InvokeRc|Stage|Played=|Passed=|StartupRestored=|ReceiptPath=)' }) }
 }
 
 # Emits a diagnostic tensor job, runs it on the phone with a job input directory, and returns the output tensor bytes
@@ -1026,6 +1035,181 @@ function Get-KokoroApi {
     }
 }
 
+function Test-KokoroWorkingBank {
+    # This is deliberately separate from Verify. data/unit-bank is frozen evidence.
+    $bankRoot = Join-Path $Build 'unit-bank'
+    $manifestPath = Join-Path $Root 'tools/reference/unit-bank/bank-manifest.json'
+    $manifest = Get-Content -LiteralPath $manifestPath -Raw | ConvertFrom-Json
+    if (-not (Test-Path -LiteralPath $bankRoot)) {
+        $preserved = Join-Path $Root 'data/unit-bank'
+        if (-not (Test-Path -LiteralPath $preserved)) { throw 'Working and preserved banks are missing; restore a manifest-verified backup. Do not recapture.' }
+        Copy-Item -LiteralPath $preserved -Destination $bankRoot -Recurse
+    }
+    foreach ($item in $manifest.Files) {
+        $file = [IO.Path]::GetFullPath((Join-Path $bankRoot $item.Path))
+        if (-not $file.StartsWith($bankRoot + [IO.Path]::DirectorySeparatorChar, [StringComparison]::OrdinalIgnoreCase)) { throw 'Bank manifest path escapes the working bank.' }
+        if (-not (Test-Path -LiteralPath $file) -or (Get-Item -LiteralPath $file).Length -ne $item.Bytes -or
+            (Get-FileHash -LiteralPath $file).Hash -cne $item.SHA256) { throw "Working bank integrity mismatch: $($item.Path)" }
+    }
+    Write-Host "Bank verified: $($manifest.Files.Count) files; preserved copy untouched."
+    [pscustomobject]@{ Directory = $bankRoot; ManifestSHA256 = (Get-FileHash -LiteralPath $manifestPath).Hash }
+}
+
+function New-KokoroBankDecoderInput {
+    <# .SYNOPSIS Assembles the existing all-features table baseline in PowerShell, without a reference model call.
+    N shape: first 10,000 bank sentences, 8 samples per token, triphone/right-biphone/phone backoff (count >= 5).
+    N/F0/duration levels: Measure-ProsodyFeatures.ps1 level 8. Voicing and t_en: mine.ps1's selected units.
+    Equations and interpolation match tools/reference/unit-bank/render_pred.py and contour_ceiling.py.
+    #>
+    param([Parameter(Mandatory)] $Bank, [Parameter(Mandatory)][string] $Directory, [int] $Index = 0)
+    $held = @(Get-Content (Join-Path $Root 'tools/reference/unit-bank/heldout.json') -Raw | ConvertFrom-Json)[$Index]
+    $pred = @(Get-Content (Join-Path $Bank.Directory 'prosody-predictions.json') -Raw | ConvertFrom-Json)[$Index]
+    if (-not $pred.aligned -or $pred.text -cne $held.text) { throw 'Held-out prediction alignment mismatch.' }
+    $levels = $pred.levels[8]; $count = $held.phonemes.Length + 2
+    if ($levels.Count -ne $count) { throw 'Prosody token count mismatch.' }
+    $durations = [int[]]@($levels | ForEach-Object { [math]::Max(1, [int][math]::Round($_[2], [MidpointRounding]::ToEven)) })
+    $frames = [int]($durations | Measure-Object -Sum).Sum
+    if ($frames -gt 96) { throw "Held-out sentence $Index needs $frames decoder frames; first Speak supports at most 96. Chunking is Next item 4." }
+    [void][IO.Directory]::CreateDirectory($Directory)
+    $selectionDir = Join-Path $Directory 'selection'; [void][IO.Directory]::CreateDirectory($selectionDir)
+    ConvertTo-Json -InputObject @($held) -Depth 5 | Set-Content (Join-Path $selectionDir 'heldout.json') -Encoding utf8NoBOM
+    # Regenerate selections, never teacher captures. Match the full-bank baseline's measured right-weighted cost
+    # (docs/results/unit-bank-curve-20261010.md); restore the caller's experiment setting afterward.
+    $previousWeights = $env:KOKORO_TARGETW
+    try {
+        $env:KOKORO_TARGETW = '4,1,0.5,4,8,2'
+        & (Join-Path $Root 'tools/reference/unit-bank/mine.ps1') -Dir $selectionDir -Sizes @(1000000) | ForEach-Object { Write-Host $_ }
+    } finally { $env:KOKORO_TARGETW = $previousWeights }
+    $selectionPath = Join-Path $selectionDir 'big-selections.json'
+    $selection = Get-Content -LiteralPath $selectionPath -Raw | ConvertFrom-Json
+    $selected = @($selection.PSObject.Properties.Value | Sort-Object sentences)[-1]
+    $picks = $selected.picks[0].path
+    if ($picks.Count -ne $count) { throw 'Selection token count mismatch.' }
+    $order = @(Get-Content (Join-Path $Bank.Directory 'order.json') -Raw | ConvertFrom-Json)
+    if (@($order | Where-Object { $_.text -ceq $held.text -or $_.phonemes -ceq $held.phonemes }).Count) { throw 'Held-out sentence occurs in the teacher bank.' }
+
+    function Read-BankNpy([IO.Compression.ZipArchive] $Zip, [string] $ArrayName) {
+        $entry = $Zip.GetEntry("$ArrayName.npy"); if (-not $entry -or $entry.Length -gt 512MB) { throw "Missing/oversized bank array: $ArrayName" }
+        $stream = $entry.Open(); $memory = [IO.MemoryStream]::new()
+        try { $stream.CopyTo($memory); $bytes = $memory.ToArray() } finally { $stream.Dispose(); $memory.Dispose() }
+        if ($bytes.Length -lt 10 -or [Convert]::ToHexString($bytes[0..7]) -cne '934E554D50590100') { throw "Expected NPY v1: $ArrayName" }
+        $offset = 10 + [BitConverter]::ToUInt16($bytes, 8)
+        if ($offset -gt $bytes.Length) { throw "Truncated NPY header: $ArrayName" }
+        $header = [Text.Encoding]::ASCII.GetString($bytes, 10, $offset - 10)
+        if ($header -notmatch "'descr': '(?<dtype><[if][248])'" -or $header -notmatch "'fortran_order': False") { throw "Unsupported bank dtype/layout: $ArrayName" }
+        $null = $header -match "'descr': '(?<dtype><[if][248])'"; $dtype = $Matches.dtype
+        $null = $header -match "'shape': \((?<dims>[0-9, ]+)\)"; $shape = [int[]]@($Matches.dims.Split(',') | Where-Object { $_.Trim() } | ForEach-Object { [int]$_ })
+        $size = [int]$dtype.Substring(2); $elements = 1L; foreach ($dim in $shape) { $elements *= $dim }
+        if ($elements * $size -ne $bytes.Length - $offset) { throw "NPY payload length mismatch: $ArrayName" }
+        [pscustomobject]@{ Bytes = $bytes; Offset = $offset; Type = $dtype; Shape = $shape }
+    }
+    function Get-BankArray($Array, [type] $Type, [string] $Dtype) {
+        if ($Array.Type -cne $Dtype) { throw "Expected bank dtype $Dtype, got $($Array.Type)." }
+        $values = [Array]::CreateInstance($Type, ($Array.Bytes.Length - $Array.Offset) / [int]$Dtype.Substring(2))
+        [Buffer]::BlockCopy($Array.Bytes, $Array.Offset, $values, 0, $Array.Bytes.Length - $Array.Offset); , $values
+    }
+    $tokens = '<' + $held.phonemes + '>'; $wanted = [Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
+    $contexts = for ($i = 0; $i -lt $count; $i++) {
+        $left = if ($i) { $tokens[$i - 1] } else { '#' }; $right = if ($i + 1 -lt $count) { $tokens[$i + 1] } else { '#' }
+        $keys = @("3|$left$($tokens[$i])$right", "2|$($tokens[$i])$right", "1|$($tokens[$i])")
+        foreach ($key in $keys) { [void]$wanted.Add($key) }; , $keys
+    }
+    $shapes = [Collections.Generic.Dictionary[string, double[]]]::new([StringComparer]::Ordinal)
+    Write-Host 'Building the baseline N shapes from bank sentences 0..9999.'
+    for ($chunkIndex = 0; $chunkIndex -lt 10; $chunkIndex++) {
+        $zip = [IO.Compression.ZipFile]::OpenRead((Join-Path $Bank.Directory ('chunk-{0:d4}.npz' -f $chunkIndex)))
+        try {
+            $to = Get-BankArray (Read-BankNpy $zip 'tok_off') ([long]) '<i8'
+            $fo = Get-BankArray (Read-BankNpy $zip 'frm_off') ([long]) '<i8'
+            $dur = Get-BankArray (Read-BankNpy $zip 'dur') ([int16]) '<i2'
+            $noise = Read-BankNpy $zip 'n'; if ($noise.Type -cne '<f2') { throw 'Expected half-precision bank N.' }
+        } finally { $zip.Dispose() }
+        for ($sentenceIndex = 0; $sentenceIndex -lt $to.Length - 1; $sentenceIndex++) {
+            $ph = '<' + $order[1000 * $chunkIndex + $sentenceIndex].phonemes + '>'; $frame = 2L * $fo[$sentenceIndex]
+            if ($ph.Length -ne $to[$sentenceIndex + 1] - $to[$sentenceIndex]) { throw 'Bank N token alignment mismatch.' }
+            for ($i = 0; $i -lt $ph.Length; $i++) {
+                $length = 2 * $dur[$to[$sentenceIndex] + $i]; if ($length -lt 2) { throw 'Nonpositive bank duration.' }
+                $left = if ($i) { $ph[$i - 1] } else { '#' }; $right = if ($i + 1 -lt $ph.Length) { $ph[$i + 1] } else { '#' }
+                $keys = @("3|$left$($ph[$i])$right", "2|$($ph[$i])$right", "1|$($ph[$i])")
+                $use = @($keys | Where-Object { $wanted.Contains($_) })
+                if ($use.Count) {
+                    $shape = [double[]]::new(8)
+                    for ($q = 0; $q -lt 8; $q++) {
+                        $position = $q * ($length - 1) / 7.0; $lo = [int][math]::Floor($position); $hi = [math]::Min($lo + 1, $length - 1)
+                        $a = [double][BitConverter]::ToHalf($noise.Bytes, [int]($noise.Offset + 2 * ($frame + $lo)))
+                        $b = [double][BitConverter]::ToHalf($noise.Bytes, [int]($noise.Offset + 2 * ($frame + $hi)))
+                        $shape[$q] = $a + ($b - $a) * ($position - $lo)
+                    }
+                    foreach ($key in $use) {
+                        $acc = $null; if (-not $shapes.TryGetValue($key, [ref]$acc)) { $acc = [double[]]::new(9); $shapes[$key] = $acc }
+                        for ($q = 0; $q -lt 8; $q++) { $acc[$q] += $shape[$q] }; $acc[8]++
+                    }
+                }
+                $frame += $length
+            }
+        }
+        Write-Host "  N shapes: $((1 + $chunkIndex) * 1000) sentences"
+    }
+    $asr = [single[]]::new(512 * $frames); $f0 = [single[]]::new(2 * $frames); $n = [single[]]::new(2 * $frames)
+    $at = [int[]]::new($count); for ($i = 1; $i -lt $count; $i++) { $at[$i] = $at[$i - 1] + $durations[$i - 1] }
+    foreach ($group in ($picks | Group-Object { [int][math]::Floor($_.s / 1000.0) })) {
+        $chunkIndex = [int]$group.Name
+        $zip = [IO.Compression.ZipFile]::OpenRead((Join-Path $Bank.Directory ('chunk-{0:d4}.npz' -f $chunkIndex)))
+        try {
+            $to = Get-BankArray (Read-BankNpy $zip 'tok_off') ([long]) '<i8'
+            $fo = Get-BankArray (Read-BankNpy $zip 'frm_off') ([long]) '<i8'
+            $dur = Get-BankArray (Read-BankNpy $zip 'dur') ([int16]) '<i2'
+            $teArray = Read-BankNpy $zip 't_en'; $te = Get-BankArray $teArray ([int16]) '<i2'
+            $scale = Get-BankArray (Read-BankNpy $zip 'scale') ([single]) '<f4'
+            $pitch = Read-BankNpy $zip 'f0'; if ($pitch.Type -cne '<f2' -or $teArray.Shape[0] -ne 512 -or $scale.Length -ne 512) { throw 'Bank t_en/F0 layout mismatch.' }
+        } finally { $zip.Dispose() }
+        for ($i = 0; $i -lt $count; $i++) {
+            $pick = $picks[$i]; if ([int][math]::Floor($pick.s / 1000.0) -ne $chunkIndex) { continue }
+            $local = [int]$pick.s % 1000; $token = [long]$to[$local] + [int]$pick.i
+            $donorPh = '<' + $order[[int]$pick.s].phonemes + '>'
+            if ($pick.i -lt 0 -or $token -ge $to[$local + 1] -or $donorPh[[int]$pick.i] -cne $tokens[$i]) { throw 'Selected unit symbol/bounds mismatch.' }
+            $frame = [long]$fo[$local]; for ($q = $to[$local]; $q -lt $token; $q++) { $frame += $dur[$q] }
+            $donorLength = 2 * $dur[$token]; $length = 2 * $durations[$i]
+            for ($channel = 0; $channel -lt 512; $channel++) {
+                $value = [single]($te[$channel * $teArray.Shape[1] + $token] * $scale[$channel])
+                for ($q = 0; $q -lt $durations[$i]; $q++) { $asr[$channel * $frames + $at[$i] + $q] = $value }
+            }
+            $acc = $null
+            foreach ($key in $contexts[$i]) { if ($shapes.TryGetValue($key, [ref]$acc) -and $acc[8] -ge 5) { break }; $acc = $null }
+            if ($null -eq $acc) { $acc = $shapes[$contexts[$i][2]] }
+            if ($null -eq $acc -or $acc[8] -le 0) { throw 'No baseline N shape for selected token.' }
+            $mean = 0.0; for ($q = 0; $q -lt 8; $q++) { $mean += $acc[$q] / $acc[8] / 8 }
+            for ($q = 0; $q -lt $length; $q++) {
+                $position = $q * ($donorLength - 1) / [double]($length - 1); $lo = [int][math]::Floor($position); $hi = [math]::Min($lo + 1, $donorLength - 1)
+                $a = [double][BitConverter]::ToHalf($pitch.Bytes, [int]($pitch.Offset + 2 * (2 * $frame + $lo)))
+                $b = [double][BitConverter]::ToHalf($pitch.Bytes, [int]($pitch.Offset + 2 * (2 * $frame + $hi)))
+                $voicing = $a + ($b - $a) * ($position - $lo)
+                $f0[2 * $at[$i] + $q] = if ($voicing -gt 10) { [math]::Exp($levels[$i][1]) } else { $voicing }
+                $position = 7.0 * $q / ($length - 1); $lo = [int][math]::Floor($position); $hi = [math]::Min($lo + 1, 7)
+                $n[2 * $at[$i] + $q] = ($acc[$lo] + ($acc[$hi] - $acc[$lo]) * ($position - $lo)) / $acc[8] - $mean + $levels[$i][0]
+            }
+        }
+    }
+    $tensors = [ordered]@{}
+    foreach ($name in 'asr', 'F0', 'N') {
+        $values = switch ($name) { 'asr' { , $asr }; 'F0' { , $f0 }; 'N' { , $n } }
+        if (@($values | Where-Object { -not [single]::IsFinite($_) }).Count) { throw "Nonfinite assembled $name." }
+        $bytes = [byte[]]::new(4 * $values.Length); [Buffer]::BlockCopy($values, 0, $bytes, 0, $bytes.Length)
+        $file = Join-Path $Directory "$name.f32"; [IO.File]::WriteAllBytes($file, $bytes)
+        $tensors[$name] = @{ file = "$name.f32"; shape = $(if ($name -ceq 'asr') { @(1, 512, $frames) } else { @(1, (2 * $frames)) }); bytes = $bytes.Length; sha256 = (Get-FileHash -LiteralPath $file).Hash }
+    }
+    $descriptor = Join-Path $Directory 'decoder-input.json'
+    $frontData = [pscustomobject][ordered]@{ schema = 1; text = $held.text; phonemes = $held.phonemes; voice = 'af_heart'; frames = $frames; durations = $durations; tensors = $tensors
+        provenance = @{ bankManifestSHA256 = $Bank.ManifestSHA256; selectionSHA256 = (Get-FileHash $selectionPath).Hash
+            predictionsSHA256 = (Get-FileHash (Join-Path $Bank.Directory 'prosody-predictions.json')).Hash; heldOutIndex = $Index
+            bankSentences = $selected.sentences; prosodyLevel = 8; nShapeTrainingSentences = 10000; targetWeights = '4,1,0.5,4,8,2'
+            assemblyToolSHA256 = (Get-FileHash $PSCommandPath).Hash; selectionToolSHA256 = (Get-FileHash (Join-Path $Root 'tools/reference/unit-bank/mine.ps1')).Hash } }
+    # Files bridge to the pinned Python reference only; PowerShell callers keep the typed object.
+    $frontData | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath $descriptor -Encoding utf8NoBOM
+    Write-Host "Front end: '$($held.text)', $frames decoder frames."
+    [pscustomobject]@{ Path = $descriptor; Data = $frontData }
+}
+
 # Dot-sourced (. ./Invoke-KokoroDevelopment.ps1): the functions above are the API; no command runs.
 if ($MyInvocation.InvocationName -eq '.') { return }
 
@@ -1044,7 +1228,7 @@ switch ($Command) {
         }
         ''
         'Commands (Get-Help ./Invoke-KokoroDevelopment.ps1 -Full):'
-        '  Status Verify Ratchet Run Emit Check Compare JobInput Capture Albert Find Tools'
+        '  Status Verify Ratchet Run Emit Check Compare JobInput Capture StockCapture Speak Zira Albert Find Tools'
         'Contract: AGENTS.md. Reference manuals: Find-Reference (Pwsh-Development/tools/SharedLibrary.psm1).'
     }
     'Verify' {
@@ -1191,6 +1375,13 @@ switch ($Command) {
         }
     }
     'StockCapture' {
+        if ($DecoderInput) {
+            if ($Block -eq 'albert' -or $PhonemesFrom) { throw 'DecoderInput is for decoder/generator captures and cannot be combined with PhonemesFrom.' }
+            $DecoderInput = [IO.Path]::GetFullPath($DecoderInput)
+            $frontEnd = if ($DecoderInputData) { $DecoderInputData } else { Get-Content -LiteralPath $DecoderInput -Raw | ConvertFrom-Json }
+            $Phonemes = $frontEnd.phonemes; $Voice = $frontEnd.voice
+            if ($Voice -cne 'af_heart') { throw 'The current unit-bank tables are af_heart only.' }
+        }
         if ($PhonemesFrom) {
             $from = Get-Content (Join-Path $(if ([IO.Path]::IsPathRooted($PhonemesFrom)) { $PhonemesFrom } else { Join-Path $Build $PhonemesFrom }) 'capture-spec.json') -Raw | ConvertFrom-Json
             $Phonemes = $from.phonemes; $Voice = $from.voice; $Seed = $from.seed
@@ -1224,11 +1415,83 @@ switch ($Command) {
         $script = @{ albert = 'capture_stock_albert.py'; decoder = 'capture_stock_decoder.py'; generator = 'capture_stock_generator.py' }[$Block]
         $spec = @{ sourceCommit = $StockCommit; sourceRoot = $sourceRoot; sourceFiles = @($sourceFiles); inputs = $inputs; phonemes = $Phonemes; voice = $Voice
             seed = $Seed; block = @{ albert = 'albert'; decoder = 'decoder'; generator = 'decoder.generator' }[$Block]; output = $out; exportToolSha256 = (Get-FileHash $PSCommandPath).Hash }
+        if ($DecoderInput) {
+            $spec.decoderInput = @{ path = $DecoderInput; sha256 = (Get-FileHash -LiteralPath $DecoderInput).Hash }
+            $spec.decoderInputToolSha256 = (Get-FileHash -LiteralPath (Join-Path $Root 'tools/reference/capture_decoder_input.py')).Hash
+        }
         $specPath = Join-Path $out 'capture-spec.json'
         $spec | ConvertTo-Json -Depth 8 | Set-Content $specPath -Encoding utf8NoBOM
         & $Python -I (Join-Path $Root "tools/reference/$script") --spec $specPath
         if ($LASTEXITCODE -or -not (Test-Path (Join-Path $out 'capture.json'))) { throw "Stock $Block capture failed." }
         "capture: $out"
+    }
+    'Zira' {
+        if (-not $Text) { throw 'Zira needs -Text.' }
+        $ziraDirectory = if ($OutputDirectory) { [IO.Path]::GetFullPath($OutputDirectory) } else { Join-Path $Build ("zira-{0:yyyyMMddTHHmmssZ}" -f [DateTime]::UtcNow) }
+        if (-not $ziraDirectory.StartsWith($Build + [IO.Path]::DirectorySeparatorChar, [StringComparison]::OrdinalIgnoreCase) -or (Test-Path -LiteralPath $ziraDirectory)) { throw 'Zira requires a new output directory under build/.' }
+        [void][IO.Directory]::CreateDirectory($ziraDirectory)
+        & (Join-Path $Root 'tools/reference/unit-bank/zira.ps1') -Text $Text -OutPrefix (Join-Path $ziraDirectory 'speech')
+    }
+    'Speak' {
+        if ($Soc -cne 'SM8550') { throw 'First Speak is the SM8550 gate; SM8635 follows chunked Speak (Next item 4).' }
+        $bank = Test-KokoroWorkingBank
+        $out = if ($OutputDirectory) { [IO.Path]::GetFullPath($OutputDirectory) } else { Join-Path $Build ("speak-{0:yyyyMMddTHHmmssZ}" -f [DateTime]::UtcNow) }
+        if (-not $out.StartsWith($Build + [IO.Path]::DirectorySeparatorChar, [StringComparison]::OrdinalIgnoreCase) -or (Test-Path -LiteralPath $out)) { throw 'Speak requires a new output directory under build/.' }
+        [void][IO.Directory]::CreateDirectory($out)
+        # -Path can reuse an assembled descriptor after a capture/build failure; the reference loader checks every hash.
+        if ($Path) {
+            $frontInput = [IO.Path]::GetFullPath($Path)
+            $front = Get-Content -LiteralPath $frontInput -Raw | ConvertFrom-Json
+        } else {
+            $assembled = New-KokoroBankDecoderInput -Bank $bank -Directory (Join-Path $out 'front-end') -Index $HeldOutIndex
+            $frontInput = $assembled.Path; $front = $assembled.Data
+        }
+        if ($front.provenance.bankManifestSHA256 -cne $bank.ManifestSHA256) { throw 'Assembled input belongs to a different bank manifest.' }
+        $decoderCapture = Join-Path $out 'decoder'; $generatorCapture = Join-Path $out 'generator'
+        foreach ($blockName in 'decoder', 'generator') {
+            & $PSCommandPath StockCapture -Block $blockName -DecoderInput $frontInput -DecoderInputData $front -Seed 17 -OutputDirectory (Join-Path $out $blockName) | ForEach-Object { Write-Host $_ }
+        }
+        # Both independently loaded stock models must have consumed exactly the assembled tensors.
+        foreach ($capDir in $decoderCapture, $generatorCapture) {
+            $captured = Get-Content -LiteralPath (Join-Path $capDir 'capture.json') -Raw | ConvertFrom-Json
+            $tensorIndex = 0
+            foreach ($name in 'asr', 'F0', 'N') {
+                if ($captured.tensors.PSObject.Properties["decoder.input.$tensorIndex"].Value.sha256 -cne $front.tensors.$name.sha256) { throw "Teacher did not consume the assembled $name." }
+                $tensorIndex++
+            }
+        }
+        $referenceDir = if ($Reference) { [IO.Path]::GetFullPath($Reference) } else { Join-Path $Build 'decoder-generator-fixture-20261009' }
+        $captureMapForSpeak = @{}; $visited = [Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
+        $walk = $null; $walk = {
+            param([string] $Fixture)
+            if (-not $visited.Add($Fixture)) { return }
+            $record = Get-Content -LiteralPath (Join-Path $Fixture 'fixture.json') -Raw | ConvertFrom-Json
+            $targetCapture = if ($record.Graph -ceq 'Decoder16') { $decoderCapture } else { $generatorCapture }
+            if ($record.PSObject.Properties['Capture'] -and $record.Capture) { $captureMapForSpeak[[IO.Path]::GetFullPath($record.Capture)] = $targetCapture }
+            if ($record.PSObject.Properties['Captures']) { foreach ($capture in $record.Captures) { $captureMapForSpeak[[IO.Path]::GetFullPath($capture.Directory)] = $targetCapture } }
+            foreach ($key in 'TenFixture', 'SixtyFixture', 'FrontFixture', 'SourceFixture', 'DecoderFixture', 'StageFixture', 'TailFixture', 'NoiseResFixture', 'UpInputScaleFixture') {
+                if ($record.PSObject.Properties[$key] -and $record.$key) { & $walk $record.$key }
+            }
+        }
+        & $walk $referenceDir
+        Import-Evaluator
+        $inputDir = New-KokoroJobInput -Reference $referenceDir -CaptureMap $captureMapForSpeak -OutputDirectory (Join-Path $out 'job-input')
+        $fixture = Get-Content -LiteralPath (Join-Path $inputDir 'fixture.json') -Raw | ConvertFrom-Json
+        if ($fixture.Frames -ne 120 * $front.frames + 1 -or $fixture.Samples -ne 600 * $front.frames) { throw 'Assembled input and connected job frame counts differ.' }
+        # Fourteen tiles leave room for this held-out group's resident activations in SM8550's measured 8 MiB.
+        $emission = Invoke-KokoroEmission -Kernel KokoroDecoderGenerator16Run -Parameters @{ ResBlockFrames = [int]$fixture.Frames; ResidentHvxThreads = 4; ResidentBatchTiles = 14 }
+        $layout = Get-Content -LiteralPath (Join-Path $emission.Directory 'runner-layout.json') -Raw | ConvertFrom-Json
+        if ($layout.VtcmBytes -gt 8388608) { throw "Speak needs $($layout.VtcmBytes) VTCM bytes; SM8550 grants 8388608. Choose a shorter group." }
+        $phone = Invoke-KokoroDeviceJob -EmissionDirectory $emission.Directory -InputDirectory $inputDir -Soc $Soc -Runs $(if ($Runs) { $Runs } else { 3 })
+        $wav = Join-Path $out 'dsp.wav'
+        $metrics = & (Join-Path $Root 'tools/Measure-KokoroPcmSnr.ps1') -OutputPath $phone.OutputPath -FixtureDirectory $inputDir -WavPath $wav
+        $result = [ordered]@{ Variant = 'network-free Kokoro'; Text = $front.text; Soc = $Soc; DecoderFrames = $front.frames; Samples = $metrics.Samples
+            PcmSnrDb = $metrics.PcmSnrDb; Clipped = $metrics.ClippedSamples; PcmSHA256 = $metrics.PcmSHA256; MedianDspMs = $phone.MedianMs
+            DspRtf = $phone.MedianMs / 1000 / ($metrics.Samples / 24000.0); LibrarySHA256 = $emission.LibrarySHA256; Emission = $emission.Directory
+            DecoderInput = $frontInput; DecoderInputSHA256 = (Get-FileHash $frontInput).Hash; JobInput = $inputDir; Output = $phone.OutputPath; Wav = $wav
+            Commit = (git -C $Root rev-parse HEAD); SourceKey = (Get-KokoroSourceKey); Uncommitted = [bool]@(git -C $Root status --porcelain).Count
+            DeviceReceipt = $phone.Lines; Listening = 'Not assessed; playback receipt alone does not establish intelligibility.' }
+        [pscustomobject]$result
     }
     'Albert' {
         'Stock ALBERT (pinned source):'
