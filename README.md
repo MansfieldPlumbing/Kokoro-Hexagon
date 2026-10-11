@@ -1,141 +1,177 @@
 # Kokoro-Hexagon
 
-Kokoro-82M text-to-speech on Android, authored in PowerShell, with the decoder,
-harmonic source and generator running together on the Hexagon DSP. The active
-network-free front end uses a phonemizer, unit bank and learned prosody tables in
-place of ALBERT, the text encoder and predictors. The integrated synthesis result
-below uses Windows-prepared inputs. The phonemizer has been verified independently
-on the phone; the complete Android text-to-audio pipeline is not connected yet.
-The stock whole-model DSP path remains the reference track.
-PowerShell reads the stock checkpoint, quantizes and packs the weights, and
-emits Hexagon machine code directly: HMX for convolutions and matrix
-multiplies, HVX for the rest, integer throughout (16-bit activations, W8x2
-weights, per-channel scales). The target Android pipeline runs phonemization,
-unit selection and table-driven prosody on the ARM CPU, drives the DSP and plays
-PCM through AAudio.
+PowerShell-authored text-to-speech for Android, with Kokoro's decoder, harmonic
+source and generator running together on the Hexagon DSP. PowerShell reads the
+checkpoint, packs the weights, and emits the Hexagon machine code and ELF directly.
+HMX handles convolutions and matrix multiplies; HVX handles the remaining model math.
 
-See [AGENTS.md](AGENTS.md) for the build contract and `docs/results/` for
-device receipts (each with numbers, artifact hashes and commit).
+## First audible network-free synthesis on SM8550
 
-| Path | Contents |
-|---|---|
-| `src/hexagon` | Hexagon instruction encoder, DMA copy and hardware probes (the ELF writer is `tools/Emit-HexagonProbe.ps1`) |
-| `src/kernels` | HMX/HVX kernel body generators (convolution, AdaIN, Snake, combine, STFT, harmonic source, decoder pieces, ALBERT attention) |
-| `src/jobs` | DSP job assemblies: decoder, generator stages and tail, harmonic source, resblock runners |
-| `src/models` | Checkpoint readers and weight conversion |
-| `src/runspace` | Native binding, AAudio, dspqueue layout, device harnesses |
-| `tools` | Fixture builders (from stock PyTorch captures), emission checks, device runners, scorers |
-| `phonemizer` | Text to Kokoro token IDs (Zira distillation, CoreLib-only); imported from PSPerception, see below |
-| `lib` | Pinned inputs (`manifest.json`) and the stock Kokoro config |
-
-Generated files go in the ignored `build/`.
-
-## Current state, 2026-10-10
-
-**Network-free Kokoro on SM8550: “I can eat a peach for hours.”**
-
-The first bank-front-end sentence ran through the connected decoder, harmonic
-source, generator and PCM path on the phone and played through AAudio. Scott heard
-the speaker playback and reported good sound quality. All three runs produced the
-same PCM hash.
+**“I can eat a peach for hours.” — October 10, 2026**
 
 | Measurement | Result |
 |---|---:|
-| Audio | 2.125 s, 51,000 samples |
+| Speech | **2.125 seconds**, 51,000 PCM samples at 24 kHz |
 | Median DSP execution | **148.495 ms** |
-| Real-time speed, DSP only | **14.3×** |
-| PCM SNR against the matching Windows teacher | **31.29 dB** |
+| DSP synthesis speed | **14.3× real time** |
+| PCM SNR against the matching reference | **31.29 dB** |
 | Clipped samples | **0** |
-| Requested VTCM / measured capacity | **7.75 / 8 MiB** |
+| VTCM allocation | **7.75 / 8 MiB** |
 
-For this integration check, the bank front end assembled inputs and capture-derived
-tables on Windows; the connected synthesis job ran on SM8550. The reference is stock
-PyTorch decoder/generator math driven by those same assembled inputs. These numbers
-measure DSP execution, not end-to-end latency or time to first audio.
+The connected synthesis job produced an entire sentence on the S23's SM8550 and
+played it through the phone speaker using AAudio. All three runs produced identical
+PCM. Listening was accepted, with a separate observation that the opening “I” was weak.
 
-The original 22-tile convolution batch requested 8.25 MiB and failed resource
-acquisition before playback. Manually reducing it to 14 tiles saved 512 KiB and fit
-the same complete 85-frame sentence in 7.75 MiB. Its phrasing and inputs were
-unchanged. This was a scratch-size workaround, not temporal chunking or an
-automatic memory planner.
+This is measured, audible speech faster than real time. Windows prepared the
+front-end inputs for this run; the phone executed the decoder, harmonic source,
+generator and PCM playback. The 148.495 ms measures DSP execution. Median host
+invoke time was 179.790 ms. Complete text-to-audio latency and time to first audio
+will be measured once the resident front end is connected.
 
-The exact library, inputs, receipt, PCM and listening verdict are preserved outside
-`build/` and protected by the `network-free-peach-sm8550` ratchet case. See the
-[baseline receipt](docs/results/bank-front-end-sm8550-20261010.md). Run the gate with
-`pwsh -NoProfile -File ./Invoke-KokoroDevelopment.ps1 -Command Ratchet -Case network-free-peach-sm8550`.
+The exact emitted library, inputs, output, receipt and listening verdict are banked
+and protected by the `network-free-peach-sm8550` ratchet. See the
+[baseline receipt and artifact manifest](docs/results/bank-front-end-sm8550-20261010.md).
 
-Next: phone-resident integration of the accepted system. Give the generator runtime
-frames, persist and compile the existing selector/prosody tables, and connect the
-installed APK host and local payload so fresh text produces phone speech with
-Windows disconnected. Start with short sentences using runtime normalization, then
-bounded streaming. Learned AdaIN controls, pronunciation improvements and the 17x
-speed target do not block the first resident sentence.
-For streaming, test arbitrary decoder-frame cuts with carried conditioning/state
-and direct activation binding. Measure the largest stage handoff and simultaneous
-live memory, then try a static frame-chunk schedule that keeps the working set in
-VTCM. Execution cuts need not follow phonemes, words or spoken groups.
-The deferred [VTCM-aware graph tiling design](docs/vtcm-aware-graph-tiling-design.md)
-records tiling across time, channels, windows and buffers while preserving graph
-semantics and contiguous PCM. Changing tile size must preserve the operation being
-computed; approximation error is measured separately. The newest handoff sets the order.
+## How it works
 
-## Earlier stage receipts, 2026-10-08
+The active system is a network-free Kokoro variant. A compiled phonemizer, a unit
+bank and PowerShell-learned prosody tables replace ALBERT, the text encoder and
+predictor LSTMs at playback. Stock Kokoro supplies offline training captures and the
+numerical reference for the decoder and generator.
 
-Measured on SM8550, hello-world sentence (af_heart, 1.625 s of audio), against
-stock PyTorch Kokoro at `dfb907a0`; scales calibrated on two other sentences.
-Every row is a run on the phone, three runs with identical output, bytes
-checked against the SDK 6.4.0.2 assembler.
+The Android integration follows this path:
 
-| Job | SNR vs stock | DSP time | Receipt |
-|---|---:|---:|---|
-| **Whole generator with the harmonic source and STFT in one job**, from captured decoder output, f0 and noise draws (stock against itself with the source in float64: 40.83 dB) | **37.24 dB PCM** | **95.57 ms** | [generator-whole-source](docs/results/generator-whole-source-sm8550-20261008.md) |
-| Harmonic source + STFT alone, f0 to har | 64.62 dB (har magnitude) | 3.95 ms | [harmonic-source](docs/results/harmonic-source-sm8550-20261008.md) |
-| Whole generator in one job (10x half, LeakyReLU(0.1) into ups[1] on the DSP, 60x half, tail), from captured decoder output and har | **42.05 dB PCM** | **79.71 ms** | [generator-whole](docs/results/generator-whole-sm8550-20261008.md) |
-| Generator 60x half (noise_convs[1], noise_res[1], ups[1], resblocks.3-5, mean) + tail (LeakyReLU, conv_post, exp/sin, iSTFT) in one job, from captured ups[1] input and har | **42.71 dB PCM** | **46.48 ms** | [generator-front-stage-tail](docs/results/generator-front-stage-tail-sm8550-20261008.md) |
-| resblocks.3-5 + mean + tail, from captured resblocks.3 input | 45.70 dB PCM | 32.12 ms | [generator-stage16-tail](docs/results/generator-stage16-tail-sm8550-20261008.md) |
-| Tail alone | 46.03 dB PCM | 3.06 ms | [generator-tail16](docs/results/generator-tail16-sm8550-20261008.md) |
-| Generator 10x half (LeakyReLU(0.1), ups[0], noise_convs[0], noise_res[0], resblocks.0-2, mean) in one job, from captured decoder output and har | **58.56 dB** | **31.67 ms** | [generator-10x-half](docs/results/generator-10x-half-sm8550-20261008.md) |
-| resblocks.0-2 + mean (256 channels) | 64.14 dB | 23.24 ms | [generator-resblocks012](docs/results/generator-resblocks012-16bit-sm8550-20261008.md) |
-| noise_res[0] (256 channels) | 74.81 dB | 7.74 ms | same receipt |
-| noise_res[1] (128 channels) | 54.87 dB | 11.00 ms | [noise-res1](docs/results/noise-res1-16bit-sm8550-20261008.md) |
+```text
+Text → phonemizer → unit selection + prosody → packed decoder inputs
+     → Hexagon decoder → harmonic source + generator → PCM → AAudio
+```
 
-The 60x half plus tail is RTF 0.029 for that part of the model. PCM from these
-jobs plays on the phone speaker as "hello world".
+The front end and dispatch run on ARM; synthesis math runs on Hexagon. The DSP
+path uses integer kernels, 16-bit activations, W8x2 weights and per-channel scales.
+Our build emits its own instructions and ELF without C/C++, LLVM or QNN. Python
+and PyTorch are used only for stock Windows reference captures and evaluation.
 
-The whole generator, its harmonic source and STFT included, runs as one job in
-95.57 ms for 1.625 s of audio (generator RTF 0.059) from the decoder output and f0.
-The connected stock-input decoder and generator subsequently reached 31.99 dB PCM
-in 106.8 ms on SM8550 ([receipt](docs/results/decoder-generator-sm8550-20261009.md)).
-Stock whole-model RTF, time to first audio, and connected SM8635 speech remain unmeasured.
+The phonemizer has already run independently in the Android host: 57.8 µs warm per
+sentence on SM8550, with token IDs identical to Windows. Its challenge corpus
+completed 73/73 sentences and its held-out corpus 149/153. See the
+[phonemizer documentation](phonemizer/README.md) and
+[phone receipt](docs/results/phonemizer-polish-sm8550-20261008.md).
+
+## Phone integration comes next
+
+The next delivery is fresh text entered on the phone producing speech with Windows
+disconnected. The accepted synthesis quality is sufficient to begin integration.
+
+1. Give the generator a runtime frame count, retaining the existing normalization
+   for the first short resident sentence.
+2. Compile the selector and persist the learned prosody tables with an indexed local
+   bank and deployment calibration checked on holdouts.
+3. Connect phonemization, selection, packing, DSP execution and AAudio in the APK
+   host, retaining resources between requests.
+4. Extend to bounded frame streaming, then measure warm and cold latency, time to
+   first audio and end-to-end real-time factor on SM8550 and SM8635 separately.
+
+The model-less APK host and verified local model/bank payload ship separately.
+Training and Zira remain offline. No per-utterance teacher capture or recalibration
+belongs in the resident playback path. In-process stages pass typed objects and
+binary buffers; user text is data, never executable PowerShell.
+
+### Frame chunking as temporal tiling
+
+The first sentence fit after a manual scratch-size adjustment: reducing the
+convolution batch from 22 to 14 tiles saved 512 KiB, lowering requested VTCM from
+8.25 to 7.75 MiB. The same complete 85 decoder frames ran with four HVX workers.
+This was an unsplit utterance; general frame streaming remains to be implemented.
+
+Streaming will use arbitrary decoder-frame cuts, including cuts inside phonemes.
+Full linguistic context drives prosody upstream. Measure the largest stage handoff,
+carried state and simultaneously live buffers, then choose a static frame-chunk
+size and memory schedule that fit the VTCM grant. Bind producer outputs directly to
+consumers in the native layout, retain live activations and reuse dead storage.
+
+Carry convolution edge context, acoustic conditioning, harmonic phase and noise
+state across cuts. Preserve native STFT/iSTFT overlap-add and give each PCM sample
+one owner. Execution boundaries must introduce no pauses, duplicated samples or
+arbitrary audio crossfade. Test smaller chunks and shifted cut points against the
+same uninterrupted reference.
+
+Supplied AdaIN coefficients have already reduced decoder chunk execution from
+about 13.4 to 2.9 ms with exact parity against the supplied-moments path. Extending
+that mechanism to the generator and producing its controls on the phone follow
+the first resident sentence. See the [AdaIN design](docs/adain-control-stream-design.md),
+[roadmap](docs/ROADMAP.md) and [current handoff](docs/handoff-20261010.md) for the
+implementation order. A general multidimensional tiler and the 17× speed target
+are subsequent work.
+
+## Development
+
+Start with PowerShell 7.4 or later and the project entrypoint:
+
+```powershell
+pwsh -NoProfile -File ./Invoke-KokoroDevelopment.ps1
+pwsh -NoProfile -File ./Invoke-KokoroDevelopment.ps1 Verify
+```
+
+The default command reports the current commit, next step and available commands
+without accessing a phone. `Verify` checks the repository and runs the same gates
+as CI. Build dependencies are pinned in `lib/manifest.json`; generated artifacts
+belong under ignored `build/`. Follow [AGENTS.md](AGENTS.md) for the build contract.
+
+With the preserved baseline and an authorized SM8550 connected:
+
+```powershell
+pwsh -NoProfile -File ./Invoke-KokoroDevelopment.ps1 Run -Case network-free-peach-sm8550 -Runs 3
+pwsh -NoProfile -File ./Invoke-KokoroDevelopment.ps1 Ratchet -Case network-free-peach-sm8550
+```
+
+`Run` replays the frozen input; `Ratchet` checks it against the accepted baseline.
+`Speak` currently prepares a selected bank sentence on Windows and runs it on the
+phone. The resident fresh-text path is the integration work above. Keep measurements
+from different phone models separate, including phones with the same SoC.
+
+The preserved `data/unit-bank/` is frozen evidence. Experiments use `build/unit-bank/`;
+restore a missing working copy from the preserved copy and verify its manifest.
+`Verify` does not check bank integrity. The Drive archive remains unverified until
+an extracted copy passes the bank manifest check.
 
 ## Published comparisons
 
-Checked 2026-10-10. Speed is audio duration divided by synthesis time. These runs
-use different phones, inputs and timing scopes; they are context for our targets,
-not a matched ranking. External results are the authors' measurements.
+Checked October 10, 2026. Speed is audio duration divided by synthesis time.
+Each row retains its published device and timing scope; these are comparison
+points, not a matched ranking.
 
-| Build | Device | Timed scope | Published speed |
+| Build | Device | Timed scope | Speed |
 |---|---|---|---:|
-| [Kokoro-Hexagon network-free baseline](docs/results/bank-front-end-sm8550-20261010.md) | SM8550 | Connected decoder, source and generator; DSP only; 2.125 s audio | **14.3×** |
-| [laishere/kokoro-coreml](https://github.com/laishere/kokoro-coreml#ios), pinned comparison `484907d` | iPhone 16 Pro | Warm phonemes-to-PCM chain; six passages; G2P and load excluded | **16.9× mean**, 19.8× on the 8.07 s passage |
+| [Kokoro-Hexagon network-free baseline](docs/results/bank-front-end-sm8550-20261010.md) | S23 / SM8550 | Connected decoder, source and generator; DSP only; 2.125 s audio | **14.3×** |
+| [laishere/kokoro-coreml](https://github.com/laishere/kokoro-coreml#ios), comparison `484907d` | iPhone 16 Pro | Warm phonemes-to-PCM chain; six passages; G2P and load excluded | **16.9× mean**, 19.8× on the 8.07 s passage |
 | [Soniqo speech-swift](https://github.com/soniqo/speech-swift/blob/main/docs/benchmarks/ios-coreml.md) | iPhone 16 Pro | Core ML Kokoro, warm release benchmark | **12.5×** (RTF 0.08) |
-| [kokoro-offline-tts-android](https://github.com/cedgeremek/kokoro-offline-tts-android#real-device-demo), earlier Android reference | S24 Ultra / SM8650 | QNN HTP generator; separately reports 306 ms warm request-to-first-audio | **3.78×** (generator RTF 0.2644) |
-| [Morph developer report](https://www.reddit.com/r/TextToSpeech/comments/1sc32wb/kokoro_tts_running_oniphone_cpuonly_20x_realtime/) | iPhone 17 Pro | CPU; modified model with a trained replacement stage; no reproducible benchmark protocol established | **20× claimed** |
+| [kokoro-offline-tts-android](https://github.com/cedgeremek/kokoro-offline-tts-android#real-device-demo) | S24 Ultra / SM8650 | QNN HTP generator; separately reports 306 ms warm request-to-first-audio | **3.78×** (generator RTF 0.2644) |
+| [Morph developer report](https://www.reddit.com/r/TextToSpeech/comments/1sc32wb/kokoro_tts_running_oniphone_cpuonly_20x_realtime/) | iPhone 17 Pro | CPU; modified model with a trained replacement stage; reproducible benchmark protocol pending | **20× claimed** |
 
-The 17× target is a milestone, not proof of being the fastest mobile Kokoro.
-Our complete phone-resident text-to-audio and first-audio timings remain pending.
-The [six-passage protocol](docs/speed-target.md) defines the stock comparison inputs.
+17× is our next speed milestone. Leadership claims require matched measurements
+with the same inputs and stage coverage. The
+[six-passage protocol](docs/speed-target.md) defines the stock comparison inputs;
+network-free variant results are labeled separately.
 
-## Phonemizer
+## Source and evidence
 
-Text to Kokoro token IDs, distilled from Windows SAPI Zira (contextual
-pronunciation choices such as noun/verb `record`) into a compact PSD1 and a
-CoreLib-only assembly, with the selection logic compiled alongside the data.
-Developed in PSPerception and imported here at a pinned commit (see [phonemizer/README.md](phonemizer/README.md)); it now
-builds under `build/phonemizer` from pinned inputs and all its Windows gates pass. On SM8550 the driver loads in
-the phone app in 15 ms. With the polish pass it takes 57.8 µs warm per sentence on SM8550, with token IDs identical
-to Windows; 73 of 73 challenge and 149 of 153 held-out sentences complete
-([phonemizer-polish](docs/results/phonemizer-polish-sm8550-20261008.md)).
+| Location | Contents |
+|---|---|
+| `src/hexagon` | Instruction encoding, DMA and hardware probes |
+| `src/kernels` | HMX/HVX convolution, AdaIN, Snake, source and transform kernels |
+| `src/jobs` | Connected DSP jobs and their memory layouts |
+| `src/models` | Checkpoint reading and weight conversion |
+| `src/runspace` | Native bindings, dispatch and AAudio |
+| `phonemizer` | Compiled text-to-token front end |
+| `tools` | Emission, packing, reference evaluation and device runners |
+| `docs/results` | Hardware receipts with artifact hashes and timing scope |
 
-Direction: Moby lexicon and Zira-distilled choices, polished with hand-written rules (stress on content words, US flaps,
-function-word weak forms, morphology, numbers). Misaki is not used.
+Earlier stock-input speech reached 31.99 dB PCM in 106.8 ms for 1.625 seconds of
+audio through the connected decoder and generator on SM8550
+([receipt](docs/results/decoder-generator-sm8550-20261009.md)). The whole generator
+with its harmonic source reached 37.24 dB PCM in 95.57 ms
+([receipt](docs/results/generator-whole-source-sm8550-20261008.md)). These remain
+separate reference results alongside the bank-front-end baseline.
+
+The [roadmap](docs/ROADMAP.md) records delivery priorities; the newest
+[handoff](docs/handoff-20261010.md) owns the numbered implementation steps.
