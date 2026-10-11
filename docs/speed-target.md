@@ -1,6 +1,12 @@
-# Speed target: the published iPhone Kokoro
+# Stock comparison protocol: the published iPhone Kokoro
 
-## The bar
+This preserves the six-passage comparison protocol and October 9 investigation below.
+The current delivery order is [phone-resident network-free integration](handoff-20261010.md),
+followed by state-carrying decoder-frame chunks. The old ALBERT/LSTM implementation order and
+400 ms crossfade experiment below are historical, not instructions for that path.
+Current published comparisons live in the [README chart](../README.md#published-comparisons).
+
+## Pinned reference
 
 kokoro-coreml-ane `484907d` (`C:\Dev\.vendor\kokoro-coreml-ane`), Core ML fp16 + int8 palettized, mostly on the ANE.
 iPhone 16 Pro (A18 Pro), `iOSDemo/` (`assets/iPhone16ProBenchmark.png`):
@@ -27,7 +33,7 @@ not split into breath groups. Inputs: `iOSDemo/iOSDemo/Resources/benchmark_data.
 - Fidelity reported with every timing: PCM SNR against stock PyTorch for the same passage and noise draws.
 - Time to first audio is a separate claim: breath-group streaming, first group's PCM.
 
-## Where we are
+## Stock-path snapshot, 2026-10-09
 
 Decoder + whole generator, hello world (1.625 s): 106.8 ms DSP time, RTF 0.066, on SM8550. ALBERT, the text encoder and the
 predictors are not on the DSP yet. Their front end is small (M4 Mac, T_enc 13: ALBERT 4, PostAlbert 3, alignment 1,
@@ -75,8 +81,9 @@ Sentence: "The early morning sun cast long shadows across the empty street." (17
 - The single forward itself pauses 280 ms after "sun" (1.40-1.68 s, 20 ms RMS below -40 dBFS), which is why the
   250 ms text-split pause matched.
 
-Layer-major streaming stays the exact answer and the one used for benchmark timing; slices are the fallback that
-runs long sentences on today's jobs.
+At the time of this experiment, layer-major streaming was the proposed exact benchmark path and overlapping
+slices were an interim listening experiment. Neither establishes the current frame-chunk implementation.
+The active streaming direction carries conditioning/state across frame cuts without arbitrary PCM overlap.
 
 Stock captures (af_heart, seed 17, `build/capture-iphone-bench/<id>-decoder|generator`), generator input frames and audio:
 122 / 1.525 s, 356 / 4.450 s, 644 / 8.050 s, 1300 / 16.250 s, 2154 / 26.925 s, 2242 / 28.025 s. The iPhone rows differ by
@@ -89,13 +96,13 @@ up to 0.1 s (predicted durations; cause not checked); RTF is the comparable figu
   int32 at `Layout.Input.Frames`, clamped to 2..capacity. V73 simulator, hello-world fixture (65 frames): capacity 65 and
   capacity 96 both 0 differing bytes against the fixed job (163,840 output bytes). The fixed job's code is unchanged
   (SHA-256 `346276CF...`, 54,468 bytes, before and after).
-- Next: the generator. Its batch loops, `$parallel` worker chunks, pad rows, front interleave counts, source and tail
+- Remaining at that date: the generator. Its batch loops, `$parallel` worker chunks, pad rows, front interleave counts, source and tail
   layouts are emitted per frame count (`Kokoro.Generator60x16Run.ps1` lines 206-245, 289-300, 354-509). Converting the
   batch loop to runtime counts is also the loop DDR streaming needs.
 - Recurring operations done by hand this session belong in one instrument: emit a job, build a simulator fixture from a
   capture, run the simulator, compare outputs, capture stock, write WAV, measure waveform and log-spectral distance.
 
-## Order
+## Historical stock-path order, 2026-10-09 (superseded for active work)
 
 1. **Scaling.** Capture stock for the six passages (`build/capture-iphone-bench/`; calibrate on other sentences, the six
    are holdout). Passage 0 on the current job; layer-major streaming for the rest, measuring DDR traffic per layer. This

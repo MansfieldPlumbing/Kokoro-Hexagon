@@ -5,9 +5,15 @@ different mechanism. If an experiment shows a part of it does not work, report t
 
 ## Goal
 
-Synthesize any length of speech in bounded chunks (up to 96 decoder frames per DSP job) with the quality of one
-uninterrupted pass, without overlapping chunks and without waiting for the whole utterance before the first chunk
-plays. Every utterance is chunked; there is no separate short-utterance path.
+Synthesize any length of speech in bounded decoder-frame chunks with the quality of one uninterrupted pass,
+without overlapping published PCM and without waiting for the whole utterance before the first chunk plays.
+Cut points may fall inside phonemes; words and word groups do not determine execution boundaries. Measure the
+largest stage handoff, the state it carries and simultaneous live memory, then test a static frame size and
+resident schedule, including a final partial chunk. The earlier 96-frame capacity is a test point, not a universal
+memory guarantee. Arbitrary cut points do not require runtime replanning.
+
+The immediate delivery gate is first a short phone-resident sentence using existing normalization, as ordered
+by `handoff-20261010.md`. The bounded streaming path and learned coefficients follow that integration gate.
 
 ## Principle
 
@@ -41,7 +47,7 @@ one pass. Within a chunk v is constant (stock AdaIN holds coefficients constant 
 modulating them per frame is time-varying conditioning, a separate extension measured on its own.
 
 Two separate experiments, in this order: representation sufficiency (can one shared scalar per chunk, through fitted
-per-site sensitivities, reproduce the oracle corrections well enough, scored by decoder output against the one pass)
+per-site sensitivities, reproduce the reference corrections well enough, scored by decoder output against the one pass)
 and then learnability (can the front end's features determine that scalar on held-out sentences). Training a
 controller is pointless until the first passes.
 
@@ -85,7 +91,7 @@ the experiment and not yet persisted as a runtime bank (handoff Next item 3).
 | Supplied whole-utterance moments reproduce the one pass exactly | done, bit-exact (`docs/results/decoder-supplied-moments-sm8550-20261010.md`) |
 | Normalization is the decoder's chunking error | done: two chunks 12.21 dB against one pass with their own moments, 61.97 dB with supplied moments |
 | 1. Zero correction reproduces ordinary chunked decoding bit for bit | done, bit-exact (`docs/results/decoder-coefficient-correction-sm8550-20261010.md`) |
-| 2. Oracle corrections reproduce the supplied-moments result | done, bit-exact, 61.97 dB stitched; the correction costs about 0.06 ms per chunk |
+| 2. Reference corrections reproduce the supplied-moments result | done, bit-exact, 61.97 dB stitched; the correction costs about 0.06 ms per chunk |
 | 3. Learned r(t) on held-out sentences: how much of the 12.21-to-61.97 dB gap it closes | after end to end |
 | 4. Runtime: the controller lowered through PSLowering, corrections supplied per chunk | after 3 |
 | Generator sites take the same modes | next DSP change |
@@ -107,8 +113,12 @@ harmonic source's phase and noise state carry from chunk to chunk on the DSP, so
 and controller run ahead of the DSP; AAudio plays finished chunks. Time to first audio is the front end for the first
 chunk plus one chunk's DSP time.
 
-Execution chunks deliver computation tiles sized to fit VTCM, across supported time, channel, window and buffer
-dimensions. They need not coincide with words or spoken groups. Carry per-layer acoustic state and the necessary future context, and publish only each tile's new contiguous
+Frame chunks are the first temporal tiling method to test. Bind native-layout producer outputs directly to their
+consumers, keep live activations resident and reuse storage after its last consumer instead of materializing
+separate intermediate tensors where binding suffices. Carry sufficient conditioning and edge/source state;
+measure the required carried objects rather than retaining whole-utterance activations by default. Additional
+tiling dimensions remain deferred unless frame chunking cannot fit the working set.
+Carry the necessary future context, and publish only each tile's new contiguous
 PCM span. Job boundaries must not introduce pauses. Whole-utterance style selection, AdaIN control, harmonic phase
 and randomness must remain consistent as execution granularity changes.
 
@@ -117,7 +127,7 @@ do not add an audio segmentation heuristic. Scott's example, "I can" | "eat a pe
 spoken groups, not mandatory DSP job sizes. Grammatical expectations can develop incrementally ("eat" opens an
 object, "for" opens a complement) and persist across time tiles.
 
-Benchmark progressively smaller execution tiles against one uninterrupted pass, varying supported dimensions.
+Benchmark progressively smaller frame chunks and shifted cut points against one uninterrupted pass.
 Hold linguistic context, acoustic controls, utterance style and randomness fixed. Exact parity is the target for
 deterministic operators; quantify approximation error separately. Report sample ownership and error near joins,
 listening, peak memory, DSP time and first-audio latency. See the deferred shared
@@ -125,5 +135,7 @@ listening, peak memory, DSP time and first-audio latency. See the deferred share
 
 ## Order
 
-End to end first (`docs/handoff-20261010.md` Next items 1-4: first speech through the DSP job, generator modes,
-selector, chunked `Speak` with dspqueue and AAudio), then the learned stream (item 5).
+Phone-resident integration first (`docs/handoff-20261010.md` Next items 2-4: generator runtime frames,
+compiled selector/tables and fresh short-text `Speak` with all assets local), then state-carrying frame chunks
+and the learned stream (item 5). Supplied decoder coefficients already cut chunk execution from about 13.4 to
+2.9 ms with exact supplied-path parity; the generator modes and front-end coefficient production remain open.

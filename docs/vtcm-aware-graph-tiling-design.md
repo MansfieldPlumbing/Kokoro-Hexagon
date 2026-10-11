@@ -4,6 +4,13 @@ Recorded 2026-10-10 at Scott's request. Deferred design direction; the seven-ste
 order in `handoff-20261010.md` still governs implementation. Kokoro is the proving
 ground for a general capability shared with PSLowering and the DSP execution system.
 
+Current first approach: arbitrary decoder-frame chunk boundaries with carried conditioning/state. Measure the
+largest object ferried between stages and all simultaneously live objects, then test a static frame size and
+resident buffer schedule. Directly bind producers to consumers and reuse dead storage; avoid intermediate
+materialization where that binding suffices. Linguistic boundaries do not select execution cuts. Dynamic
+replanning and additional tile dimensions below are deferred extensions if this bounded temporal schedule
+cannot meet the measured memory requirements; they do not precede phone-resident integration.
+
 ## Execution model
 
 Complete utterance -> phonemes and full-context acoustic controls -> decoder and
@@ -74,5 +81,7 @@ Keep SM8550 and SM8635 receipts separate and identify the executed artifacts.
 SM8550 and 4 MiB on SM8635. The first bank-front-end sentence has 85 decoder frames:
 the existing resident job needs 8,650,752 VTCM bytes at 22 convolution batch tiles and
 8,126,464 bytes at 14. The first plan stopped at resource acquisition and published
-no audio. The second plan's result belongs in `results/bank-front-end-sm8550-20261010.md`.
-This establishes a concrete planning regression case, not general tiled execution.
+no audio. The second plan ran and played the same complete sentence, as recorded in
+`results/bank-front-end-sm8550-20261010.md`. The manual batch reduction saved 524,288 bytes of internal
+convolution scratch; no temporal split occurred. This establishes a concrete planning regression case,
+not arbitrary frame chunking, automatic fallback or fully bound resident activations.

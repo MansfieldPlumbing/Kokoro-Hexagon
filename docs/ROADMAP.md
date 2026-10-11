@@ -1,121 +1,122 @@
 # Roadmap
 
-The machine-wide rules in `C:\Dev\AGENTS.md` and this repository's `AGENTS.md` apply.
-This file records the current campaign: what is built where, in what order, and how
-each step is judged. Results go in `docs/results/`.
+Follow [the shared rules](../../Pwsh-Development/AGENTS.md) and this repository's
+[AGENTS.md](../AGENTS.md). Updated 2026-10-10. The newest
+[handoff](handoff-20261010.md) owns the numbered implementation steps and commands;
+this file records delivery priorities and open engineering questions. Device
+receipts live in `docs/results/`. Published comparisons belong in the
+[README comparison chart](../README.md#published-comparisons).
 
-## Scoreboard
+## First priority: phone-resident speech
 
-End-to-end real-time factor and time to first audio on SM8550 and SM8635, measured
-warm and cold with the same text. The reference bar is the best other Kokoro build:
-306 ms warm request-to-first-audio and generator RTF 0.2644 (QNN HTP, SM8650).
+The accepted network-free system is good enough for integration. Previously
+unprepared text entered on SM8550 must produce audible speech through the installed
+APK host and local model/bank payload with Windows disconnected. Start with a short
+sentence, then bounded long-form speech and SM8635. The host and model payload ship
+separately; both must be installed before inference.
 
-## Tracks
+The active front end is our compiled phonemizer, unit bank and PowerShell-learned
+prosody tables. ALBERT, the text encoder and predictor LSTMs populate reference
+captures offline; they are not phone dependencies for this variant. The stock
+whole-model DSP track remains a separate numerical and benchmark reference.
 
-| Track | Where | Work | Gate |
-| --- | --- | --- | --- |
-| 1. Model on the DSP (main line; nothing below may block it) | this repository | Active (2026-10-10): speech end to end through the network-free front end (phonemizer, unit bank, PowerShell-learned tables) driving the DSP decoder and generator, in the order of the newest handoff's Next. Stock reference track: ALBERT, text encoder and predictors on the DSP for the stock phase-1 benchmark rows, after the variant speaks; host-side timing breakdown | bit-exact against the V73 simulator, stage SNR against stock PyTorch captures, phone runs with artifact hashes |
-| 2. PSPerception (refinement) and PSLowering (compilation) | github.com/MansfieldPlumbing/PSPerception, github.com/MansfieldPlumbing/PSLowering | PSPerception: counterexample-guided percept refinement (`Invoke-PerceptRefine`, `src/Refine.ps1`): observations, contradictions, proposals, keep/revert, retained percepts. PSLowering: compiles admitted typed PowerShell into CoreLib-only assemblies (`UnitKernels` at `1afabe05`) | each project's own verification entrypoint |
-| 3. Text front end | this repository | typed spans (Money, Time, Cardinal, ...), reversible projection, SMA parse and non-executing bind, breath-group planner; consumes PSPerception's refined output compiled by PSLowering, by pinned commit | phoneme parity with misaki (lexicon mode) and accuracy on human labels |
-| 4. Short bursts and first audio | this repository, PyTorch on Windows | Campaign 1 measurements below | listening plus measured gap closure |
+Integration needs generator runtime-frame support, a compiled selector and persisted
+learned tables, an indexed local bank, deployment calibration checked on holdouts,
+and the resident front-end -> DSP -> AAudio chain. Reuse the existing APK host and
+PSLowering inputs at their pinned commits. No Windows-prepared per-utterance capture,
+scale or input is allowed at playback. Keep typed objects and binary buffers in
+process, without JSON serialization between stages. User text is data, never code.
 
-## Track 1: VTCM
+Pronunciation improvements, learned AdaIN controls, 17x speed, instruction packet
+scheduling and a general graph tiler do not block the first resident sentence.
+Stateful frame chunking and activation binding are the subsequent streaming work;
+fix any memory or correctness blocker needed for integration in that path.
 
-Measured with an emitted probe (`docs/results/vtcm-capacity-20261007.md`):
-SM8550 grants 8 MiB, SM8635 grants 4 MiB, for every application ID tried.
-4 MiB is the design floor. The runtime planner must query VTCM at setup and pick its layout:
+## Established baseline and remaining measurements
 
-- general path: time tiles streamed through VTCM with DMA ping-pong, sized from the
-  queried VTCM; AdaIN moments accumulated in the producing conv's epilogue, applied
-  in a fused AdaIN + Snake + residual pass;
-- fast path: when a breath group fits, the whole group stays resident (HMX output is
-  the next conv's input, skip connections rotate pointers).
+The [accepted SM8550 sentence](results/bank-front-end-sm8550-20261010.md) contains
+85 decoder frames and 51,000 PCM samples (2.125 s). Median DSP execution is
+148.495 ms, 14.3x real time, with 31.29 dB PCM SNR and zero clipping. It was heard
+through the phone speaker. Windows prepared its inputs; complete fresh-text Android
+synthesis is still pending. The 179.790 ms median host invoke is a separate timing,
+also excluding the full text-to-audio pipeline.
 
-Use the resident path for the first execution chunk only when its checked layout fits the
-reported grant. SM8635's 4 MiB is the platform value (ExecuTorch's Qualcomm SoC table lists
-SM8635 and SM7675 as V73 with 4 MB; SM8550, SM8650, SM8750 and SM8850 have 8 MB).
-Planner contract: the runtime query is authoritative; at 8 MiB or more use the
-large-resident path where liveness permits; at 4 MiB the tiled path is required and the
-resident path applies only to groups that fit. Whether one V73 binary runs unchanged on
-V75 and later is a separate claim that needs its own phone receipts.
+After integration, measure warm and cold text-to-PCM latency, request-to-first-audio
+and end-to-end RTF on the same text, keeping DSP and host timings distinct. Report
+SM8550 and SM8635 separately, with artifact hashes, fidelity and listening evidence.
+17x is an optimization target, not an established mobile leadership claim.
+[The six-passage stock comparison protocol](speed-target.md) remains available;
+label network-free results as the variant and refresh competitor data when used.
 
-Predict peak VTCM use analytically from simultaneously live activations, weights,
-scratch, DMA buffers, alignment and HMX page constraints. Report required bytes,
-queried capacity and the selected layout before dispatch. Tile supported time,
-channel, window and buffer dimensions while retaining linguistic context and
-acoustic state; a DSP job boundary need not be a
-word or prosodic boundary. Reduce internal convolution tile batches first. If fixed
-resident buffers still cannot fit, stream them through VTCM or choose a shorter
-execution tile while preserving model state, lookahead and AdaIN semantics.
-Allocation failure must select a smaller checked plan with a bounded
-retry, before publishing PCM or advancing persistent state; never continue a failed
-job as if it produced audio. Record the rejected and selected plans in the receipt.
+## Frame chunking as temporal tiling
 
-The first bank-front-end sentence exposed this requirement: its 22-tile layout
-requested 8,650,752 bytes and stopped at resource acquisition on SM8550. The same
-85-decoder-frame group with 14 tiles needs 8,126,464 bytes. This is a layout prediction;
-successful execution and speech require a separate phone receipt. The initial
-`Speak` gate checks the emitted layout against measured SM8550 capacity; the runtime
-query and automatic fallback remain to be implemented.
-The deferred [graph tiling design](vtcm-aware-graph-tiling-design.md) records the
-general compiler capability and its semantic invariants; the newest handoff's
-generator modes, runtime frames and selector work retain priority.
+Investigate arbitrary decoder-frame cut points, including cuts inside phonemes.
+Words, word groups and breath groups supply linguistic context and acoustic controls;
+they do not set DSP job boundaries. Preserve that context as the execution moves
+through fixed-size frame chunks and a final partial chunk.
 
-Generator 60x liveness (stock `AdaINResBlock1.forward` and the three-resblock mean,
-`istftnet.py` at `dfb907a0`; 128 channels, u8, 998,528 B per tensor at 7,801 frames,
-conv weights up to 180 KB at K=11). Three tensors must be resident: the residual
-stream, the conv input and the conv output (a conv cannot overwrite its own input
-because it reads neighboring frames). The stage input and the three-way mean can stay
-in DDR: the input is re-read once per resblock and the mean is accumulated by DMA after
-each resblock, about 8 MB of DDR traffic per group against 79 MB today. Three resident
-tensors need about 3.2 MB, so 7,801-frame groups stay resident on SM8635 with about
-1 MB spare (limit about 9,900 frames); SM8550 can keep four tensors resident (limit
-about 15,600 frames). Longer groups take the tiled path.
+Start by measuring the largest object passed between stages, its required carried
+state, and the other simultaneously live objects at each handoff. Include weights,
+scratch, alignment and HMX page constraints in the peak-memory bound. Use those
+bounds to test a static frame-chunk size and buffer schedule for each supported VTCM
+grant. Arbitrary cut points do not require a dynamic scheduler. Runtime replanning
+or additional tiled dimensions are extensions only if the static schedule cannot
+meet the measured requirements.
 
-## Campaign 1 (Windows characterization)
+Bind producer outputs directly to consumer inputs in the native activation layout,
+retain the live working set in VTCM and reuse storage after its last consumer.
+Avoid separate intermediate tensors, host objects or DDR round-trips where direct
+binding suffices. Measure the state needed across chunks rather than retaining
+whole-utterance activations by default. The front-end conditioning stream supplies
+AdaIN coefficients; establish its sufficiency and the remaining edge/source state
+against an uninterrupted run. Supplied decoder coefficients are already
+[bit-exact with the supplied-moments path](results/decoder-direct-coefficients-sm8550-20261010.md)
+and reduced chunk execution from about 13.4 to 2.9 ms. Producing those coefficients
+on the phone and extending the modes to the generator remain open.
 
-One corpus: WikipediaHomographData at `8f008f021e88f8b71118a27ae655f1f3121162bc`
-(Apache-2.0). Voices `af_heart`, `am_michael`. Phonemes from misaki `fba12365` in
-lexicon mode (`fallback` set to a callable returning nothing, because a falsy fallback
-loads BART), run offline in an isolated Python 3.11 environment built from misaki's
-`uv.lock`.
+Compare progressively smaller and differently placed frame cuts with the same
+linguistic controls, style and randomness. Report sample ownership, boundary error,
+listening, peak memory and timing. Native STFT/iSTFT overlap-add is retained; no
+arbitrary PCM crossfade, duplicated samples or inserted pause is allowed. Exact
+tiling error and learned-control approximation error are measured separately.
+See [AdaIN control](adain-control-stream-design.md) and the deferred
+[general graph tiler](vtcm-aware-graph-tiling-design.md).
 
-| | Question | Method |
-| --- | --- | --- |
-| E1 | Does refinement beat ordinary learning, and does SMA add information? | Variants on the dataset's own 90/10 split: A most-frequent; B Gorman-style per-word linear classifier; C PSPerception refinement with B's features; D refinement with SMA features only; E refinement with both; F misaki with spaCy; G a perceptron port. Human labels are the truth. Primary score: macro accuracy across homographs with a paired bootstrap over homographs. C vs B tests refinement; E vs C tests SMA. Lives in PSPerception. |
-| E2 | Why do short chunks sound worse? | Render a phrase alone and inside its sentence; swap in AdaIN statistics, durations and pitch, or the style row one at a time; report the fraction of the gap each closes. |
-| E3 | Is there only a small number of ways context shapes the rendering? | ALBERT context reach versus right-hand context; per AdaIN site, principal components for 99% of per-channel statistics and how well cheap-stage outputs predict them. |
-| E4 | Where can the first burst start? | Boundary, lookahead and VTCM fit, learned by PSPerception refinement once track 1 speaks. |
+## VTCM: measured workaround and planning limits
 
-Automated branches are fixed before the run and recorded in its receipt; they choose
-what to measure next and never adopt a change.
+The [capacity probe](results/vtcm-capacity-20261007.md) measured 8 MiB on SM8550 and
+4 MiB on SM8635. Admit a schedule only against the actual grant; an 8 MiB result
+does not establish fit on SM8635.
 
-## Track 3 status (2026-10-07, scratch lab, not yet in a repository)
+The peach sentence initially requested 8,650,752 bytes at 22 convolution batch
+tiles and failed resource acquisition (`Stage=2 Done=0`), before execution or
+playback. Manually setting `ResidentBatchTiles=14` reduced the request by 524,288
+bytes to 8,126,464 bytes, leaving 262,144 bytes below the measured 8 MiB capacity.
+The same complete 85-frame utterance then ran and played successfully, with four
+HVX workers. Inputs, phrasing and sample count were unchanged.
 
-Measured on WikipediaHomographData eval (1,615 sentences, 162 homographs, macro accuracy):
-most frequent 84.1%; per-word decision lists over neighboring words 91.5%; the same plus
-SMA tree features of the projected sentence 91.4% (no gain); misaki lexicon mode with spaCy
-89.2% (provisional). The word-context rules match misaki without a tagger; the difference is
-not significant. A reversible projection lets SMA parse 99% of held-out English sentences.
-Next for the front end: distil misaki's choices over public-domain text for parity on all 671
-heteronyms, then correct misaki where human labels (with GPT as calibrated reviewer citing
-dictionary sources) show it is wrong. Experiments may use any corpus; shipped tables derive
-only from MIT or Apache sources.
+This reduced internal convolution scratch; it did not split the utterance in time,
+bind all intermediate activations, or prove a general memory solution. `Speak`
+checks the emitted size against the measured SM8550 capacity. Runtime capacity
+query, automatic fallback and arbitrary frame chunking are not implemented.
+The older 128-channel u8 generator-stage liveness estimate was for that stage
+alone; it is not evidence that the integrated 16-bit job fits 4 MiB.
 
-## Team decisions not yet taken
+Any later fallback must reject a failed job before publishing PCM or committing
+phase/noise state. A checked static plan that fits is sufficient; do not require
+allocation failure and retry as the normal scheduling strategy.
 
-- Predicted or shrunk AdaIN statistics for short bursts (departs from stock equations).
-- Breath-group boundaries other than stock punctuation.
-- U+2019 to U+02BC as the only allowed character change before SMA parses text.
-- Moving any front-end scorer to Hexagon (current plan: CoreLib IL on the CPU).
+## Earlier research
 
-## Standing rules for this campaign
+The October 7 homograph experiments used WikipediaHomographData at
+`8f008f021e88f8b71118a27ae655f1f3121162bc`: macro accuracy was 84.1% for most-frequent
+choice, 91.5% for neighboring-word decision lists, 91.4% with SMA tree features,
+and a provisional 89.2% for misaki with spaCy. These are historical observations,
+not the current front-end implementation or a directive to distil misaki.
+The [current phonemizer](../phonemizer/README.md) uses Moby and Zira-distilled
+choices and has independent phone receipts. The existing prosody/substitution
+experiments and their held-out results are indexed in the handoff.
 
-- Stock weights are never pruned or restructured; spare budget buys accuracy
-  (split-precision HMX passes, residual weight planes, metadata).
-- User text is parsed and bound, never executed. A runspace that resolves commands for
-  binding starts from a minimal `InitialSessionState` with module auto-loading off.
-- No regular expressions and no JSON boundary in the text front end; data crosses as
-  live objects, and the phone never parses JSON.
-- Each claim needs a run on the named phone with the same artifact; SM8550 and SM8635
-  results stay separate.
+Use admitted teacher evidence for quality improvements; rejected or uncertain
+targets cause neither learning updates nor student penalties. Keep training and
+untouched holdouts separate. Those improvements follow phone integration.
