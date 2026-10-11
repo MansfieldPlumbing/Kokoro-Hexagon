@@ -7,7 +7,8 @@ Runs the emitted generator tail job on an attached phone, plays its PCM, and ret
 Stages the skel, harness, Native.Binding.psm1, Audio.AAudio.psm1 and the tail fixture into the
 host app's private storage (hash-checked), runs the harness as the app's startup script, pulls
 run 0's output buffer back (hash-checked against the receipt), then restores the startup scripts
-and any replaced file and verifies the restore by hash. The phone is selected by ro.soc.model;
+and any replaced file and verifies the restore by hash (or restores original absence).
+The phone is selected by ro.soc.model;
 no serial is printed. Check the retrieved buffer with tools/Test-KokoroGeneratorTailOutput.ps1.
 #>
 param(
@@ -42,8 +43,18 @@ $spec = Join-Path $emission "tail-spec-$id.txt"
 $temp = "/data/local/tmp/kokoro-tail-$id"
 $backup = "files/kokoro-fl/generator-tail-backup-$id"
 $target = 'files/kokoro-fl/generator-tail'
-$startHashes = @(& $run @('shell', 'run-as', $Package, 'sha256sum', 'files/Start.ps1', 'files/PROFILE.PS1'))
-$null = & $run @('shell', "run-as $Package mkdir -p $backup $target files/kokoro-fl/qnn && run-as $Package cp files/Start.ps1 $backup/Start.ps1 && run-as $Package cp files/PROFILE.PS1 $backup/PROFILE.PS1 && mkdir -p $temp")
+$null = & $run @('shell', "run-as $Package mkdir -p $backup $target files/kokoro-fl/qnn && mkdir -p $temp")
+$startupFiles = @('files/Start.ps1', 'files/PROFILE.PS1')
+$startupState = @{}
+foreach ($startupFile in $startupFiles) {
+    $present = ((& $run @('shell', "if run-as $Package test -f $startupFile; then echo yes; fi")) -join '').Trim() -ceq 'yes'
+    $originalHash = $null
+    if ($present) {
+        $originalHash = ((& $run @('shell', 'run-as', $Package, 'sha256sum', $startupFile)) -join '').Split(' ')[0]
+        $null = & $run @('shell', "run-as $Package cp $startupFile $backup/$(Split-Path $startupFile -Leaf)")
+    }
+    $startupState[$startupFile] = [pscustomobject]@{ Present = $present; Hash = $originalHash }
+}
 $replaced = [Collections.Generic.List[string]]::new(); $changed = $false
 try {
     $files = @(
@@ -68,10 +79,21 @@ try {
         if ($deviceHash -ne $localHash) { throw "Staged artifact hash mismatch for $name" }
     }
     $null = & $run @('shell', "run-as $Package truncate -s 0 $target/receipt.txt")
+    $startupUid = ((& $run @('shell', 'run-as', $Package, 'id', '-u')) -join '').Trim()
+    $startupEpoch = ((& $run @('shell', 'date', '+%s')) -join '').Trim()
+    if ($startupUid -notmatch '^\d+$' -or $startupEpoch -notmatch '^\d+$') { throw 'Project startup filter admission failed.' }
     $changed = $true
     $null = & $run @('shell', "am force-stop $Package && run-as $Package cp $target/KokoroGeneratorTailProbe.ps1 files/Start.ps1 && run-as $Package cp $target/KokoroGeneratorTailProbe.ps1 files/PROFILE.PS1 && monkey -p $Package -c android.intent.category.LAUNCHER 1")
     $watch = [Diagnostics.Stopwatch]::StartNew()
-    do { Start-Sleep -Seconds 2; $receipt = (& $run @('shell', 'run-as', $Package, 'cat', "$target/receipt.txt")) -join "`n" }
+    do {
+        Start-Sleep -Seconds 2
+        $receipt = (& $run @('shell', 'run-as', $Package, 'cat', "$target/receipt.txt")) -join "`n"
+        if (-not $receipt.Trim() -and $watch.Elapsed.TotalSeconds -ge 30) { break }
+        if ($receipt -match '(?m)^Started=' -and $receipt -notmatch '(?m)^Passed=') {
+            $alive = (& $run @('shell', "pidof $Package || true")) -join ''
+            if (-not $alive.Trim()) { break }
+        }
+    }
     while ($receipt -notmatch '(?m)^Passed=' -and $watch.Elapsed.TotalSeconds -lt $TimeoutSeconds)
     $receiptPath = Join-Path $emission "device-receipt-$Soc-$id.txt"
     [IO.File]::WriteAllText($receiptPath, $receipt)
@@ -84,13 +106,56 @@ try {
     }
     $receipt
     "ReceiptPath=$receiptPath"
+    if ($receipt -notmatch '(?m)^Passed=') {
+        $startupMarkers = [Collections.Generic.List[string]]::new()
+        foreach ($line in ($receipt -split "`n" | Where-Object { $_ -match '^(Job|Started|ProbeStage)=' })) { $startupMarkers.Add($line) }
+        $startupMarkers.Add("DiagnosticStarted=$($receipt -match '(?m)^Started=')")
+        if ($startupUid -match '^\d+$') {
+            # Read only the project UID, fixed Pwsh tag and this launch's time
+            # window, including an early exit. Only source-defined labels leave memory.
+            $startupLog = ((& $run @('logcat', '-d', '-T', "$startupEpoch.000", "--uid=$startupUid", '-s', 'Pwsh:I', 'libc:E', '*:S')) -join "`n")
+            $fatal = [regex]::Match($startupLog, 'Fatal signal (6|11)\b')
+            if ($fatal.Success) { $startupMarkers.Add("NativeFatalSignal=$($fatal.Groups[1].Value)") }
+            foreach ($marker in 'GATE2A Admit returned', 'GATE2B begin', 'GATE2B exception',
+                'GATE2C CreateDefault2', 'GATE2C CreateRunspace', 'GATE2C Open',
+                'GATE2C DefaultRunspace set', 'GATE2D START_MISSING',
+                'GATE2D START_INVOKE_BEGIN', 'GATE2D START_INVOKE_END') {
+                if ($startupLog.Contains($marker, [StringComparison]::Ordinal)) { $startupMarkers.Add("HostStage=$marker") }
+            }
+            $startupError = @($startupLog -split "`n" | Where-Object { $_.Contains('GATE2B exception', [StringComparison]::Ordinal) }) -join "`n"
+            foreach ($typeName in ([regex]::Matches($startupError, '\b(?:System|Microsoft)\.(?:[A-Za-z_][A-Za-z0-9_]*\.)*[A-Za-z_][A-Za-z0-9_]*Exception\b').Value | Sort-Object -Unique)) {
+                $startupMarkers.Add("HostExceptionType=$typeName")
+            }
+            foreach ($errorCategory in 'Could not load file or assembly', 'Method not found',
+                'Could not load type', 'Unable to load shared library', 'The type initializer') {
+                if ($startupError.Contains($errorCategory, [StringComparison]::Ordinal)) { $startupMarkers.Add("HostErrorCategory=$errorCategory") }
+            }
+            foreach ($assemblyName in 'System.Management.Automation', 'System.Runtime', 'System.Private.CoreLib',
+                'System.Console', 'System.Linq.Expressions', 'System.Reflection.Emit', 'Microsoft.PowerShell.Commands.Utility') {
+                if ($startupError.Contains($assemblyName, [StringComparison]::Ordinal)) { $startupMarkers.Add("HostAssembly=$assemblyName") }
+            }
+        }
+        [IO.File]::WriteAllLines($receiptPath, $startupMarkers)
+        $startupMarkers.ToArray()
+        throw 'Diagnostic did not complete; DSP execution remains unverified.'
+    }
 }
 finally {
     if ($changed) {
-        $null = & $run @('shell', "am force-stop $Package && run-as $Package cp $backup/Start.ps1 files/Start.ps1 && run-as $Package cp $backup/PROFILE.PS1 files/PROFILE.PS1")
+        $null = & $run @('shell', 'am', 'force-stop', $Package)
+        foreach ($startupFile in $startupFiles) {
+            if ($startupState[$startupFile].Present) {
+                $null = & $run @('shell', "run-as $Package cp $backup/$(Split-Path $startupFile -Leaf) $startupFile")
+                $restoredHash = ((& $run @('shell', 'run-as', $Package, 'sha256sum', $startupFile)) -join '').Split(' ')[0]
+                if ($restoredHash -cne $startupState[$startupFile].Hash) { throw 'Startup restoration hash mismatch' }
+            } else {
+                # These two explicit project startup paths were absent before this diagnostic.
+                $null = & $run @('shell', 'run-as', $Package, 'rm', '-f', $startupFile)
+                $remaining = ((& $run @('shell', "if run-as $Package test -e $startupFile; then echo yes; fi")) -join '').Trim()
+                if ($remaining -ceq 'yes') { throw 'Startup restoration did not preserve absence' }
+            }
+        }
         foreach ($d in $replaced) { $null = & $run @('shell', "run-as $Package cp $backup/$(Split-Path $d -Leaf) $d") }
-        $restored = @(& $run @('shell', 'run-as', $Package, 'sha256sum', 'files/Start.ps1', 'files/PROFILE.PS1'))
-        if (($restored -join "`n") -cne ($startHashes -join "`n")) { throw 'Startup restoration hash mismatch' }
         'StartupRestored=True'
     }
     $null = & $run @('shell', "rm -rf $temp")

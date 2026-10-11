@@ -30,6 +30,8 @@ param(
     [ValidateSet('Block','Shortcut','Conv1','Windows1','Pool','Coeff')][string] $DecoderDumpPoint = 'Block',
     # KokoroDecoder16Run: read the frame count at run time (DecoderFrames is the capacity).
     [switch] $DecoderRuntimeFrames,
+    # Residual generator stages: ResBlockFrames is capacity; live frames follow the input tensor.
+    [switch] $GeneratorRuntimeFrames,
     # KokoroDecoder16Run AdaIN statistics: Accumulate, Export (records and coefficients after the output), Supplied (records
     # from the input) or Corrected (coefficient deltas from the input added to the accumulated coefficients).
     [ValidateSet('Accumulate','Export','Supplied','SuppliedExport','Corrected','Direct')][string] $DecoderMoments = 'Accumulate',
@@ -284,7 +286,7 @@ if($Kernel -eq 'KokoroR0Sub0') {
 } elseif($Kernel -eq 'KokoroResBlock16Run') {
     # One or more 16-bit resblocks without the tail, under the generic tail harness (completion word 1 for one block).
     . (Join-Path $PSScriptRoot '..\src\jobs\Kokoro.Generator60x16Run.ps1')
-    $run=New-KokoroGenerator60x16RunSteps -Frames $ResBlockFrames -HvxThreads $ResidentHvxThreads -BatchTiles $ResidentBatchTiles -Kernels $Stage16Kernels -Channels $Stage16Channels -GenericHarness -StopAfterStage $Stage16StopAfter -DumpPoint $Stage16DumpPoint
+        $run=New-KokoroGenerator60x16RunSteps -Frames $ResBlockFrames -HvxThreads $ResidentHvxThreads -BatchTiles $ResidentBatchTiles -Kernels $Stage16Kernels -Channels $Stage16Channels -GenericHarness -StopAfterStage $Stage16StopAfter -DumpPoint $Stage16DumpPoint -RuntimeFrames:$GeneratorRuntimeFrames
     $steps=@($run.Steps)
     $symbol='kokoro_generator_tail_skel_handle_invoke'; $soname='libkokoro_generator_tail_skel.so'
     Write-NewOrIdenticalFile (Join-Path $OutputDirectory 'runner-layout.json') ([Text.Encoding]::UTF8.GetBytes(($run.Layout | ConvertTo-Json -Depth 6))) -AllowOverwrite:$Force
@@ -389,7 +391,7 @@ if($Kernel -eq 'KokoroR0Sub0') {
 } elseif($Kernel -eq 'KokoroGenerator60x16Run') {
     . (Join-Path $PSScriptRoot '..\src\jobs\Kokoro.Generator60x16Run.ps1')
     $pmu=if($ResidentPmuEvents){@{PmuEvents=$ResidentPmuEvents}}else{@{}}
-    $run=New-KokoroGenerator60x16RunSteps -Frames $ResBlockFrames -HvxThreads $ResidentHvxThreads -BatchTiles $ResidentBatchTiles -StopAfterStage $Stage16StopAfter -DumpPoint $Stage16DumpPoint -Kernels $Stage16Kernels @pmu
+        $run=New-KokoroGenerator60x16RunSteps -Frames $ResBlockFrames -HvxThreads $ResidentHvxThreads -BatchTiles $ResidentBatchTiles -StopAfterStage $Stage16StopAfter -DumpPoint $Stage16DumpPoint -Kernels $Stage16Kernels -RuntimeFrames:$GeneratorRuntimeFrames @pmu
     $steps=@($run.Steps)
     $symbol='kokoro_resblock_run_skel_handle_invoke'; $soname='libkokoro_resblock_run_skel.so'
     Write-NewOrIdenticalFile (Join-Path $OutputDirectory 'runner-layout.json') ([Text.Encoding]::UTF8.GetBytes(($run.Layout | ConvertTo-Json -Depth 6))) -AllowOverwrite:$Force

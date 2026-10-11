@@ -180,7 +180,8 @@ function Invoke-KokoroExperiment {
     scores it. Prints one line; returns the full result. Status: keep (meets every accepted value and improves one),
     hold (meets them, no gain beyond noise), discard (misses one), crash (did not produce output).
     #>
-    param([Parameter(Mandatory)][string]$Case, [hashtable]$Parameters = @{}, [string]$Setup, [string]$Hypothesis = '', [ValidateRange(1, 20)][int]$Runs = 3)
+    param([Parameter(Mandatory)][string]$Case, [hashtable]$Parameters = @{}, [string]$Setup, [string]$Hypothesis = '', [ValidateRange(1, 20)][int]$Runs = 3,
+        [ValidateSet('dev.mansfieldplumbing.androidsma.preview', 'dev.mansfieldplumbing.kokoro')][string]$Package = 'dev.mansfieldplumbing.androidsma.preview')
     $c = Get-KokoroRatchetCase $Case
     if ($Setup) {
         $s = (Import-PowerShellDataFile $script:RatchetPath).Setups[$Setup]; if ($null -eq $s) { throw "No setup '$Setup' in $script:RatchetPath." }
@@ -194,7 +195,7 @@ function Invoke-KokoroExperiment {
         if ($c.BaselineManifest) { Test-KokoroBaselineManifest -Path $c.BaselineManifest }
         $e = Invoke-KokoroEmission -Kernel $c.Kernel -Parameters $p
         $inputDir = Join-Path $script:Root $c.Input
-        $out = & $script:Pwsh -NoProfile -File (Join-Path $script:Root 'tools/Invoke-GeneratorTailProbe.ps1') -EmissionDirectory $e.Directory -FixtureDirectory $inputDir -Soc $c.Soc -Runs $Runs -TimeoutSeconds 300 2>&1
+        $out = & $script:Pwsh -NoProfile -File (Join-Path $script:Root 'tools/Invoke-GeneratorTailProbe.ps1') -EmissionDirectory $e.Directory -FixtureDirectory $inputDir -Soc $c.Soc -Runs $Runs -Package $Package -TimeoutSeconds 300 2>&1
         $text = ($out | ForEach-Object { "$_" }) -join "`n"
         $field = { param([string]$n) $i = $text.IndexOf("$n="); if ($i -lt 0) { return $null }; $j = $i + $n.Length + 1; $k = $j; while ($k -lt $text.Length -and -not [char]::IsWhiteSpace($text[$k])) { $k++ }; $text.Substring($j, $k - $j) }
         $outputPath = & $field 'OutputPath'

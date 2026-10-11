@@ -46,6 +46,11 @@ function Set-KokoroManifestPolicy {
     # Field offsets follow pinned AOSP ResourceTypes.h and Test-BinaryAxml.
     $report=Test-BinaryAxml -Document $Document
     $strings=$report.Strings; $result=[IO.MemoryStream]::new()
+    [string[]]$ownedStrings=$strings.Clone()
+    $activityIndex=[Array]::IndexOf($ownedStrings,'dev.mansfieldplumbing.kokoro.MainActivity')
+    if ($activityIndex -lt 0) { throw 'Generated activity identity is missing.' }
+    $ownedStrings[$activityIndex]='dev.mansfieldplumbing.pwsh.MainActivity'
+    $ownedPool=New-ResStringPool -Strings $ownedStrings
     $internetSeen=$false; $backupSet=$false; $skipEnd=$false
     try {
         $result.Write($Document,0,8)
@@ -75,7 +80,8 @@ function Set-KokoroManifestPolicy {
                     }
                 }
             }
-            if (-not $omit) { $result.Write($Document,$cursor,$chunk.Size) }
+            if ($type -eq 1) { $result.Write($ownedPool,0,$ownedPool.Length) }
+            elseif (-not $omit) { $result.Write($Document,$cursor,$chunk.Size) }
             $cursor+=$chunk.Size
         }
         if ($skipEnd -or -not $internetSeen -or -not $backupSet) { throw 'Manifest policy transformation incomplete.' }
@@ -134,7 +140,7 @@ function Add-KokoroDiagnosticNativeLibrary {
     } finally { $result.Dispose() }
 }
 $package='dev.mansfieldplumbing.kokoro'
-$manifest=Set-KokoroManifestPolicy (New-BinaryAxmlManifest -PackageName $package -ActivityClassName 'android.app.NativeActivity' -ActivityLabel 'Kokoro-Hexagon' -VersionCode 1 -VersionName '0.1-development' -TargetSdkVersion 36 -CompileSdkVersion 36 -CompileSdkVersionCodename '16')
+$manifest=Set-KokoroManifestPolicy (New-BinaryAxmlManifest -PackageName $package -ActivityClassName 'MainActivity' -ActivityLabel 'Kokoro-Hexagon' -VersionCode 1 -VersionName '0.1-development' -TargetSdkVersion 36 -CompileSdkVersion 36 -CompileSdkVersionCodename '16')
 if ($DiagnosticVendorRpc) { $manifest=Add-KokoroDiagnosticNativeLibrary $manifest }
 $parsed=Test-BinaryAxml -Document $manifest
 $declared=@($parsed.Elements | Where-Object Name -CEQ 'uses-native-library')
@@ -145,15 +151,20 @@ $application=@($parsed.Elements | Where-Object Name -CEQ 'application')
 $activity=@($parsed.Elements | Where-Object Name -CEQ 'activity')
 if ($permissions.Count -ne 1 -or $permissions[0].Attributes.name -cne 'android.permission.INTERNET' -or
     $application.Count -ne 1 -or $application[0].Attributes.allowBackup -ne 0 -or
-    $activity.Count -ne 1 -or $activity[0].Attributes.name -cne 'android.app.NativeActivity' -or
+    $application[0].Attributes.hasCode -eq 0 -or
+    $activity.Count -ne 1 -or $activity[0].Attributes.name -cne 'dev.mansfieldplumbing.pwsh.MainActivity' -or
     @($parsed.Elements | Where-Object Name -CEQ 'manifest')[0].Attributes.package -cne $package) { throw 'Manifest readback failed.' }
 $debugExpected=if ($Debuggable) { [uint32]::MaxValue } else { [uint32]0 }
 if ($application[0].Attributes.debuggable -ne $debugExpected) { throw 'Debug policy readback failed.' }
 $entries=[Collections.Generic.List[object]]::new()
+$brandingIcon=Join-Path $repo 'assets/branding/kokoro-hexagon-icon.png'
+$hasProjectIcon=Test-Path -LiteralPath $brandingIcon
+if (-not $hasProjectIcon -and -not $Debuggable) { throw 'Release branding asset is missing.' }
 $nativeNames=@('libpwsh-host.so','libassembly-store.so','libpsl-native.so','libcoreclr.so','libclrjit.so',
     'libSystem.Native.so','libSystem.Globalization.Native.so','libSystem.IO.Compression.Native.so','libSystem.Security.Cryptography.Native.Android.so')
-$allowed=@('AndroidManifest.xml','resources.arsc','res/mipmap-anydpi-v26/ic_launcher.xml','res/mipmap-nodpi-v4/ic_launcher_foreground.png')+@($nativeNames | ForEach-Object { "lib/arm64-v8a/$_" })
+$allowed=@('AndroidManifest.xml','resources.arsc','classes.dex','classes2.dex','res/mipmap-anydpi-v26/ic_tv_banner.xml','res/mipmap-anydpi-v26/ic_launcher.xml','res/mipmap-nodpi-v4/ic_launcher_foreground.png')+@($nativeNames | ForEach-Object { "lib/arm64-v8a/$_" })
 $nativeHashes=[ordered]@{}
+$dexHashes=[ordered]@{}
 $archive=[IO.Compression.ZipFile]::OpenRead([IO.Path]::GetFullPath($BaseApk))
 try {
     if ($archive.Entries.Count -ne $allowed.Count) { throw 'Unexpected base APK closure.' }
@@ -162,10 +173,16 @@ try {
         $bytes=Read-KokoroZipEntry $entry
         switch -Exact ($entry.FullName) {
             'AndroidManifest.xml' { $bytes=$manifest }
-            'resources.arsc' { $bytes=New-ResourceTable -PackageName $package -IconPath 'res/mipmap-anydpi-v26/ic_launcher.xml' -ForegroundPath 'res/mipmap-nodpi-v4/ic_launcher_foreground.png' -BackgroundColor ([uint32]4278926638) }
-            'res/mipmap-nodpi-v4/ic_launcher_foreground.png' { $bytes=[IO.File]::ReadAllBytes((Join-Path $repo 'assets/branding/kokoro-hexagon-icon.png')) }
+            'resources.arsc' { $bytes=New-ResourceTable -PackageName $package -IconPath 'res/mipmap-anydpi-v26/ic_launcher.xml' -ForegroundPath 'res/mipmap-nodpi-v4/ic_launcher_foreground.png' -BannerPath 'res/mipmap-anydpi-v26/ic_tv_banner.xml' -BackgroundColor ([uint32]4278926638) }
+            'res/mipmap-nodpi-v4/ic_launcher_foreground.png' { if ($hasProjectIcon) { $bytes=[IO.File]::ReadAllBytes($brandingIcon) } }
         }
         if ($entry.FullName.StartsWith('lib/')) { $nativeHashes[$entry.FullName]=[Convert]::ToHexString([Security.Cryptography.SHA256]::HashData($bytes)) }
+        if ($entry.FullName -cin @('classes.dex','classes2.dex')) {
+            $dexHashes[$entry.FullName]=[Convert]::ToHexString([Security.Cryptography.SHA256]::HashData($bytes))
+            $dexHeader=if ($entry.FullName -ceq 'classes.dex') { "dex`n039`0" } else { "dex`n035`0" }
+            if ($bytes.Length -lt 112 -or [Text.Encoding]::ASCII.GetString($bytes,0,8) -cne $dexHeader) { throw 'Invalid bootstrap DEX header.' }
+            if ($entry.FullName -ceq 'classes2.dex' -and $dexHashes[$entry.FullName] -cne '7C1AECCC89E10EF4FD1F732F7E2126765A40916D969E401E1A8E11478A053786') { throw 'Runtime crypto DEX integrity failed.' }
+        }
         $stored=$entry.FullName -cin @('resources.arsc','res/mipmap-nodpi-v4/ic_launcher_foreground.png')
         $entries.Add([pscustomobject]@{Name=$entry.FullName;Bytes=$bytes;Stored=$stored;Alignment=$(if ($stored) {4} else {0})})
     }
@@ -203,8 +220,9 @@ try {
     [void][IO.Directory]::CreateDirectory($output)
     [IO.File]::WriteAllBytes($apkPath,$signed)
     $receipt=[ordered]@{Schema=1;Package=$package;Label='Kokoro-Hexagon';Startup='Profile';Debuggable=[bool]$Debuggable;DiagnosticVendorRpc=[bool]$DiagnosticVendorRpc;
-        BaseSHA256=$BaseSHA256.ToUpperInvariant();SetupSHA256=$import.SetupSHA256;APKBytes=$signed.Length;APKSHA256=(Get-FileHash $apkPath).Hash;
-        Permissions=@('android.permission.INTERNET');AllowBackup=$false;NativePayloadsUnchanged=$nativeHashes;
+        BaseSHA256=$BaseSHA256.ToUpperInvariant();SetupSHA256=$import.SetupSHA256;PwshCommit=$import.PwshCommit;PowerShellVersion=$import.PowerShellVersion;
+        APKBytes=$signed.Length;APKSHA256=(Get-FileHash $apkPath).Hash;ProjectBranding=[bool]$hasProjectIcon;
+        Permissions=@('android.permission.INTERNET');AllowBackup=$false;NativePayloadsUnchanged=$nativeHashes;DexPayloadsUnchanged=$dexHashes;Activity='dev.mansfieldplumbing.pwsh.MainActivity';
         SignatureV2Verified=$true;ArchiveReadbackVerified=$true;ModelWeightsIncluded=$false;SpeechSynthesisVerified=$false}
     [IO.File]::WriteAllText((Join-Path $output 'package-receipt.json'),($receipt | ConvertTo-Json -Depth 5),[Text.UTF8Encoding]::new($false))
     [pscustomobject]$receipt

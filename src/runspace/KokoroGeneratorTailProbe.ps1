@@ -3,14 +3,20 @@
 # One unsigned-PD session, one handle; Runs invocations of method 2 (sc 0x02040100). Run 0's
 # whole output buffer is saved for host verification; every run's PCM must be identical.
 # The PCM is then played once through AAudio at 24 kHz mono.
-$root = [IO.Path]::Combine($Activity.FilesDir.AbsolutePath, 'kokoro-fl')
+$activityHost = Get-Variable -Name Activity -ValueOnly -ErrorAction Ignore
+$hostFiles = if ($null -ne $activityHost) { $activityHost.FilesDir.AbsolutePath } else { $PSScriptRoot }
+$root = [IO.Path]::Combine($hostFiles, 'kokoro-fl')
 $dir = [IO.Path]::Combine($root, 'generator-tail')
 $receipt = [IO.Path]::Combine($dir, 'receipt.txt')
 $lines = [Collections.Generic.List[string]]::new()
 $lines.Add('Job=kokoro-generator-tail')
 $inv = [Globalization.CultureInfo]::InvariantCulture
-# Written before any loading: an empty receipt means the app never ran this script; Started= alone means it stalled.
+# Written before any loading: an empty receipt means initialization did not reach this point.
 [IO.File]::WriteAllLines($receipt, @('Job=kokoro-generator-tail', "Started=$([DateTime]::UtcNow.ToString('o', $inv))"))
+function Write-KokoroProbeStage {
+    param([string] $Stage)
+    [IO.File]::AppendAllText($receipt, "ProbeStage=$Stage`n")
+}
 $Marshal = [Runtime.InteropServices.Marshal]; $native = [IntPtr]::Zero; $opened = $false; $handle = [uint64]0
 $pins = [Collections.Generic.List[object]]::new(); $allocations = [Collections.Generic.List[object]]::new()
 $passed = $false; $stream = $null; $audio = $null
@@ -22,12 +28,38 @@ try {
     $load = { param([string]$Name, [object[]]$Arguments)
         $ast = [Management.Automation.Language.Parser]::ParseFile([IO.Path]::Combine($root, $Name), [ref]$null, [ref]$null)
         $ast.GetScriptBlock().InvokeReturnAsIs($Arguments) }
+    Write-KokoroProbeStage 'BindingsBegin'
     $abi = & $load 'Native.Binding.psm1' @()
+    Write-KokoroProbeStage 'BindingsReady'
     $so = [IO.Path]::Combine($root, 'qnn', 'libkokoro_generator_tail_skel.so')
     $lines.Add('LibrarySHA256=' + [Convert]::ToHexString([Security.Cryptography.SHA256]::HashData([IO.File]::ReadAllBytes($so))))
     $search = [IO.Path]::Combine($root, 'qnn') + ';/vendor/lib/rfsa/adsp;/vendor/dsp/cdsp;/dsp'
-    foreach ($name in 'ADSP_LIBRARY_PATH', 'DSP_LIBRARY_PATH') { [Environment]::SetEnvironmentVariable($name, $search); [Android.Systems.Os]::Setenv($name, $search, $true) }
+    # Bionic stdlib.h: int setenv(const char*, const char*, int). UTF-8 buffers
+    # live through each call; the native binding also works in the NativeActivity host.
+    # https://android.googlesource.com/platform/bionic/+/3a5441c3474f2f4f5893504293aa33746f8847cb/libc/include/stdlib.h
+    Write-KokoroProbeStage 'SearchPathBegin'
+    $libc = [Runtime.InteropServices.NativeLibrary]::Load('libc.so')
+    $valuePtr = [IntPtr]::Zero
+    try {
+        $setenv = & $abi.BindExport $libc 'setenv' ([int]) ([Type[]]@([IntPtr], [IntPtr], [int]))
+        Write-KokoroProbeStage 'SetenvBound'
+        $valuePtr = $Marshal::StringToCoTaskMemUTF8($search)
+        foreach ($name in 'ADSP_LIBRARY_PATH', 'DSP_LIBRARY_PATH') {
+            [Environment]::SetEnvironmentVariable($name, $search)
+            $namePtr = $Marshal::StringToCoTaskMemUTF8($name)
+            try {
+                if ($setenv.Invoke($namePtr, $valuePtr, 1) -ne 0) { throw 'DSP search path configuration failed' }
+            }
+            finally { $Marshal::FreeCoTaskMem($namePtr) }
+        }
+    }
+    finally {
+        if ($valuePtr -ne [IntPtr]::Zero) { $Marshal::FreeCoTaskMem($valuePtr) }
+        [Runtime.InteropServices.NativeLibrary]::Free($libc)
+    }
+    Write-KokoroProbeStage 'SearchPathReady'
     $native = [Runtime.InteropServices.NativeLibrary]::Load('libcdsprpc.so')
+    Write-KokoroProbeStage 'RpcLibraryReady'
     $fn = { param($Name, $ReturnType, $Parameters)
         $Marshal::GetDelegateForFunctionPointer([Runtime.InteropServices.NativeLibrary]::GetExport($native, $Name), (& $abi.NewDelegateType ('GeneratorTail_' + $Name) $ReturnType $Parameters)) }
     $control = & $fn 'remote_session_control' ([int]) ([Type[]]@([uint32], [IntPtr], [uint32]))
@@ -37,6 +69,7 @@ try {
     $pin = { param([byte[]]$Bytes) $g = [Runtime.InteropServices.GCHandle]::Alloc($Bytes, [Runtime.InteropServices.GCHandleType]::Pinned); $pins.Add($g); $g.AddrOfPinnedObject() }
     $cfg = $Marshal::AllocHGlobal(8); $allocations.Add($cfg)
     $Marshal::WriteInt32($cfg, 0, 3); $Marshal::WriteInt32($cfg, 4, 1)
+    Write-KokoroProbeStage 'SessionControlBegin'
     $rc = [int]$control.DynamicInvoke([object[]]@([uint32]2, $cfg, [uint32]8))
     $lines.Add("UnsignedPdRc=$rc"); if ($rc -ne 0) { throw 'Unsigned PD configuration failed' }
     $uri = [Text.Encoding]::UTF8.GetBytes('file:///libkokoro_generator_tail_skel.so?kokoro_generator_tail_skel_handle_invoke&_modver=1.0&_dom=cdsp' + [char]0)

@@ -11,9 +11,14 @@ twice, or written as a scratch script, is a missing command: add it here.
   Status                      Project state, next step, cases, commands (default). Reads the repository only:
                               no adb, no phone, no network. Phone access is only in Run, Ratchet and Compare.
   Verify                      Check tracked source, repository hygiene, handoff, Status, tests and optional case pairs.
+  BuildHost -OutputDirectory  Build and retain the pinned arm64 diagnostic APK; no phone access.
   Ratchet  [-Case]            Case-pair check, then every unblocked ratchet case on the phone; throws on regression.
   Run      -Case [-Hypothesis] [-Runs]
                               Emit the case's kernel, run it on the phone, print input hashes, receipt and result.
+  Run      -Case device-readiness [-Soc]
+                              Read-only hardware and project-host checks; identifiers stay in memory and are never returned.
+  Run      -Case host-install -Path <apk> [-Soc]
+                              Install the verified Kokoro diagnostic host from its package receipt.
   Emit     -Case | -Kernel [-Parameters]
                               Emit a kernel (cached by source key) and print the library hash.
   Check    -Kernel [-Parameters]
@@ -87,7 +92,7 @@ pwsh -NoProfile -File ./Invoke-KokoroDevelopment.ps1 Run -Case benchmark-0-sm855
 [CmdletBinding()]
 param(
     [Parameter(Position = 0)]
-    [ValidateSet('Status', 'Verify', 'Ratchet', 'Run', 'Emit', 'Check', 'Compare', 'JobInput', 'Capture', 'StockCapture', 'Speak', 'Zira', 'Albert', 'AlbertError', 'AlbertLinear', 'AlbertLayerNorm', 'AlbertGelu', 'AlbertAttention', 'AlbertEmbed', 'AlbertJob', 'Api', 'Find', 'Tools')]
+    [ValidateSet('Status', 'Verify', 'BuildHost', 'Ratchet', 'Run', 'Emit', 'Check', 'Compare', 'JobInput', 'Capture', 'StockCapture', 'Speak', 'Zira', 'Albert', 'AlbertError', 'AlbertLinear', 'AlbertLayerNorm', 'AlbertGelu', 'AlbertAttention', 'AlbertEmbed', 'AlbertJob', 'Api', 'Find', 'Tools')]
     [string] $Command = 'Status',
     [string] $Case,
     [string] $Kernel,
@@ -119,6 +124,8 @@ param(
     [string] $Repeat,
     [ValidateSet('SM8550', 'SM8635')]
     [string] $Soc = 'SM8550',
+    [ValidateSet('dev.mansfieldplumbing.androidsma.preview', 'dev.mansfieldplumbing.kokoro')]
+    [string] $HostPackage = 'dev.mansfieldplumbing.androidsma.preview',
     # Pwsh-Development checkout; CI passes its own (checkout cannot write outside the workspace).
     [string] $SharedRoot,
     # Verify: a missing shared library is a failure, not a skip (CI).
@@ -151,6 +158,99 @@ function Get-Phone {
 }
 
 function Resume-Phone { $adb = Get-Adb; foreach ($p in Get-Phone) { & $adb -s $p.Serial shell input keyevent KEYCODE_WAKEUP | Out-Null } }
+
+function Get-KokoroDeviceReadiness {
+    param([ValidateSet('SM8550', 'SM8635')][string] $Soc = 'SM8550',
+        [ValidateSet('dev.mansfieldplumbing.androidsma.preview', 'dev.mansfieldplumbing.kokoro')]
+        [string] $Package = 'dev.mansfieldplumbing.androidsma.preview')
+    # Only whitelisted hardware facts and project-app booleans leave this function.
+    # Never return native command output, identifiers, broad getprop/logcat dumps or personal app inventory.
+    $adb = Get-Adb
+    $PSNativeCommandUseErrorActionPreference = $false
+    $probe = {
+        param([string[]] $Arguments)
+        try {
+            $nativeLines = @(& $adb @Arguments 2>&1)
+            [pscustomobject]@{ ExitCode = $LASTEXITCODE; Text = ($nativeLines -join "`n").Trim() }
+        } catch { throw 'Private device probe could not execute; native details suppressed.' }
+    }
+    $inventory = & $probe -Arguments @('devices')
+    if ($inventory.ExitCode -ne 0) { throw 'Device enumeration failed; native details suppressed.' }
+    $targets = [Collections.Generic.List[string]]::new()
+    foreach ($line in ($inventory.Text -split "`n")) {
+        $fields = $line.Trim().Split("`t")
+        if ($fields.Count -ne 2 -or $fields[1] -cne 'device') { continue }
+        $candidateId = $fields[0]
+        $hardware = & $probe -Arguments @('-s', $candidateId, 'shell', 'getprop', 'ro.soc.model')
+        if ($hardware.ExitCode -eq 0 -and $hardware.Text -ceq $Soc) { $targets.Add($candidateId) }
+    }
+    if ($targets.Count -ne 1) { throw "Expected exactly one authorized attached $Soc device, found $($targets.Count); identifiers suppressed." }
+    $selectedId = $targets[0]
+    $release = & $probe -Arguments @('-s', $selectedId, 'shell', 'getprop', 'ro.build.version.release')
+    $abi = & $probe -Arguments @('-s', $selectedId, 'shell', 'getprop', 'ro.product.cpu.abilist')
+    # Query only the selected project host, never a general app listing.
+    $installed = & $probe -Arguments @('-s', $selectedId, 'shell', 'pm', 'path', $Package)
+    $appAccess = & $probe -Arguments @('-s', $selectedId, 'shell', 'run-as', $Package, 'id', '-u')
+    $startup = & $probe -Arguments @('-s', $selectedId, 'shell', 'run-as', $Package, 'test', '-f', 'files/Start.ps1')
+    $profile = & $probe -Arguments @('-s', $selectedId, 'shell', 'run-as', $Package, 'test', '-f', 'files/PROFILE.PS1')
+    $consoleStartup = & $probe -Arguments @('-s', $selectedId, 'shell', 'run-as', $Package, 'test', '-f', 'files/app-scripts/Start-Console.ps1')
+    $process = & $probe -Arguments @('-s', $selectedId, 'shell', 'pidof', $Package)
+    $diagnosticReceipt = & $probe -Arguments @('-s', $selectedId, 'shell', 'run-as', $Package, 'cat', 'files/kokoro-fl/generator-tail/receipt.txt')
+    $startedText = [regex]::Match($diagnosticReceipt.Text, '(?m)^Started=([0-9TZ:.+-]+)').Groups[1].Value
+    $hostStages = [Collections.Generic.List[string]]::new()
+    $fatalSignal = ''
+    if ($startedText -and $appAccess.Text -match '^\d+$') {
+        $epoch = [DateTimeOffset]::Parse($startedText, [Globalization.CultureInfo]::InvariantCulture).ToUnixTimeSeconds()
+        $hostLog = & $probe -Arguments @('-s', $selectedId, 'logcat', '-d', '-T', "$epoch.000", "--uid=$($appAccess.Text)", '-s', 'Pwsh:I', 'libc:E', 'AndroidRuntime:E', '*:S')
+        foreach ($stage in 'GATE2B managed resolution complete', 'GATE2C CreateDefault2', 'GATE2C CreateRunspace', 'GATE2C Open', 'GATE2C DefaultRunspace set', 'GATE2D START_INVOKE_BEGIN', 'GATE2D START_INVOKE_END') {
+            if ($hostLog.Text.Contains($stage, [StringComparison]::Ordinal)) { $hostStages.Add($stage) }
+        }
+        $fatalSignal = [regex]::Match($hostLog.Text, 'Fatal signal (6|11)\b').Groups[1].Value
+    }
+    [pscustomobject]@{
+        Soc = $Soc
+        AndroidVersion = $(if ($release.ExitCode -eq 0 -and $release.Text -match '^\d{1,2}(\.\d{1,2}){0,2}$') { $release.Text } else { 'Unavailable' })
+        Arm64 = ($abi.ExitCode -eq 0 -and 'arm64-v8a' -cin ($abi.Text.Split(',')))
+        ConsoleHostStartupPresent = ($consoleStartup.ExitCode -eq 0)
+        ProjectHostInstalled = ($installed.ExitCode -eq 0 -and $installed.Text.StartsWith('package:', [StringComparison]::Ordinal))
+        ProjectAppAccessible = ($appAccess.ExitCode -eq 0)
+        StartupFilesPresent = ($startup.ExitCode -eq 0 -and $profile.ExitCode -eq 0)
+        ProjectProcessRunning = ($process.ExitCode -eq 0)
+        DiagnosticStarted = ($diagnosticReceipt.ExitCode -eq 0 -and $diagnosticReceipt.Text -match '(?m)^Started=')
+        DiagnosticCompleted = ($diagnosticReceipt.ExitCode -eq 0 -and $diagnosticReceipt.Text -match '(?m)^Passed=')
+        DiagnosticStartUtc = $startedText
+        ManagedHostStages = $hostStages.ToArray()
+        NativeFatalSignal = $fatalSignal
+        DiagnosticReturnCodes = [string[]]@([regex]::Matches($diagnosticReceipt.Text, '(?m)^(?:UnsignedPdRc|OpenRc)=-?\d+').Value)
+        DspExecutionVerified = $false
+    }
+}
+
+function Install-KokoroDiagnosticHost {
+    param([Parameter(Mandatory)][string] $Path, [ValidateSet('SM8550', 'SM8635')][string] $Soc)
+    $apkPath = [IO.Path]::GetFullPath($Path)
+    $buildPath = [IO.Path]::GetFullPath($Build) + [IO.Path]::DirectorySeparatorChar
+    if (-not $apkPath.StartsWith($buildPath, [StringComparison]::OrdinalIgnoreCase)) { throw 'Diagnostic APK must be under build/.' }
+    $packageReceipt = Get-Content (Join-Path (Split-Path $apkPath) 'package-receipt.json') -Raw | ConvertFrom-Json
+    $upstream = (Get-Content (Join-Path $Root 'lib/manifest.json') -Raw | ConvertFrom-Json).pwshUpstream
+    $setupPin = @($upstream.files | Where-Object { $_.path -ceq 'setup.ps1' })
+    if ($setupPin.Count -ne 1 -or $packageReceipt.SetupSHA256 -cne $setupPin[0].sha256) {
+        throw 'Diagnostic host was built from a different upstream pin; rebuild with BuildHost.'
+    }
+    if ($packageReceipt.Package -cne 'dev.mansfieldplumbing.kokoro' -or
+        $packageReceipt.Startup -cne 'Profile' -or -not $packageReceipt.Debuggable -or
+        -not $packageReceipt.SignatureV2Verified -or -not $packageReceipt.ArchiveReadbackVerified -or
+        $packageReceipt.ModelWeightsIncluded -ne $false) { throw 'Diagnostic host receipt admission failed.' }
+    if ((Get-Item -LiteralPath $apkPath).Length -ne $packageReceipt.APKBytes -or
+        (Get-FileHash -LiteralPath $apkPath).Hash -cne $packageReceipt.APKSHA256) { throw 'Diagnostic APK integrity mismatch.' }
+    $phones = @(Get-Phone | Where-Object Soc -CEQ $Soc)
+    if ($phones.Count -ne 1) { throw "Expected exactly one authorized attached $Soc target; identifiers suppressed." }
+    $adb = Get-Adb
+    $PSNativeCommandUseErrorActionPreference = $false
+    $installResult = @(& $adb -s $phones[0].Serial install -r $apkPath 2>&1)
+    if ($LASTEXITCODE -ne 0 -or 'Success' -cnotin $installResult) { throw 'Diagnostic host installation failed; native details suppressed.' }
+    Get-KokoroDeviceReadiness -Soc $Soc -Package $packageReceipt.Package
+}
 
 function Test-KokoroCasePairs {
     $sharedLibrary = Join-Path $Shared 'tools/SharedLibrary.psm1'
@@ -410,9 +510,10 @@ function New-KokoroAlbertLinearInput {
 # Runs an emitted diagnostic job on the phone through tools/Invoke-GeneratorTailProbe.ps1. Returns the raw output buffer,
 # the median DSP time and the receipt lines (serials are never printed).
 function Invoke-KokoroDeviceJob {
-    param([Parameter(Mandatory)][string] $EmissionDirectory, [Parameter(Mandatory)][string] $InputDirectory, [string] $Soc = 'SM8550', [int] $Runs = 3)
+    param([Parameter(Mandatory)][string] $EmissionDirectory, [Parameter(Mandatory)][string] $InputDirectory, [string] $Soc = 'SM8550', [int] $Runs = 3,
+        [ValidateSet('dev.mansfieldplumbing.androidsma.preview','dev.mansfieldplumbing.kokoro')][string] $Package = 'dev.mansfieldplumbing.androidsma.preview')
     Resume-Phone
-    $out = & (Get-Process -Id $PID).Path -NoProfile -File (Join-Path $Root 'tools/Invoke-GeneratorTailProbe.ps1') -EmissionDirectory $EmissionDirectory -FixtureDirectory $InputDirectory -Soc $Soc -Runs $Runs -TimeoutSeconds 300 2>&1
+    $out = & (Get-Process -Id $PID).Path -NoProfile -File (Join-Path $Root 'tools/Invoke-GeneratorTailProbe.ps1') -EmissionDirectory $EmissionDirectory -FixtureDirectory $InputDirectory -Soc $Soc -Runs $Runs -Package $Package -TimeoutSeconds 300 2>&1
     $text = ($out | ForEach-Object { "$_" }) -join "`n"
     $field = { param([string] $n) if ($text -match "(?m)\b$n=(\S+)") { $Matches[1] } }
     $outputPath = & $field 'OutputPath'
@@ -436,6 +537,65 @@ function Invoke-KokoroTensorJob {
 
 function Read-KokoroExpected([string] $Directory, [int] $Count) {
     $v = [float[]]::new($Count); [Buffer]::BlockCopy([IO.File]::ReadAllBytes((Join-Path $Directory 'expected-f32.bin')), 0, $v, 0, 4 * $Count); , $v
+}
+
+# Compare a capacity-sized residual generator with exact fixed-length jobs on identical live input lanes.
+function Test-KokoroGeneratorRuntimeFrames {
+    param([Parameter(Mandatory)][string]$FixtureDirectory,[Parameter(Mandatory)][string]$OutputDirectory,
+        [string]$Soc='SM8550',[string]$Package='dev.mansfieldplumbing.kokoro')
+    $out=[IO.Path]::GetFullPath($OutputDirectory)
+    if(-not $out.StartsWith($Build+[IO.Path]::DirectorySeparatorChar,[StringComparison]::OrdinalIgnoreCase) -or
+        [IO.Directory]::Exists($out)){throw 'Choose a fresh runtime-frame check directory under build/.'}
+    $fixture=[IO.Path]::GetFullPath($FixtureDirectory)
+    if(-not $fixture.StartsWith($Build+[IO.Path]::DirectorySeparatorChar,[StringComparison]::OrdinalIgnoreCase)){throw 'Use an existing build/ fixture.'}
+    $source=[IO.File]::ReadAllBytes((Join-Path $fixture 'activations.bin'))
+    $weights=[IO.File]::ReadAllBytes((Join-Path $fixture 'weights.bin'))
+    $tables=[IO.File]::ReadAllBytes((Join-Path $fixture 'tables.bin'))
+    if($source.Length -lt 24576 -or $weights.Length -lt 589824 -or $tables.Length -lt 98304){throw 'A 128-channel generator resblocks.3 fixture is required.'}
+    Import-Evaluator
+    $baseParameters=@{ResBlockFrames=65;ResidentBatchTiles=2;ResidentHvxThreads=4;Stage16Kernels=3}
+    $runtimeParameters=$baseParameters.Clone(); $runtimeParameters.GeneratorRuntimeFrames=$true
+    $runtime=Invoke-KokoroEmission -Kernel KokoroResBlock16Run -Parameters $runtimeParameters
+    $results=[Collections.Generic.List[object]]::new()
+    foreach($frames in 2,31,32,33,64,65){
+        $pair=[Collections.Generic.List[object]]::new()
+        foreach($mode in 'fixed','runtime'){
+            $capacity=if($mode -ceq 'runtime'){65}else{$frames}
+            $tiles=[int][math]::Ceiling($capacity/32.0); $tensorBytes=8192*$tiles
+            $inputBytes=[byte[]]::new($tensorBytes+$(if($mode -ceq 'runtime'){4}else{0}))
+            [Array]::Copy($source,$inputBytes,$tensorBytes)
+            if($mode -ceq 'fixed'){
+                for($t=$frames;$t -lt 32*$tiles;$t++){for($c=0;$c -lt 128;$c++){
+                    $at=8192*[int][math]::Floor($t/32)+2048*[int][math]::Floor($c/32)+128*[int][math]::Floor(($t%32)/2)+4*($c%32)+2*($t%2)
+                    $inputBytes[$at]=0; $inputBytes[$at+1]=128
+                }}
+            }else{[BitConverter]::GetBytes([int]$frames).CopyTo($inputBytes,$tensorBytes)}
+            $dir=Join-Path $out "$frames-$mode"; [void][IO.Directory]::CreateDirectory($dir)
+            [IO.File]::WriteAllBytes((Join-Path $dir 'activations.bin'),$inputBytes)
+            $packedWeights=[byte[]]::new(589824); [Array]::Copy($weights,$packedWeights,$packedWeights.Length)
+            $packedTables=[byte[]]::new(98304); [Array]::Copy($tables,$packedTables,$packedTables.Length)
+            [IO.File]::WriteAllBytes((Join-Path $dir 'weights.bin'),$packedWeights)
+            [IO.File]::WriteAllBytes((Join-Path $dir 'tables.bin'),$packedTables)
+            $parameters=$baseParameters.Clone(); $parameters.ResBlockFrames=$frames
+            $emission=if($mode -ceq 'runtime'){$runtime}else{Invoke-KokoroEmission -Kernel KokoroResBlock16Run -Parameters $parameters}
+            $run=Invoke-KokoroDeviceJob -EmissionDirectory $emission.Directory -InputDirectory $dir -Soc $Soc -Runs 1 -Package $Package
+            $offset=[BitConverter]::ToInt32($run.Output,40)
+            if($offset -lt 192 -or $offset+$tensorBytes -gt $run.Output.Length){throw 'Invalid final tensor offset.'}
+            $tensor=[byte[]]::new($tensorBytes); [Array]::Copy($run.Output,$offset,$tensor,0,$tensorBytes)
+            $pair.Add([pscustomobject]@{Tensor=$tensor;MedianMs=$run.MedianMs;LibrarySHA256=$emission.LibrarySHA256})
+        }
+        $mismatches=0; $inactive=0
+        for($t=0;$t -lt 96;$t++){for($c=0;$c -lt 128;$c++){
+            $at=8192*[int][math]::Floor($t/32)+2048*[int][math]::Floor($c/32)+128*[int][math]::Floor(($t%32)/2)+4*($c%32)+2*($t%2)
+            if($t -lt $frames){if($pair[0].Tensor[$at] -ne $pair[1].Tensor[$at] -or $pair[0].Tensor[$at+1] -ne $pair[1].Tensor[$at+1]){$mismatches++}}
+            elseif($pair[1].Tensor[$at] -ne 0 -or $pair[1].Tensor[$at+1] -ne 128){$inactive++}
+        }}
+        $result=[pscustomobject]@{Frames=$frames;Capacity=65;Mismatches=$mismatches;NonzeroInactiveLanes=$inactive;
+            FixedMs=$pair[0].MedianMs;RuntimeMs=$pair[1].MedianMs;RuntimeLibrarySHA256=$runtime.LibrarySHA256}
+        $results.Add($result); $result
+        if($mismatches -or $inactive){throw "Runtime frame parity failed at $frames frames."}
+    }
+    [IO.File]::WriteAllText((Join-Path $out 'receipt.json'),($results.ToArray()|ConvertTo-Json),[Text.UTF8Encoding]::new($false))
 }
 
 # A fresh job input directory under build/ (an existing one is replaced).
@@ -1210,6 +1370,48 @@ function New-KokoroBankDecoderInput {
     [pscustomobject]@{ Path = $descriptor; Data = $frontData }
 }
 
+function New-KokoroDiagnosticHost {
+    param([Parameter(Mandatory)][string] $OutputDirectory)
+    $outputPath = [IO.Path]::GetFullPath($OutputDirectory)
+    $buildPrefix = [IO.Path]::GetFullPath($Build) + [IO.Path]::DirectorySeparatorChar
+    if (-not $outputPath.StartsWith($buildPrefix, [StringComparison]::OrdinalIgnoreCase) -or
+        (Test-Path -LiteralPath $outputPath)) { throw 'Choose a fresh host output directory under build/.' }
+    $upstream = (Get-Content (Join-Path $Root 'lib/manifest.json') -Raw | ConvertFrom-Json).pwshUpstream
+    $sourceRoot = Join-Path $Build "upstream/Pwsh-$($upstream.commit)"
+    if (-not (Test-Path -LiteralPath $sourceRoot)) {
+        $archivePath = Join-Path $Build "upstream/$($upstream.commit).zip"
+        [void][IO.Directory]::CreateDirectory((Split-Path $archivePath))
+        $client = [Net.Http.HttpClient]::new()
+        try {
+            $archiveBytes = $client.GetByteArrayAsync("https://codeload.github.com/MansfieldPlumbing/Pwsh/zip/$($upstream.commit)").GetAwaiter().GetResult()
+            [IO.File]::WriteAllBytes($archivePath, $archiveBytes)
+        } finally { $client.Dispose() }
+        Expand-Archive -LiteralPath $archivePath -DestinationPath (Split-Path $sourceRoot)
+    }
+    foreach ($sourcePin in $upstream.files) {
+        $sourcePath = Join-Path $sourceRoot $sourcePin.path
+        if ((Get-Item -LiteralPath $sourcePath).Length -ne [long]$sourcePin.bytes -or
+            (Get-FileHash -LiteralPath $sourcePath).Hash -cne $sourcePin.sha256) { throw 'Pinned host source integrity failed.' }
+    }
+    $setupPath = Join-Path $sourceRoot 'setup.ps1'
+    # Admission also checks that the running emitter and packaged SMA versions match.
+    $null = & (Join-Path $Root 'src/build/Import-PwshBuildFunction.ps1') -SetupPath $setupPath -FunctionName New-SignedApk
+    $baseDirectory = Join-Path $outputPath 'base'
+    [void][IO.Directory]::CreateDirectory($baseDirectory)
+    $baseApk = Join-Path $baseDirectory 'pwsh-base-arm64.apk'
+    $cacheRoot = Join-Path $env:LOCALAPPDATA 'Kokoro-Hexagon/UpstreamBuild'
+    $buildLog = Join-Path $outputPath 'host-build.log'
+    if (-not $env:PWSH_SIGNING_KEY -or -not [IO.File]::Exists($env:PWSH_SIGNING_KEY)) {
+        throw 'Configure PWSH_SIGNING_KEY with the existing upstream signing identity before building the base host.'
+    }
+    & $setupPath -Headless -Step 9 -Architecture arm64 -Payload Minimal -Startup Profile -Debuggable -Packages Folder `
+        -CacheDirectory (Join-Path $cacheRoot 'packages') -SigningKeyPath $env:PWSH_SIGNING_KEY `
+        -OutputDirectory $baseDirectory -ApkPath $baseApk -KeepIntermediates -AcceptWritePlan *> $buildLog
+    if (-not (Test-Path -LiteralPath $baseApk)) { throw 'Pinned host build failed; inspect the local host-build.log.' }
+    & (Join-Path $Root 'tools/Build-KokoroApk.ps1') -BaseApk $baseApk -BaseSHA256 (Get-FileHash -LiteralPath $baseApk).Hash `
+        -SetupPath $setupPath -OutputDirectory $outputPath -Debuggable -DiagnosticVendorRpc
+}
+
 # Dot-sourced (. ./Invoke-KokoroDevelopment.ps1): the functions above are the API; no command runs.
 if ($MyInvocation.InvocationName -eq '.') { return }
 
@@ -1228,8 +1430,12 @@ switch ($Command) {
         }
         ''
         'Commands (Get-Help ./Invoke-KokoroDevelopment.ps1 -Full):'
-        '  Status Verify Ratchet Run Emit Check Compare JobInput Capture StockCapture Speak Zira Albert Find Tools'
+        '  Status Verify BuildHost Ratchet Run Emit Check Compare JobInput Capture StockCapture Speak Zira Albert Find Tools'
         'Contract: AGENTS.md. Reference manuals: Find-Reference (Pwsh-Development/tools/SharedLibrary.psm1).'
+    }
+    'BuildHost' {
+        if (-not $OutputDirectory) { throw 'BuildHost needs -OutputDirectory under build/.' }
+        New-KokoroDiagnosticHost -OutputDirectory $OutputDirectory
     }
     'Verify' {
         $pwsh = Join-Path $PSHOME $(if ($IsWindows) { 'pwsh.exe' } else { 'pwsh' })
@@ -1317,6 +1523,13 @@ switch ($Command) {
     }
     'Run' {
         if (-not $Case) { throw 'Run needs -Case (see Status for names).' }
+        if ($Case -ceq 'device-readiness') { Get-KokoroDeviceReadiness -Soc $Soc -Package $HostPackage; break }
+        if ($Case -ceq 'host-install') { Install-KokoroDiagnosticHost -Path $Path -Soc $Soc; break }
+        if ($Case -ceq 'generator-runtime-frames') {
+            if(-not $Path -or -not $OutputDirectory){throw 'Runtime-frame check needs -Path <existing stage fixture> and -OutputDirectory <fresh build directory>.'}
+            Test-KokoroGeneratorRuntimeFrames -FixtureDirectory $Path -OutputDirectory $OutputDirectory -Soc $Soc -Package $HostPackage
+            break
+        }
         Resume-Phone; Import-Evaluator
         $c = Get-KokoroRatchetCase $Case
         'inputs:'; Show-InputHashes (Join-Path $Root $c.Input)
@@ -1326,11 +1539,13 @@ switch ($Command) {
         $a = @{ Case = $Case; Hypothesis = $(if ($Hypothesis) { $Hypothesis } else { "run $Case" }) }
         if ($Parameters) { $a.Parameters = $Parameters }
         if ($Runs) { $a.Runs = $Runs }
-        $r = Invoke-KokoroExperiment @a
-        $receipt = Get-ChildItem $e.Directory -Filter 'device-receipt-*.txt' | Sort-Object LastWriteTime | Select-Object -Last 1
+        $attemptStarted = [DateTime]::UtcNow
+        $r = Invoke-KokoroExperiment @a -Package $HostPackage
+        $receipt = Get-ChildItem $e.Directory -Filter 'device-receipt-*.txt' | Where-Object { $_.LastWriteTimeUtc -ge $attemptStarted } | Sort-Object LastWriteTime | Select-Object -Last 1
         if ($receipt) { 'device receipt:'; Get-Content $receipt.FullName | Where-Object { $_ -notmatch 'SHA256=' } | ForEach-Object { "  $_" } }
         "commit $(git -C $Root rev-parse --short HEAD)$(if (git -C $Root status --porcelain) { ' (uncommitted changes)' })"
         $r | Format-List Status, MedianMs, PcmSnrDb, Clipped, PcmSHA256, Wav, Reason
+        if ($r.Status -eq 'crash') { throw 'Device experiment failed; see the diagnostic receipt above.' }
     }
     'Emit' {
         Import-Evaluator

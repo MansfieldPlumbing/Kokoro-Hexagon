@@ -102,18 +102,18 @@
   },
   "pwshUpstream": {
     "repo": "https://github.com/MansfieldPlumbing/Pwsh",
-    "commit": "4afa9ae291035b454e634dcebea1338e435df391",
+    "commit": "8dc04b1f4284f0a229e3f0daa45a0372fdb7d8e4",
     "role": "Pinned Xamarin-independent NativeActivity/CoreCLR/SMA base appliance; Kokoro remains a downstream TTS engine",
     "files": [
       {
         "path": "setup.ps1",
-        "bytes": 463406,
-        "sha256": "AA15CBF8BDC3551D4983E9BBC70722D21B768FF12ADF68E742315836437490CB"
+        "bytes": 517515,
+        "sha256": "59BCBB9D65BD4B383061A547D2856667B0A8AC86D0D356BEF7A61F868921125A"
       },
       {
         "path": "lib/manifest.json",
-        "bytes": 15824,
-        "sha256": "04E0B859FB6569884749E9E4FCC1057EB106FB220361C1BF722D0F7F634B5913"
+        "bytes": 15819,
+        "sha256": "49EA6FBFF35E4CD447A8C870E837E7B3EEA2AB17672F11961874BB891C1A619D"
       },
       {
         "path": "modules/AndroidCanvas.psm1",

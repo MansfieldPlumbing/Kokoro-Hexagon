@@ -27,6 +27,18 @@ $hash = (Get-FileHash -LiteralPath $resolvedSetup -Algorithm SHA256).Hash
 if ($item.Length -ne [long]$pin[0].bytes -or $hash -cne [string]$pin[0].sha256) {
     throw 'The Pwsh setup source does not match its downstream integrity pin.'
 }
+$packageManifestPath = Join-Path (Split-Path $resolvedSetup) 'lib/manifest.json'
+$packageManifestPin = @($manifest.pwshUpstream.files | Where-Object { $_.path -ceq 'lib/manifest.json' })
+if ($packageManifestPin.Count -ne 1 -or
+    (Get-Item -LiteralPath $packageManifestPath).Length -ne [long]$packageManifestPin[0].bytes -or
+    (Get-FileHash -LiteralPath $packageManifestPath).Hash -cne [string]$packageManifestPin[0].sha256) {
+    throw 'The Pwsh package manifest does not match its downstream integrity pin.'
+}
+$packageManifest = Get-Content -LiteralPath $packageManifestPath -Raw | ConvertFrom-Json
+$enginePin = @($packageManifest.packages | Where-Object { $_.id -ceq 'System.Management.Automation' })
+if ($enginePin.Count -ne 1 -or $enginePin[0].version -cne $PSVersionTable.PSVersion.ToString()) {
+    throw 'The build engine must match the pinned PowerShell package version; otherwise emitted assembly references cannot load on Android.'
+}
 
 $tokens = $null
 $parseErrors = $null
@@ -56,6 +68,8 @@ $definitions = foreach ($name in @($FunctionName | Sort-Object -Unique)) {
 [pscustomobject]@{
     PSTypeName = 'Kokoro.Build.PwshFunctionImport'
     SetupSHA256 = $hash
+    PwshCommit = [string]$manifest.pwshUpstream.commit
+    PowerShellVersion = $PSVersionTable.PSVersion.ToString()
     Names = [string[]]@($FunctionName | Sort-Object -Unique)
     Definitions = [scriptblock[]]@($definitions)
     Passed = $true

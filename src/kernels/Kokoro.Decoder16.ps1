@@ -77,6 +77,32 @@ function New-KokoroPadRows16RuntimeSteps {
     $s.ToArray()
 }
 
+# Clear every row beyond the live frame count through the supplied tile capacity.
+# r0 = tensor, r5 = live frames (0 .. 32*r6), r6 = capacity tiles. Uses r1..r13 and v0..v2,v29.
+# The partial-tile operation is the existing runtime decoder pad; complete inactive tiles follow it.
+function New-KokoroPadCapacity16Steps {
+    param([ValidateRange(32,256)][int]$Channels=128,[ValidateSet(0,0x8000)][int]$Halfword=0x8000,
+        [string]$LabelPrefix='padcapacity16',[switch]$NoReturn)
+    if ($Channels % 32) { throw 'Channels must be whole 32-channel blocks' }
+    $s=[Collections.Generic.List[hashtable]]::new()
+    $s.Add(@{Op='addi';d=13;s=6;i=0})
+    foreach($step in (New-KokoroPadRows16RuntimeSteps -Channels $Channels -Halfword $Halfword -LabelPrefix "${LabelPrefix}_partial" -NoReturn)) { $s.Add($step) }
+    $s.Add(@{Op='addi';d=6;s=5;i=31}); $s.Add(@{Op='lsr-i';d=6;s=6;i=5})
+    $s.Add(@{Op='imm';d=8;i=(64*$Channels)}); $s.Add(@{Op='mpy-d';d=10;s=6;t=8})
+    $s.Add(@{Op='add';d=1;s=0;t=10}); $s.Add(@{Op='sub';d=13;s=13;t=6})
+    $s.Add(@{Op='imm';d=8;i=($Channels/2)}); $s.Add(@{Op='mpy-d';d=10;s=13;t=8})
+    $s.Add(@{Op='imm';d=12;i=0}); $s.Add(@{Op='eq';d=0;s=10;t=12}); $s.Add(@{Op='jump-p';u=0;Label="${LabelPrefix}_done"})
+    $pattern=[long]$Halfword -bor ([long]$Halfword -shl 16)
+    $s.Add(@{Op='lo';x=2;i=($pattern -band 65535)}); $s.Add(@{Op='hi';x=2;i=($pattern -shr 16)})
+    $s.Add(@{Op='vsplat';d=0;s=2})
+    $s.Add(@{Op='label';Name="${LabelPrefix}_fill"})
+    $s.Add(@{Op='vstore';s=1;t=0;Offset=0}); $s.Add(@{Op='addi';d=1;s=1;i=128})
+    $s.Add(@{Op='addi';d=10;s=10;i=-1}); $s.Add(@{Op='gtu';d=0;s=10;t=12}); $s.Add(@{Op='jump-p';u=0;Label="${LabelPrefix}_fill"})
+    $s.Add(@{Op='label';Name="${LabelPrefix}_done"})
+    if(-not $NoReturn){$s.Add(@{Op='return'})}
+    $s.ToArray()
+}
+
 # Low conv-input window of a stored tensor (its high window is the tensor itself: the odd byte of x + 32768 is
 # (x >> 8) + 128): out = in << 8 per halfword. r0 = input, r1 = output, r2 = vectors >= 1. Uses r3..r5, v0.
 function New-KokoroLowWindow16Steps {
