@@ -148,6 +148,141 @@ $script:HexagonForms = @{
     'asr-i'          = '10001100000sssssPP0iiiii000ddddd'
 }
 
+# The authoring tables cross this boundary once. Fields and presence bits are
+# shared by all jobs; absence is distinct from a supplied zero.
+class HexagonStep {
+    [string] $Op
+    [int] $d
+    [int] $s
+    [int] $t
+    [int] $u
+    [int] $x
+    [int] $e
+    [int] $r
+    [int] $v
+    [long] $i
+    [long] $Offset
+    [long] $Bytes
+    [long] $Delta
+    [string] $Name
+    [string] $Label
+    [string] $Import
+    [string] $Data
+    [string] $Act
+    [string] $Wt
+    [long] $Present
+
+    HexagonStep() { }
+
+    static [int] FieldIndex([string] $Name) {
+        if ($Name -eq 'Op') { return 0 }
+        if ($Name -eq 'd') { return 1 }
+        if ($Name -eq 's') { return 2 }
+        if ($Name -eq 't') { return 3 }
+        if ($Name -eq 'u') { return 4 }
+        if ($Name -eq 'x') { return 5 }
+        if ($Name -eq 'e') { return 6 }
+        if ($Name -eq 'r') { return 7 }
+        if ($Name -eq 'v') { return 8 }
+        if ($Name -eq 'i') { return 9 }
+        if ($Name -eq 'Offset') { return 10 }
+        if ($Name -eq 'Bytes') { return 11 }
+        if ($Name -eq 'Delta') { return 12 }
+        if ($Name -eq 'Name') { return 13 }
+        if ($Name -eq 'Label') { return 14 }
+        if ($Name -eq 'Import') { return 15 }
+        if ($Name -eq 'Data') { return 16 }
+        if ($Name -eq 'Act') { return 17 }
+        if ($Name -eq 'Wt') { return 18 }
+        return -1
+    }
+
+    [bool] ContainsKey([string] $Name) {
+        [int] $index = [HexagonStep]::FieldIndex($Name)
+        return $index -ge 0 -and ($this.Present -band (1L -shl $index)) -ne 0L
+    }
+
+    [long] Get([string] $Name) {
+        if ($Name -eq 'd') { return [long]$this.d }
+        if ($Name -eq 's') { return [long]$this.s }
+        if ($Name -eq 't') { return [long]$this.t }
+        if ($Name -eq 'u') { return [long]$this.u }
+        if ($Name -eq 'x') { return [long]$this.x }
+        if ($Name -eq 'e') { return [long]$this.e }
+        if ($Name -eq 'r') { return [long]$this.r }
+        if ($Name -eq 'v') { return [long]$this.v }
+        if ($Name -eq 'i') { return $this.i }
+        if ($Name -eq 'Offset') { return $this.Offset }
+        if ($Name -eq 'Bytes') { return $this.Bytes }
+        if ($Name -eq 'Delta') { return $this.Delta }
+        throw [ArgumentException]::new('Unknown numeric step field: ' + $Name)
+    }
+
+    static [string] Invalid([int] $Index, [string] $Op, [string] $Field) {
+        return 'Step ' + [Convert]::ToString($Index) + ' Op=' + $Op + ' field=' + $Field + ': exact CLR type required'
+    }
+
+    static [HexagonStep[]] Convert([hashtable[]] $Source) {
+        [HexagonStep[]] $result = [HexagonStep[]]::new($Source.Length)
+        for ([int]$index = 0; $index -lt $Source.Length; $index++) {
+            [hashtable] $table = $Source[$index]
+            if ([object]$table -eq $null) { throw [HexagonStep]::Invalid($index, '<missing>', '<step>') }
+            [object] $raw = $table.get_Item('Op')
+            if ($raw -eq $null) { throw [HexagonStep]::Invalid($index, '<missing>', 'Op') }
+            if ($raw.GetType().FullName -cne 'System.String') { throw [HexagonStep]::Invalid($index, '<invalid>', 'Op') }
+            [string] $operation = [string]$raw
+            [HexagonStep] $step = [HexagonStep]::new()
+            [object[]] $keys = [object[]]::new($table.Count)
+            $table.Keys.CopyTo([Array]$keys, 0)
+            for ([int]$keyAt = 0; $keyAt -lt $keys.Length; $keyAt++) {
+                [object] $rawKey = $keys[$keyAt]
+                if ($rawKey.GetType().FullName -cne 'System.String') { throw [HexagonStep]::Invalid($index, $operation, '<key>') }
+                [string] $key = [string]$rawKey
+                [int] $field = [HexagonStep]::FieldIndex($key)
+                if ($field -lt 0) { throw [HexagonStep]::Invalid($index, $operation, $key) }
+                $raw = $table.get_Item($key)
+                if ($raw -eq $null) { throw [HexagonStep]::Invalid($index, $operation, $key) }
+                [string] $typeName = $raw.GetType().FullName
+                [long] $number = 0L
+                [string] $text = ''
+                if ($field -ge 1 -and $field -le 8) {
+                    if ($typeName -cne 'System.Int32') { throw [HexagonStep]::Invalid($index, $operation, $key) }
+                    $number = [long][int]$raw
+                } elseif ($field -ge 9 -and $field -le 12) {
+                    if ($typeName -ceq 'System.Int32') { $number = [long][int]$raw }
+                    elseif ($typeName -ceq 'System.Int64') { $number = [long]$raw }
+                    else { throw [HexagonStep]::Invalid($index, $operation, $key) }
+                } else {
+                    if ($typeName -cne 'System.String') { throw [HexagonStep]::Invalid($index, $operation, $key) }
+                    $text = [string]$raw
+                }
+                if ($field -eq 0) { $step.Op = $text }
+                elseif ($field -eq 1) { $step.d = [int]$number }
+                elseif ($field -eq 2) { $step.s = [int]$number }
+                elseif ($field -eq 3) { $step.t = [int]$number }
+                elseif ($field -eq 4) { $step.u = [int]$number }
+                elseif ($field -eq 5) { $step.x = [int]$number }
+                elseif ($field -eq 6) { $step.e = [int]$number }
+                elseif ($field -eq 7) { $step.r = [int]$number }
+                elseif ($field -eq 8) { $step.v = [int]$number }
+                elseif ($field -eq 9) { $step.i = $number }
+                elseif ($field -eq 10) { $step.Offset = $number }
+                elseif ($field -eq 11) { $step.Bytes = $number }
+                elseif ($field -eq 12) { $step.Delta = $number }
+                elseif ($field -eq 13) { $step.Name = $text }
+                elseif ($field -eq 14) { $step.Label = $text }
+                elseif ($field -eq 15) { $step.Import = $text }
+                elseif ($field -eq 16) { $step.Data = $text }
+                elseif ($field -eq 17) { $step.Act = $text }
+                elseif ($field -eq 18) { $step.Wt = $text }
+                $step.Present = $step.Present -bor (1L -shl $field)
+            }
+            $result[$index] = $step
+        }
+        return $result
+    }
+}
+
 function ConvertTo-HexagonWord {
     param([string] $Form, [hashtable] $Fields)
     $pattern = $script:HexagonForms[$Form]
