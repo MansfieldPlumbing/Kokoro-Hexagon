@@ -23,6 +23,7 @@ the commit message. Only a measured improvement moves an accepted value (Update-
 $script:Root = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..'))
 $script:Pwsh = (Get-Process -Id $PID).Path
 $script:RatchetPath = Join-Path $PSScriptRoot 'Kokoro.Ratchet.psd1'
+$script:TypedEmissions = [Collections.Generic.Dictionary[string,object]]::new([StringComparer]::Ordinal)
 # The experiment log is committed evidence in the shared PowerShell library (C:/Dev/Pwsh-Development/kokoro-hexagon).
 $script:LogPath = [IO.Path]::GetFullPath((Join-Path $script:Root '../Pwsh-Development/kokoro-hexagon/experiments.tsv'))
 $script:Standards = @{
@@ -64,6 +65,26 @@ function Invoke-KokoroEmission {
     $pairs = foreach ($k in ($Parameters.Keys | Sort-Object)) { "$k=$($Parameters[$k])" }
     $key = [Convert]::ToHexString([Security.Cryptography.SHA256]::HashData([Text.Encoding]::UTF8.GetBytes("$Kernel`n$($pairs -join "`n")`n$SourceKey"))).Substring(0, 16)
     $dir = Join-Path $script:Root "build/evaluator/emit/$Kernel-$key"
+    if ($Kernel -cin 'KokoroHarmonicSource16Run','KokoroDecoder16Run','KokoroGeneratorWholeSource16Run') {
+        if (-not $script:TypedEmissions.ContainsKey($key)) {
+            # The source worker's layout and link state remain live objects. No generated
+            # metadata file or child PowerShell process is its execution contract.
+            $emission = & (Join-Path $script:Root 'tools/Emit-HexagonProbe.ps1') -Kernel $Kernel -OutputDirectory $dir -Force @Parameters
+            if ($emission -isnot [pscustomobject] -or $null -eq $emission.Layout -or
+                $null -eq $emission.Steps -or $null -eq $emission.Buffers) {
+                throw "$Kernel emitter did not return its typed artifact and layout."
+            }
+            $emission | Add-Member -NotePropertyName Key -NotePropertyValue $key
+            $script:TypedEmissions.Add($key, $emission)
+        }
+        $cachedEmission = $script:TypedEmissions[$key]
+        if (-not (Test-Path -LiteralPath $cachedEmission.Path -PathType Leaf) -or
+            (Get-Item -LiteralPath $cachedEmission.Path).Length -ne $cachedEmission.Bytes -or
+            (Get-FileHash -LiteralPath $cachedEmission.Path).Hash -cne $cachedEmission.LibrarySHA256) {
+            throw "Cached $Kernel library integrity mismatch."
+        }
+        return $cachedEmission
+    }
     if (-not (Test-Path -LiteralPath (Join-Path $dir 'runner-layout.json'))) {
         $arguments = @('-NoProfile', '-File', (Join-Path $script:Root 'tools/Emit-HexagonProbe.ps1'), '-Kernel', $Kernel, '-OutputDirectory', $dir, '-Force')
         foreach ($k in ($Parameters.Keys | Sort-Object)) { $v = $Parameters[$k]; if ($v -is [bool]) { if ($v) { $arguments += "-$k" } } else { $arguments += "-$k", "$v" } }
@@ -181,7 +202,7 @@ function Invoke-KokoroExperiment {
     hold (meets them, no gain beyond noise), discard (misses one), crash (did not produce output).
     #>
     param([Parameter(Mandatory)][string]$Case, [hashtable]$Parameters = @{}, [string]$Setup, [string]$Hypothesis = '', [ValidateRange(1, 20)][int]$Runs = 3,
-        [ValidateSet('dev.mansfieldplumbing.androidsma.preview', 'dev.mansfieldplumbing.kokoro')][string]$Package = 'dev.mansfieldplumbing.androidsma.preview')
+        [ValidateSet('dev.mansfieldplumbing.androidsma.preview', 'dev.mansfieldplumbing.kokoro')][string]$Package = 'dev.mansfieldplumbing.kokoro')
     $c = Get-KokoroRatchetCase $Case
     if ($Setup) {
         $s = (Import-PowerShellDataFile $script:RatchetPath).Setups[$Setup]; if ($null -eq $s) { throw "No setup '$Setup' in $script:RatchetPath." }
@@ -195,7 +216,11 @@ function Invoke-KokoroExperiment {
         if ($c.BaselineManifest) { Test-KokoroBaselineManifest -Path $c.BaselineManifest }
         $e = Invoke-KokoroEmission -Kernel $c.Kernel -Parameters $p
         $inputDir = Join-Path $script:Root $c.Input
-        $out = & $script:Pwsh -NoProfile -File (Join-Path $script:Root 'tools/Invoke-GeneratorTailProbe.ps1') -EmissionDirectory $e.Directory -FixtureDirectory $inputDir -Soc $c.Soc -Runs $Runs -Package $Package -TimeoutSeconds 300 2>&1
+        if ($null -ne $e.PSObject.Properties['Layout']) {
+            $out = & (Join-Path $script:Root 'tools/Invoke-GeneratorTailProbe.ps1') -EmissionDirectory $e.Directory -EmissionArtifact $e -FixtureDirectory $inputDir -Soc $c.Soc -Runs $Runs -Package $Package -TimeoutSeconds 300 2>&1
+        } else {
+            $out = & $script:Pwsh -NoProfile -File (Join-Path $script:Root 'tools/Invoke-GeneratorTailProbe.ps1') -EmissionDirectory $e.Directory -FixtureDirectory $inputDir -Soc $c.Soc -Runs $Runs -Package $Package -TimeoutSeconds 300 2>&1
+        }
         $text = ($out | ForEach-Object { "$_" }) -join "`n"
         $field = { param([string]$n) $i = $text.IndexOf("$n="); if ($i -lt 0) { return $null }; $j = $i + $n.Length + 1; $k = $j; while ($k -lt $text.Length -and -not [char]::IsWhiteSpace($text[$k])) { $k++ }; $text.Substring($j, $k - $j) }
         $outputPath = & $field 'OutputPath'
@@ -205,7 +230,9 @@ function Invoke-KokoroExperiment {
         $r.MedianMs = [double](& $field 'MedianRegionMs')
         $wavDir = Join-Path $script:Root 'build/evaluator/wav'; $null = New-Item -ItemType Directory -Force $wavDir
         $r.Wav = Join-Path $wavDir ("{0}-{1}-{2:yyyyMMdd-HHmmss}.wav" -f $c.Name, $e.Key, (Get-Date))
-        $pcmOffset = [int](Get-Content -LiteralPath (Join-Path $e.Directory 'runner-layout.json') -Raw | ConvertFrom-Json).PcmOffset
+        $pcmOffset = if ($null -ne $e.PSObject.Properties['Layout']) { [int]$e.Layout.PcmOffset } else {
+            [int](Get-Content -LiteralPath (Join-Path $e.Directory 'runner-layout.json') -Raw | ConvertFrom-Json).PcmOffset
+        }
         $m = & (Join-Path $script:Root 'tools/Measure-KokoroPcmSnr.ps1') -OutputPath $outputPath -FixtureDirectory $inputDir -PcmOffset $pcmOffset -WavPath $r.Wav
         $r.PcmSnrDb = $m.PcmSnrDb; $r.Clipped = $m.ClippedSamples; $r.PcmSHA256 = $m.PcmSHA256
         $misses = @()

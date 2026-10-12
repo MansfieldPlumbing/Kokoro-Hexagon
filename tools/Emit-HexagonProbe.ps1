@@ -34,7 +34,7 @@ param(
     [switch] $GeneratorRuntimeFrames,
     # KokoroDecoder16Run AdaIN statistics: Accumulate, Export (records and coefficients after the output), Supplied (records
     # from the input) or Corrected (coefficient deltas from the input added to the accumulated coefficients).
-    [ValidateSet('Accumulate','Export','Supplied','SuppliedExport','Corrected','Direct')][string] $DecoderMoments = 'Accumulate',
+    [ValidateSet('Accumulate','Export','Supplied','SuppliedExport','Corrected','Direct','Constants')][string] $DecoderMoments = 'Accumulate',
     [ValidateSet(1, 3, 5)][int] $ConvDilation = 1,
     [switch] $ConvOutputPlanes,
     [ValidateSet(1,2)][int] $ConvWeightPlanes = 1,
@@ -303,7 +303,7 @@ if($Kernel -eq 'KokoroR0Sub0') {
     $run=New-KokoroGenerator60x16RunSteps -Frames $ResBlockFrames -HvxThreads $ResidentHvxThreads -BatchTiles $ResidentBatchTiles -Whole -Source
     $steps=@($run.Steps)
     $symbol='kokoro_generator_tail_skel_handle_invoke'; $soname='libkokoro_generator_tail_skel.so'
-    Write-NewOrIdenticalFile (Join-Path $OutputDirectory 'runner-layout.json') ([Text.Encoding]::UTF8.GetBytes(($run.Layout | ConvertTo-Json -Depth 6))) -AllowOverwrite:$Force
+    # The existing generator consumes the decoder tensor through the typed layout.
 } elseif($Kernel -eq 'KokoroDecoderGenerator16Run') {
     # The decoder then the whole generator with the harmonic source: asr, F0_curve, N_curve, f0 and z to PCM, one DSP job.
     . (Join-Path $PSScriptRoot '..\src\jobs\Kokoro.Generator60x16Run.ps1')
@@ -317,7 +317,7 @@ if($Kernel -eq 'KokoroR0Sub0') {
     $run=New-KokoroHarmonicSource16RunSteps -Frames $ResBlockFrames
     $steps=@($run.Steps)
     $symbol='kokoro_generator_tail_skel_handle_invoke'; $soname='libkokoro_generator_tail_skel.so'
-    Write-NewOrIdenticalFile (Join-Path $OutputDirectory 'runner-layout.json') ([Text.Encoding]::UTF8.GetBytes(($run.Layout | ConvertTo-Json -Depth 6))) -AllowOverwrite:$Force
+    # Layout and link state are returned with the emitted artifact, without JSON interchange.
 } elseif($Kernel -eq 'KokoroHarmonicStft16Run') {
     # The harmonic-source STFT (merged source -> har planes) under the generic tail harness (completion word 1).
     . (Join-Path $PSScriptRoot '..\src\jobs\Kokoro.HarmonicStft16Run.ps1')
@@ -345,7 +345,7 @@ if($Kernel -eq 'KokoroR0Sub0') {
     $steps=@($run.Steps)
     # The phone harness (tools/Invoke-GeneratorTailProbe.ps1) runs every generator job under the tail skel's name.
     $symbol='kokoro_generator_tail_skel_handle_invoke'; $soname='libkokoro_generator_tail_skel.so'
-    Write-NewOrIdenticalFile (Join-Path $OutputDirectory 'runner-layout.json') ([Text.Encoding]::UTF8.GetBytes(($run.Layout | ConvertTo-Json -Depth 6))) -AllowOverwrite:$Force
+    # Decoder layouts travel with the typed emission artifact.
 } elseif($Kernel -eq 'KokoroAlbertLinear16Run') {
     . (Join-Path $PSScriptRoot '..\src\jobs\Kokoro.Albert16Run.ps1')
     $run=New-KokoroAlbertLinear16RunSteps -InputChannels $AlbertInputChannels -OutputChannels $AlbertOutputChannels -Tokens $AlbertTokens
@@ -490,7 +490,7 @@ if ($RegionBody) {
     $symbol+='_encoding_only'; $soname=$soname.Replace('_skel.so','_region_encoding_only.so')
 }
 $library=New-ElfCodeLibrary -Soname $soname -Needed @() -Functions ([ordered]@{$symbol=$steps}) -PageSize 4096
-if($Kernel -in 'KokoroAlbertLinear16Run','KokoroAlbertLayerNorm16Run','KokoroAlbertGelu16Run','KokoroAlbertAttention16Run','KokoroAlbertEmbed16Run','KokoroAlbert16Run','KokoroDecoder16Run','KokoroDecoderGenerator16Run','KokoroResBlockRun','KokoroGenerator60xRun','KokoroGenerator60xResidentRun','KokoroGenerator60x16Run','KokoroGeneratorTailRun','KokoroGeneratorTail16Run','KokoroGeneratorStage16TailRun','KokoroResBlock16Run','KokoroGeneratorFrontStageTailRun','KokoroGeneratorFront10x16Run','KokoroGeneratorWhole16Run','KokoroHarmonicStft16Run','KokoroHarmonicSource16Run','KokoroGeneratorWholeSource16Run') {
+if($Kernel -notin 'KokoroHarmonicSource16Run','KokoroDecoder16Run','KokoroGeneratorWholeSource16Run' -and $Kernel -in 'KokoroAlbertLinear16Run','KokoroAlbertLayerNorm16Run','KokoroAlbertGelu16Run','KokoroAlbertAttention16Run','KokoroAlbertEmbed16Run','KokoroAlbert16Run','KokoroDecoder16Run','KokoroDecoderGenerator16Run','KokoroResBlockRun','KokoroGenerator60xRun','KokoroGenerator60xResidentRun','KokoroGenerator60x16Run','KokoroGeneratorTailRun','KokoroGeneratorTail16Run','KokoroGeneratorStage16TailRun','KokoroResBlock16Run','KokoroGeneratorFrontStageTailRun','KokoroGeneratorFront10x16Run','KokoroGeneratorWhole16Run','KokoroHarmonicStft16Run','KokoroHarmonicSource16Run','KokoroGeneratorWholeSource16Run') {
     Write-NewOrIdenticalFile (Join-Path $OutputDirectory 'runner-link.json') ([Text.Encoding]::UTF8.GetBytes((@{Entry=$library.Exports[$symbol];Got=$library.GotSlots} | ConvertTo-Json -Depth 4))) -AllowOverwrite:$Force
 }
 $path=Join-Path $OutputDirectory $soname
@@ -510,4 +510,14 @@ $isa=Get-InstructionSet
 $codeLength=($steps | Where-Object Op -ne 'label' | ForEach-Object { & $isa.Length $_ } | Measure-Object -Sum).Sum
 $code=[byte[]]::new($codeLength); [Array]::Copy($library.Bytes,$codeStart,$code,0,$codeLength)
 Write-NewOrIdenticalFile (Join-Path $OutputDirectory 'emitted-code.bin') $code -AllowOverwrite:$Force
-[pscustomobject]@{Path=$path;Bytes=$library.Bytes.Length;CodeBytes=$codeLength;SHA256=(Get-FileHash $path).Hash;Imports=$library.Imports.Count;Relocations=0;RegionBodyEncodingOnly=[bool]$RegionBody}
+$artifactHash=(Get-FileHash $path).Hash
+$emissionResult=[pscustomobject]@{PSTypeName='Kokoro.Hexagon.Emission';Kernel=$Kernel;Path=$path;Directory=$OutputDirectory;
+    Bytes=$library.Bytes.Length;CodeBytes=$codeLength;SHA256=$artifactHash;LibrarySHA256=$artifactHash;
+    Imports=$library.Imports.Count;Relocations=0;RegionBodyEncodingOnly=[bool]$RegionBody}
+if ($Kernel -cin 'KokoroHarmonicSource16Run','KokoroDecoder16Run','KokoroGeneratorWholeSource16Run') {
+    $emissionResult | Add-Member -NotePropertyMembers @{
+        Layout=$run.Layout;Steps=$steps;Link=[pscustomobject]@{Entry=$library.Exports[$symbol];Got=$library.GotSlots}
+        Buffers=[pscustomobject]@{Library=$library.Bytes;Code=$code}
+    }
+}
+$emissionResult

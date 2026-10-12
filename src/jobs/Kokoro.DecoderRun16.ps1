@@ -34,8 +34,11 @@ function Get-KokoroDecoder16Layout {
         if($r[2] -and [math]::Floor($at/$page) -ne [math]::Floor(($at+$r[1]+$slack-1)/$page)){ $at=[long]([math]::Ceiling($at/$page)*$page) }
         if($r[2] -and [math]::Floor($at/$page) -ne [math]::Floor(($at+$r[1]+$slack-1)/$page)){ throw "$($r[0]) and its read extent exceed one 2 MiB VTCM page" }
         $regions[$r[0]]=[ordered]@{Offset=$at;Bytes=[long]$r[1]}; $at+=& $al $r[1] }
-    if($at -gt 4194304){throw 'Decoder activations exceed the first 4 MiB of VTCM'}
-    $regions['Weights']=[ordered]@{Offset=4194304L;Bytes=3440640L}; $vtcm=4194304L+3440640L
+    # Preserve the accepted placement for small inputs; larger static tensors
+    # may move the streamed weights after the aligned activation extent.
+    $weightAt=[math]::Max(4194304L,$at); $vtcm=$weightAt+3440640L
+    if($vtcm -gt 8388608L){throw 'Decoder activations and streamed weights exceed the admitted 8 MiB of VTCM'}
+    $regions['Weights']=[ordered]@{Offset=$weightAt;Bytes=3440640L}
     # Inputs: asr (512-wide croutons, T tiles), F0 curve and N curve (int32, 2F samples each, 128-byte padded).
     # Frames: the runtime frame count (int32), read only by a -RuntimeFrames job; Frames is then the capacity.
     $input=[ordered]@{Asr=0L;F0=($T*32768L);N=($T*32768L+$curveBytes);Frames=($T*32768L+2*$curveBytes)}; $inputBytes=$T*32768L+2*$curveBytes
@@ -56,6 +59,11 @@ function Get-KokoroDecoder16Layout {
         if($b.Up){ $q['Pool']=$pAt; $pAt+=512L*$b.Cin/32; $q['Convert']=$pAt; $pAt+=384L*$ob }
         $blockParams.Add($q)
     }
+    # Direction (2026-10-11, docs/expanded-student-campaign.md "Normalization direction"): runtime synthesis computes and
+    # supplies no AdaIN statistics. The front end emits scalar streams; each site's K and M are expanded from them through
+    # the existing style projections and arrive through the direct-coefficient input. The
+    # moments records below remain for stock-reference comparison and teacher observation, staged for removal from the
+    # runtime path; do not build new runtime work on them.
     # AdaIN moments records in run order (per block AdaIN1 over its input, AdaIN2 over conv1's output; decode.3's AdaIN2 runs
     # at 2F frames): the AdaInMoments16 record (S1, A2, AB, B2 int32 per channel, 16 bytes per channel). Exported after the
     # decoder output; supplied in the input after the runtime frame count, followed by one int32 frame count N per site.
@@ -67,7 +75,8 @@ function Get-KokoroDecoder16Layout {
     $input['Moments']=$inputBytes+128; $input['MomentCounts']=$input.Moments+$mAt; $input['KmDeltas']=$input.MomentCounts+128
     [pscustomobject]@{Frames=$F;Tiles=$T;Tiles2=$T2;OutputTiles=2*$T;PlaneStride=$planeStride;Regions=$regions;Small=$small;CurveBytes=$curveBytes
         Input=$input;InputBytes=$inputBytes;RuntimeInputBytes=($inputBytes+128);SuppliedInputBytes=($input.MomentCounts+128);CorrectedInputBytes=($input.KmDeltas+$kAt);KmBytes=$kAt;Blocks=$blocks;Convs=$convs.ToArray();WeightBytes=$w;Params=$p;BlockParams=$blockParams.ToArray();ParameterBytes=$pAt
-        MomentSites=$sites.ToArray();MomentsBytes=$mAt;OutputBytes=($T2*32768L);VtcmBytes=$vtcm}
+        MomentSites=$sites.ToArray();MomentsBytes=$mAt;OutputBytes=($T2*32768L);VtcmBytes=$vtcm
+        ConstantsTableOffset=$pAt;ConstantsBytes=$mAt;ConstantsParameterBytes=($pAt+$mAt)}
 }
 
 # Appends the decoder job to Steps (registers as the generator jobs: r18 VTCM, r24 DMA descriptor slots). The decoder output
@@ -92,7 +101,7 @@ function Add-KokoroDecoder16JobSteps {
         # also exports each site's local coefficients (from this job's own moments) where Export puts coefficients: the
         # supplied minus local difference is the exact Corrected delta on the supplied trajectory. Direct loads each site's
         # absolute coefficients from the KmDeltas region and computes no moments and no coefficients.
-        [ValidateSet('Accumulate','Export','Supplied','SuppliedExport','Corrected','Direct')][string]$Moments='Accumulate')
+        [ValidateSet('Accumulate','Export','Supplied','SuppliedExport','Corrected','Direct','Constants')][string]$Moments='Accumulate')
     if($RuntimeFrames -and $StopAfterBlock -ge 0){throw 'Dump points need a fixed frame count'}
     if($Moments -ne 'Accumulate' -and $StopAfterBlock -ge 0){throw 'Exported or supplied moments need the whole decoder'}
     $L=Get-KokoroDecoder16Layout -Frames $Frames
@@ -136,6 +145,14 @@ function Add-KokoroDecoder16JobSteps {
         if($Moments -eq 'Direct'){
             # The site's coefficients from the input (the KmDeltas region holds absolute Km): no moments, no derivation.
             & $dma 18 ($sm+$small.Km) $InputBase ($InputOffset+$L.Input.KmDeltas+$site.KmOffset) $site.KmBytes
+            & $ptr 0 18 $x; & $ptr 1 18 $hi; & $ptr 2 18 $lo; & $ptr 3 18 ($sm+$small.Km); & $cnt 4 $tiles; & $call "dec_leaky_$($output.ToLower())_$width"; & $sync
+            return
+        }
+        if($Moments -eq 'Constants'){
+            & $dma 18 ($sm+$small.Moments) $TablesBase ($TablesOffset+$L.ConstantsTableOffset+$site.Offset) $site.Bytes
+            & $dma 18 ($sm+$small.Records) $TablesBase ($TablesOffset+$records) (32L*$width)
+            & $ptr 0 18 ($sm+$small.Moments); & $ptr 1 18 ($sm+$small.Records); & $ptr 2 18 ($sm+$small.Km)
+            & $call "dec_constants_$width"
             & $ptr 0 18 $x; & $ptr 1 18 $hi; & $ptr 2 18 $lo; & $ptr 3 18 ($sm+$small.Km); & $cnt 4 $tiles; & $call "dec_leaky_$($output.ToLower())_$width"; & $sync
             return
         }
@@ -267,7 +284,7 @@ function Add-KokoroDecoder16JobSteps {
         $ci+=3; $src=$dst; $dst=if($dst -eq 'XA'){'XB'}else{'XA'}
     }
     if($StopAfterBlock -lt 0 -and $siteIndex.Value -ne $L.MomentSites.Count){throw "The decoder ran $($siteIndex.Value) AdaIN sites; the layout has $($L.MomentSites.Count)"}
-    [pscustomobject]@{Layout=$L;Pads=@($padUsed);Combines=@($combines);Stride=@($stride);RuntimeFrames=[bool]$RuntimeFrames}
+    [pscustomobject]@{Layout=$L;Pads=@($padUsed);Combines=@($combines);Stride=@($stride);RuntimeFrames=[bool]$RuntimeFrames;Constants=($Moments -eq 'Constants')}
 }
 
 # Bodies the job calls (labels as Add-KokoroDecoder16JobSteps emits them).
@@ -285,8 +302,12 @@ function Get-KokoroDecoder16Bodies {
     foreach($c in $Job.Combines){ $m,$ch,$skip=$c -split ','
         $bodies.Add(@("dec_combine_$($m.ToLower())_${ch}_$skip",@(New-KokoroPlaneCombineLoopSteps -Mode $m -Channels ([int]$ch) -PlaneStride $ps -OutputTileSkip ([long]$skip) -LabelPrefix "deccombine_$($m.ToLower())_${ch}_$skip"))) }
     foreach($w in 544,1120,1024,512){
+        if($Job.Constants){
+            $bodies.Add(@("dec_constants_$w",@(New-KokoroAdaInConstantCoefficientsLoopSteps -Channels $w -LabelPrefix "decconstants_$w")))
+        } else {
         $bodies.Add(@("dec_moments_$w",@(New-KokoroAdaInMoments16LoopSteps -Channels $w -LabelPrefix "decmoments_$w")))
         $bodies.Add(@("dec_coeff_$w",@(New-KokoroAdaInAffineCoefficientsLoopSteps -Channels $w -LabelPrefix "deccoeff_$w")))
+        }
         $bodies.Add(@("dec_leaky_windows_$w",@(New-KokoroAdaInLeaky16Steps -Channels $w -Output Windows -LabelPrefix "decleakyw_$w"))) }
     $bodies.Add(@('dec_leaky_tensor_1120',@(New-KokoroAdaInLeaky16Steps -Channels 1120 -Output Tensor -LabelPrefix 'decleakyt_1120')))
     foreach($p in $Job.Pads){ $f,$w,$h=$p -split ','
@@ -302,7 +323,7 @@ function Get-KokoroDecoder16Bodies {
 # -StopAfterBlock).
 function New-KokoroDecoder16RunSteps {
     param([Parameter(Mandatory)][ValidateRange(2,4096)][int]$Frames,[ValidateRange(-1,4)][int]$StopAfterBlock=-1,[ValidateSet('Block','Shortcut','Conv1','Windows1','Pool','Coeff')][string]$DumpPoint='Block',[switch]$RuntimeFrames,
-        [ValidateSet('Accumulate','Export','Supplied','SuppliedExport','Corrected','Direct')][string]$Moments='Accumulate')
+        [ValidateSet('Accumulate','Export','Supplied','SuppliedExport','Corrected','Direct','Constants')][string]$Moments='Accumulate')
     . (Join-Path $PSScriptRoot 'Kokoro.ResBlockRun.ps1')
     foreach($file in '../kernels/Kokoro.HmxConvPlanes.ps1','../kernels/Kokoro.PlaneCombine.ps1','../kernels/Kokoro.AdaInMoments16.ps1','../kernels/Kokoro.AdaInTurnsCoefficients.ps1','../kernels/Kokoro.AdaInLeaky16.ps1','../kernels/Kokoro.Decoder16.ps1','../hexagon/Kokoro.DmaCopy.ps1') { . (Join-Path $PSScriptRoot $file) }
     $L=Get-KokoroDecoder16Layout -Frames $Frames
@@ -315,7 +336,8 @@ function New-KokoroDecoder16RunSteps {
     $base=@($wrapperSource.Steps);$start=-1
     for($i=0;$i -lt $base.Count;$i++){if($base[$i].Op -eq 'label' -and $base[$i].Name -eq 'connected_job'){$start=$i;break}}
     if($start -lt 0){throw 'Connected wrapper anchor changed'}
-    $inBytes=if($Moments -in 'Corrected','Direct'){$L.CorrectedInputBytes}elseif($Moments -in 'Supplied','SuppliedExport'){$L.SuppliedInputBytes}elseif($RuntimeFrames){$L.RuntimeInputBytes}else{$L.InputBytes}; $minimum=@(4,$inBytes,$L.WeightBytes,$L.ParameterBytes,$outputBytes)
+    $parameterBytes=if($Moments -eq 'Constants'){$L.ConstantsParameterBytes}else{$L.ParameterBytes}
+    $inBytes=if($Moments -in 'Corrected','Direct'){$L.CorrectedInputBytes}elseif($Moments -in 'Supplied','SuppliedExport'){$L.SuppliedInputBytes}elseif($RuntimeFrames){$L.RuntimeInputBytes}else{$L.InputBytes}; $minimum=@(4,$inBytes,$L.WeightBytes,$parameterBytes,$outputBytes)
     $oldVtcm=[long]$wrapperSource.Layout.VtcmBytes; $patched=@{request=0;check=0}
     for($i=0;$i -lt $start;$i++){
         $step=$base[$i].Clone()
@@ -343,6 +365,6 @@ function New-KokoroDecoder16RunSteps {
     $labels=@{};$pcs=[Collections.Generic.Dictionary[object,long]]::new();$pc=0L;$isa=Get-InstructionSet
     foreach($step in $s){if($step.Op -eq 'label'){if($labels.ContainsKey($step.Name)){throw "Duplicate label $($step.Name)"};$labels[$step.Name]=$pc};$pcs[$step]=$pc;$pc+=& $isa.Length $step}
     foreach($c in $calls){if(-not $labels.ContainsKey($c.label)){throw "Missing body $($c.label)"};$delta=[uint32](($labels[$c.label]-$pcs[$c.pc]) -band 0xffffffffL);$c.low.i=$delta -band 65535;$c.high.i=$delta -shr 16}
-    [pscustomobject]@{Steps=$s.ToArray();Layout=[ordered]@{Frames=$Frames;RuntimeFrames=[bool]$RuntimeFrames;FramesOffset=$L.Input.Frames;Tiles=$L.Tiles;Tiles2=$L.Tiles2;InputBytes=$inBytes;WeightBytes=$L.WeightBytes;ParameterBytes=$L.ParameterBytes;OutputBytes=$outputBytes;OutputOffset=256;PcmOffset=256;Samples=1;VtcmBytes=$L.VtcmBytes;StopAfterBlock=$StopAfterBlock
+    [pscustomobject]@{Steps=$s.ToArray();Layout=[ordered]@{Frames=$Frames;RuntimeFrames=[bool]$RuntimeFrames;FramesOffset=$L.Input.Frames;Tiles=$L.Tiles;Tiles2=$L.Tiles2;InputBytes=$inBytes;WeightBytes=$L.WeightBytes;ParameterBytes=$parameterBytes;OutputBytes=$outputBytes;OutputOffset=256;PcmOffset=256;Samples=1;VtcmBytes=$L.VtcmBytes;StopAfterBlock=$StopAfterBlock
         Moments=$Moments;MomentsInputOffset=$L.Input.Moments;MomentCountsInputOffset=$L.Input.MomentCounts;MomentsOutputOffset=(256L+$L.OutputBytes);KmOutputOffset=(256L+$L.OutputBytes+$L.MomentsBytes);KmDeltasInputOffset=$L.Input.KmDeltas;MomentSites=$L.MomentSites}}
 }

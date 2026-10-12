@@ -14,6 +14,7 @@ param(
     [Parameter(Mandatory)][string] $OutputPath,
     [Parameter(Mandatory)][string] $FixtureDirectory,
     [int] $PcmOffset = -1,
+    [ValidateRange(0,100000000)][int] $Samples = 0,
     [string] $WavPath
 )
 $ErrorActionPreference = 'Stop'
@@ -21,19 +22,19 @@ if ($PcmOffset -lt 0) {
     $layoutPath = Join-Path (Split-Path -LiteralPath ([IO.Path]::GetFullPath($OutputPath))) 'runner-layout.json'
     $PcmOffset = if (Test-Path -LiteralPath $layoutPath) { [int](Get-Content -LiteralPath $layoutPath -Raw | ConvertFrom-Json).PcmOffset } else { 256 }
 }
-$fx = Get-Content -LiteralPath (Join-Path $FixtureDirectory 'fixture.json') -Raw | ConvertFrom-Json
-$n = [int]$fx.Samples
+$n = if($Samples){$Samples}else{[int](Get-Content -LiteralPath (Join-Path $FixtureDirectory 'fixture.json') -Raw | ConvertFrom-Json).Samples}
 $refBytes = [IO.File]::ReadAllBytes((Join-Path $FixtureDirectory 'expected-pcm-f32.bin'))
 if ($refBytes.Length -ne 4 * $n) { throw 'Expected PCM length differs from the fixture sample count.' }
 $ref = [float[]]::new($n); [Buffer]::BlockCopy($refBytes, 0, $ref, 0, $refBytes.Length)
 $buf = [IO.File]::ReadAllBytes($OutputPath)
 if ($buf.Length -lt $PcmOffset + 2 * $n) { throw 'Output buffer is shorter than its PCM.' }
 $pcm = [int16[]]::new($n); [Buffer]::BlockCopy($buf, $PcmOffset, $pcm, 0, 2 * $n)
-$sig = 0.0; $noi = 0.0; $mx = 0.0; $clip = 0
+$sig = 0.0; $noi = 0.0; $mx = 0.0; $clip = 0; $pcmEnergy=0.0; $peak=0.0
 for ($i = 0; $i -lt $n; $i++) {
     $d = [double]$ref[$i] - $pcm[$i] / 32768.0; $sig += [double]$ref[$i] * $ref[$i]; $noi += $d * $d
     if ([math]::Abs($d) -gt $mx) { $mx = [math]::Abs($d) }
     if ($pcm[$i] -eq 32767 -or $pcm[$i] -eq -32768) { $clip++ }
+    $sample=$pcm[$i]/32768.0; $pcmEnergy+=$sample*$sample; $peak=[math]::Max($peak,[math]::Abs($sample))
 }
 if ($WavPath) {
     $build = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '../build')) + [IO.Path]::DirectorySeparatorChar
@@ -45,4 +46,4 @@ if ($WavPath) {
     $bw.Write([Text.Encoding]::ASCII.GetBytes('data')); $bw.Write([int](2 * $n)); $bw.Write($buf, $PcmOffset, 2 * $n); $bw.Flush()
     [IO.File]::WriteAllBytes($wav, $ms.ToArray())
 }
-[pscustomobject]@{ Samples = $n; PcmSnrDb = [math]::Round(10 * [math]::Log10($sig / [math]::Max($noi, 1e-300)), 2); MaxAbsError = [math]::Round($mx, 5); ClippedSamples = $clip; PcmSHA256 = [Convert]::ToHexString([Security.Cryptography.SHA256]::HashData([byte[]]$buf[$PcmOffset..($PcmOffset + 2 * $n - 1)])) }
+[pscustomobject]@{ Samples = $n; Rms=[math]::Sqrt($pcmEnergy/$n);Peak=$peak; PcmSnrDb = [math]::Round(10 * [math]::Log10($sig / [math]::Max($noi, 1e-300)), 2); MaxAbsError = [math]::Round($mx, 5); ClippedSamples = $clip; PcmSHA256 = [Convert]::ToHexString([Security.Cryptography.SHA256]::HashData([byte[]]$buf[$PcmOffset..($PcmOffset + 2 * $n - 1)])) }

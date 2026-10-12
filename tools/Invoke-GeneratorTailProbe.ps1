@@ -17,14 +17,33 @@ param(
     [ValidateRange(1, 20)][int] $Runs = 3,
     [ValidateSet('SM8550', 'SM8635')][string] $Soc = 'SM8550',
     [string] $Adb = 'C:\backup\Android\platform-tools\adb.exe',
-    [string] $Package = 'dev.mansfieldplumbing.androidsma.preview',
-    [ValidateRange(10, 600)][int] $TimeoutSeconds = 180
+    [string] $Package = 'dev.mansfieldplumbing.kokoro',
+    [ValidateRange(10, 600)][int] $TimeoutSeconds = 180,
+    [pscustomobject] $EmissionArtifact
 )
 $ErrorActionPreference = 'Stop'
 if ($Package -notmatch '^[a-zA-Z0-9_.]+$') { throw 'Invalid Android package name' }
 $emission = [IO.Path]::GetFullPath($EmissionDirectory); $fixture = [IO.Path]::GetFullPath($FixtureDirectory)
-$layout = Get-Content (Join-Path $emission 'runner-layout.json') -Raw | ConvertFrom-Json
 $library = Join-Path $emission 'libkokoro_generator_tail_skel.so'
+if ($null -ne $EmissionArtifact) {
+    if ($null -eq $EmissionArtifact.Layout -or
+        [IO.Path]::GetFullPath($EmissionArtifact.Directory) -cne $emission -or
+        [IO.Path]::GetFullPath($EmissionArtifact.Path) -cne $library -or
+        (Get-Item -LiteralPath $library).Length -ne $EmissionArtifact.Bytes -or
+        (Get-FileHash -LiteralPath $library).Hash -cne $EmissionArtifact.LibrarySHA256) {
+        throw 'Typed emission identity or library integrity mismatch.'
+    }
+    $layout = $EmissionArtifact.Layout
+} else {
+    # Preserved reference artifacts retain their original metadata contract.
+    $layout = Get-Content (Join-Path $emission 'runner-layout.json') -Raw | ConvertFrom-Json
+}
+if ([long]$layout.Tiles -lt 1 -or [long]$layout.Tiles -gt 1024 -or
+    [long]$layout.InputBytes -lt 1 -or [long]$layout.Samples -lt 1 -or
+    [long]$layout.PcmOffset -lt 0 -or
+    [long]$layout.PcmOffset + 2L * [long]$layout.Samples -gt [long]$layout.OutputBytes) {
+    throw 'Runner layout is out of range.'
+}
 $serials = @(& $Adb devices | ForEach-Object { $p = $_.Split("`t"); if ($p.Count -eq 2 -and $p[1] -eq 'device') { $p[0] } } |
     Where-Object { (& $Adb -s $_ shell getprop ro.soc.model).Trim() -eq $Soc })
 if ($serials.Count -ne 1) { throw "Expected exactly one attached $Soc device, found $($serials.Count)." }

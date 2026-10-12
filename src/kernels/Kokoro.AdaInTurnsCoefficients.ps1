@@ -251,3 +251,69 @@ function New-KokoroAdaInAffineCoefficientsLoopSteps {
     $s.Add(@{Op='dealloc-return'})
     $s.ToArray()
 }
+
+# Constants-mode decoder affine. r0 holds 16 bytes/channel: unsigned numerator
+# and denominator of N/root, then signed numerator and unsigned denominator of
+# S1/N. Exact fixture ratios retain the statistics path's integer rounding.
+# r1 is the unchanged Ka/Mb record; r2 receives the existing blocked K/M layout.
+function New-KokoroAdaInConstantCoefficientsLoopSteps {
+    param([ValidateRange(32,2048)][int]$Channels=1120,[string]$LabelPrefix='constantcoeff')
+    if ($Channels % 32) { throw 'Channels must be whole 32-channel blocks' }
+    $s = [Collections.Generic.List[hashtable]]::new()
+    $s.Add(@{Op='allocframe';Bytes=64})
+    foreach ($r in 16,18,20,22,24,26) { $s.Add(@{Op='store-d';s=29;t=$r;Offset=(($r-16)*4)}) }
+    $s.Add(@{Op='imm';d=16;i=0}); $s.Add(@{Op='imm';d=26;i=1}); $s.Add(@{Op='imm';d=5;i=-1})
+    $script:__cc = 0
+    $next = { $script:__cc++; "${LabelPrefix}_$($script:__cc)" }
+    $divide = { param([int]$divisor,[int]$q)
+        $s.Add(@{Op='imm';d=$q;i=0})
+        $s.Add(@{Op='imm';d=15;i=1}); $s.Add(@{Op='asl-i';d=15;s=15;i=30})
+        $bit = & $next; $skip = & $next
+        $s.Add(@{Op='label';Name=$bit}); $s.Add(@{Op='or';d=14;s=$q;t=15})
+        $s.Add(@{Op='mpyu-d';d=10;s=14;t=$divisor}); $s.Add(@{Op='gtu-d';d=0;s=10;t=6})
+        $s.Add(@{Op='jump-p';u=0;Label=$skip}); $s.Add(@{Op='addi';d=$q;s=14;i=0})
+        $s.Add(@{Op='label';Name=$skip}); $s.Add(@{Op='lsr-i';d=15;s=15;i=1})
+        $s.Add(@{Op='gtu';d=0;s=15;t=16}); $s.Add(@{Op='jump-p';u=0;Label=$bit})
+    }
+    $s.Add(@{Op='imm';d=4;i=($Channels/32)})
+    $s.Add(@{Op='label';Name="${LabelPrefix}_block"}); $s.Add(@{Op='imm';d=17;i=32})
+    $s.Add(@{Op='label';Name="${LabelPrefix}_channel"})
+    $s.Add(@{Op='load';d=20;s=0;Offset=0}); $s.Add(@{Op='load';d=18;s=0;Offset=4})
+    $s.Add(@{Op='load-d';d=12;s=1;Offset=0}); $s.Add(@{Op='imm';d=19;i=0})
+    $positiveKa = & $next
+    $s.Add(@{Op='gt';d=0;s=13;t=5}); $s.Add(@{Op='jump-p';u=0;Label=$positiveKa})
+    $s.Add(@{Op='imm';d=10;i=0}); $s.Add(@{Op='imm';d=11;i=0})
+    $s.Add(@{Op='sub-d';d=12;s=10;t=12}); $s.Add(@{Op='imm';d=19;i=1})
+    $s.Add(@{Op='label';Name=$positiveKa})
+    # |Ka| * inverse numerator, rounded by its denominator, with the old quotient bound.
+    $s.Add(@{Op='mpyu-d';d=6;s=12;t=20}); $s.Add(@{Op='mpyu-d';d=10;s=13;t=20})
+    $s.Add(@{Op='add';d=7;s=7;t=10})
+    $s.Add(@{Op='lsr-i';d=10;s=18;i=1}); $s.Add(@{Op='imm';d=11;i=0}); $s.Add(@{Op='add-d';d=6;s=6;t=10})
+    & $divide 18 21
+    $positiveK = & $next
+    $s.Add(@{Op='gtu';d=0;s=26;t=19}); $s.Add(@{Op='jump-p';u=0;Label=$positiveK})
+    $s.Add(@{Op='sub';d=21;s=16;t=21}); $s.Add(@{Op='label';Name=$positiveK})
+    $s.Add(@{Op='load';d=20;s=0;Offset=8}); $s.Add(@{Op='load';d=27;s=0;Offset=12})
+    $s.Add(@{Op='asl-i';d=27;s=27;i=15})
+    $s.Add(@{Op='mpy-d';d=6;s=21;t=20}); $s.Add(@{Op='imm';d=19;i=0})
+    $positiveProduct = & $next
+    $s.Add(@{Op='gt';d=0;s=7;t=5}); $s.Add(@{Op='jump-p';u=0;Label=$positiveProduct})
+    $s.Add(@{Op='imm';d=10;i=0}); $s.Add(@{Op='imm';d=11;i=0})
+    $s.Add(@{Op='sub-d';d=6;s=10;t=6}); $s.Add(@{Op='imm';d=19;i=1})
+    $s.Add(@{Op='label';Name=$positiveProduct})
+    $s.Add(@{Op='lsr-i';d=10;s=27;i=1}); $s.Add(@{Op='imm';d=11;i=0}); $s.Add(@{Op='add-d';d=6;s=6;t=10})
+    & $divide 27 22
+    $positiveCorrection = & $next
+    $s.Add(@{Op='gtu';d=0;s=26;t=19}); $s.Add(@{Op='jump-p';u=0;Label=$positiveCorrection})
+    $s.Add(@{Op='sub';d=22;s=16;t=22}); $s.Add(@{Op='label';Name=$positiveCorrection})
+    $s.Add(@{Op='load';d=23;s=1;Offset=8}); $s.Add(@{Op='sub';d=23;s=23;t=22})
+    $s.Add(@{Op='store';s=2;t=21;Offset=0}); $s.Add(@{Op='store';s=2;t=23;Offset=128})
+    $s.Add(@{Op='addi';d=0;s=0;i=16}); $s.Add(@{Op='addi';d=1;s=1;i=32}); $s.Add(@{Op='addi';d=2;s=2;i=4})
+    $s.Add(@{Op='addi';d=17;s=17;i=-1}); $s.Add(@{Op='gtu';d=0;s=17;t=16})
+    $s.Add(@{Op='jump-p';u=0;Label="${LabelPrefix}_channel"})
+    $s.Add(@{Op='addi';d=2;s=2;i=128}); $s.Add(@{Op='addi';d=4;s=4;i=-1})
+    $s.Add(@{Op='gtu';d=0;s=4;t=16}); $s.Add(@{Op='jump-p';u=0;Label="${LabelPrefix}_block"})
+    foreach ($r in 16,18,20,22,24,26) { $s.Add(@{Op='load-d';d=$r;s=29;Offset=(($r-16)*4)}) }
+    $s.Add(@{Op='dealloc-return'})
+    $s.ToArray()
+}
