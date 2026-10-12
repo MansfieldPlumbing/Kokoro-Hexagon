@@ -813,6 +813,104 @@ function Test-KokoroDecoderConstants {
     $result
 }
 
+function Test-KokoroGeneratorPmu {
+    param([Parameter(Mandatory)][string]$OutputDirectory,[string]$Soc='SM8550',
+        [string]$Package='dev.mansfieldplumbing.kokoro',
+        [ValidateSet('P1','P2','P3','P4')][string[]]$Profiles=@('P1','P3'),
+        [string]$PriorReceipt=(Join-Path $Build 'generator-constants-full-corpus-20261012-143702-run.clixml'))
+    $out=[IO.Path]::GetFullPath($OutputDirectory)
+    if(-not $out.StartsWith($Build+[IO.Path]::DirectorySeparatorChar,[StringComparison]::OrdinalIgnoreCase) -or (Test-Path -LiteralPath $out)){throw 'Choose a fresh profile directory under build/.'}
+    [void][IO.Directory]::CreateDirectory($out)
+    $rows=[Collections.Generic.List[object]]::new()
+    $report=[ordered]@{Status='Failed';Stage='ByteGates';Soc=$Soc;Package=$Package;Profiles=$rows}
+    try {
+        Import-Evaluator
+        $prior=Import-Clixml -LiteralPath $PriorReceipt
+        if($prior.Gate.Status -cne 'Passed'){throw 'Prior generator constants gate did not pass.'}
+        $peach=Join-Path $Root 'data/baselines/network-free-peach-sm8550-20261010/input'
+        $cases=@(
+            @{Name='P1';Kernel='KokoroDecoderGenerator16Run';Parameters=@{ResBlockFrames=10201;ResidentHvxThreads=4;ResidentBatchTiles=14};Input=$peach;Hash='FEFF54DF8340F184FA909C35CFEE48D3F0010F8B37E7C7F0967759403F9672A5';Pcm='E6456751BDBCCE0D5CB38DA8226B4EEC8B1C514E16626755C5BD975699374054'},
+            @{Name='P2';Kernel='KokoroGeneratorWholeSource16Run';Parameters=@{ResBlockFrames=10201;ResidentHvxThreads=4;ResidentBatchTiles=14};Input=(Join-Path $prior.OutputDirectory 'A/generator');Hash='13D75D38B0B5BC8695BCAFF49378F860B5E923C80D8F14872321B14854301428';Pcm='E6456751BDBCCE0D5CB38DA8226B4EEC8B1C514E16626755C5BD975699374054'},
+            @{Name='P3';Kernel='KokoroGeneratorWholeSource16Run';Parameters=@{ResBlockFrames=10201;ResidentHvxThreads=4;ResidentBatchTiles=14;GeneratorMoments='Constants'};Input=(Join-Path $prior.OutputDirectory 'G/generator');Hash=$prior.Gate.GeneratorLibraries.Constants;Pcm=(@($prior.Gate.Variants | Where-Object Variant -CEQ 'G')[0].PcmSHA256)},
+            @{Name='P4';Kernel='KokoroDecoder16Run';Parameters=@{DecoderFrames=85;DecoderMoments='Constants'};Input=(Join-Path $prior.OutputDirectory 'B/decoder');Hash='4E63E1405A5486E70F316679AE143575B9C792FF8F18D09E86F47127436D2DFD'}
+        )
+        $cases=@($cases | Where-Object {$_.Name -cin $Profiles})
+        foreach($case in $cases){
+            $report.Stage="$($case.Name)-ByteGate"
+            $case.Emission=Invoke-KokoroEmission -Kernel $case.Kernel -Parameters $case.Parameters
+            if($case.Emission.LibrarySHA256 -cne $case.Hash){throw "$($case.Name) unprofiled library differs: expected $($case.Hash), received $($case.Emission.LibrarySHA256)."}
+            Write-Host "$($case.Name) UnprofiledLibrary=$($case.Hash) ByteGate=True"
+        }
+        $report.ByteGates=@($cases | ForEach-Object {[pscustomobject]@{Profile=$_.Name;LibrarySHA256=$_.Hash}})
+        $events=@{A=[int[]]@(0x3,0x111,0x100,0x101,0x105,0x128,0x129,0x103);
+            B=[int[]]@(0x12a,0x12b,0x115,0x116,0x117,0x12c,0x3,0x111)}
+        foreach($case in $cases){
+            foreach($eventSet in $(if($case.Name -ceq 'P4'){@('Total')}else{@('A','B')})){
+                $report.Stage="$($case.Name)-$eventSet"
+                $emission=$case.Emission
+                if($eventSet -cne 'Total'){
+                    $parameters=$case.Parameters.Clone(); $parameters.ResidentPmuEvents=$events[$eventSet]
+                    $emission=Invoke-KokoroEmission -Kernel $case.Kernel -Parameters $parameters
+                }
+                $run=Invoke-KokoroDeviceJob -EmissionDirectory $emission.Directory -EmissionArtifact $emission -InputDirectory $case.Input -Soc $Soc -Package $Package -Runs 3
+                $samples=[byte[]]::new(2*$emission.Layout.Samples); [Array]::Copy($run.Output,$emission.Layout.PcmOffset,$samples,0,$samples.Length)
+                $pcmHash=[Convert]::ToHexString([Security.Cryptography.SHA256]::HashData($samples))
+                if($case.ContainsKey('Pcm') -and $pcmHash -cne $case.Pcm){throw "$($case.Name) profile PCM differs: expected $($case.Pcm), received $pcmHash."}
+                $measurements=[Collections.Generic.List[object]]::new()
+                $unmarked=[Collections.Generic.List[object]]::new()
+                if($eventSet -cne 'Total'){
+                    $pmu=$emission.Layout.PmuProfile; $categories=@($pmu.Categories)
+                    $header=-1; $search=0
+                    while($search -lt $run.Output.Length){
+                        $candidate=[Array]::IndexOf[byte]($run.Output,0x50,$search); if($candidate -lt 0){break}
+                        if($candidate+$pmu.SiteRecordOffset+64*$pmu.SiteRecordCount -le $run.Output.Length -and [BitConverter]::ToUInt32($run.Output,$candidate) -eq 0x31554d50){if($header -ge 0){throw 'Multiple PMU records found.'};$header=$candidate}
+                        $search=$candidate+1
+                    }
+                    if($header -lt 0 -or [BitConverter]::ToUInt32($run.Output,$header+28) -ne 0){throw 'Missing PMU record or failed PMU call.'}
+                    for($index=0;$index -lt $categories.Count;$index++){
+                        $at=$header+256+64*$index
+                        $counters=[uint32[]]::new(8); [Buffer]::BlockCopy($run.Output,$at,$counters,0,32)
+                        $measurements.Add([pscustomobject]@{Category=$categories[$index];Ticks=[BitConverter]::ToUInt64($run.Output,$at+32);Ms=[BitConverter]::ToUInt64($run.Output,$at+32)/19200.0;
+                            Cycles=[BitConverter]::ToUInt64($run.Output,$at+40);Calls=[BitConverter]::ToUInt32($run.Output,$at+48);
+                            HvxPackets=$counters[$(if($eventSet -ceq 'A'){1}else{7})];Permutes=$(if($eventSet -ceq 'B'){$counters[1]}else{$null});Counters=$counters})
+                    }
+                    foreach($site in $pmu.Sites){
+                        $at=$header+$pmu.SiteRecordOffset+64*$site.Index
+                        $counters=[uint32[]]::new(8); [Buffer]::BlockCopy($run.Output,$at,$counters,0,32)
+                        $unmarked.Add([pscustomobject]@{Index=$site.Index;File=$site.File;MarkLine=$site.MarkLine;PrecedingLine=$site.PrecedingLine;PrecedingStep=$site.PrecedingStep;
+                            Ticks=[BitConverter]::ToUInt64($run.Output,$at+32);Ms=[BitConverter]::ToUInt64($run.Output,$at+32)/19200.0;
+                            Cycles=[BitConverter]::ToUInt64($run.Output,$at+40);Calls=[BitConverter]::ToUInt32($run.Output,$at+48);
+                            HvxPackets=$counters[$(if($eventSet -ceq 'A'){1}else{7})];Permutes=$(if($eventSet -ceq 'B'){$counters[1]}else{$null});Counters=$counters})
+                    }
+                    $unmarkedIndex=[array]::IndexOf($categories,'Unmarked')
+                    if($unmarkedIndex -lt 0 -or $measurements[$unmarkedIndex].Calls -ne 0){throw 'Unexpected aggregate Unmarked record.'}
+                    $totalCounters=[ulong[]]::new(8)
+                    foreach($site in $unmarked){for($counter=0;$counter -lt 8;$counter++){$totalCounters[$counter]+=$site.Counters[$counter]}}
+                    $ticks=($unmarked | Measure-Object Ticks -Sum).Sum
+                    $measurements[$unmarkedIndex]=[pscustomobject]@{Category='Unmarked';Ticks=[ulong]$ticks;Ms=$ticks/19200.0;
+                        Cycles=($unmarked | Measure-Object Cycles -Sum).Sum;Calls=($unmarked | Measure-Object Calls -Sum).Sum;
+                        HvxPackets=$totalCounters[$(if($eventSet -ceq 'A'){1}else{7})];Permutes=$(if($eventSet -ceq 'B'){$totalCounters[1]}else{$null});Counters=$totalCounters}
+                    $categoryTicks=($measurements | Where-Object Category -CNotLike 'Stage.*' | Measure-Object Ticks -Sum).Sum
+                    $stageTicks=($measurements | Where-Object Category -CLike 'Stage.*' | Measure-Object Ticks -Sum).Sum
+                    if($categoryTicks -ne $stageTicks){throw "Category/stage accounting differs: $categoryTicks/$stageTicks ticks."}
+                }
+                $row=[pscustomobject]@{Profile=$case.Name;EventSet=$eventSet;LibrarySHA256=$emission.LibrarySHA256;DspMs=$run.MedianMs;
+                    OutputPath=$run.OutputPath;PcmSHA256=$pcmHash;Measurements=$measurements.ToArray();UnmarkedSites=$unmarked.ToArray()}
+                $rows.Add($row); $row | Export-Clixml -LiteralPath (Join-Path $out "$($case.Name)-$eventSet.clixml") -Depth 8
+                Write-Host "$($case.Name) Set=$eventSet DspMs=$($run.MedianMs) PcmParity=True"
+                if($case.Name -ceq 'P3' -and $eventSet -ceq 'A'){
+                    $hvx=($measurements | Where-Object {$_.Category -cin 'AdaInSnake','Combine','Mean'} | Measure-Object Ms -Sum).Sum
+                    $generator=($measurements | Where-Object {$_.Category -cnotlike 'Stage.*'} | Measure-Object Ms -Sum).Sum
+                    $report.HvxMathShare=$hvx/$generator
+                    $report.HvxDominates=$hvx -gt $generator/2
+                }
+            }
+        }
+        $report.Status='Passed'; $report.Stage='Complete'
+    } catch {$report.Error=$_.Exception.Message;$report.ErrorPosition=$_.InvocationInfo.PositionMessage;$report.ErrorStack=$_.ScriptStackTrace}
+    $result=[pscustomobject]$report; $result | Export-Clixml -LiteralPath (Join-Path $out 'profile.clixml') -Depth 12; $result
+}
+
 function Test-KokoroDecoderConstantsCorpus {
     param([Parameter(Mandatory)][string]$PeachFixtureDirectory,[Parameter(Mandatory)][string[]]$CorpusDirectories,
         [Parameter(Mandatory)][string]$OutputDirectory,[ValidateSet('SM8550','SM8635')][string]$Soc='SM8550',
@@ -2090,6 +2188,11 @@ switch ($Command) {
         if($Case -ceq 'decoder-constants'){
             $gateParameters=if($Parameters){$Parameters}else{@{}}
             Test-KokoroDecoderConstants -FixtureDirectory $Path -OutputDirectory $OutputDirectory -BaselineLibrary $Reference -Soc $Soc -Package $HostPackage @gateParameters
+            break
+        }
+        if($Case -ceq 'generator-pmu'){
+            $profileParameters=if($Parameters){$Parameters}else{@{}}
+            Test-KokoroGeneratorPmu -OutputDirectory $OutputDirectory -Soc $Soc -Package $HostPackage @profileParameters
             break
         }
         if($Case -ceq 'decoder-constants-corpus'){

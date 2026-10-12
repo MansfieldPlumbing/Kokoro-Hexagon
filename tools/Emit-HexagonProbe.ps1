@@ -404,17 +404,19 @@ if($Kernel -eq 'KokoroR0Sub0') {
 } elseif($Kernel -eq 'KokoroGeneratorWholeSource16Run') {
     # The whole generator with the harmonic source: decoder output, f0 and z to PCM (tail harness plays the PCM) under the generic tail harness (completion word 1).
     . (Join-Path $PSScriptRoot '..\src\jobs\Kokoro.Generator60x16Run.ps1')
-    $run=New-KokoroGenerator60x16RunSteps -Frames $ResBlockFrames -HvxThreads $ResidentHvxThreads -BatchTiles $ResidentBatchTiles -Whole -Source -AdaInMode $GeneratorMoments
+    $pmu=if($ResidentPmuEvents){@{PmuEvents=$ResidentPmuEvents}}else{@{}}
+    $run=New-KokoroGenerator60x16RunSteps -Frames $ResBlockFrames -HvxThreads $ResidentHvxThreads -BatchTiles $ResidentBatchTiles -Whole -Source -AdaInMode $GeneratorMoments @pmu
     $steps=@($run.Steps)
     $symbol='kokoro_generator_tail_skel_handle_invoke'; $soname='libkokoro_generator_tail_skel.so'
     # The existing generator consumes the decoder tensor through the typed layout.
 } elseif($Kernel -eq 'KokoroDecoderGenerator16Run') {
     # The decoder then the whole generator with the harmonic source: asr, F0_curve, N_curve, f0 and z to PCM, one DSP job.
     . (Join-Path $PSScriptRoot '..\src\jobs\Kokoro.Generator60x16Run.ps1')
-    $run=New-KokoroGenerator60x16RunSteps -Frames $ResBlockFrames -HvxThreads $ResidentHvxThreads -BatchTiles $ResidentBatchTiles -Whole -Source -Decoder
+    $pmu=if($ResidentPmuEvents){@{PmuEvents=$ResidentPmuEvents}}else{@{}}
+    $run=New-KokoroGenerator60x16RunSteps -Frames $ResBlockFrames -HvxThreads $ResidentHvxThreads -BatchTiles $ResidentBatchTiles -Whole -Source -Decoder @pmu
     $steps=@($run.Steps)
     $symbol='kokoro_generator_tail_skel_handle_invoke'; $soname='libkokoro_generator_tail_skel.so'
-    Write-NewOrIdenticalFile (Join-Path $OutputDirectory 'runner-layout.json') ([Text.Encoding]::UTF8.GetBytes(($run.Layout | ConvertTo-Json -Depth 6))) -AllowOverwrite:$Force
+    # Layout and link state remain part of the typed artifact.
 } elseif($Kernel -eq 'KokoroHarmonicSource16Run') {
     # The harmonic source and STFT (f0 -> har planes, signal copy) under the generic tail harness (completion word 1).
     . (Join-Path $PSScriptRoot '..\src\jobs\Kokoro.HarmonicSource16Run.ps1')
@@ -600,7 +602,7 @@ $conversionSeconds = $stageClock.Elapsed.TotalSeconds
 $stageClock.Restart()
 $library=New-ElfCodeLibrary -Soname $soname -Needed @() -Functions ([ordered]@{$symbol=$typedSteps}) -PageSize 4096
 $librarySeconds = $stageClock.Elapsed.TotalSeconds
-if($Kernel -notin 'KokoroHarmonicSource16Run','KokoroDecoder16Run','KokoroGeneratorWholeSource16Run' -and $Kernel -in 'KokoroAlbertLinear16Run','KokoroAlbertLayerNorm16Run','KokoroAlbertGelu16Run','KokoroAlbertAttention16Run','KokoroAlbertEmbed16Run','KokoroAlbert16Run','KokoroDecoder16Run','KokoroDecoderGenerator16Run','KokoroResBlockRun','KokoroGenerator60xRun','KokoroGenerator60xResidentRun','KokoroGenerator60x16Run','KokoroGeneratorTailRun','KokoroGeneratorTail16Run','KokoroGeneratorStage16TailRun','KokoroResBlock16Run','KokoroGeneratorFrontStageTailRun','KokoroGeneratorFront10x16Run','KokoroGeneratorWhole16Run','KokoroHarmonicStft16Run','KokoroHarmonicSource16Run','KokoroGeneratorWholeSource16Run') {
+if($Kernel -notin 'KokoroHarmonicSource16Run','KokoroDecoder16Run','KokoroGeneratorWholeSource16Run','KokoroDecoderGenerator16Run' -and $Kernel -in 'KokoroAlbertLinear16Run','KokoroAlbertLayerNorm16Run','KokoroAlbertGelu16Run','KokoroAlbertAttention16Run','KokoroAlbertEmbed16Run','KokoroAlbert16Run','KokoroDecoder16Run','KokoroDecoderGenerator16Run','KokoroResBlockRun','KokoroGenerator60xRun','KokoroGenerator60xResidentRun','KokoroGenerator60x16Run','KokoroGeneratorTailRun','KokoroGeneratorTail16Run','KokoroGeneratorStage16TailRun','KokoroResBlock16Run','KokoroGeneratorFrontStageTailRun','KokoroGeneratorFront10x16Run','KokoroGeneratorWhole16Run','KokoroHarmonicStft16Run','KokoroHarmonicSource16Run','KokoroGeneratorWholeSource16Run') {
     Write-NewOrIdenticalFile (Join-Path $OutputDirectory 'runner-link.json') ([Text.Encoding]::UTF8.GetBytes((@{Entry=$library.Exports[$symbol];Got=$library.GotSlots} | ConvertTo-Json -Depth 4))) -AllowOverwrite:$Force
 }
 $path=Join-Path $OutputDirectory $soname
@@ -633,7 +635,7 @@ $emissionResult=[pscustomobject]@{PSTypeName='Kokoro.Hexagon.Emission';Kernel=$K
     Timings=[pscustomobject]@{SetupSeconds=$setupSeconds;StepsSeconds=$stepSeconds;ConversionSeconds=$conversionSeconds;
         LibrarySeconds=$librarySeconds;LayoutSeconds=$library.LayoutSeconds;EncodeSeconds=$library.EncodeSeconds;
         ReferenceSeconds=$referenceSeconds;CodeSeconds=$stageClock.Elapsed.TotalSeconds;TotalSeconds=$emissionClock.Elapsed.TotalSeconds}}
-if ($Kernel -cin 'KokoroHarmonicSource16Run','KokoroDecoder16Run','KokoroGeneratorWholeSource16Run') {
+if ($Kernel -cin 'KokoroHarmonicSource16Run','KokoroDecoder16Run','KokoroGeneratorWholeSource16Run','KokoroDecoderGenerator16Run') {
     $emissionResult | Add-Member -NotePropertyMembers @{
         Layout=$run.Layout;Steps=$steps;Link=[pscustomobject]@{Entry=$library.Exports[$symbol];Got=$library.GotSlots}
         Buffers=[pscustomobject]@{Library=$library.Bytes;Code=$code}

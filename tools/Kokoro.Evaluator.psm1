@@ -65,7 +65,7 @@ function Invoke-KokoroEmission {
     $pairs = foreach ($k in ($Parameters.Keys | Sort-Object)) { "$k=$($Parameters[$k])" }
     $key = [Convert]::ToHexString([Security.Cryptography.SHA256]::HashData([Text.Encoding]::UTF8.GetBytes("$Kernel`n$($pairs -join "`n")`n$SourceKey"))).Substring(0, 16)
     $dir = Join-Path $script:Root "build/evaluator/emit/$Kernel-$key"
-    if ($Kernel -cin 'KokoroHarmonicSource16Run','KokoroDecoder16Run','KokoroGeneratorWholeSource16Run') {
+    if ($Kernel -cin 'KokoroHarmonicSource16Run','KokoroDecoder16Run','KokoroGeneratorWholeSource16Run','KokoroDecoderGenerator16Run') {
         if (-not $script:TypedEmissions.ContainsKey($key)) {
             # The source worker's layout and link state remain live objects. No generated
             # metadata file or child PowerShell process is its execution contract.

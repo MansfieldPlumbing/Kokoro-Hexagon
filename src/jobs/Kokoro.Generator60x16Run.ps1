@@ -234,11 +234,44 @@ function New-KokoroGenerator60x16RunSteps {
 
     # Performance counters (as Kokoro.Generator60xResidentRun.ps1; record at r25 + scratch).
     $pmuCategories=@('Setup','Dma','Coefficients','AdaInSnake','HmxConv','Combine','Moments','Mean','Sync','TileFix')
+    $pmuCategories+=@('Source','Decoder','Tail','Boundary')
+    $pmuStages=@('Setup','Decoder','Source','HarLayout','Front256','Noise256','Ups256','Res256_0','Res256_1','Res256_2','Mean256','Front128','Noise128','Ups128','Res128_0','Res128_1','Res128_2','Mean128','Tail','Exit')
+    $pmuCategories+=@($pmuStages | ForEach-Object {"Stage.$_"})
+    $pmuCategories+=@('Unmarked')
+    $pmuStage=[string[]]@('Setup')
     $pmuOffset=$scratchOffset
-    $mark={param([string]$category)
+    # Per-site records use unused scratch between the pool and its stacks.
+    $pmuSiteOffset=8192; $pmuSites=@(); $pmuSiteRecordCount=0
+    if($PmuEvents){
+        $pmuAst=[Management.Automation.Language.Parser]::ParseFile($PSCommandPath,[ref]$null,[ref]$null)
+        $pmuCommands=@($pmuAst.FindAll({param($node) $node -is [Management.Automation.Language.CommandAst] -and
+            $node.CommandElements[0] -is [Management.Automation.Language.VariableExpressionAst]},$true))
+        $pmuSites=@(foreach($command in $pmuCommands){
+            if($command.CommandElements[0].VariablePath.UserPath -cne 'mark' -or $command.CommandElements[1].Extent.Text -cne "'Unmarked'"){continue}
+            $siteArgument=-1
+            for($arg=0;$arg -lt $command.CommandElements.Count;$arg++){if($command.CommandElements[$arg] -is [Management.Automation.Language.CommandParameterAst] -and $command.CommandElements[$arg].ParameterName -ceq 'site'){$siteArgument=$arg+1;break}}
+            if($siteArgument -lt 0){throw 'Unmarked PMU mark has no site index.'}
+            $siteIndex=[int]$command.CommandElements[$siteArgument].SafeGetValue()
+            $preceding=@($pmuCommands | Where-Object {$_.Extent.EndOffset -le $command.Extent.StartOffset -and $_.CommandElements[0].VariablePath.UserPath -cne 'mark'}) | Select-Object -Last 1
+            if($siteIndex -eq 0){$preceding=$null}
+            [pscustomobject]@{Index=$siteIndex;File=$PSCommandPath;
+                MarkLine=$command.Extent.StartLineNumber;PrecedingLine=$(if($preceding){$preceding.Extent.StartLineNumber}else{$command.Extent.StartLineNumber});
+                PrecedingStep=$(if($preceding){$preceding.Extent.Text}elseif($siteIndex -eq 0){'Caller Unmarked mark to syncht boundary (PMU instrumentation)'}else{'Block entry'})}
+        })
+        $pmuSites=@($pmuSites | Sort-Object Index)
+        if($pmuSites.Count -eq 0 -or $pmuSites[0].Index -ne 0 -or (@($pmuSites.Index | Sort-Object -Unique).Count -ne $pmuSites.Count)){throw 'Unmarked PMU site indices must be unique and start at zero.'}
+        # Keep indices stable when an optional source branch has no mark site.
+        $pmuSiteRecordCount=1+$pmuSites[-1].Index
+        if(256+64*$pmuCategories.Count -gt 4096 -or $pmuSiteOffset+64*$pmuSiteRecordCount -gt 61440){throw 'PMU records overlap the pool or stacks.'}
+    }
+    $mark={param([string]$category,[string]$nextStage='',[int]$site=-1)
         if(-not $PmuEvents){return}
         $c=[array]::IndexOf($pmuCategories,$category); if($c -lt 0){throw "Unknown PMU category $category"}
-        & $ptr 0 25 ($pmuOffset+256+64*$c); & $call 'body_pmu_mark'
+        $stageIndex=[array]::IndexOf($pmuCategories,"Stage.$($pmuStage[0])"); if($stageIndex -lt 0){throw 'Unknown PMU stage'}
+        $recordOffset=256+64*$c
+        if($category -ceq 'Unmarked'){if($site -cnotin $pmuSites.Index){throw 'Invalid Unmarked PMU site.'};$recordOffset=$pmuSiteOffset+64*$site}
+        & $ptr 0 25 ($pmuOffset+$recordOffset); & $ptr 1 25 ($pmuOffset+256+64*$stageIndex); & $call 'body_pmu_mark'
+        if($nextStage){$pmuStage[0]=$nextStage}
     }
 
     # HVX worker pool (as Kokoro.Generator60xResidentRun.ps1): block at r25 + scratch + 4096, stacks at
@@ -322,7 +355,7 @@ function New-KokoroGenerator60x16RunSteps {
         foreach($step in @(New-KokoroDmaCopySteps -NoReturn)){$s.Add($step)}
         & $mark 'Dma'
     }
-    $sync={ $s.Add(@{Op='syncht'}); & $mark 'Sync' }
+    $sync={ & $mark 'Unmarked' -site 0; $s.Add(@{Op='syncht'}); & $mark 'Sync' }
     # VTCM tiles <- one 32-bit pattern (0x80008000: x = 0 or the high-window zero; 0: the low-window zero).
     $fill={param([long]$off,[int]$count,[long]$pattern)
         & $ptr 4 18 $off; & $imm 6 $pattern; $s.Add(@{Op='vsplat';d=0;s=6}); & $imm 5 ($count*$tileBytes/128); $s.Add(@{Op='imm';d=7;i=0})
@@ -380,7 +413,9 @@ function New-KokoroGenerator60x16RunSteps {
         $evtcfg=0L;$evtcfg1=0L;$pmucfg=0L
         for($i=0;$i -lt 4;$i++){ $evtcfg=$evtcfg -bor (([long]$PmuEvents[$i] -band 0xff) -shl (8*$i)); $evtcfg1=$evtcfg1 -bor (([long]$PmuEvents[$i+4] -band 0xff) -shl (8*$i)) }
         for($i=0;$i -lt 8;$i++){ $pmucfg=$pmucfg -bor ((([long]$PmuEvents[$i] -shr 8) -band 3) -shl (2*$i)) }
-        & $ptr 4 25 $pmuOffset; $s.Add(@{Op='vxor';d=0;s=0;t=0}); for($k=0;$k -lt 8;$k++){$s.Add(@{Op='vstore';s=4;t=0;Offset=(128*$k)})}
+        & $ptr 4 25 $pmuOffset; $s.Add(@{Op='vxor';d=0;s=0;t=0}); for($k=0;$k -lt [math]::Ceiling((256+64*$pmuCategories.Count)/128);$k++){$s.Add(@{Op='vstore';s=4;t=0;Offset=(128*($k%8))}); if($k%8 -eq 7){$s.Add(@{Op='addi';d=4;s=4;i=1024})}}
+        & $ptr 4 25 ($pmuOffset+$pmuSiteOffset); for($k=0;$k -lt [math]::Ceiling(64*$pmuSiteRecordCount/128);$k++){$s.Add(@{Op='vstore';s=4;t=0;Offset=(128*($k%8))}); if($k%8 -eq 7){$s.Add(@{Op='addi';d=4;s=4;i=1024})}}
+        & $ptr 4 25 ($pmuOffset+64); $s.Add(@{Op='store-d';s=4;t=26;Offset=32}); $s.Add(@{Op='upcycle';d=6}); $s.Add(@{Op='store-d';s=4;t=6;Offset=40})
         $s.Add(@{Op='imm';d=5;i=2}); $s.Add(@{Op='trap0';i=0x55}); & $ptr 2 25 $pmuOffset; $s.Add(@{Op='store';s=2;t=0;Offset=4})
         foreach($w in @(@(4,$pmucfg),@(5,$evtcfg),@(10,$evtcfg1))){ $s.Add(@{Op='imm';d=0;i=$w[0]}); & $imm 1 $w[1]; $s.Add(@{Op='imm';d=2;i=1}); $s.Add(@{Op='trap0';i=0x4a}) }
         $s.Add(@{Op='imm';d=0;i=0}); $s.Add(@{Op='imm';d=1;i=1}); $s.Add(@{Op='imm';d=2;i=0}); $s.Add(@{Op='trap0';i=0x4a})
@@ -394,7 +429,7 @@ function New-KokoroGenerator60x16RunSteps {
         $n=& $label; $s.Add(@{Op='label';Name=$n});$s.Add(@{Op='vstore';s=4;t=0;Offset=0});$s.Add(@{Op='addi';d=4;s=4;i=128});$s.Add(@{Op='addi';d=5;s=5;i=-1});$s.Add(@{Op='gtu';d=0;s=5;t=7});$s.Add(@{Op='jump-p';u=0;Label=$n})
     }
     $frontNoise={
-        & $fill $offResidual $tiles 0x80008000L
+        & $mark 'Unmarked' -site 1; & $fill $offResidual $tiles 0x80008000L
         & $dma 18 $offFrontWeights 21 $frontWeightOffset 49152
         & $dma 18 $offFrontTables 22 $frontParameterOffset 65536
         for($start=0;$start -lt $tiles;$start+=$batch){
@@ -404,14 +439,14 @@ function New-KokoroGenerator60x16RunSteps {
             & $dma 18 ($offWin+($first-$start+1)*4096) $harReg ($harAt+$first*4096L) (($last-$first)*4096L)
             & $dma 18 ($offLow+($first-$start+1)*4096) $harReg ($harAt+$tiles*4096L+$first*4096L) (($last-$first)*4096L)
             & $ptr 0 18 ($offWin+4096); & $ptr 1 18 ($offLow+4096); & $ptr 2 18 $offFrontWeights; & $ptr 3 18 $offFrontTables; & $imm 4 $count; & $ptr 5 18 $offPlanes
-            & $call 'body_conv_front_noise'; & $mark 'HmxConv'; & $sync
+            & $call 'body_conv_front_noise'; & $mark 'HmxConv'; & $mark 'Unmarked' -site 2; & $sync
             & $parallel "body_combine_residual$sfx" @($offPlanes,($offResidual+$start*8192),($offFrontTables+8192)) @($true,$true,$false) $count
             & $mark 'Combine'
         }
-        & $padRows ($offResidual+($tiles-1)*8192) 0x8000
+        & $mark 'Unmarked' -site 3; & $padRows ($offResidual+($tiles-1)*8192) 0x8000
     }
     $frontUps={
-        & $sync; & $dma 25 $noiseSlot 18 $offResidual $tensorBytes
+        & $mark 'Unmarked' -site 4; & $sync; & $dma 25 $noiseSlot 18 $offResidual $tensorBytes
         $upHi=$offResidual; $upLo=$offResidual+($upTiles+2)*16384L; $harBytes=2L*$tiles*4096
         & $fillVectors $upHi 128 0x80008000L; & $fillVectors ($upHi+($upTiles+1)*16384L) 128 0x80008000L
         & $fillVectors $upLo 128 0; & $fillVectors ($upLo+($upTiles+1)*16384L) 128 0
@@ -421,7 +456,7 @@ function New-KokoroGenerator60x16RunSteps {
             if($chainTiles -ne $upTiles){throw 'The 10x mean does not cover the ups[1] input tiles'}
             & $dma 18 $offConv 25 $chainOffset ($upTiles*16384L)
             & $ptr 0 18 $offConv; & $ptr 1 18 ($upHi+16384); & $ptr 2 18 ($upLo+16384); & $imm 3 ($upTiles*128)
-            & $call 'body_leaky_up'; & $mark 'Combine'; & $sync
+            & $call 'body_leaky_up'; & $mark 'Combine'; & $mark 'Unmarked' -site 5; & $sync
         }
         else { & $dma 18 ($upHi+16384) 20 ($inBase+$harBytes) ($upTiles*16384L); & $dma 18 ($upLo+16384) 20 ($inBase+$harBytes+$upTiles*16384L) ($upTiles*16384L) }
         for($c=0;$c -lt 3;$c++){
@@ -429,12 +464,12 @@ function New-KokoroGenerator60x16RunSteps {
             for($start=0;$start -lt $upTiles;$start+=$upBatch){
                 $count=[math]::Min($upBatch,$upTiles-$start)
                 & $ptr 0 18 ($upHi+($start+1)*16384L); & $ptr 1 18 ($upLo+($start+1)*16384L); & $ptr 2 18 $offFrontWeights; & $ptr 3 18 ($offFrontTables+16384+12288*$c); & $imm 4 $count; & $ptr 5 18 $offPlanes
-                & $call 'body_conv_front_up'; & $mark 'HmxConv'; & $sync
+                & $call 'body_conv_front_up'; & $mark 'HmxConv'; & $mark 'Unmarked' -site 6; & $sync
                 & $ptr 0 18 $offPlanes; & $ptr 1 18 ($offUpPhase+$start*16384L); & $ptr 2 18 ($offFrontTables+53248+2048*$c-1024); & $imm 3 $count
-                & $call 'body_combine_conv256'; & $mark 'Combine'; & $sync
+                & $call 'body_combine_conv256'; & $mark 'Combine'; & $mark 'Unmarked' -site 7; & $sync
             }
             & $ptr 0 18 $offUpPhase; & $ptr 1 18 $offConv; & $imm 2 $c; & $imm 3 ([math]::Ceiling($upFrames/2))
-            & $call 'body_front_interleave'; & $mark 'Combine'; & $sync
+            & $call 'body_front_interleave'; & $mark 'Combine'; & $mark 'Unmarked' -site 8; & $sync
         }
         # Reflection: padded frame 0 is padded frame 2 (even halfwords of row pairs 0 and 1 of tile 0).
         & $imm 6 0xFFFF0000L; $s.Add(@{Op='vsplat';d=30;s=6}); & $imm 6 0x0000FFFFL; $s.Add(@{Op='vsplat';d=31;s=6})
@@ -442,69 +477,72 @@ function New-KokoroGenerator60x16RunSteps {
             & $ptr 4 18 ($offConv+2048*$blk); $s.Add(@{Op='vload';d=0;s=4;Offset=0}); $s.Add(@{Op='vload';d=1;s=4;Offset=128})
             $s.Add(@{Op='vand';d=0;s=0;t=30}); $s.Add(@{Op='vand';d=1;s=1;t=31}); $s.Add(@{Op='vor';d=0;s=0;t=1}); $s.Add(@{Op='vstore';s=4;t=0;Offset=0})
         }
-        & $sync; & $dma 18 $offResidual 25 $noiseSlot $tensorBytes
+        & $mark 'Unmarked' -site 9; & $sync; & $dma 18 $offResidual 25 $noiseSlot $tensorBytes
         & $ptr 0 18 $offConv; & $ptr 1 18 $offResidual; & $ptr 2 18 ($offFrontTables+59392); & $imm 3 $tiles
         & $call 'body_front_add'; & $mark 'Combine'
-        & $padRows ($offResidual+($tiles-1)*8192) 0x8000
-        & $sync; & $dma 25 $r0Slot 18 $offResidual $tensorBytes
+        & $mark 'Unmarked' -site 10; & $padRows ($offResidual+($tiles-1)*8192) 0x8000
+        & $mark 'Unmarked' -site 11; & $sync; & $dma 25 $r0Slot 18 $offResidual $tensorBytes
     }
     $front10Noise={
-        & $fill $offResidual $tiles 0x80008000L
+        & $mark 'Unmarked' -site 12; & $fill $offResidual $tiles 0x80008000L
         & $dma 18 $offFrontWeights 21 $frontWeightOffset 393216
         & $dma 18 $offFrontTables 22 $frontParameterOffset 163840
         for($start=0;$start -lt $tiles;$start+=$batch){
             $count=[math]::Min($batch,$tiles-$start); $first=[math]::Max(0,$start-1); $last=[math]::Min($tiles,$start+$count+1)
-            if($start -eq 0){ & $fill $offWin 1 0x80008000L; & $fill $offLow 1 0 }
-            if($start+$count -eq $tiles){ & $fill ($offWin+($count+1)*$tileBytes) 1 0x80008000L; & $fill ($offLow+($count+1)*$tileBytes) 1 0 }
+            if($start -eq 0){ & $mark 'Unmarked' -site 13; & $fill $offWin 1 0x80008000L; & $mark 'Unmarked' -site 14; & $fill $offLow 1 0 }
+            if($start+$count -eq $tiles){ & $mark 'Unmarked' -site 15; & $fill ($offWin+($count+1)*$tileBytes) 1 0x80008000L; & $mark 'Unmarked' -site 16; & $fill ($offLow+($count+1)*$tileBytes) 1 0 }
             & $dma 18 ($offWin+($first-$start+1)*$tileBytes) $harReg ($harAt+$first*[long]$tileBytes) (($last-$first)*[long]$tileBytes)
             & $dma 18 ($offLow+($first-$start+1)*$tileBytes) $harReg ($harAt+$tiles*[long]$tileBytes+$first*[long]$tileBytes) (($last-$first)*[long]$tileBytes)
             & $ptr 0 18 ($offWin+$tileBytes); & $ptr 1 18 ($offLow+$tileBytes); & $ptr 2 18 $offFrontWeights; & $ptr 3 18 $offFrontTables; & $imm 4 $count; & $ptr 5 18 $offPlanes
-            & $call 'body_conv_front10_noise'; & $mark 'HmxConv'; & $sync
+            & $call 'body_conv_front10_noise'; & $mark 'HmxConv'; & $mark 'Unmarked' -site 17; & $sync
             & $parallel "body_combine_residual$sfx" @($offPlanes,($offResidual+$start*$tileBytes),($offFrontTables+12288)) @($true,$true,$false) $count
             & $mark 'Combine'
         }
-        & $padRows ($offResidual+($tiles-1)*$tileBytes) 0x8000
+        & $mark 'Unmarked' -site 18; & $padRows ($offResidual+($tiles-1)*$tileBytes) 0x8000
     }
     $front10Ups={
-        & $sync; & $dma 25 $noiseSlot 18 $offResidual $tensorBytes
+        & $mark 'Unmarked' -site 19; & $sync; & $dma 25 $noiseSlot 18 $offResidual $tensorBytes
         # Decoder output into the C region, LeakyReLU(0.1) into the ups[0] input planes (zero halo tiles).
         if($Decoder){ & $dma 18 $offConv 25 $decSlot $decBytes } else { & $dma 18 $offConv 20 $inBase $decBytes }
-        & $fill $upHi 2 0x80008000L; & $fill ($upHi+($decTiles+1)*32768L) 2 0x80008000L; & $fill $upLo 2 0; & $fill ($upLo+($decTiles+1)*32768L) 2 0
+        & $mark 'Unmarked' -site 20; & $fill $upHi 2 0x80008000L; & $mark 'Unmarked' -site 21; & $fill ($upHi+($decTiles+1)*32768L) 2 0x80008000L; & $mark 'Unmarked' -site 22; & $fill $upLo 2 0; & $mark 'Unmarked' -site 23; & $fill ($upLo+($decTiles+1)*32768L) 2 0
         & $ptr 0 18 $offConv; & $ptr 1 18 ($upHi+32768); & $ptr 2 18 ($upLo+32768); & $imm 3 ($decTiles*256)
-        & $call 'body_leaky_up'; & $sync
+        & $call 'body_leaky_up'; & $mark 'Unmarked' -site 24; & $sync
         for($r=0;$r -lt 10;$r++){
             & $dma 18 $offFrontWeights 21 ($frontWeightOffset+393216+$r*786432L) 786432
             & $ptr 0 18 ($upHi+32768); & $ptr 1 18 ($upLo+32768); & $ptr 2 18 $offFrontWeights; & $ptr 3 18 ($offFrontTables+16384+12288*$r); & $imm 4 $decTiles; & $ptr 5 18 $offPlanes
-            & $call 'body_conv_front10_up'; & $mark 'HmxConv'; & $sync
+            & $call 'body_conv_front10_up'; & $mark 'HmxConv'; & $mark 'Unmarked' -site 25; & $sync
             & $parallel "body_combine_conv$sfx" @($offPlanes,$(if($r%2){$offUpB}else{$offUpA}),($offFrontTables+139264+1024*$r-1024)) @($true,$true,$false) $decTiles
             & $mark 'Combine'
-            if($r%2){ & $sync; & $ptr 0 18 $offUpA; & $ptr 1 18 $offConv; & $imm 2 (($r-1)/2); & $imm 3 $qPairs; & $ptr 4 18 $offUpB; & $call 'body_front10_interleave'; & $mark 'Combine'; & $sync }
+            if($r%2){ & $mark 'Unmarked' -site 26; & $sync; & $ptr 0 18 $offUpA; & $ptr 1 18 $offConv; & $imm 2 (($r-1)/2); & $imm 3 $qPairs; & $ptr 4 18 $offUpB; & $call 'body_front10_interleave'; & $mark 'Combine'; & $mark 'Unmarked' -site 27; & $sync }
         }
         & $dma 18 $offResidual 25 $noiseSlot $tensorBytes
         & $ptr 0 18 $offConv; & $ptr 1 18 $offResidual; & $ptr 2 18 ($offFrontTables+149504); & $imm 3 $tiles
         & $call 'body_front10_add'; & $mark 'Combine'
-        & $padRows ($offResidual+($tiles-1)*$tileBytes) 0x8000
-        & $sync; & $dma 25 $r0Slot 18 $offResidual $tensorBytes
+        & $mark 'Unmarked' -site 28; & $padRows ($offResidual+($tiles-1)*$tileBytes) 0x8000
+        & $mark 'Unmarked' -site 29; & $sync; & $dma 25 $r0Slot 18 $offResidual $tensorBytes
     }
     & $poolStart
     $stopped=$false
-    if($Decoder){ $decJob=Add-KokoroDecoder16JobSteps -Steps $s -Calls $calls -Frames $decIn -InputBase 20 -InputOffset $decInOff -WeightsBase 21 -WeightsOffset $decWOff -TablesBase 22 -TablesOffset $decPOff -OutputBase 25 -OutputOffset $decSlot; & $sync }
+    if($Decoder){ & $mark 'Boundary' 'Decoder'; $decJob=Add-KokoroDecoder16JobSteps -Steps $s -Calls $calls -Frames $decIn -InputBase 20 -InputOffset $decInOff -WeightsBase 21 -WeightsOffset $decWOff -TablesBase 22 -TablesOffset $decPOff -OutputBase 25 -OutputOffset $decSlot; & $mark 'Decoder' 'Setup'; & $mark 'Unmarked' -site 30; & $sync }
     if($Source){
+        & $mark 'Boundary' 'Source'
         Add-KokoroHarmonicSource16JobSteps -Steps $s -Calls $calls -Frames $sourceFrames -InputBase 20 -InputOffset $sourceIn -WeightsBase 21 -WeightsOffset $sourceW -TablesBase 22 -TablesOffset $sourceP -HarBase 25 -HarOffset $har60At
-        & $sync
+        & $mark 'Source' 'HarLayout'
+        & $mark 'Unmarked' -site 31; & $sync
         & $dma 18 $gHi 25 $har60At ($tiles60*4096L); & $dma 18 $gLo 25 ($har60At+$tiles60*4096L) ($tiles60*4096L)
         & $fillVectors $gPmHi ($tiles10*128) 0x80008000L; & $fillVectors $gPmLo ($tiles10*128) 0
-        & $sync
+        & $mark 'Unmarked' -site 32; & $sync
         & $imm 0 $upFramesWhole; & $ptr 1 18 $gHi; & $ptr 2 18 $gLo; & $ptr 3 18 $gPmHi; & $ptr 4 18 $gPmLo; & $imm 5 0
         & $call 'body_har_phase_major'
         & $imm 0 1; & $ptr 1 18 $gHi; & $ptr 2 18 $gLo; & $ptr 3 18 $gPmHi; & $ptr 4 18 $gPmLo; & $imm 5 $upFramesWhole
         & $call 'body_har_phase_major_last'
-        & $sync
+        & $mark 'Unmarked' -site 33; & $sync
         & $dma 25 $harPmAt 18 $gPmHi ($tiles10*16384L); & $dma 25 ($harPmAt+$tiles10*16384L) 18 $gPmLo ($tiles10*16384L)
-        & $sync
+        & $mark 'Unmarked' -site 34; & $sync
     }
     for($section=0;$section -lt $sections.Count;$section++){
     if($section -gt 0){ $chainOffset=$finalOffset; $chainTiles=$tiles; . $bind $section }
+    & $mark 'Boundary' "Front$Channels"
     # Blocks: noise_res[1] first with -Front (index -1: its own weights and records, input computed in VTCM, kernel 11
     # bodies of branch 2), then the stage's branches.
     $blocks=[Collections.Generic.List[object]]::new()
@@ -514,8 +552,10 @@ function New-KokoroGenerator60x16RunSteps {
     foreach($blk in $blocks){
         if($stopped){break}
         $b=$blk.B; $K=$blk.K
+        if($b -ge 0){ & $mark 'Boundary' "Res${Channels}_$b" }
         if($b -lt 0 -and $front10){ & $front10Noise } elseif($b -lt 0){ & $frontNoise } else { & $dma 18 $offResidual $r0Base $r0Offset $tensorBytes }
-        if($RuntimeFrames){ & $sync; & $padCapacity $offResidual 0 $tiles 0x8000 }
+        if($b -lt 0){ & $mark 'Boundary' "Noise$Channels" }
+        if($RuntimeFrames){ & $mark 'Unmarked' -site 35; & $sync; & $padCapacity $offResidual 0 $tiles 0x8000 }
         if($AdaInMode -ne 'Constants'){
             if($b -le 0){ & $zeroRecord $offMoments; & $moments $offResidual $tiles; if($b -eq 0){ & $copyRecord $offInputMoments $offMoments } }
             else { & $copyRecord $offMoments $offInputMoments }
@@ -544,66 +584,71 @@ function New-KokoroGenerator60x16RunSteps {
                 for($start=0;$start -lt $tiles;$start+=$batch){
                     $count=[math]::Min($batch,$tiles-$start)
                     $first=[math]::Max(0,$start-1);$last=[math]::Min($tiles,$start+$count+1)
-                    if($start -eq 0){ & $fill $offWin 1 0x80008000L; & $fill $offLow 1 0 }
-                    if($start+$count -eq $tiles){ & $fill ($offWin+($count+1)*$tileBytes) 1 0x80008000L; & $fill ($offLow+($count+1)*$tileBytes) 1 0 }
+                    if($start -eq 0){ & $mark 'Unmarked' -site 36; & $fill $offWin 1 0x80008000L; & $mark 'Unmarked' -site 37; & $fill $offLow 1 0 }
+                    if($start+$count -eq $tiles){ & $mark 'Unmarked' -site 38; & $fill ($offWin+($count+1)*$tileBytes) 1 0x80008000L; & $mark 'Unmarked' -site 39; & $fill ($offLow+($count+1)*$tileBytes) 1 0 }
                     & $parallel "body_turns$sfx" @(($convSource+$first*$tileBytes),($offWin+($first-$start+1)*$tileBytes),($offLow+($first-$start+1)*$tileBytes),$offKms) @($true,$true,$true,$false) ($last-$first)
                     & $mark 'AdaInSnake'
                     if($RuntimeFrames){
                         & $padCapacity ($offWin+($first-$start+1)*$tileBytes) $first ($last-$first) 0x8000
                         & $padCapacity ($offLow+($first-$start+1)*$tileBytes) $first ($last-$first) 0
                     }
-                    if($last -eq $tiles){ & $padRows ($offWin+($tiles-$start)*$tileBytes) 0x8000; & $padRows ($offLow+($tiles-$start)*$tileBytes) 0 }
-                    & $sync
+                    if($last -eq $tiles){ & $mark 'Unmarked' -site 40; & $padRows ($offWin+($tiles-$start)*$tileBytes) 0x8000; & $mark 'Unmarked' -site 41; & $padRows ($offLow+($tiles-$start)*$tileBytes) 0 }
+                    & $mark 'Unmarked' -site 42; & $sync
                     if($b -ge 0 -and $b*6+$st -eq $StopAfterStage -and $start -eq 0 -and $DumpPoint -eq 'Windows'){ & $dma 25 $finalOffset 18 $offWin (($batch+2)*[long]$tileBytes); & $dma 25 ($finalOffset+($batch+2)*[long]$tileBytes) 18 $offLow (($batch+2)*[long]$tileBytes); $stopped=$true; break }
                     & $ptr 0 18 ($offWin+$tileBytes); & $ptr 1 18 ($offLow+$tileBytes); & $ptr 2 18 $offWeights; & $ptr 3 18 ($offParams+$tablesAt); & $imm 4 $count; & $ptr 5 18 $offPlanes
                     & $call $convLabel; & $mark 'HmxConv'
-                    & $sync
+                    & $mark 'Unmarked' -site 43; & $sync
                     if($b -ge 0 -and $b*6+$st -eq $StopAfterStage -and $start -eq 0 -and $DumpPoint -eq 'Planes'){ & $dma 25 $finalOffset 18 $offPlanes (6L*$planeStride); $stopped=$true; break }
                     $hasLast=($start+$count -eq $tiles)
                     if($half -eq 0){
                         & $parallel "body_combine_conv$sfx" @($offPlanes,($offConv+$start*$tileBytes),($offParams+$ratiosAt)) @($true,$true,$false) $count
                         & $mark 'Combine'
-                        if($hasLast){ & $padRows ($offConv+($tiles-1)*$tileBytes) 0x8000 }
+                        if($hasLast){ & $mark 'Unmarked' -site 44; & $padRows ($offConv+($tiles-1)*$tileBytes) 0x8000 }
                         if($RuntimeFrames){ & $padCapacity ($offConv+$start*$tileBytes) $start $count 0x8000 }
                         & $moments ($offConv+$start*$tileBytes) $count
                     } else {
                         & $parallel "body_combine_residual$sfx" @($offPlanes,($offResidual+$start*$tileBytes),($offParams+$ratiosAt)) @($true,$true,$false) $count
                         & $mark 'Combine'
-                        if($hasLast){ & $padRows ($offResidual+($tiles-1)*$tileBytes) 0x8000 }
+                        if($hasLast){ & $mark 'Unmarked' -site 45; & $padRows ($offResidual+($tiles-1)*$tileBytes) 0x8000 }
                         if($RuntimeFrames){ & $padCapacity ($offResidual+$start*$tileBytes) $start $count 0x8000 }
                         if($p -lt 2){ & $moments ($offResidual+$start*$tileBytes) $count }
                     }
                 }
                 if($b -ge 0 -and $b*6+$st -eq $StopAfterStage -and -not $stopped){
-                    & $sync; & $dma 25 $finalOffset 18 $(if($half -eq 0){$offConv}else{$offResidual}) $tensorBytes; $stopped=$true
+                    & $mark 'Unmarked' -site 46; & $sync; & $dma 25 $finalOffset 18 $(if($half -eq 0){$offConv}else{$offResidual}) $tensorBytes; $stopped=$true
                 }
             }
         }
+        if($b -lt 0 -and -not $stopped){ & $mark 'Boundary' "Ups$Channels" }
         if($b -lt 0 -and -not $stopped -and $front10){ & $front10Ups }
         elseif($b -lt 0 -and -not $stopped){ & $frontUps }
-        elseif($b -lt $branches-1 -and -not $stopped){ & $sync; & $dma 25 ($ddrBase+$b*$stride) 18 $offResidual $tensorBytes }
+        elseif($b -lt $branches-1 -and -not $stopped){ & $mark 'Unmarked' -site 47; & $sync; & $dma 25 ($ddrBase+$b*$stride) 18 $offResidual $tensorBytes }
     }
     # One block: its output is the final tensor.
-    if(-not $stopped -and -not $withMean){ & $sync; & $dma 25 $finalOffset 18 $offResidual $tensorBytes }
+    if(-not $stopped -and -not $withMean){ & $mark 'Unmarked' -site 48; & $sync; & $dma 25 $finalOffset 18 $offResidual $tensorBytes }
     # Three-branch mean in two chunks: branches 0 and 1 come back from DDR into the free C region.
     if(-not $stopped -and $withMean){
-    & $sync
+    & $mark 'Boundary' "Mean$Channels"
+    & $mark 'Unmarked' -site 49; & $sync
     $chunk=[int][math]::Ceiling($tiles/2)
     for($j=0;$j*$chunk -lt $tiles;$j++){
         $chunkTiles=[math]::Min($chunk,$tiles-$j*$chunk)
         & $dma 18 $offConv 25 ($ddrBase+$j*$chunk*$tileBytes) ($chunkTiles*$tileBytes)
         & $dma 18 ($offConv+$chunk*$tileBytes) 25 ($ddrBase+$stride+$j*$chunk*$tileBytes) ($chunkTiles*$tileBytes)
         & $parallel "body_mean$sfx" @($offConv,($offConv+$chunk*$tileBytes),($offResidual+$j*$chunk*$tileBytes),$offConv) @($true,$true,$true,$true) $chunkTiles
-        & $mark 'Mean'; & $sync
+        & $mark 'Mean'; & $mark 'Unmarked' -site 50; & $sync
         & $dma 25 ($finalOffset+$j*$chunk*$tileBytes) 18 $offConv ($chunkTiles*$tileBytes)
     }
     }
     if($Tail){
-        & $sync
+        & $mark 'Boundary' 'Tail'
+        & $mark 'Unmarked' -site 51; & $sync
         Add-KokoroGeneratorTail16JobSteps -Steps $s -Calls $calls -Frames $Frames -InputBase 25 -InputOffset $finalOffset -WeightsBase 21 -WeightsOffset $tailWeightOffset -TablesBase 22 -TablesOffset $tailParameterOffset -PcmBase 23 -PcmOffset $pcmOffset
+        & $mark 'Tail' 'Exit'
     }
     }
     & $poolStop
+    & $mark 'Boundary' 'Exit'
     if($PmuEvents){
         $s.Add(@{Op='imm';d=0;i=0}); $s.Add(@{Op='imm';d=1;i=0}); $s.Add(@{Op='imm';d=2;i=0}); $s.Add(@{Op='trap0';i=0x4a})
         & $ptr 2 25 $pmuOffset; & $imm 4 0x31554D50L; $s.Add(@{Op='store';s=2;t=4;Offset=0})
@@ -680,22 +725,25 @@ function New-KokoroGenerator60x16RunSteps {
         $s.Add(@{Op='imm';d=0;i=0}); $s.Add(@{Op='got-call';Import='qurt_thread_exit';d=14})
     }
     if($PmuEvents){
-        $s.Add(@{Op='label';Name='body_pmu_mark'}); $s.Add(@{Op='allocframe';Bytes=16}); $s.Add(@{Op='store';s=29;t=0;Offset=0})
+        $s.Add(@{Op='label';Name='body_pmu_mark'}); $s.Add(@{Op='allocframe';Bytes=16}); $s.Add(@{Op='store';s=29;t=0;Offset=0}); $s.Add(@{Op='store';s=29;t=1;Offset=4})
         $s.Add(@{Op='imm';d=5;i=0}); $s.Add(@{Op='trap0';i=0x63})
         & $ptr 9 25 ($pmuOffset+128); for($k=0;$k -lt 8;$k++){ $s.Add(@{Op='store';s=9;t=(1+$k);Offset=(4*$k)}) }
         & $ptr 2 25 $pmuOffset; $s.Add(@{Op='load';d=4;s=2;Offset=28}); $s.Add(@{Op='or';d=4;s=4;t=0}); $s.Add(@{Op='store';s=2;t=4;Offset=28})
-        & $ptr 2 25 ($pmuOffset+128); & $ptr 3 25 ($pmuOffset+64); $s.Add(@{Op='load';d=1;s=29;Offset=0})
+        & $ptr 2 25 ($pmuOffset+128); & $ptr 3 25 ($pmuOffset+64); $s.Add(@{Op='load';d=1;s=29;Offset=0}); $s.Add(@{Op='load';d=12;s=29;Offset=4})
         $s.Add(@{Op='hwticks';d=6}); $s.Add(@{Op='store-d';s=2;t=6;Offset=32})
         $s.Add(@{Op='upcycle';d=6}); $s.Add(@{Op='store-d';s=2;t=6;Offset=40})
         for($k=0;$k -lt 8;$k++){
             $s.Add(@{Op='load';d=4;s=2;Offset=(4*$k)}); $s.Add(@{Op='load';d=5;s=3;Offset=(4*$k)}); $s.Add(@{Op='sub';d=6;s=4;t=5})
             $s.Add(@{Op='load';d=7;s=1;Offset=(4*$k)}); $s.Add(@{Op='add';d=7;s=7;t=6}); $s.Add(@{Op='store';s=1;t=7;Offset=(4*$k)}); $s.Add(@{Op='store';s=3;t=4;Offset=(4*$k)})
+            $s.Add(@{Op='load';d=7;s=12;Offset=(4*$k)}); $s.Add(@{Op='add';d=7;s=7;t=6}); $s.Add(@{Op='store';s=12;t=7;Offset=(4*$k)})
         }
         foreach($o in 32,40){
             $s.Add(@{Op='load-d';d=4;s=2;Offset=$o}); $s.Add(@{Op='load-d';d=6;s=3;Offset=$o}); $s.Add(@{Op='sub-d';d=8;s=4;t=6})
             $s.Add(@{Op='load-d';d=10;s=1;Offset=$o}); $s.Add(@{Op='add-d';d=10;s=10;t=8}); $s.Add(@{Op='store-d';s=1;t=10;Offset=$o}); $s.Add(@{Op='store-d';s=3;t=4;Offset=$o})
+            $s.Add(@{Op='load-d';d=10;s=12;Offset=$o}); $s.Add(@{Op='add-d';d=10;s=10;t=8}); $s.Add(@{Op='store-d';s=12;t=10;Offset=$o})
         }
         $s.Add(@{Op='load';d=4;s=1;Offset=48}); $s.Add(@{Op='addi';d=4;s=4;i=1}); $s.Add(@{Op='store';s=1;t=4;Offset=48})
+        $s.Add(@{Op='load';d=4;s=12;Offset=48}); $s.Add(@{Op='addi';d=4;s=4;i=1}); $s.Add(@{Op='store';s=12;t=4;Offset=48})
         $s.Add(@{Op='dealloc-return'})
     }
     $labels=@{};$pcs=[Collections.Generic.Dictionary[object,long]]::new();$pc=0L;$isa=Get-InstructionSet
@@ -703,6 +751,7 @@ function New-KokoroGenerator60x16RunSteps {
     foreach($c in $calls){$delta=[long]([uint32](($labels[$c.label]-$pcs[$c.pc]) -band 0xffffffffL));$c.low.i=$delta -band 65535;$c.high.i=$delta -shr 16}
     $resultLayout=[ordered]@{Frames=$Frames;Tiles=$tiles;InputBytes=$totalInput;WeightBytes=$totalWeights;ParameterBytes=$totalParameters;OutputBytes=$totalOutput;VtcmBytes=$vtcmTotal;Samples=$(if($Tail){5*($Frames-1)}else{1});PcmOffset=$(if($Tail){$pcmOffset}else{256});BranchStride=$stride;FinalWorkspaceOffset=$finalOffset;CoefficientOffset=$coefOffset;ScratchOffset=$scratchOffset;CompletedStages=$(6*$branches+[int]$withMean);BatchTiles=$batch;HvxThreads=$HvxThreads;Regions=$layout.Regions}
     $resultLayout.AdaInMode=$AdaInMode
+    if($PmuEvents){$resultLayout.PmuProfile=[pscustomobject]@{Categories=$pmuCategories;SiteRecordOffset=$pmuSiteOffset;SiteRecordCount=$pmuSiteRecordCount;Sites=$pmuSites}}
     $resultLayout.ConstantPacking=[pscustomobject]@{Frames=$Frames;ParameterBytes=$constantsTableOffset;ConstantsTableOffset=$constantsTableOffset;
         ConstantsBytes=$momentAt;ConstantsParameterBytes=$constantsTableOffset+$momentAt;OutputBytes=$exportOffset;
         MomentSites=$momentSites.ToArray();MomentsBytes=$momentAt;KmBytes=$kmsAt}
