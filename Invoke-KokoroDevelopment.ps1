@@ -817,12 +817,14 @@ function Test-KokoroGeneratorPmu {
     param([Parameter(Mandatory)][string]$OutputDirectory,[string]$Soc='SM8550',
         [string]$Package='dev.mansfieldplumbing.kokoro',
         [ValidateSet('P1','P2','P3','P4')][string[]]$Profiles=@('P1','P3'),
+        [ValidateSet('LibraryAndPcm','Pcm')][string]$Parity='LibraryAndPcm',
         [string]$PriorReceipt=(Join-Path $Build 'generator-constants-full-corpus-20261012-143702-run.clixml'))
     $out=[IO.Path]::GetFullPath($OutputDirectory)
     if(-not $out.StartsWith($Build+[IO.Path]::DirectorySeparatorChar,[StringComparison]::OrdinalIgnoreCase) -or (Test-Path -LiteralPath $out)){throw 'Choose a fresh profile directory under build/.'}
     [void][IO.Directory]::CreateDirectory($out)
     $rows=[Collections.Generic.List[object]]::new()
-    $report=[ordered]@{Status='Failed';Stage='ByteGates';Soc=$Soc;Package=$Package;Profiles=$rows}
+    $totals=[Collections.Generic.List[object]]::new()
+    $report=[ordered]@{Status='Failed';Stage='ByteGates';Soc=$Soc;Package=$Package;Parity=$Parity;Profiles=$rows;UnprofiledRuns=$totals}
     try {
         Import-Evaluator
         $prior=Import-Clixml -LiteralPath $PriorReceipt
@@ -838,10 +840,19 @@ function Test-KokoroGeneratorPmu {
         foreach($case in $cases){
             $report.Stage="$($case.Name)-ByteGate"
             $case.Emission=Invoke-KokoroEmission -Kernel $case.Kernel -Parameters $case.Parameters
-            if($case.Emission.LibrarySHA256 -cne $case.Hash){throw "$($case.Name) unprofiled library differs: expected $($case.Hash), received $($case.Emission.LibrarySHA256)."}
-            Write-Host "$($case.Name) UnprofiledLibrary=$($case.Hash) ByteGate=True"
+            if($Parity -ceq 'LibraryAndPcm' -and $case.Emission.LibrarySHA256 -cne $case.Hash){throw "$($case.Name) unprofiled library differs: expected $($case.Hash), received $($case.Emission.LibrarySHA256)."}
+            Write-Host "$($case.Name) UnprofiledLibrary=$($case.Emission.LibrarySHA256) Parity=$Parity"
+            if($Parity -ceq 'Pcm'){
+                $report.Stage="$($case.Name)-UnprofiledPcmGate"
+                $run=Invoke-KokoroDeviceJob -EmissionDirectory $case.Emission.Directory -EmissionArtifact $case.Emission -InputDirectory $case.Input -Soc $Soc -Package $Package -Runs 3
+                $samples=[byte[]]::new(2*$case.Emission.Layout.Samples); [Array]::Copy($run.Output,$case.Emission.Layout.PcmOffset,$samples,0,$samples.Length)
+                $pcmHash=[Convert]::ToHexString([Security.Cryptography.SHA256]::HashData($samples))
+                if(-not $case.ContainsKey('Pcm') -or $pcmHash -cne $case.Pcm){throw "$($case.Name) unprofiled PCM differs: expected $($case.Pcm), received $pcmHash."}
+                $totals.Add([pscustomobject]@{Profile=$case.Name;LibrarySHA256=$case.Emission.LibrarySHA256;DspMs=$run.MedianMs;PcmSHA256=$pcmHash;OutputPath=$run.OutputPath})
+                Write-Host "$($case.Name) UnprofiledDspMs=$($run.MedianMs) PcmParity=True"
+            }
         }
-        $report.ByteGates=@($cases | ForEach-Object {[pscustomobject]@{Profile=$_.Name;LibrarySHA256=$_.Hash}})
+        $report.ByteGates=@($cases | ForEach-Object {[pscustomobject]@{Profile=$_.Name;LibrarySHA256=$_.Emission.LibrarySHA256;ReferenceLibrarySHA256=$_.Hash}})
         $events=@{A=[int[]]@(0x3,0x111,0x100,0x101,0x105,0x128,0x129,0x103);
             B=[int[]]@(0x12a,0x12b,0x115,0x116,0x117,0x12c,0x3,0x111)}
         foreach($case in $cases){

@@ -367,12 +367,18 @@ function New-KokoroGenerator60x16RunSteps {
     # Rows >= Frames of the tile at tileOff: every halfword of those rows <- value (0x8000 or 0).
     $padRows={param([long]$tileOff,[long]$value)
         if($Frames%32 -eq 0){return}
-        for($t=$Frames%32;$t -lt 32;$t++){
+        # Each vector contains two rows: low/high halfwords of its 32 words.
+        # Construct each row-pair mask once and reuse it across channel blocks.
+        $firstPair=[int][math]::Floor(($Frames%32)/2)
+        for($pair=$firstPair;$pair -lt 16;$pair++){
+            $keep=if($pair -eq $firstPair -and $Frames%2){0x0000ffffL}else{0L}
+            $padding=($value -bor ($value -shl 16)) -band (0xffffffffL -bxor $keep)
+            & $imm 6 $keep; $s.Add(@{Op='vsplat';d=1;s=6})
+            & $imm 8 $padding; $s.Add(@{Op='vsplat';d=2;s=8})
             for($block=0;$block -lt $blocksPerTile;$block++){
-                $lane=$tileOff+$block*2048+[int][math]::Floor($t/2)*128
-                & $ptr 4 18 $lane; & $imm 6 $(if($t%2){0x0000ffffL}else{0xffff0000L}); & $imm 8 $(if($t%2){$value -shl 16}else{$value})
-                $s.Add(@{Op='imm';d=5;i=32});$s.Add(@{Op='imm';d=7;i=0});$n=& $label
-                $s.Add(@{Op='label';Name=$n});$s.Add(@{Op='load';d=0;s=4;Offset=0});$s.Add(@{Op='and';d=0;s=0;t=6});$s.Add(@{Op='or';d=0;s=0;t=8});$s.Add(@{Op='store';s=4;t=0;Offset=0});$s.Add(@{Op='addi';d=4;s=4;i=4});$s.Add(@{Op='addi';d=5;s=5;i=-1});$s.Add(@{Op='gtu';d=0;s=5;t=7});$s.Add(@{Op='jump-p';u=0;Label=$n})
+                & $ptr 4 18 ($tileOff+$block*2048+$pair*128)
+                $s.Add(@{Op='vload';d=0;s=4;Offset=0}); $s.Add(@{Op='vand';d=0;s=0;t=1})
+                $s.Add(@{Op='vor';d=0;s=0;t=2}); $s.Add(@{Op='vstore';s=4;t=0;Offset=0})
             }
         }
         & $mark 'TileFix'
