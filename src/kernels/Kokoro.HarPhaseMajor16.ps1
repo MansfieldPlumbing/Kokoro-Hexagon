@@ -11,7 +11,7 @@
 function New-KokoroHarPhaseMajor16Steps {
     param([ValidateRange(1,6)][int]$Phases=6,[string]$LabelPrefix='harphasemajor16',[switch]$NoReturn)
     $s = [Collections.Generic.List[hashtable]]::new()
-    $imm = { param([int]$r,[long]$v) $u=[uint32]($v -band 0xffffffffL); $s.Add(@{Op='lo';x=$r;i=($u -band 65535)}); $s.Add(@{Op='hi';x=$r;i=($u -shr 16)}) }
+    $imm = { param([int]$r,[long]$v) $u=[long]([uint32]($v -band 0xffffffffL)); $s.Add(@{Op='lo';x=$r;i=($u -band 65535)}); $s.Add(@{Op='hi';x=$r;i=($u -shr 16)}) }
     # Crouton row offset of row index in rs (tile bytes tb) into rd: (r >> 5) tb + ((r & 31) >> 1) 128 + (r & 1) 2.
     $rowOff = { param([int]$rd,[int]$rs,[int]$tileShift)
         $s.Add(@{Op='lsr-i';d=$rd;s=$rs;i=5}); $s.Add(@{Op='asl-i';d=$rd;s=$rd;i=$tileShift})

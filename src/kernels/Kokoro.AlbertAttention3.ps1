@@ -12,7 +12,7 @@ function New-KokoroAlbertAttention3Steps {
     if (-not $RegionBody -and ($PSBoundParameters.ContainsKey('LabelPrefix') -or
         $PSBoundParameters.ContainsKey('DomainFailureLabel'))) { throw 'Region label options require RegionBody.' }
     $steps=[Collections.Generic.List[hashtable]]::new()
-    $imm={param([int]$r,[uint32]$v)$steps.Add(@{Op='lo';x=$r;i=($v-band 65535)});$steps.Add(@{Op='hi';x=$r;i=($v-shr 16)})}
+    $imm={param([int]$r,[uint32]$v)$steps.Add(@{Op='lo';x=$r;i=[long]($v-band 65535)});$steps.Add(@{Op='hi';x=$r;i=[long]($v-shr 16)})}
     $fp={param([int]$r,[float]$v)& $imm $r ([BitConverter]::SingleToUInt32Bits($v))}
     $ptr={param([int]$r,[int]$base,[int]$offset)
         $steps.Add(@{Op='addi';d=$r;s=$base;i=0})

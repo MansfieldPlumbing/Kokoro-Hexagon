@@ -28,7 +28,7 @@ function New-KokoroAdaInSnakeTurnsSteps {
         [int][math]::Round([math]::Pow(-1, $k - 1) * [math]::Pow([math]::PI / 2, 2 * $k - 1) / $f * 16384)
     }
     $s = [Collections.Generic.List[hashtable]]::new()
-    $imm = { param([int]$r,[long]$v) $u=[uint32]($v -band 0xffffffffL); $s.Add(@{Op='lo';x=$r;i=($u -band 65535)}); $s.Add(@{Op='hi';x=$r;i=($u -shr 16)}) }
+    $imm = { param([int]$r,[long]$v) $u=[long]([uint32]($v -band 0xffffffffL)); $s.Add(@{Op='lo';x=$r;i=($u -band 65535)}); $s.Add(@{Op='hi';x=$r;i=($u -shr 16)}) }
     $splat = { param([int]$v,[long]$value) & $imm 13 $value; $s.Add(@{Op='vsplat';d=$v;s=13}) }
     $half = { param([int]$h) [long](($h -band 0xffff) -bor (($h -band 0xffff) -shl 16)) }
     # Resident constants.

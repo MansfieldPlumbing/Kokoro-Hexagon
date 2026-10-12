@@ -22,7 +22,7 @@ function New-KokoroAlbertConnectedAttention3Steps {
     # Ten anchors cover length checks, end-address wrap, and pairwise alias
     # checks for both expanded ranges, not just their two minimum lengths.
     if ($lengthEdits -ne 10 -or $scanEdits -ne 1) { throw 'Outer admission adaptation differs.' }
-    $imm={param([int]$r,[uint32]$v) $steps.Add(@{Op='lo';x=$r;i=($v -band 65535)}); $steps.Add(@{Op='hi';x=$r;i=($v -shr 16)})}
+    $imm={param([int]$r,[uint32]$v) $steps.Add(@{Op='lo';x=$r;i=[long]($v -band 65535)}); $steps.Add(@{Op='hi';x=$r;i=[long]($v -shr 16)})}
     # All bodies retain r3 (the outer descriptor); no callee-saved register,
     # stack frame, mutable descriptor, or cross-invocation scratch is needed.
     $context=@(New-KokoroAlbertAttention3Steps -RegionBody -LabelPrefix 'connected_context' -DomainFailureLabel 'domain')

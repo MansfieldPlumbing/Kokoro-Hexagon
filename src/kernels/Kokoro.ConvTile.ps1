@@ -15,7 +15,7 @@ function New-KokoroConvTileSteps {
         throw 'Unsupported convolution DAG'
     }
     $s=[Collections.Generic.List[hashtable]]::new()
-    $imm={param([int]$r,[uint32]$v) $s.Add(@{Op='lo';x=$r;i=($v -band 65535)}); $s.Add(@{Op='hi';x=$r;i=($v -shr 16)})}
+    $imm={param([int]$r,[uint32]$v) $s.Add(@{Op='lo';x=$r;i=[long]($v -band 65535)}); $s.Add(@{Op='hi';x=$r;i=[long]($v -shr 16)})}
     foreach($d in @(@(0x00020001,'open'),@(0x01000010,'success'),@(0x02030100,'conv'))) {
         & $imm 4 $d[0]; $s.Add(@{Op='eq';d=0;s=2;t=4}); $s.Add(@{Op='jump-p';u=0;Label=$d[1]})
     }

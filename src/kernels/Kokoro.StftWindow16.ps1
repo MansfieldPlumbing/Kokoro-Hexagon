@@ -17,7 +17,7 @@
 function New-KokoroStftWindow16Steps {
     param([string]$LabelPrefix='stftwindow16',[ValidateRange(0,127)][int]$SignalOffset=108,[switch]$NoReturn)
     $s = [Collections.Generic.List[hashtable]]::new()
-    $imm = { param([int]$r,[long]$v) $u=[uint32]($v -band 0xffffffffL); $s.Add(@{Op='lo';x=$r;i=($u -band 65535)}); $s.Add(@{Op='hi';x=$r;i=($u -shr 16)}) }
+    $imm = { param([int]$r,[long]$v) $u=[long]([uint32]($v -band 0xffffffffL)); $s.Add(@{Op='lo';x=$r;i=($u -band 65535)}); $s.Add(@{Op='hi';x=$r;i=($u -shr 16)}) }
     & $imm 6 0xFF00FF00L; $s.Add(@{Op='vsplat';d=30;s=6})
     & $imm 6 0x80008000L; $s.Add(@{Op='vsplat';d=31;s=6})
     $s.Add(@{Op='imm';d=7;i=-2}); $s.Add(@{Op='imm';d=8;i=8}); $s.Add(@{Op='imm';d=13;i=0})

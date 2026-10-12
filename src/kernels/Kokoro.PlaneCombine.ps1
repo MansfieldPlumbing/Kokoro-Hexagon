@@ -31,7 +31,7 @@ function New-KokoroPlaneCombineSteps {
     $ratioBase = if ($ob -gt 4) { 16 } else { 20 }
     $shiftBase = if ($ob -gt 4 -and $Mode -eq 'Residual') { 8 } else { 16 }
     $s = [Collections.Generic.List[hashtable]]::new()
-    $imm = { param([int]$r,[long]$v) $u=[uint32]($v -band 0xffffffffL); $s.Add(@{Op='lo';x=$r;i=($u -band 65535)}); $s.Add(@{Op='hi';x=$r;i=($u -shr 16)}) }
+    $imm = { param([int]$r,[long]$v) $u=[long]([uint32]($v -band 0xffffffffL)); $s.Add(@{Op='lo';x=$r;i=($u -band 65535)}); $s.Add(@{Op='hi';x=$r;i=($u -shr 16)}) }
     & $imm 13 0xFF00FF00L; $s.Add(@{Op='vsplat';d=31;s=13})
     & $imm 13 0x00FF00FFL; $s.Add(@{Op='vsplat';d=30;s=13})
     & $imm 13 0x80008000L; $s.Add(@{Op='vsplat';d=29;s=13})
@@ -119,7 +119,7 @@ function New-KokoroPlaneCombineLoopSteps {
     if ($PlaneStride % 2048 -ne 0) { throw 'Plane stride must keep 2 KB tile alignment' }
     $ob = $Channels / 32
     $s = [Collections.Generic.List[hashtable]]::new()
-    $imm = { param([int]$r,[long]$v) $u=[uint32]($v -band 0xffffffffL); $s.Add(@{Op='lo';x=$r;i=($u -band 65535)}); $s.Add(@{Op='hi';x=$r;i=($u -shr 16)}) }
+    $imm = { param([int]$r,[long]$v) $u=[long]([uint32]($v -band 0xffffffffL)); $s.Add(@{Op='lo';x=$r;i=($u -band 65535)}); $s.Add(@{Op='hi';x=$r;i=($u -shr 16)}) }
     & $imm 13 0xFF00FF00L; $s.Add(@{Op='vsplat';d=31;s=13})
     & $imm 13 0x00FF00FFL; $s.Add(@{Op='vsplat';d=30;s=13})
     & $imm 13 0x80008000L; $s.Add(@{Op='vsplat';d=29;s=13})

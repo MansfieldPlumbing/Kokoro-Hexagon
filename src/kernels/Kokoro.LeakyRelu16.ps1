@@ -12,7 +12,7 @@ function New-KokoroLeakyRelu16Steps {
     param([string]$LabelPrefix='leakyrelu16',[ValidateRange(0.0,0.5)][double]$Slope=0.01,[switch]$NoReturn)
     $q15=[long][math]::Round($Slope*32768)
     $s = [Collections.Generic.List[hashtable]]::new()
-    $imm = { param([int]$r,[long]$v) $u=[uint32]($v -band 0xffffffffL); $s.Add(@{Op='lo';x=$r;i=($u -band 65535)}); $s.Add(@{Op='hi';x=$r;i=($u -shr 16)}) }
+    $imm = { param([int]$r,[long]$v) $u=[long]([uint32]($v -band 0xffffffffL)); $s.Add(@{Op='lo';x=$r;i=($u -band 65535)}); $s.Add(@{Op='hi';x=$r;i=($u -shr 16)}) }
     & $imm 13 0x80008000L; $s.Add(@{Op='vsplat';d=31;s=13})
     & $imm 13 0xFF00FF00L; $s.Add(@{Op='vsplat';d=30;s=13})
     & $imm 13 (($q15 -shl 16) -bor $q15); $s.Add(@{Op='vsplat';d=29;s=13})   # round(slope * 32768) per halfword

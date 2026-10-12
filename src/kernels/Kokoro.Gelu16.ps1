@@ -15,7 +15,7 @@
 function New-KokoroGelu16Steps {
     param([string]$LabelPrefix='gelu16')
     $s = [Collections.Generic.List[hashtable]]::new()
-    $imm = { param([int]$r,[long]$v) $u=[uint32]($v -band 0xffffffffL); $s.Add(@{Op='lo';x=$r;i=($u -band 65535)}); $s.Add(@{Op='hi';x=$r;i=($u -shr 16)}) }
+    $imm = { param([int]$r,[long]$v) $u=[long]([uint32]($v -band 0xffffffffL)); $s.Add(@{Op='lo';x=$r;i=($u -band 65535)}); $s.Add(@{Op='hi';x=$r;i=($u -shr 16)}) }
     $splat = { param([int]$v,[long]$value) & $imm 13 $value; $s.Add(@{Op='vsplat';d=$v;s=13}) }
     $q31 = { param([int]$d,[int]$x,[int]$k) $s.Add(@{Op='vmpye-w-uh';d=$d;s=$x;t=$k}); $s.Add(@{Op='vmpyo-acc-w-h-rnd-sat-shift';d=$d;s=$x;t=$k}) }
     $s.Add(@{Op='imm';d=8;i=8}); $s.Add(@{Op='imm';d=9;i=16}); $s.Add(@{Op='imm';d=12;i=0})

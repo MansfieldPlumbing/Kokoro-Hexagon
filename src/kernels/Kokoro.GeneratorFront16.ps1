@@ -12,7 +12,7 @@
 function New-KokoroFrontInterleaveSteps {
     param([string]$LabelPrefix='frontinterleave',[switch]$NoReturn)
     $s = [Collections.Generic.List[hashtable]]::new()
-    $imm = { param([int]$r,[long]$v) $u=[uint32]($v -band 0xffffffffL); $s.Add(@{Op='lo';x=$r;i=($u -band 65535)}); $s.Add(@{Op='hi';x=$r;i=($u -shr 16)}) }
+    $imm = { param([int]$r,[long]$v) $u=[long]([uint32]($v -band 0xffffffffL)); $s.Add(@{Op='lo';x=$r;i=($u -band 65535)}); $s.Add(@{Op='hi';x=$r;i=($u -shr 16)}) }
     & $imm 13 0x0000FFFFL; $s.Add(@{Op='vsplat';d=31;s=13})
     & $imm 13 0xFFFF0000L; $s.Add(@{Op='vsplat';d=30;s=13})
     $s.Add(@{Op='imm';d=8;i=16}); $s.Add(@{Op='imm';d=7;i=0}); $s.Add(@{Op='imm';d=4;i=0})     # r4 = j
@@ -50,7 +50,7 @@ function New-KokoroFrontInterleaveSteps {
 function New-KokoroFrontAddSteps {
     param([string]$LabelPrefix='frontadd',[switch]$NoReturn)
     $s = [Collections.Generic.List[hashtable]]::new()
-    $imm = { param([int]$r,[long]$v) $u=[uint32]($v -band 0xffffffffL); $s.Add(@{Op='lo';x=$r;i=($u -band 65535)}); $s.Add(@{Op='hi';x=$r;i=($u -shr 16)}) }
+    $imm = { param([int]$r,[long]$v) $u=[long]([uint32]($v -band 0xffffffffL)); $s.Add(@{Op='lo';x=$r;i=($u -band 65535)}); $s.Add(@{Op='hi';x=$r;i=($u -shr 16)}) }
     & $imm 13 0x80008000L; $s.Add(@{Op='vsplat';d=31;s=13})
     $s.Add(@{Op='imm';d=9;i=16}); $s.Add(@{Op='imm';d=7;i=0})
     # Ratios in both halfwords of each word lane: v16..v19 rU, v20..v23 rN (one vector per block).
@@ -87,7 +87,7 @@ function New-KokoroFrontAddSteps {
 function New-KokoroPhaseInterleaveSteps {
     param([ValidateSet(6,10)][int]$Phases=10,[ValidateSet(128,256)][int]$Channels=256,[string]$LabelPrefix='phaseinterleave',[switch]$NoReturn)
     $s = [Collections.Generic.List[hashtable]]::new()
-    $imm = { param([int]$r,[long]$v) $u=[uint32]($v -band 0xffffffffL); $s.Add(@{Op='lo';x=$r;i=($u -band 65535)}); $s.Add(@{Op='hi';x=$r;i=($u -shr 16)}) }
+    $imm = { param([int]$r,[long]$v) $u=[long]([uint32]($v -band 0xffffffffL)); $s.Add(@{Op='lo';x=$r;i=($u -band 65535)}); $s.Add(@{Op='hi';x=$r;i=($u -shr 16)}) }
     $tileShift = [int][math]::Log(64 * $Channels, 2)
     & $imm 13 0x0000FFFFL; $s.Add(@{Op='vsplat';d=31;s=13})
     & $imm 13 0xFFFF0000L; $s.Add(@{Op='vsplat';d=30;s=13})
@@ -125,7 +125,7 @@ function New-KokoroPhaseInterleaveSteps {
 function New-KokoroResidualAdd16Steps {
     param([ValidateSet(128,256)][int]$Channels=256,[string]$LabelPrefix='residualadd16',[switch]$NoReturn)
     $s = [Collections.Generic.List[hashtable]]::new()
-    $imm = { param([int]$r,[long]$v) $u=[uint32]($v -band 0xffffffffL); $s.Add(@{Op='lo';x=$r;i=($u -band 65535)}); $s.Add(@{Op='hi';x=$r;i=($u -shr 16)}) }
+    $imm = { param([int]$r,[long]$v) $u=[long]([uint32]($v -band 0xffffffffL)); $s.Add(@{Op='lo';x=$r;i=($u -band 65535)}); $s.Add(@{Op='hi';x=$r;i=($u -shr 16)}) }
     $ob = $Channels / 32
     & $imm 13 0x80008000L; $s.Add(@{Op='vsplat';d=31;s=13})
     $s.Add(@{Op='imm';d=7;i=0}); $s.Add(@{Op='addi';d=15;s=3;i=0})

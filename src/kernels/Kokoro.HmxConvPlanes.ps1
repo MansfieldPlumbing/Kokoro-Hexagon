@@ -30,14 +30,14 @@ function New-KokoroHmxConvPlanesSteps {
         [string] $LabelPrefix = 'hmxconvplanes',
         [switch] $NoReturn
     )
-    $cb = $InputChannels / 32; $ob = $OutputChannels / 32; $groups = $OutputChannels / 64
+    [int]$cb = $InputChannels / 32; [int]$ob = $OutputChannels / 32; [int]$groups = $OutputChannels / 64
     $accGroups = if ($WeightPlanes -eq 2) { 3 } else { 2 }
     $wlOffset = $groups * $Kernel * $cb * 2048
-    $half = ($Kernel - 1) / 2
+    [int]$half = ($Kernel - 1) / 2
     if ($Dilation * $half -gt 31) { throw 'Tap shift exceeds one crouton' }
     if ($PlaneStride % 2048 -ne 0) { throw 'Plane stride must keep 2 KB tile alignment' }
     $s = [Collections.Generic.List[hashtable]]::new()
-    $imm = { param([int]$r,[long]$v) $u=[uint32]($v -band 0xffffffffL); $s.Add(@{Op='lo';x=$r;i=($u -band 65535)}); $s.Add(@{Op='hi';x=$r;i=($u -shr 16)}) }
+    $imm = { param([int]$r,[long]$v) $u=[long]([uint32]($v -band 0xffffffffL)); $s.Add(@{Op='lo';x=$r;i=($u -band 65535)}); $s.Add(@{Op='hi';x=$r;i=($u -shr 16)}) }
     $dy = $cb * 2048
     & $imm 9 ($dy -bor 0x7ff)                          # :single activation range
     $s.Add(@{Op='imm'; d=10; i=0x7ff})                # weight :deep range
@@ -47,7 +47,7 @@ function New-KokoroHmxConvPlanesSteps {
         $s.Add(@{Op='addi'; d=12; s=$wt; i=0})
         for ($k = 0; $k -lt $Kernel; $k++) {
             $shift = $Dilation * ($k - $half)
-            $tile = [math]::Floor($shift / 32); $row = $shift - 32 * $tile
+            [int]$tile = [math]::Floor($shift / 32); [int]$row = $shift - 32 * $tile
             for ($c = 0; $c -lt $cb; $c++) {
                 $offset = (($tile * $cb) + $c) * 2048 + (($row -shr 1) -shl 7) + (($row -band 1) -shl 1)
                 if ($offset -lt -32768 -or $offset -gt 32767) { throw 'Activation offset out of addi range' }
@@ -110,14 +110,14 @@ function New-KokoroHmxConvPlanesLoopSteps {
     )
     if ($InputChannels % 32) { throw 'Input channels must be whole 32-channel blocks' }
     if ($OutputChannels % 64) { throw 'Output channels must be whole 64-channel groups' }
-    $cb = $InputChannels / 32; $ob = $OutputChannels / 32; $groups = $OutputChannels / 64
+    [int]$cb = $InputChannels / 32; [int]$ob = $OutputChannels / 32; [int]$groups = $OutputChannels / 64
     $accGroups = if ($WeightPlanes -eq 2) { 3 } else { 2 }
     $groupWeights = $Kernel * $cb * 2048; $wlOffset = $groups * $groupWeights
-    $half = ($Kernel - 1) / 2
+    [int]$half = ($Kernel - 1) / 2
     if ($Dilation * $half -gt 31) { throw 'Tap shift exceeds one crouton' }
     if ($PlaneStride % 2048 -ne 0) { throw 'Plane stride must keep 2 KB tile alignment' }
     $s = [Collections.Generic.List[hashtable]]::new()
-    $imm = { param([int]$r,[long]$v) $u=[uint32]($v -band 0xffffffffL); $s.Add(@{Op='lo';x=$r;i=($u -band 65535)}); $s.Add(@{Op='hi';x=$r;i=($u -shr 16)}) }
+    $imm = { param([int]$r,[long]$v) $u=[long]([uint32]($v -band 0xffffffffL)); $s.Add(@{Op='lo';x=$r;i=($u -band 65535)}); $s.Add(@{Op='hi';x=$r;i=($u -shr 16)}) }
     # d = s + v, through r15 when v is outside addi's range.
     $addc = { param([int]$d,[int]$src,[long]$v)
         if ($v -ge -32768 -and $v -le 32767) { $s.Add(@{Op='addi'; d=$d; s=$src; i=[int]$v}) }
@@ -130,7 +130,7 @@ function New-KokoroHmxConvPlanesLoopSteps {
         $s.Add(@{Op='addi'; d=12; s=$wt; i=0})
         for ($k = 0; $k -lt $Kernel; $k++) {
             $shift = $Dilation * ($k - $half)
-            $tile = [math]::Floor($shift / 32); $row = $shift - 32 * $tile
+            [int]$tile = [math]::Floor($shift / 32); [int]$row = $shift - 32 * $tile
             & $addc 8 $act (($tile * $cb) * 2048 + (($row -shr 1) -shl 7) + (($row -band 1) -shl 1))
             for ($c = 0; $c -lt $cb; $c++) {
                 $s.Add(@{Op='hmx-pair'; Act='act-ub-single'; Wt='wt-b-deep'; s=8; t=9; u=12; v=10})

@@ -42,7 +42,7 @@ function Add-KokoroHarmonicStft16JobSteps {
     $layout=Get-KokoroHarmonicStft16Layout -Frames $Frames -BatchTiles $BatchTiles
     $tiles=$layout.Tiles; $batch=$BatchTiles; $reg=$layout.Regions
     $s=$Steps; $calls=$Calls
-    $imm={param([int]$r,[long]$v) $u=[uint32]($v -band 0xffffffffL);$s.Add(@{Op='lo';x=$r;i=($u -band 65535)});$s.Add(@{Op='hi';x=$r;i=($u -shr 16)})}
+    $imm={param([int]$r,[long]$v) $u=[long]([uint32]($v -band 0xffffffffL));$s.Add(@{Op='lo';x=$r;i=($u -band 65535)});$s.Add(@{Op='hi';x=$r;i=($u -shr 16)})}
     $ptr={param([int]$r,[int]$baseReg,[long]$offset) $offsetReg=if($r -eq $baseReg){15}else{$r}; & $imm $offsetReg $offset;$s.Add(@{Op='add';d=$r;s=$baseReg;t=$offsetReg}) }
     $call={param([string]$label) $pc=@{Op='add-pc';d=14;i=0};$lo=@{Op='lo';x=15;i=0};$hi=@{Op='hi';x=15;i=0};$s.Add($pc);$s.Add($lo);$s.Add($hi);$s.Add(@{Op='add';d=14;s=14;t=15});$s.Add(@{Op='callr';s=14});$calls.Add(@{pc=$pc;low=$lo;high=$hi;label=$label})}
     $script:__h16=0
@@ -108,7 +108,7 @@ function New-KokoroHarmonicStft16RunSteps {
     $layout=Get-KokoroHarmonicStft16Layout -Frames $Frames -BatchTiles $BatchTiles
     $s=[Collections.Generic.List[hashtable]]::new()
     $calls=[Collections.Generic.List[object]]::new()
-    $imm={param([int]$r,[long]$v) $u=[uint32]($v -band 0xffffffffL);$s.Add(@{Op='lo';x=$r;i=($u -band 65535)});$s.Add(@{Op='hi';x=$r;i=($u -shr 16)})}
+    $imm={param([int]$r,[long]$v) $u=[long]([uint32]($v -band 0xffffffffL));$s.Add(@{Op='lo';x=$r;i=($u -band 65535)});$s.Add(@{Op='hi';x=$r;i=($u -shr 16)})}
     # Checked resource wrapper of the frozen K=11 resblock runner (as Kokoro.GeneratorTail16Run.ps1).
     $wrapperSource=New-KokoroResBlockRunSteps -Frames $Frames -Kernel 11
     $base=@($wrapperSource.Steps);$start=-1
@@ -141,6 +141,6 @@ function New-KokoroHarmonicStft16RunSteps {
     foreach($pair in (Get-KokoroHarmonicStft16Bodies -PlaneStride $layout.PlaneStride)){$s.Add(@{Op='label';Name=$pair[0]});foreach($step in $pair[1]){$s.Add($step)}}
     $labels=@{};$pcs=[Collections.Generic.Dictionary[object,long]]::new();$pc=0L;$isa=Get-InstructionSet
     foreach($step in $s){if($step.Op -eq 'label'){if($labels.ContainsKey($step.Name)){throw "Duplicate label $($step.Name)"};$labels[$step.Name]=$pc};$pcs[$step]=$pc;$pc+=& $isa.Length $step}
-    foreach($c in $calls){$delta=[uint32](($labels[$c.label]-$pcs[$c.pc]) -band 0xffffffffL);$c.low.i=$delta -band 65535;$c.high.i=$delta -shr 16}
+    foreach($c in $calls){$delta=[long]([uint32](($labels[$c.label]-$pcs[$c.pc]) -band 0xffffffffL));$c.low.i=$delta -band 65535;$c.high.i=$delta -shr 16}
     [pscustomobject]@{Steps=$s.ToArray();Layout=[ordered]@{Frames=$Frames;Tiles=$layout.Tiles;InputBytes=$layout.InputBytes;WeightBytes=$layout.WeightBytes;ParameterBytes=$layout.ParameterBytes;OutputBytes=$layout.OutputBytes;VtcmBytes=$layout.VtcmBytes;Samples=1;PcmOffset=256;HarOffset=$layout.HarOffset;BatchTiles=$BatchTiles;Regions=$layout.Regions}}
 }

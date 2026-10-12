@@ -152,6 +152,51 @@ $definitions=foreach($name in $names) {
             if(([regex]::Matches($source,[regex]::Escape($edit[0]))).Count -ne 1) { throw 'Writer adaptation anchor mismatch' }
             $source=$source.Replace($edit[0],$edit[1])
         }
+        # Replace the three upstream step walks with calls to the typed,
+        # PowerShell-authored managed encoder. Metadata remains in the writer.
+        $writerAst = [Management.Automation.Language.Parser]::ParseInput($source,[ref]$tokens,[ref]$errors)
+        $loops = @($writerAst.FindAll({ param($n) $n -is [Management.Automation.Language.ForEachStatementAst] },$true))
+        $importsLoop = @($loops | Where-Object { $_.Condition.Extent.Text -eq '$Functions.PSBase.Keys' -and $_.Body.Extent.Text.Contains('$step[''Import'']') })
+        $layoutLoop = @($loops | Where-Object { $_.Condition.Extent.Text -eq '$exports' -and $_.Body.Extent.Text.Contains('$size = 0;') })
+        $encodeLoop = @($loops | Where-Object { $_.Condition.Extent.Text -eq '$exports' -and $_.Body.Extent.Text.Contains('$isa.Encode') })
+        if ($importsLoop.Count -ne 1 -or $layoutLoop.Count -ne 1 -or $encodeLoop.Count -ne 1) { throw 'Typed writer loop anchors are not unique.' }
+        $importsBody = @'
+$layouts = @{}
+    $layoutClock = [Diagnostics.Stopwatch]::StartNew()
+    foreach ($name in $Functions.PSBase.Keys) {
+        $layout = $script:HexagonEncoderType::Layout($Functions[$name], 0L)
+        $layouts[$name] = $layout
+        foreach ($import in $layout.Imports) { if (-not $imports.Contains($import)) { $imports.Add($import) } }
+    }
+    $layoutSeconds = $layoutClock.Elapsed.TotalSeconds
+'@
+        $layoutBody = @'
+foreach ($name in $exports) {
+        $functionOffset[$name] = $cursor
+        $layout = $layouts[$name]
+        $script:HexagonEncoderType::Relocate($layout, [long]$cursor)
+        $labels[$name] = $layout.Labels
+        $functionLengths[$name] = $layout.Lengths
+        $functionSize[$name] = $layout.Size
+        $cursor += $layout.Size
+    }
+'@
+        $encodeBody = @'
+$typedGot = [Collections.Generic.Dictionary[string,long]]::new([StringComparer]::InvariantCultureIgnoreCase)
+    foreach ($key in $gotSlot.Keys) { $typedGot.Add([string]$key, [long]$gotSlot[$key]) }
+    $typedData = [Collections.Generic.Dictionary[string,long]]::new([StringComparer]::InvariantCultureIgnoreCase)
+    foreach ($key in $address.Keys) { $typedData.Add([string]$key, [long]$address[$key]) }
+    $encodeClock = [Diagnostics.Stopwatch]::StartNew()
+    foreach ($name in $exports) {
+        $bytes = $script:HexagonEncoder.Encode($Functions[$name], $layouts[$name], [long]$functionOffset[$name], $typedGot, $typedData)
+        [Array]::Copy($bytes, 0, $image, [int]$functionOffset[$name], $bytes.Length)
+    }
+    $encodeSeconds = $encodeClock.Elapsed.TotalSeconds
+'@
+        $source = $source.Replace($importsLoop[0].Extent.Text, $importsBody)
+        $source = $source.Replace($layoutLoop[0].Extent.Text, $layoutBody)
+        $source = $source.Replace($encodeLoop[0].Extent.Text, $encodeBody)
+        $source = $source.Replace('StepLengths = $functionLengths', 'StepLengths = $functionLengths; LayoutSeconds = $layoutSeconds; EncodeSeconds = $encodeSeconds')
     }
     $source
 }
@@ -162,6 +207,44 @@ if($errors.Count) { throw 'Writer adapter does not parse' }
 Write-NewOrIdenticalFile $adapter ([Text.Encoding]::UTF8.GetBytes($text)) -AllowOverwrite:$Force
 . $adapter
 . (Join-Path $PSScriptRoot '..\src\hexagon\Hexagon.ps1')
+# The compiler is a pinned, self-contained PowerShell source file. A verified
+# sibling checkout can supply an unpublished local revision; otherwise fetch
+# the immutable revision. Neither path executes an unverified working copy.
+$loweringCommit = '8880e5e51c65babbf83d8d059c2316c2e4c11858'
+$loweringHash = '6CF1537E3FDAC9F6073655F042FABCFB20A95468F929F59C5BBC5901DF62A00F'
+$loweringCache = Join-Path $PSScriptRoot "../build/lowered-hexagon/compiler/$loweringHash/Export-LoweredAssembly.ps1"
+if ([IO.File]::Exists($loweringCache)) { $loweringBytes = [IO.File]::ReadAllBytes($loweringCache) }
+else {
+    $siblingCompiler = Join-Path $PSScriptRoot '../../PSLowering/Export-LoweredAssembly.ps1'
+    if ([IO.File]::Exists($siblingCompiler) -and (Get-FileHash $siblingCompiler).Hash -ceq $loweringHash) {
+        $loweringBytes = [IO.File]::ReadAllBytes($siblingCompiler)
+    } else {
+        $loweringBytes = (Invoke-WebRequest -Uri "https://raw.githubusercontent.com/MansfieldPlumbing/PSLowering/$loweringCommit/Export-LoweredAssembly.ps1" -UseBasicParsing).RawContentStream.ToArray()
+    }
+}
+if ([Convert]::ToHexString([Security.Cryptography.SHA256]::HashData($loweringBytes)) -cne $loweringHash) { throw 'Pinned PSLowering compiler hash mismatch.' }
+if (-not [IO.File]::Exists($loweringCache)) {
+    [void][IO.Directory]::CreateDirectory([IO.Path]::GetDirectoryName($loweringCache))
+    [IO.File]::WriteAllBytes($loweringCache, $loweringBytes)
+}
+$encoderSource = Join-Path $PSScriptRoot '../src/hexagon/Hexagon.ps1'
+$encoderHash = (Get-FileHash $encoderSource).Hash
+$encoderDirectory = Join-Path $PSScriptRoot "../build/lowered-hexagon/$loweringCommit/$encoderHash"
+$encoderPath = Join-Path $encoderDirectory 'HexagonEncoder.dll'
+$encoderReceipt = $encoderPath + '.sha256'
+if (-not [IO.File]::Exists($encoderPath) -or -not [IO.File]::Exists($encoderReceipt)) {
+    [void][IO.Directory]::CreateDirectory($encoderDirectory)
+    & $loweringCache -SourcePath $encoderSource -ClassName HexagonEncoder -OutputPath $encoderPath -Deterministic | Out-Null
+    [IO.File]::WriteAllText($encoderReceipt, (Get-FileHash $encoderPath).Hash)
+}
+if ((Get-FileHash $encoderPath).Hash -cne [IO.File]::ReadAllText($encoderReceipt)) { throw 'Cached Hexagon encoder hash mismatch.' }
+$encoderAssembly = [Reflection.Assembly]::LoadFile([IO.Path]::GetFullPath($encoderPath))
+if (@($encoderAssembly.GetReferencedAssemblies() | Where-Object Name -EQ 'System.Management.Automation').Count) { throw 'Hexagon encoder must be ClrOnly.' }
+$script:HexagonStepType = $encoderAssembly.GetType('HexagonStep', $true)
+$script:HexagonEncoderType = $encoderAssembly.GetType('HexagonEncoder', $true)
+[string[]]$formNames = @($script:HexagonForms.Keys)
+[string[]]$formPatterns = @(foreach ($formName in $formNames) { $script:HexagonForms[$formName] })
+$script:HexagonEncoder = $script:HexagonEncoderType::new($formNames, $formPatterns)
 $script:ElfConstants=$null
 $elf=Get-ElfConstants
 $header=Import-LibSourceText 'ELF.h'
@@ -511,7 +594,10 @@ if ($RegionBody) {
 }
 $stepSeconds = $emissionClock.Elapsed.TotalSeconds - $setupSeconds
 $stageClock = [Diagnostics.Stopwatch]::StartNew()
-$library=New-ElfCodeLibrary -Soname $soname -Needed @() -Functions ([ordered]@{$symbol=$steps}) -PageSize 4096
+$typedSteps = $script:HexagonStepType::Convert([hashtable[]]$steps)
+$conversionSeconds = $stageClock.Elapsed.TotalSeconds
+$stageClock.Restart()
+$library=New-ElfCodeLibrary -Soname $soname -Needed @() -Functions ([ordered]@{$symbol=$typedSteps}) -PageSize 4096
 $librarySeconds = $stageClock.Elapsed.TotalSeconds
 if($Kernel -notin 'KokoroHarmonicSource16Run','KokoroDecoder16Run','KokoroGeneratorWholeSource16Run' -and $Kernel -in 'KokoroAlbertLinear16Run','KokoroAlbertLayerNorm16Run','KokoroAlbertGelu16Run','KokoroAlbertAttention16Run','KokoroAlbertEmbed16Run','KokoroAlbert16Run','KokoroDecoder16Run','KokoroDecoderGenerator16Run','KokoroResBlockRun','KokoroGenerator60xRun','KokoroGenerator60xResidentRun','KokoroGenerator60x16Run','KokoroGeneratorTailRun','KokoroGeneratorTail16Run','KokoroGeneratorStage16TailRun','KokoroResBlock16Run','KokoroGeneratorFrontStageTailRun','KokoroGeneratorFront10x16Run','KokoroGeneratorWhole16Run','KokoroHarmonicStft16Run','KokoroHarmonicSource16Run','KokoroGeneratorWholeSource16Run') {
     Write-NewOrIdenticalFile (Join-Path $OutputDirectory 'runner-link.json') ([Text.Encoding]::UTF8.GetBytes((@{Entry=$library.Exports[$symbol];Got=$library.GotSlots} | ConvertTo-Json -Depth 4))) -AllowOverwrite:$Force
@@ -540,9 +626,11 @@ $code=[byte[]]::new($codeLength); [Array]::Copy($library.Bytes,$codeStart,$code,
 Write-NewOrIdenticalFile (Join-Path $OutputDirectory 'emitted-code.bin') $code -AllowOverwrite:$Force
 $artifactHash=(Get-FileHash $path).Hash
 $emissionResult=[pscustomobject]@{PSTypeName='Kokoro.Hexagon.Emission';Kernel=$Kernel;Path=$path;Directory=$OutputDirectory;
+    EncoderPath=$encoderPath;LoweringCommit=$loweringCommit;
     Bytes=$library.Bytes.Length;CodeBytes=$codeLength;SHA256=$artifactHash;LibrarySHA256=$artifactHash;
     Imports=$library.Imports.Count;Relocations=0;RegionBodyEncodingOnly=[bool]$RegionBody;
-    Timings=[pscustomobject]@{SetupSeconds=$setupSeconds;StepsSeconds=$stepSeconds;LibrarySeconds=$librarySeconds;
+    Timings=[pscustomobject]@{SetupSeconds=$setupSeconds;StepsSeconds=$stepSeconds;ConversionSeconds=$conversionSeconds;
+        LibrarySeconds=$librarySeconds;LayoutSeconds=$library.LayoutSeconds;EncodeSeconds=$library.EncodeSeconds;
         ReferenceSeconds=$referenceSeconds;CodeSeconds=$stageClock.Elapsed.TotalSeconds;TotalSeconds=$emissionClock.Elapsed.TotalSeconds}}
 if ($Kernel -cin 'KokoroHarmonicSource16Run','KokoroDecoder16Run','KokoroGeneratorWholeSource16Run') {
     $emissionResult | Add-Member -NotePropertyMembers @{

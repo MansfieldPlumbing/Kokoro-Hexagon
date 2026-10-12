@@ -14,7 +14,7 @@ function New-KokoroGenerator60xRunSteps {
  $weights=@(0,294912,983040);$weightBytes=2064384;$parameterBytes=147472
  $s=[Collections.Generic.List[hashtable]]::new()
  $calls=[Collections.Generic.List[object]]::new()
- $imm={param([int]$r,[long]$v) $u=[uint32]($v -band 0xffffffffL);$s.Add(@{Op='lo';x=$r;i=($u -band 65535)});$s.Add(@{Op='hi';x=$r;i=($u -shr 16)})}
+ $imm={param([int]$r,[long]$v) $u=[long]([uint32]($v -band 0xffffffffL));$s.Add(@{Op='lo';x=$r;i=($u -band 65535)});$s.Add(@{Op='hi';x=$r;i=($u -shr 16)})}
  $ptr={param([int]$r,[int]$baseReg,[long]$offset)
   # Preserve the base when the destination is the same scalar register.
   $offsetReg=if($r -eq $baseReg){15}else{$r}
@@ -77,6 +77,6 @@ function New-KokoroGenerator60xRunSteps {
  $s.Add(@{Op='label';Name='body_average'});foreach($step in @(New-KokoroBranchAverageIntegerSteps)){$s.Add($step)}
  $labels=@{};$pcs=[Collections.Generic.Dictionary[object,long]]::new();$pc=0L;$isa=Get-InstructionSet
  foreach($step in $s){if($step.Op -eq 'label'){$labels[$step.Name]=$pc};$pcs[$step]=$pc;$pc+=& $isa.Length $step}
- foreach($c in $calls){$delta=[uint32]($labels[$c.label]-$pcs[$c.pc]);$c.low.i=$delta -band 65535;$c.high.i=$delta -shr 16}
+ foreach($c in $calls){$delta=[long]([uint32]($labels[$c.label]-$pcs[$c.pc]));$c.low.i=$delta -band 65535;$c.high.i=$delta -shr 16}
  [pscustomobject]@{Steps=$s.ToArray();Layout=[ordered]@{Frames=$Frames;Tiles=$blocks[0].Layout.Tiles;InputBytes=$bytes;WeightBytes=$weightBytes;ParameterBytes=$parameterBytes;OutputBytes=$outputBytes;WorkspaceBytes=$bytes;VtcmBytes=$blocks[2].Layout.VtcmBytes;BranchStride=$stride;FinalWorkspaceOffset=$finalOffset;CoefficientBytes=18432;CoefficientOffset=$bytes;CompletedStages=19}}
 }

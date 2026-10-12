@@ -132,6 +132,29 @@ foreach($bad in $badOps) {
     try { $null=New-HexagonInstruction $bad 0 0 } catch { $rejections++ }
 }
 if($rejections -ne $badOps.Count) { throw "Encoder accepted an invalid operand: got $rejections expected $($badOps.Count)" }
+$encoderAssembly = [Reflection.Assembly]::LoadFile([IO.Path]::GetFullPath($result.EncoderPath))
+$stepType = $encoderAssembly.GetType('HexagonStep', $true)
+$encoderType = $encoderAssembly.GetType('HexagonEncoder', $true)
+[string[]]$formNames = @($script:HexagonForms.Keys)
+[string[]]$formPatterns = @(foreach($formName in $formNames) { $script:HexagonForms[$formName] })
+$encoder = $encoderType::new($formNames, $formPatterns)
+$loweredRejections = 0
+foreach($bad in $badOps) {
+    try { $typed = $stepType::Convert([hashtable[]]@($bad)); $null = $encoder.Instruction($typed[0], 0L, 0L) }
+    catch { $loweredRejections++ }
+}
+if($loweredRejections -ne $badOps.Count) { throw 'Lowered encoder accepted an invalid operand.' }
+$strictRejections = 0
+foreach($wrong in @([uint32]1, [double]1, [decimal]1, [Management.Automation.PSObject]::new(1), [int[]]@(1), $null)) {
+    try { $null = $stepType::Convert([hashtable[]]@(@{Op='imm';d=0;i=$wrong})) }
+    catch {
+        if(-not $_.Exception.Message.Contains('Step 0 Op=imm field=i: exact CLR type required')) { throw }
+        $strictRejections++
+    }
+}
+if($strictRejections -ne 6) { throw 'The typed boundary accepted a non-admitted immediate type.' }
+$widened = $stepType::Convert([hashtable[]]@(@{Op='imm';d=0;i=1}))
+if($widened[0].i.GetType() -ne [long] -or $widened[0].i -ne 1L) { throw 'The typed boundary did not widen Int32 to Int64 exactly.' }
 $summary=[ordered]@{LibrarySHA256=$result.SHA256;LibraryBytes=$result.Bytes;CodeBytes=$emitted.Length;AssemblerSHA256=$hash[0];InstructionBytesMatch=$true;InvalidOperandsRejected=$rejections;Imports=$result.Imports;Relocations=$result.Relocations;RegionBodyEncodingOnly=$result.RegionBodyEncodingOnly}
 $summary | ConvertTo-Json | Set-Content (Join-Path $check 'verification.json')
 [pscustomobject]$summary

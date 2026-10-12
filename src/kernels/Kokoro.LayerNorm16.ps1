@@ -22,7 +22,7 @@ function New-KokoroLayerNorm16Steps {
     if ($Channels % 32) { throw 'Channels must be whole 32-channel blocks' }
     $C = $Channels; $blocks = $C / 32; $epsOffset = 256 * $blocks
     $s = [Collections.Generic.List[hashtable]]::new()
-    $imm = { param([int]$r,[long]$v) $u=[uint32]($v -band 0xffffffffL); $s.Add(@{Op='lo';x=$r;i=($u -band 65535)}); $s.Add(@{Op='hi';x=$r;i=($u -shr 16)}) }
+    $imm = { param([int]$r,[long]$v) $u=[long]([uint32]($v -band 0xffffffffL)); $s.Add(@{Op='lo';x=$r;i=($u -band 65535)}); $s.Add(@{Op='hi';x=$r;i=($u -shr 16)}) }
     $script:__ln = 0
     $next = { $script:__ln++; "${LabelPrefix}_$($script:__ln)" }
     $loop = { param([int]$counter,[string]$label) $s.Add(@{Op='addi';d=$counter;s=$counter;i=-1}); $s.Add(@{Op='gtu';d=0;s=$counter;t=16}); $s.Add(@{Op='jump-p';u=0;Label=$label}) }

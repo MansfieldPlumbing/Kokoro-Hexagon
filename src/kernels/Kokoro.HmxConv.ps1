@@ -28,8 +28,8 @@ function New-KokoroHmxConvSteps {
         # Fall through instead of returning, for inlining into a caller.
         [switch] $NoReturn
     )
-    $cb = $InputChannels / 32; $ob = $OutputChannels / 32; $groups = $OutputChannels / 64
-    $half = ($Kernel - 1) / 2
+    [int]$cb = $InputChannels / 32; [int]$ob = $OutputChannels / 32; [int]$groups = $OutputChannels / 64
+    [int]$half = ($Kernel - 1) / 2
     if ($Dilation * $half -gt 31) { throw 'Tap shift exceeds one crouton' }
     $s = [Collections.Generic.List[hashtable]]::new()
     # rt for the :single read: dY = one time tile (CB croutons), all-Y spatial mask, channels 0..31.
@@ -44,7 +44,7 @@ function New-KokoroHmxConvSteps {
         $s.Add(@{Op='mxclracc'})
         for ($k = 0; $k -lt $Kernel; $k++) {
             $shift = $Dilation * ($k - $half)
-            $tile = [math]::Floor($shift / 32); $row = $shift - 32 * $tile
+            [int]$tile = [math]::Floor($shift / 32); [int]$row = $shift - 32 * $tile
             for ($c = 0; $c -lt $cb; $c++) {
                 $offset = (($tile * $cb) + $c) * 2048 + (($row -shr 1) -shl 7) + (($row -band 1) -shl 1)
                 if ($offset -lt -32768 -or $offset -gt 32767) { throw 'Activation offset out of addi range' }

@@ -14,7 +14,7 @@ function New-KokoroEmbed16Steps {
     param([ValidateSet(1,2,4,8,16)][int]$Blocks=4,[Parameter(Mandatory)][ValidateRange(1,65536)][int]$Vocab,[Parameter(Mandatory)][ValidateRange(1,512)][int]$Tokens,[string]$LabelPrefix='embed16')
     $tiles = [int][math]::Ceiling($Tokens / 32); $tileStride = 2048L * $Blocks; $rowBytes = 128 * $Blocks; $vectors = $tiles * $Blocks * 16
     $s = [Collections.Generic.List[hashtable]]::new()
-    $imm = { param([int]$r,[long]$v) $u=[uint32]($v -band 0xffffffffL); $s.Add(@{Op='lo';x=$r;i=($u -band 65535)}); $s.Add(@{Op='hi';x=$r;i=($u -shr 16)}) }
+    $imm = { param([int]$r,[long]$v) $u=[long]([uint32]($v -band 0xffffffffL)); $s.Add(@{Op='lo';x=$r;i=($u -band 65535)}); $s.Add(@{Op='hi';x=$r;i=($u -shr 16)}) }
     & $imm 13 0x80008000L; $s.Add(@{Op='vsplat';d=31;s=13})
     $s.Add(@{Op='imm';d=14;i=0}); $s.Add(@{Op='imm';d=12;i=16})
     # Copy posType into the output.

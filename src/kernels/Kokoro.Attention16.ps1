@@ -35,7 +35,7 @@ function New-KokoroAttention16Steps {
     $L = Get-KokoroAttention16Scratch -Tokens $Tokens; $pad = $L.Padded; $chunks = $pad / 32; $rowBytes = 4L * $pad
     $rowPairs = [int][math]::Ceiling($Tokens / 2)
     $s = [Collections.Generic.List[hashtable]]::new()
-    $imm = { param([int]$r,[long]$v) $u=[uint32]($v -band 0xffffffffL); $s.Add(@{Op='lo';x=$r;i=($u -band 65535)}); $s.Add(@{Op='hi';x=$r;i=($u -shr 16)}) }
+    $imm = { param([int]$r,[long]$v) $u=[long]([uint32]($v -band 0xffffffffL)); $s.Add(@{Op='lo';x=$r;i=($u -band 65535)}); $s.Add(@{Op='hi';x=$r;i=($u -shr 16)}) }
     $addc = { param([int]$d,[int]$src,[long]$v) if ($v -ge -32768 -and $v -le 32767) { $s.Add(@{Op='addi';d=$d;s=$src;i=[int]$v}) } else { & $imm 15 $v; $s.Add(@{Op='add';d=$d;s=$src;t=15}) } }
     $splat = { param([int]$v,[long]$value) & $imm 13 $value; $s.Add(@{Op='vsplat';d=$v;s=13}) }
     $script:__at = 0

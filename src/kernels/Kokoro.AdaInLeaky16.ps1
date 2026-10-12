@@ -19,7 +19,7 @@ function New-KokoroAdaInLeaky16Steps {
         [string]$LabelPrefix='adainleaky16',[switch]$NoReturn)
     if ($Channels % 32) { throw 'Channels must be whole 32-channel blocks' }
     $s = [Collections.Generic.List[hashtable]]::new()
-    $imm = { param([int]$r,[long]$v) $u=[uint32]($v -band 0xffffffffL); $s.Add(@{Op='lo';x=$r;i=($u -band 65535)}); $s.Add(@{Op='hi';x=$r;i=($u -shr 16)}) }
+    $imm = { param([int]$r,[long]$v) $u=[long]([uint32]($v -band 0xffffffffL)); $s.Add(@{Op='lo';x=$r;i=($u -band 65535)}); $s.Add(@{Op='hi';x=$r;i=($u -shr 16)}) }
     $splat = { param([int]$v,[long]$value) & $imm 13 $value; $s.Add(@{Op='vsplat';d=$v;s=13}) }
     & $splat 31 0x80008000L                     # u16 bias
     & $splat 30 0xFFFF0000L                     # odd-halfword mask

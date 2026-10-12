@@ -11,7 +11,7 @@ function New-KokoroPadRows16Steps {
         [ValidateSet(0,0x8000)][int]$Halfword=0x8000,[string]$LabelPrefix='padrows16',[switch]$NoReturn)
     if ($Channels % 32) { throw 'Channels must be whole 32-channel blocks' }
     $s = [Collections.Generic.List[hashtable]]::new()
-    $imm = { param([int]$r,[long]$v) $u=[uint32]($v -band 0xffffffffL); $s.Add(@{Op='lo';x=$r;i=($u -band 65535)}); $s.Add(@{Op='hi';x=$r;i=($u -shr 16)}) }
+    $imm = { param([int]$r,[long]$v) $u=[long]([uint32]($v -band 0xffffffffL)); $s.Add(@{Op='lo';x=$r;i=($u -band 65535)}); $s.Add(@{Op='hi';x=$r;i=($u -shr 16)}) }
     $f = $Frames % 32
     if ($f -ne 0) {
         $tiles = [int][math]::Ceiling($Frames / 32)
@@ -19,7 +19,7 @@ function New-KokoroPadRows16Steps {
         & $imm 2 0x0000FFFFL; $s.Add(@{Op='vsplat';d=29;s=2})
         & $imm 2 ([long]$Halfword -shl 16); $s.Add(@{Op='vsplat';d=1;s=2})
         & $imm 2 ([long]($tiles - 1) * 64 * $Channels + [math]::Floor($f / 2) * 128); $s.Add(@{Op='add';d=1;s=0;t=2})
-        $s.Add(@{Op='imm';d=3;i=($Channels/32)}); $s.Add(@{Op='imm';d=4;i=0})
+        $s.Add(@{Op='imm';d=3;i=[int]($Channels/32)}); $s.Add(@{Op='imm';d=4;i=0})
         $s.Add(@{Op='label';Name="${LabelPrefix}_block"})
         $s.Add(@{Op='addi';d=2;s=1;i=0})
         $first = [math]::Floor($f / 2)
@@ -44,7 +44,7 @@ function New-KokoroPadRows16RuntimeSteps {
         [string]$LabelPrefix='padrows16rt',[switch]$NoReturn)
     if ($Channels % 32) { throw 'Channels must be whole 32-channel blocks' }
     $s = [Collections.Generic.List[hashtable]]::new()
-    $imm = { param([int]$r,[long]$v) $u=[uint32]($v -band 0xffffffffL); $s.Add(@{Op='lo';x=$r;i=($u -band 65535)}); $s.Add(@{Op='hi';x=$r;i=($u -shr 16)}) }
+    $imm = { param([int]$r,[long]$v) $u=[long]([uint32]($v -band 0xffffffffL)); $s.Add(@{Op='lo';x=$r;i=($u -band 65535)}); $s.Add(@{Op='hi';x=$r;i=($u -shr 16)}) }
     $done = "${LabelPrefix}_done"
     $s.Add(@{Op='imm';d=12;i=0})
     $s.Add(@{Op='imm';d=6;i=31}); $s.Add(@{Op='and';d=7;s=5;t=6})                    # f = Frames mod 32
@@ -57,7 +57,7 @@ function New-KokoroPadRows16RuntimeSteps {
     & $imm 2 ([long]$Halfword -bor ([long]$Halfword -shl 16)); $s.Add(@{Op='vsplat';d=0;s=2})
     & $imm 2 0x0000FFFFL; $s.Add(@{Op='vsplat';d=29;s=2})
     & $imm 2 ([long]$Halfword -shl 16); $s.Add(@{Op='vsplat';d=1;s=2})
-    $s.Add(@{Op='imm';d=3;i=($Channels/32)})
+    $s.Add(@{Op='imm';d=3;i=[int]($Channels/32)})
     $s.Add(@{Op='label';Name="${LabelPrefix}_block"})
     $s.Add(@{Op='addi';d=2;s=1;i=0})
     $s.Add(@{Op='eq';d=0;s=11;t=12}); $s.Add(@{Op='jump-p';u=0;Label="${LabelPrefix}_even"})
@@ -90,7 +90,7 @@ function New-KokoroPadCapacity16Steps {
     $s.Add(@{Op='addi';d=6;s=5;i=31}); $s.Add(@{Op='lsr-i';d=6;s=6;i=5})
     $s.Add(@{Op='imm';d=8;i=(64*$Channels)}); $s.Add(@{Op='mpy-d';d=10;s=6;t=8})
     $s.Add(@{Op='add';d=1;s=0;t=10}); $s.Add(@{Op='sub';d=13;s=13;t=6})
-    $s.Add(@{Op='imm';d=8;i=($Channels/2)}); $s.Add(@{Op='mpy-d';d=10;s=13;t=8})
+    $s.Add(@{Op='imm';d=8;i=[int]($Channels/2)}); $s.Add(@{Op='mpy-d';d=10;s=13;t=8})
     $s.Add(@{Op='imm';d=12;i=0}); $s.Add(@{Op='eq';d=0;s=10;t=12}); $s.Add(@{Op='jump-p';u=0;Label="${LabelPrefix}_done"})
     $pattern=[long]$Halfword -bor ([long]$Halfword -shl 16)
     $s.Add(@{Op='lo';x=2;i=($pattern -band 65535)}); $s.Add(@{Op='hi';x=2;i=($pattern -shr 16)})
@@ -127,14 +127,14 @@ function New-KokoroFrameDouble16Steps {
     if ($Channels % 32) { throw 'Channels must be whole 32-channel blocks' }
     $tileBytes = 64 * $Channels
     $s = [Collections.Generic.List[hashtable]]::new()
-    $imm = { param([int]$r,[long]$v) $u=[uint32]($v -band 0xffffffffL); $s.Add(@{Op='lo';x=$r;i=($u -band 65535)}); $s.Add(@{Op='hi';x=$r;i=($u -shr 16)}) }
+    $imm = { param([int]$r,[long]$v) $u=[long]([uint32]($v -band 0xffffffffL)); $s.Add(@{Op='lo';x=$r;i=($u -band 65535)}); $s.Add(@{Op='hi';x=$r;i=($u -shr 16)}) }
     & $imm 3 0x0000FFFFL; $s.Add(@{Op='vsplat';d=29;s=3})
     & $imm 3 0xFFFF0000L; $s.Add(@{Op='vsplat';d=30;s=3})
     $s.Add(@{Op='imm';d=4;i=16}); $s.Add(@{Op='imm';d=7;i=0})
     & $imm 8 $tileBytes
     $s.Add(@{Op='label';Name="${LabelPrefix}_tile"})
     $s.Add(@{Op='addi';d=9;s=0;i=0}); $s.Add(@{Op='addi';d=10;s=1;i=0})            # block b of input tile, output tile 2t
-    $s.Add(@{Op='imm';d=5;i=($Channels/32)})
+    $s.Add(@{Op='imm';d=5;i=[int]($Channels/32)})
     $s.Add(@{Op='label';Name="${LabelPrefix}_block"})
     $s.Add(@{Op='addi';d=6;s=9;i=0}); $s.Add(@{Op='addi';d=11;s=10;i=0})
     for ($v = 0; $v -lt 16; $v++) {
@@ -171,7 +171,7 @@ function New-KokoroPool2Steps {
     if ($Channels % 32) { throw 'Channels must be whole 32-channel blocks' }
     $tileBytes = 64 * $Channels
     $s = [Collections.Generic.List[hashtable]]::new()
-    $imm = { param([int]$r,[long]$v) $u=[uint32]($v -band 0xffffffffL); $s.Add(@{Op='lo';x=$r;i=($u -band 65535)}); $s.Add(@{Op='hi';x=$r;i=($u -shr 16)}) }
+    $imm = { param([int]$r,[long]$v) $u=[long]([uint32]($v -band 0xffffffffL)); $s.Add(@{Op='lo';x=$r;i=($u -band 65535)}); $s.Add(@{Op='hi';x=$r;i=($u -shr 16)}) }
     $splat = { param([int]$v,[long]$value) & $imm 13 $value; $s.Add(@{Op='vsplat';d=$v;s=13}) }
     & $splat 31 0x80008000L; & $splat 30 0xFFFF0000L
     & $splat 21 128; & $splat 20 255; & $splat 18 32767; & $splat 19 -32768
@@ -190,7 +190,7 @@ function New-KokoroPool2Steps {
         $s.Add(@{Op='vand';d=12;s=$q;t=20}); $s.Add(@{Op='vasl-w';d=12;s=12;t=12})
         $s.Add(@{Op='vor';d=11;s=11;t=12}); $s.Add(@{Op='vstore';s=13;t=11;Offset=$offset}) }
     $s.Add(@{Op='addi';d=14;s=0;i=0}); $s.Add(@{Op='addi';d=15;s=1;i=0}); $s.Add(@{Op='addi';d=10;s=2;i=0})   # block 0 bases
-    $s.Add(@{Op='imm';d=11;i=($Channels/32)})
+    $s.Add(@{Op='imm';d=11;i=[int]($Channels/32)})
     $s.Add(@{Op='label';Name="${LabelPrefix}_block"})
     $s.Add(@{Op='vload';d=14;s=3;Offset=0}); $s.Add(@{Op='vload';d=15;s=3;Offset=128}); $s.Add(@{Op='vload';d=16;s=3;Offset=256}); $s.Add(@{Op='vload';d=17;s=3;Offset=384})
     $s.Add(@{Op='addi';d=5;s=14;i=0}); $s.Add(@{Op='addi';d=6;s=15;i=0}); $s.Add(@{Op='addi';d=13;s=10;i=0})
@@ -238,13 +238,13 @@ function New-KokoroScaleConvert16Steps {
     param([ValidateRange(32,2048)][int]$Channels=512,[string]$LabelPrefix='scaleconvert16',[switch]$NoReturn)
     if ($Channels % 32) { throw 'Channels must be whole 32-channel blocks' }
     $s = [Collections.Generic.List[hashtable]]::new()
-    $imm = { param([int]$r,[long]$v) $u=[uint32]($v -band 0xffffffffL); $s.Add(@{Op='lo';x=$r;i=($u -band 65535)}); $s.Add(@{Op='hi';x=$r;i=($u -shr 16)}) }
+    $imm = { param([int]$r,[long]$v) $u=[long]([uint32]($v -band 0xffffffffL)); $s.Add(@{Op='lo';x=$r;i=($u -band 65535)}); $s.Add(@{Op='hi';x=$r;i=($u -shr 16)}) }
     $splat = { param([int]$v,[long]$value) & $imm 9 $value; $s.Add(@{Op='vsplat';d=$v;s=9}) }
     & $splat 31 0x80008000L; & $splat 30 0xFFFF0000L; & $splat 29 0x0000FFFFL; & $splat 18 32767; & $splat 17 -32768
     $s.Add(@{Op='imm';d=8;i=16}); $s.Add(@{Op='imm';d=7;i=0})
     $s.Add(@{Op='label';Name="${LabelPrefix}_tile"})
     $s.Add(@{Op='addi';d=4;s=1;i=0})
-    $s.Add(@{Op='imm';d=5;i=($Channels/32)})
+    $s.Add(@{Op='imm';d=5;i=[int]($Channels/32)})
     $s.Add(@{Op='label';Name="${LabelPrefix}_block"})
     $s.Add(@{Op='vload';d=14;s=4;Offset=0}); $s.Add(@{Op='vload';d=15;s=4;Offset=128}); $s.Add(@{Op='vload';d=16;s=4;Offset=256})
     $s.Add(@{Op='imm';d=3;i=16})
@@ -277,7 +277,7 @@ function New-KokoroStrideConv16Steps {
         [Parameter(Mandatory)][ValidateRange(0,2047)][int]$Channel,[string]$LabelPrefix='strideconv16',[switch]$NoReturn,[switch]$RuntimeFrames)
     $tileBytes = 64 * $Channels
     $s = [Collections.Generic.List[hashtable]]::new()
-    $imm = { param([int]$r,[long]$v) $u=[uint32]($v -band 0xffffffffL); $s.Add(@{Op='lo';x=$r;i=($u -band 65535)}); $s.Add(@{Op='hi';x=$r;i=($u -shr 16)}) }
+    $imm = { param([int]$r,[long]$v) $u=[long]([uint32]($v -band 0xffffffffL)); $s.Add(@{Op='lo';x=$r;i=($u -band 65535)}); $s.Add(@{Op='hi';x=$r;i=($u -shr 16)}) }
     & $imm 3 ([long][math]::Floor($Channel / 32) * 2048 + 4 * ($Channel % 32)); $s.Add(@{Op='add';d=1;s=1;t=3})   # row 0 of the channel
     $s.Add(@{Op='load';d=12;s=2;Offset=0}); $s.Add(@{Op='load';d=13;s=2;Offset=4}); $s.Add(@{Op='load';d=14;s=2;Offset=8})
     $s.Add(@{Op='imm';d=3;i=0})                                   # c[2t-1], zero for t = 0

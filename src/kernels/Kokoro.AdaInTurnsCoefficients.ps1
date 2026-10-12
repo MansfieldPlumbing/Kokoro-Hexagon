@@ -166,7 +166,7 @@ function New-KokoroAdaInAffineCoefficientsLoopSteps {
         $s.Add(@{Op='gtu';d=0;s=15;t=16})
         $s.Add(@{Op='jump-p';u=0;Label=$bit})
     }
-    $s.Add(@{Op='imm';d=4;i=($Channels/32)})
+    $s.Add(@{Op='imm';d=4;i=[int]($Channels/32)})
     $s.Add(@{Op='label';Name="${LabelPrefix}_block"})
     $s.Add(@{Op='imm';d=17;i=32})
     $s.Add(@{Op='label';Name="${LabelPrefix}_channel"})
@@ -275,7 +275,7 @@ function New-KokoroAdaInConstantCoefficientsLoopSteps {
         $s.Add(@{Op='label';Name=$skip}); $s.Add(@{Op='lsr-i';d=15;s=15;i=1})
         $s.Add(@{Op='gtu';d=0;s=15;t=16}); $s.Add(@{Op='jump-p';u=0;Label=$bit})
     }
-    $s.Add(@{Op='imm';d=4;i=($Channels/32)})
+    $s.Add(@{Op='imm';d=4;i=[int]($Channels/32)})
     $s.Add(@{Op='label';Name="${LabelPrefix}_block"}); $s.Add(@{Op='imm';d=17;i=32})
     $s.Add(@{Op='label';Name="${LabelPrefix}_channel"})
     $s.Add(@{Op='load';d=20;s=0;Offset=0}); $s.Add(@{Op='load';d=18;s=0;Offset=4})

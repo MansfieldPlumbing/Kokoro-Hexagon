@@ -11,8 +11,8 @@ function New-KokoroAdaInSteps {
           [ValidateRange(1, 128)][int]$Channels=128)
     $steps=[Collections.Generic.List[hashtable]]::new()
     $imm={param([int]$r,[uint32]$value)
-        $steps.Add(@{Op='lo';x=$r;i=($value -band 65535)})
-        $steps.Add(@{Op='hi';x=$r;i=($value -shr 16)})
+        $steps.Add(@{Op='lo';x=$r;i=[long]($value -band 65535)})
+        $steps.Add(@{Op='hi';x=$r;i=[long]($value -shr 16)})
     }
     $fp={param([int]$r,[float]$value)
         & $imm $r ([BitConverter]::SingleToUInt32Bits($value))

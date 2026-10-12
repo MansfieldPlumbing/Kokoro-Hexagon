@@ -23,8 +23,8 @@ function New-KokoroAlbertAttentionOutput3Steps {
     }
     $steps = [Collections.Generic.List[hashtable]]::new()
     $imm = { param([int]$r, [uint32]$v)
-        $steps.Add(@{Op='lo';x=$r;i=($v -band 65535)})
-        $steps.Add(@{Op='hi';x=$r;i=($v -shr 16)})
+        $steps.Add(@{Op='lo';x=$r;i=[long]($v -band 65535)})
+        $steps.Add(@{Op='hi';x=$r;i=[long]($v -shr 16)})
     }
     $fp = { param([int]$r, [float]$v) & $imm $r ([BitConverter]::SingleToUInt32Bits($v)) }
     foreach ($dispatch in @(@(0x00020001,'open'),@(0x01000010,'success'),@(0x02030100,'output'))) {

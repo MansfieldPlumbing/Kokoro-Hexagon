@@ -11,7 +11,7 @@
 function New-KokoroAdaInMoments16Steps {
     param([ValidateSet(128,256)][int]$Channels=128,[string]$LabelPrefix='adainmoments16',[switch]$NoReturn)
     $s = [Collections.Generic.List[hashtable]]::new()
-    $imm = { param([int]$r,[long]$v) $u=[uint32]($v -band 0xffffffffL); $s.Add(@{Op='lo';x=$r;i=($u -band 65535)}); $s.Add(@{Op='hi';x=$r;i=($u -shr 16)}) }
+    $imm = { param([int]$r,[long]$v) $u=[long]([uint32]($v -band 0xffffffffL)); $s.Add(@{Op='lo';x=$r;i=($u -band 65535)}); $s.Add(@{Op='hi';x=$r;i=($u -shr 16)}) }
     & $imm 13 0x80008000L; $s.Add(@{Op='vsplat';d=31;s=13})
     & $imm 13 0x00FF00FFL; $s.Add(@{Op='vsplat';d=30;s=13})
     & $imm 12 0x00010001L                       # multiplier 1 in both halfwords
@@ -59,7 +59,7 @@ function New-KokoroAdaInMoments16LoopSteps {
     param([ValidateRange(32,2048)][int]$Channels=1120,[string]$LabelPrefix='adainmoments16loop',[switch]$NoReturn)
     if ($Channels % 32) { throw 'Channels must be whole 32-channel blocks' }
     $s = [Collections.Generic.List[hashtable]]::new()
-    $imm = { param([int]$r,[long]$v) $u=[uint32]($v -band 0xffffffffL); $s.Add(@{Op='lo';x=$r;i=($u -band 65535)}); $s.Add(@{Op='hi';x=$r;i=($u -shr 16)}) }
+    $imm = { param([int]$r,[long]$v) $u=[long]([uint32]($v -band 0xffffffffL)); $s.Add(@{Op='lo';x=$r;i=($u -band 65535)}); $s.Add(@{Op='hi';x=$r;i=($u -shr 16)}) }
     & $imm 13 0x80008000L; $s.Add(@{Op='vsplat';d=31;s=13})
     & $imm 13 0x00FF00FFL; $s.Add(@{Op='vsplat';d=30;s=13})
     & $imm 12 0x00010001L

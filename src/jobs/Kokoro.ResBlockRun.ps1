@@ -13,7 +13,7 @@ function New-KokoroResBlockRunSteps {
  $base=New-KokoroHmxConvRunSteps -Channels 128 -Kernel $Kernel -Dilation 1 -Tiles 8
  $weightBytes=16384*$Kernel; $paramOff=131072+[int]([math]::Ceiling($weightBytes/65536)*65536); $outOff=$paramOff+65536
  $s=[Collections.Generic.List[hashtable]]::new()
- $imm={param([int]$r,[long]$v) $u=[uint32]($v -band 0xffffffffL);$s.Add(@{Op='lo';x=$r;i=($u -band 65535)});$s.Add(@{Op='hi';x=$r;i=($u -shr 16)})}
+ $imm={param([int]$r,[long]$v) $u=[long]([uint32]($v -band 0xffffffffL));$s.Add(@{Op='lo';x=$r;i=($u -band 65535)});$s.Add(@{Op='hi';x=$r;i=($u -shr 16)})}
  $ptr={param([int]$r,[int]$baseReg,[long]$offset) & $imm $r $offset;$s.Add(@{Op='add';d=$r;s=$baseReg;t=$r})}
  $copy={param([int]$dest,[long]$destOff,[int]$source,[long]$sourceOff,[int]$length)
   & $ptr 0 $dest $destOff; & $ptr 1 $source $sourceOff; & $imm 2 $length
@@ -164,6 +164,6 @@ function New-KokoroResBlockRunSteps {
  # Resolve internal PC-relative calls using already-validated add(pc), lo/hi, add, callr.
  $labels=@{};$pcs=[Collections.Generic.Dictionary[object,long]]::new();$pc=0L;$isa=Get-InstructionSet
  foreach($step in $s) {if($step.Op -eq 'label'){$labels[$step.Name]=$pc};$pcs[$step]=$pc;$pc+=& $isa.Length $step}
- foreach($c in $localCalls) {$delta=[uint32]($labels[$c.label]-$pcs[$c.pc]);$c.low.i=$delta -band 65535;$c.high.i=$delta -shr 16}
+ foreach($c in $localCalls) {$delta=[long]([uint32]($labels[$c.label]-$pcs[$c.pc]));$c.low.i=$delta -band 65535;$c.high.i=$delta -shr 16}
  [pscustomobject]@{Steps=$s.ToArray();Layout=[ordered]@{Frames=$Frames;Tiles=$tiles;InputBytes=$bytes;Kernel=$Kernel;WeightBytes=(6*$weightBytes);ParameterBytes=49152;OutputBytes=$outputBytes;WorkspaceBytes=$bytes;VtcmBytes=$base.Layout.VtcmBytes}}
 }

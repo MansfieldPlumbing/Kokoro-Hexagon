@@ -283,6 +283,350 @@ class HexagonStep {
     }
 }
 
+# Managed encoding uses the same forms and validation as the reference below.
+# Fixed bits and field positions are indexed once, rather than rescanned for
+# every round-trip check. The form array retains the reference table's order.
+class HexagonForm {
+    [string] $Name
+    [int[]] $Pattern
+    [int[]] $Counts
+    [long] $Mask
+    [long] $Bits
+
+    HexagonForm([string] $Name, [string] $Pattern) {
+        $this.Name = $Name
+        if ($Pattern.Length -ne 32) { throw ('Invalid instruction form: ' + $Name) }
+        $this.Pattern = [int[]]::new(32)
+        $this.Counts = [int[]]::new(128)
+        for ([int]$at = 0; $at -lt 32; $at++) {
+            [int] $key = [int]$Pattern.get_Chars($at)
+            $this.Pattern[$at] = $key
+            if ($key -eq 48 -or $key -eq 49 -or $key -eq 45) {
+                $this.Mask = $this.Mask -bor (1L -shl (31 - $at))
+                if ($key -eq 49) { $this.Bits = $this.Bits -bor (1L -shl (31 - $at)) }
+            } else { $this.Counts[$key] = $this.Counts[$key] + 1 }
+        }
+    }
+}
+
+class HexagonFields {
+    [long[]] $Values
+    [bool[]] $Present
+    HexagonFields() {
+        $this.Values = [long[]]::new(128)
+        $this.Present = [bool[]]::new(128)
+    }
+    [void] Set([string] $Name, [long] $Value) {
+        [int] $key = [int]$Name.get_Chars(0)
+        $this.Values[$key] = $Value
+        $this.Present[$key] = $true
+    }
+    [long] Get([string] $Name) { return $this.Values[[int]$Name.get_Chars(0)] }
+}
+
+class HexagonDecoded {
+    [string] $Op
+    [HexagonFields] $Fields
+    HexagonDecoded([string] $Op, [HexagonFields] $Fields) { $this.Op = $Op; $this.Fields = $Fields }
+}
+
+class HexagonLayout {
+    [int[]] $Lengths
+    [long] $Size
+    [System.Collections.Generic.Dictionary[string,long]] $Labels
+    [string[]] $Imports
+    HexagonLayout() { }
+}
+
+class HexagonEncoder {
+    [HexagonForm[]] $Forms
+    [System.Collections.Generic.Dictionary[string,HexagonForm]] $ByName
+
+    HexagonEncoder([string[]] $Names, [string[]] $Patterns) {
+        $this.Forms = [HexagonForm[]]::new($Names.Length)
+        $this.ByName = [System.Collections.Generic.Dictionary[string,HexagonForm]]::new([StringComparer]::InvariantCultureIgnoreCase)
+        for ([int]$n = 0; $n -lt $Names.Length; $n++) {
+            [HexagonForm] $form = [HexagonForm]::new($Names[$n], $Patterns[$n])
+            $this.Forms[$n] = $form
+            $this.ByName.Add($Names[$n], $form)
+        }
+    }
+
+    [uint32] Word([string] $Name, [HexagonFields] $Fields) {
+        if (-not $this.ByName.ContainsKey($Name)) { throw ('Invalid instruction form: ' + $Name) }
+        [HexagonForm] $form = $this.ByName.get_Item($Name)
+        [long[]] $values = [long[]]::new(128)
+        for ([int]$key = 0; $key -lt 128; $key++) {
+            if ($form.Counts[$key] -eq 0) { continue }
+            [string] $fieldName = [Convert]::ToString([char]$key)
+            if (-not $Fields.Present[$key]) { throw ('Missing ' + $Name + ' field ' + $fieldName) }
+            [long] $value = $Fields.Values[$key]
+            if ($value -lt 0L -or $value -ge (1L -shl $form.Counts[$key])) { throw ($Name + ' field ' + $fieldName + ' out of range') }
+            $values[$key] = $value
+        }
+        [long] $word = 0L
+        for ([int]$at = 31; $at -ge 0; $at--) {
+            [int] $key = $form.Pattern[$at]
+            [long] $bit = 0L
+            if ($key -eq 49) { $bit = 1L }
+            elseif ($key -ne 48 -and $key -ne 45) {
+                $bit = $values[$key] -band 1L
+                $values[$key] = $values[$key] -shr 1
+            }
+            $word = $word -bor ($bit -shl (31 - $at))
+        }
+        return [uint32]$word
+    }
+
+    [HexagonDecoded] Read([uint32] $Word) {
+        [long] $bits = [long]$Word
+        foreach ($form in $this.Forms) {
+            if (($bits -band $form.Mask) -ne $form.Bits) { continue }
+            [HexagonFields] $fields = [HexagonFields]::new()
+            for ([int]$at = 0; $at -lt 32; $at++) {
+                [int] $key = $form.Pattern[$at]
+                if ($key -eq 48 -or $key -eq 49 -or $key -eq 45) { continue }
+                $fields.Present[$key] = $true
+                $fields.Values[$key] = ($fields.Values[$key] -shl 1) -bor (($bits -shr (31 - $at)) -band 1L)
+            }
+            return [HexagonDecoded]::new($form.Name, $fields)
+        }
+        throw ('Unknown Hexagon instruction 0x' + [Convert]::ToString($bits, 16).PadLeft(8, [char]48).ToUpperInvariant())
+    }
+
+    static [int] Length([HexagonStep] $Step) {
+        if ($Step.Op -eq 'label') { return 0 }
+        if ($Step.Op -in 'mxmpy-fp16','mxmpy-w8a8','mxmpy-w4a8','mxmpy-w8a8-cm','mxmpy-w4a8-cm','hmx-pair') { return 8 }
+        if ($Step.Op -eq 'got-call') { return 16 }
+        return 4
+    }
+
+    static [HexagonLayout] Layout([HexagonStep[]] $Steps, [long] $Base) {
+        [HexagonLayout] $layout = [HexagonLayout]::new()
+        $layout.Lengths = [int[]]::new($Steps.Length)
+        $layout.Labels = [System.Collections.Generic.Dictionary[string,long]]::new([StringComparer]::InvariantCultureIgnoreCase)
+        [System.Collections.Generic.List[string]] $imports = [System.Collections.Generic.List[string]]::new()
+        for ([int]$n = 0; $n -lt $Steps.Length; $n++) {
+            [HexagonStep] $step = $Steps[$n]
+            if ($step.Op -eq 'label') {
+                if ($layout.Labels.ContainsKey($step.Name)) { throw ('Duplicate label ' + $step.Name) }
+                $layout.Labels.Add($step.Name, $Base + $layout.Size)
+            }
+            if ($step.ContainsKey('Import') -and $step.Import.Length -gt 0 -and -not $imports.Contains($step.Import)) { $imports.Add($step.Import) }
+            [int] $length = [HexagonEncoder]::Length($step)
+            $layout.Lengths[$n] = $length
+            $layout.Size = $layout.Size + [long]$length
+        }
+        $layout.Imports = $imports.ToArray()
+        return $layout
+    }
+
+    [byte[]] Packet([string] $Act, [string] $Wt, [HexagonStep] $Step, [string] $Failure) {
+        [HexagonFields] $a = [HexagonFields]::new()
+        $a.Set('s', [long]$Step.s); $a.Set('t', [long]$Step.t); $a.Set('P', 1L)
+        [HexagonFields] $w = [HexagonFields]::new()
+        $w.Set('u', [long]$Step.u); $w.Set('v', [long]$Step.v); $w.Set('P', 3L)
+        [uint32] $w0 = $this.Word($Act, $a)
+        [uint32] $w1 = $this.Word($Wt, $w)
+        if ($this.Read($w0).Op -ne $Act -or $this.Read($w1).Op -ne $Wt) { throw $Failure }
+        [byte[]] $bytes = [byte[]]::new(8)
+        [Array]::Copy([BitConverter]::GetBytes($w0), 0, $bytes, 0, 4)
+        [Array]::Copy([BitConverter]::GetBytes($w1), 0, $bytes, 4, 4)
+        return $bytes
+    }
+
+    static [void] Relocate([HexagonLayout] $Layout, [long] $Base) {
+        [string[]] $keys = [string[]]::new($Layout.Labels.Count)
+        $Layout.Labels.Keys.CopyTo($keys, 0)
+        foreach ($key in $keys) { $Layout.Labels.set_Item($key, $Layout.Labels.get_Item($key) + $Base) }
+    }
+
+    [byte[]] Instruction([HexagonStep] $Step, [long] $Pc, [long] $Target) {
+        if ($Step.Op -eq 'label') { return [byte[]]::new(0) }
+        [HexagonFields] $fields = [HexagonFields]::new()
+        $fields.Set('P', 3L)
+        foreach ($key in [string[]]@('d','s','t','x','u','e')) { if ($Step.ContainsKey($key)) { $fields.Set($key, $Step.Get($key)) } }
+        switch ($Step.Op) {
+            { $_ -in 'mpyu-d','mpy-d','add-d','sub-d','gtu-d','asr-d-i' } {
+                [string[]] $pairs = [string[]]@('d','s','t')
+                if ($Step.Op -in 'mpyu-d','mpy-d') { $pairs = [string[]]@('d') }
+                elseif ($Step.Op -eq 'gtu-d') { $pairs = [string[]]@('s','t') }
+                elseif ($Step.Op -eq 'asr-d-i') { $pairs = [string[]]@('d','s') }
+                foreach ($r in $pairs) { if ($Step.Get($r) % 2L -ne 0L -or $Step.Get($r) -lt 0L -or $Step.Get($r) -gt 30L) { throw 'Integer register pair must be even and 0..30' } }
+                if ($Step.Op -eq 'asr-d-i') {
+                    if ($Step.i -lt 0L -or $Step.i -gt 63L) { throw 'Double-word shift out of range' }
+                    $fields.Set('i', $Step.i)
+                }
+            }
+            { $_ -in 'lsr-i','asl-i','asr-i' } {
+                if ($Step.i -lt 0L -or $Step.i -gt 31L) { throw 'Word shift out of range' }
+                $fields.Set('i', $Step.i)
+            }
+            { $_ -in 'imm','addi' } {
+                if ($Step.i -lt -32768L -or $Step.i -gt 32767L) { throw 'Signed immediate out of range' }
+                $fields.Set('i', $Step.i -band 65535L)
+            }
+            { $_ -in 'lo','hi' } { $fields.Set('i', $Step.i) }
+            { $_ -in 'load','store' } {
+                if ($Step.Offset % 4L -ne 0L -or $Step.Offset -lt -4096L -or $Step.Offset -gt 4092L) { throw 'Word offset out of range' }
+                $fields.Set('i', ([long]($Step.Offset / 4L)) -band 2047L)
+            }
+            'load-ub' {
+                if ($Step.Offset -lt -1024L -or $Step.Offset -gt 1023L) { throw 'Byte offset out of range' }
+                $fields.Set('i', $Step.Offset -band 2047L)
+            }
+            'store-h' {
+                if ($Step.Offset % 2L -ne 0L -or $Step.Offset -lt -2048L -or $Step.Offset -gt 2046L) { throw 'Halfword offset out of range or unaligned' }
+                $fields.Set('i', ([long]($Step.Offset / 2L)) -band 2047L)
+            }
+            { $_ -in 'vload','vstore' } {
+                [int] $vOff = 0
+                if ($Step.ContainsKey('Offset')) {
+                    if ($Step.Offset % 128L -ne 0L) { throw 'Vector offset must be multiple of 128 bytes' }
+                    $vOff = [int]($Step.Offset / 128L)
+                } elseif ($Step.ContainsKey('i')) { $vOff = [int]$Step.i }
+                if ($vOff -lt -8 -or $vOff -gt 7) { throw 'Vector immediate offset out of range (-8..7)' }
+                if ($vOff -ge 0) { $fields.Set('i', [long]$vOff) } else { $fields.Set('i', (1L -shl 5) -bor ([long]$vOff -band 7L)) }
+            }
+            { $_ -in 'vload-post','vstore-post' } {
+                [int] $vOff = 1
+                if ($Step.ContainsKey('i')) { $vOff = [int]$Step.i }
+                if ($vOff -lt -8 -or $vOff -gt 7) { throw 'Vector post-increment offset out of range (-8..7)' }
+                if ($vOff -ge 0) { $fields.Set('i', [long]$vOff) } else { $fields.Set('i', (1L -shl 5) -bor ([long]$vOff -band 7L)) }
+            }
+            'jump-p' {
+                [long] $delta = $Target - $Pc
+                if ($delta % 4L -ne 0L -or $delta -lt -65536L -or $delta -gt 65532L) { throw 'Branch out of range' }
+                $fields.Set('i', ([long]($delta / 4L)) -band 32767L)
+            }
+            'valign' {
+                if ($Step.ContainsKey('r')) { $fields.Set('x', [long]$Step.r) }
+                if ($fields.Get('x') -lt 0L -or $fields.Get('x') -gt 7L) { throw 'Valign register out of range (r0..r7)' }
+            }
+            { $_ -in 'vlut16','vlut16-or' } {
+                if ($Step.d % 2 -ne 0 -or $Step.d -lt 0 -or $Step.d -gt 30) { throw 'Lookup destination pair must be even and 0..30' }
+                if ($Step.x -lt 0 -or $Step.x -gt 7) { throw 'Lookup scalar control must be r0..7' }
+                if ($Step.v -lt 0 -or $Step.v -gt 31) { throw 'Lookup table vector out of range' }
+                $fields.Set('v', [long]$Step.v)
+            }
+            'valign-imm' {
+                if ($Step.i -lt 0L -or $Step.i -gt 7L) { throw 'Valign immediate out of range (0..7)' }
+                $fields.Set('i', $Step.i)
+            }
+            'vshuff' {
+                if ($Step.d % 2 -ne 0 -or $Step.d -lt 0 -or $Step.d -gt 30) { throw 'Vshuff destination register pair must be even and 0..30' }
+                if ($Step.s -lt 0 -or $Step.s -gt 31 -or $Step.t -lt 0 -or $Step.t -gt 31) { throw 'Vshuff source register out of range (0..31)' }
+                if ($Step.r -lt 0 -or $Step.r -gt 7) { throw 'Vshuff scalar register out of range (r0..r7)' }
+                $fields.Set('d', [long]$Step.d); $fields.Set('s', [long]$Step.s); $fields.Set('t', [long]$Step.t); $fields.Set('r', [long]$Step.r)
+            }
+            'trap0' {
+                if ($Step.i -lt 0L -or $Step.i -gt 255L) { throw 'Trap0 immediate out of range (0..255)' }
+                $fields.Set('i', $Step.i)
+            }
+            { $_ -in 'pcycle','hwticks','upcycle' } {
+                if ($Step.d % 2 -ne 0 -or $Step.d -lt 0 -or $Step.d -gt 30) { throw 'Pcycle/Hwticks destination register pair must be even and 0..30' }
+                $fields.Set('d', [long]$Step.d)
+            }
+            'store-d' {
+                if ($Step.Offset % 8L -ne 0L -or $Step.Offset -lt -8192L -or $Step.Offset -gt 8184L) { throw 'Double word offset out of range or unaligned' }
+                if ($Step.t % 2 -ne 0 -or $Step.t -lt 0 -or $Step.t -gt 30) { throw 'Store-d source register pair must be even and 0..30' }
+                $fields.Set('i', ([long]($Step.Offset / 8L)) -band 2047L); $fields.Set('t', [long]$Step.t); $fields.Set('s', [long]$Step.s)
+            }
+            { $_ -in 'cvt-hf','cvt-ub','cvt-ub-sc0','cvt-ub-sc1' } {
+                if ($Step.s -lt 0 -or $Step.s -gt 31) { throw 'Cvt source register out of range (0..31)' }
+                $fields.Set('s', [long]$Step.s)
+            }
+            'got-call' {
+                if (-not $Step.ContainsKey('Import') -or $Step.Import.Length -eq 0) { throw 'got-call needs an Import' }
+                if ($Step.d -lt 0 -or $Step.d -gt 27) { throw 'got-call register out of range (r0..r27)' }
+                [long] $delta = $Target - $Pc
+                if ($delta -lt -2147483648L -or $delta -gt 2147483647L) { throw 'GOT slot out of range' }
+                [long] $u = $delta -band 4294967295L
+                [byte[]] $bytes = [byte[]]::new(16)
+                [HexagonFields] $part = [HexagonFields]::new()
+                $part.Set('i', $u -shr 6); $part.Set('P', 1L)
+                [Array]::Copy([BitConverter]::GetBytes($this.Word('immext', $part)), 0, $bytes, 0, 4)
+                $part = [HexagonFields]::new(); $part.Set('i', $u -band 63L); $part.Set('d', [long]$Step.d); $part.Set('P', 3L)
+                [Array]::Copy([BitConverter]::GetBytes($this.Word('add-pc', $part)), 0, $bytes, 4, 4)
+                $part = [HexagonFields]::new(); $part.Set('i', 0L); $part.Set('s', [long]$Step.d); $part.Set('d', [long]$Step.d); $part.Set('P', 3L)
+                [Array]::Copy([BitConverter]::GetBytes($this.Word('load', $part)), 0, $bytes, 8, 4)
+                $part = [HexagonFields]::new(); $part.Set('s', [long]$Step.d); $part.Set('P', 3L)
+                [Array]::Copy([BitConverter]::GetBytes($this.Word('callr', $part)), 0, $bytes, 12, 4)
+                return $bytes
+            }
+            'allocframe' {
+                if ($Step.Bytes % 8L -ne 0L -or $Step.Bytes -lt 0L -or $Step.Bytes -gt 16376L) { throw 'Frame size must be a multiple of 8 up to 16376' }
+                $fields.Set('i', [long]($Step.Bytes / 8L))
+            }
+            'add-pc' {
+                if ($Step.i -lt 0L -or $Step.i -gt 63L) { throw 'add(pc) immediate out of range (0..63)' }
+                $fields.Set('i', $Step.i)
+            }
+            'load-d' {
+                if ($Step.Offset % 8L -ne 0L -or $Step.Offset -lt -8192L -or $Step.Offset -gt 8184L) { throw 'Double word offset out of range or unaligned' }
+                if ($Step.d % 2 -ne 0 -or $Step.d -lt 0 -or $Step.d -gt 30) { throw 'Load-d destination register pair must be even and 0..30' }
+                $fields.Set('i', ([long]($Step.Offset / 8L)) -band 2047L)
+            }
+            'hmx-pair' {
+                if ($Step.Act -notin 'act-hf','act-ub','act-ub-cm','act-ub-single') { throw ('Unsupported HMX activation form: ' + $Step.Act) }
+                if ($Step.Wt -notin 'wt-hf','wt-b','wt-n','wt-b-deep') { throw ('Unsupported HMX weight form: ' + $Step.Wt) }
+                foreach ($r in [string[]]@('s','t','u','v')) { if ($Step.Get($r) -lt 0L -or $Step.Get($r) -gt 31L) { throw ('HMX register ' + $r + ' out of range (0..31)') } }
+                return $this.Packet($Step.Act, $Step.Wt, $Step, 'HMX packet failed round-trip decode')
+            }
+            { $_ -in 'mxmem-cvt','mxmem-after-hf','mxmem-after-retain-cm-ub','mxmem-after-sat-ub','mxmem-after-retain-sat-ub','mxmem-after-ub' } {
+                if ($Step.s -lt 0 -or $Step.s -gt 31) { throw 'Mxmem-cvt base register out of range (0..31)' }
+                if ($Step.t -lt 0 -or $Step.t -gt 31) { throw 'Mxmem-cvt stride register out of range (0..31)' }
+                $fields.Set('s', [long]$Step.s); $fields.Set('t', [long]$Step.t)
+            }
+            { $_ -in 'bias-mxmem','bias-mxmem2' } {
+                if ($Step.s -lt 0 -or $Step.s -gt 31) { throw 'Bias address register out of range (0..31)' }
+                $fields.Set('s', [long]$Step.s)
+            }
+            { $_ -in 'mxmpy-fp16','mxmpy-w8a8','mxmpy-w4a8','mxmpy-w8a8-cm','mxmpy-w4a8-cm' } {
+                if ($Step.s -lt 0 -or $Step.s -gt 31 -or $Step.t -lt 0 -or $Step.t -gt 31) { throw 'HMX activation registers out of range (0..31)' }
+                if ($Step.u -lt 0 -or $Step.u -gt 31 -or $Step.v -lt 0 -or $Step.v -gt 31) { throw 'HMX weight registers out of range (0..31)' }
+                [string] $actForm = 'act-ub'
+                if ($Step.Op -eq 'mxmpy-fp16') { $actForm = 'act-hf' } elseif ($Step.Op.EndsWith('-cm')) { $actForm = 'act-ub-cm' }
+                [string] $wtForm = 'wt-n'
+                if ($Step.Op -eq 'mxmpy-fp16') { $wtForm = 'wt-hf' } elseif ($Step.Op.StartsWith('mxmpy-w8a8')) { $wtForm = 'wt-b' }
+                return $this.Packet($actForm, $wtForm, $Step, 'HMX dual-slot packet failed round-trip decode')
+            }
+            'return' { $fields.Set('s', 31L) }
+        }
+        [uint32] $word = $this.Word($Step.Op, $fields)
+        [HexagonDecoded] $decoded = $this.Read($word)
+        if ($decoded.Op -ne $Step.Op) { throw 'Instruction decoded to a different operation' }
+        for ([int]$fieldIndex = 0; $fieldIndex -lt 128; $fieldIndex++) {
+            if ($fields.Present[$fieldIndex] -and $decoded.Fields.Values[$fieldIndex] -ne $fields.Values[$fieldIndex]) { throw ('Decode mismatch: ' + [Convert]::ToString([char]$fieldIndex)) }
+        }
+        return [BitConverter]::GetBytes($word)
+    }
+
+    [byte[]] Encode([HexagonStep[]] $Steps, [HexagonLayout] $Layout, [long] $Base,
+        [System.Collections.Generic.Dictionary[string,long]] $Got, [System.Collections.Generic.Dictionary[string,long]] $Data) {
+        [byte[]] $result = [byte[]]::new([int]$Layout.Size)
+        [long] $pc = $Base
+        for ([int]$n = 0; $n -lt $Steps.Length; $n++) {
+            [HexagonStep] $step = $Steps[$n]
+            [long] $target = 0L
+            if ($step.ContainsKey('Import') -and $step.Import.Length -gt 0) { $target = $Got.get_Item($step.Import) }
+            elseif ($step.ContainsKey('Data') -and $step.Data.Length -gt 0) {
+                if (-not $Data.ContainsKey($step.Data)) { throw ('Unknown data ' + $step.Data) }
+                $target = $Data.get_Item($step.Data)
+            } elseif ($step.ContainsKey('Label') -and $step.Label.Length -gt 0) {
+                if (-not $Layout.Labels.ContainsKey($step.Label)) { throw ('Unknown label ' + $step.Label) }
+                $target = $Layout.Labels.get_Item($step.Label)
+            }
+            [byte[]] $bytes = $this.Instruction($step, $pc, $target)
+            [int] $length = $Layout.Lengths[$n]
+            if ($bytes.Length -ne $length) { throw ('Encoded length mismatch: ' + $step.Op) }
+            [Array]::Copy($bytes, 0, $result, [int]($pc - $Base), $length)
+            $pc = $pc + [long]$length
+        }
+        return $result
+    }
+}
+
 function ConvertTo-HexagonWord {
     param([string] $Form, [hashtable] $Fields)
     $pattern = $script:HexagonForms[$Form]

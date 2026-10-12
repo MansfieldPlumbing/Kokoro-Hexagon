@@ -32,7 +32,7 @@ function New-KokoroHmxConvRunSteps {
     $vtcmBytes = & $align ($outOff + $outBytes)
 
     $s = [Collections.Generic.List[hashtable]]::new()
-    $imm = { param([int]$r, [long]$v) $u = [uint32]($v -band 0xFFFFFFFF); $s.Add(@{Op='lo'; x=$r; i=($u -band 65535)}); $s.Add(@{Op='hi'; x=$r; i=($u -shr 16)}) }
+    $imm = { param([int]$r, [long]$v) $u = [long]([uint32]($v -band 0xFFFFFFFF)); $s.Add(@{Op='lo'; x=$r; i=($u -band 65535)}); $s.Add(@{Op='hi'; x=$r; i=($u -shr 16)}) }
     $tele = { param([int]$Offset, [int]$Reg) $s.Add(@{Op='store'; s=23; t=$Reg; Offset=$Offset}) }
     $stage = { param([int]$Value) $s.Add(@{Op='imm'; d=13; i=$Value}); & $tele 36 13 }
     $call = { param([string]$Name) $s.Add(@{Op='got-call'; Import=$Name; d=14}) }
