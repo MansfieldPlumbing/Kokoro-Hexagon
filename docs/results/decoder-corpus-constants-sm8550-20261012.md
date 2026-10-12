@@ -23,9 +23,15 @@ DSP times are single-run measurements, not repeated-run medians.
 | D | AdaIN off | 10.579 | 131.457 | 51,000 | 0.0376770 | 0.258789 | -0.23 | 0 |
 | E | Zero decoder style; statistics normalization | 14.518 | 131.584 | 51,000 | 0.0435584 | 0.283264 | 0.62 | 0 |
 
-Listening verdict: **B only** produced intelligible peach and was described as
-"not bad". A, C, D and E were not labeled. The command's `ListeningLabel`
-fields remain empty; this subsequent listening observation applies only to B.
+Subsequent listening verdicts for the Gate 2(b) WAVs were:
+
+- B: intelligible peach; "not bad".
+- C (normalization off): unintelligible; dark, distorted noise.
+- D (AdaIN off): severely degraded; barely intelligible.
+- E (zero style, statistics): intelligible, with audible glitches.
+
+A was not labeled in this run. The command's `ListeningLabel` fields remain
+empty; these verdicts are subsequent listening observations.
 
 SNR below 1 dB does not discriminate here: E, the zero-style statistics path,
 also measures 0.62 dB. B's intelligibility is listening evidence and must not
@@ -81,7 +87,7 @@ Each variant again generated 51,000 samples. These DSP times are single-run
 measurements. Subsequent listening verdicts for these WAVs were:
 
 - A: "sounds almost the same as stock".
-- F: "intelligible, sounds like she's coming down with a cold".
+- F: intelligible; nasal, congested quality.
 - G: "low but seemingly fine".
 
 The recorded `ListeningLabel` fields remain empty. These later observations
