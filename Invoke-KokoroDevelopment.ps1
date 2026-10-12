@@ -529,17 +529,19 @@ function Invoke-KokoroDeviceJob {
 
 function New-KokoroDecoderConstantsTables {
     param([Parameter(Mandatory)]$Layout,[Parameter(Mandatory)][byte[]]$Tables,
-        [Parameter(Mandatory)][byte[]]$Observation,[int]$OutputOffset=256)
+        [Parameter(Mandatory)][byte[]]$Observation,[int]$OutputOffset=256,$Contracts)
     if($Tables.Length -ne $Layout.ParameterBytes -or
         $Observation.Length -ne $OutputOffset+$Layout.OutputBytes+$Layout.MomentsBytes+$Layout.KmBytes){throw 'Decoder constants source lengths differ from the layout.'}
     $result=[byte[]]::new($Layout.ConstantsParameterBytes)
     [Array]::Copy($Tables,$result,$Tables.Length)
     $terms=[Collections.Generic.List[object]]::new()
     foreach($site in $Layout.MomentSites){
-        $n=if($site.Count -eq 'F2'){2*$Layout.Frames}else{$Layout.Frames}
+        $n=if($Contracts){$site.Frames}elseif($site.Count -eq 'F2'){2*$Layout.Frames}else{$Layout.Frames}
         if($n -lt 1 -or $n -gt 65535){throw 'Constant mean denominator exceeds the DSP contract.'}
-        $blockIndex=[int][math]::Floor($site.Index/2)
-        $recordAt=if($site.Index%2){$Layout.BlockParams[$blockIndex].Records2}else{$Layout.BlockParams[$blockIndex].Records1}
+        if($Contracts){$recordAt=$site.RecordOffset}else{
+            $blockIndex=[int][math]::Floor($site.Index/2)
+            $recordAt=if($site.Index%2){$Layout.BlockParams[$blockIndex].Records2}else{$Layout.BlockParams[$blockIndex].Records1}
+        }
         for($channel=0;$channel -lt $site.Width;$channel++){
             $momentAt=[int]($OutputOffset+$Layout.OutputBytes+$site.Offset+512L*[math]::Floor($channel/32)+4L*($channel%32))
             $sum=[BitConverter]::ToInt32($Observation,$momentAt)
@@ -562,8 +564,11 @@ function New-KokoroDecoderConstantsTables {
             $correction=[bigint]::Min(2147483647,[bigint]::Divide([bigint]::Abs($meanProduct)+[bigint]::Divide($meanDenominator,2),$meanDenominator))
             if($meanProduct -lt 0){$correction=-$correction}
             $m=[uint32](([long]$mb-[long]$correction) -band 0xffffffffL)
-            $kmAt=[int]($OutputOffset+$Layout.OutputBytes+$Layout.MomentsBytes+$site.KmOffset+256L*[math]::Floor($channel/32)+4L*($channel%32))
-            if([BitConverter]::ToInt32($Observation,$kmAt) -ne $k -or [BitConverter]::ToUInt32($Observation,$kmAt+128) -ne $m){throw "Exported K/M disagrees with the exact constant terms at $($site.Name)/$channel."}
+            $kmBase=$OutputOffset+$Layout.OutputBytes+$Layout.MomentsBytes+$site.KmOffset
+            $kmAt=[int]($kmBase+$(if($Contracts){4L*$channel}else{256L*[math]::Floor($channel/32)+4L*($channel%32)}))
+            $mAt=$kmAt+$(if($Contracts){4*$site.Width}else{128})
+            if([BitConverter]::ToInt32($Observation,$kmAt) -ne $k -or [BitConverter]::ToUInt32($Observation,$mAt) -ne $m){throw "Exported K/M disagrees with the exact constant terms at $($site.Name)/$channel."}
+            if($Contracts -and [BitConverter]::ToInt32($Observation,[int]($kmBase+8L*$site.Width+4L*$channel)) -ne [BitConverter]::ToInt32($Tables,$parameterAt+12)){throw "Exported Snake scale differs at $($site.Name)/$channel."}
             $constantAt=[int]($Layout.ConstantsTableOffset+$site.Offset+16L*$channel)
             [Array]::Copy([BitConverter]::GetBytes([uint32]$n),0,$result,$constantAt,4)
             [Array]::Copy([BitConverter]::GetBytes([uint32]$root),0,$result,$constantAt+4,4)
@@ -628,15 +633,69 @@ function New-KokoroDecoderCorpusConstants {
         [Parameter(Mandatory)]$Layout,[Parameter(Mandatory)][byte[]]$Tables,[Parameter(Mandatory)][string]$PeachPhonemes)
     $inverseSums=[double[]]::new($Layout.ConstantsBytes/16); $meanSums=[double[]]::new($inverseSums.Length)
     $used=[Collections.Generic.List[object]]::new(); $excluded=[Collections.Generic.List[string]]::new()
+    $captures=[Collections.Generic.List[object]]::new(); $coverage=[ordered]@{}
+    foreach($contract in $Contracts){
+        $site=$contract.Site
+        $coverage[$site.Name]=[pscustomobject]@{Site=$site.Name;CapturesUsed=0;
+            Captures=[Collections.Generic.List[object]]::new()}
+    }
+    # Offline statistics use every non-peach utterance in full. Job capacities
+    # impose no limit here; accumulator and array types supply the safety bounds.
     foreach($directory in $Directories){
         $capture=Read-KokoroCapture -Directory $directory
         if($capture.Json.phonemes -ceq $PeachPhonemes){$excluded.Add($capture.Root);continue}
+        $captures.Add($capture)
+        $used.Add([pscustomobject]@{Directory=$capture.Root;Phonemes=$capture.Json.phonemes;IsPeach=$false})
+        foreach($contract in $Contracts){
+            $site=$contract.Site; $entry=$capture.Json.tensors["$($contract.Norm).input.0"]
+            if(-not $entry -or $entry.shape.Count -ne 3 -or $entry.shape[0] -ne 1 -or $entry.shape[1] -ne $contract.RealChannels){throw 'Captured AdaIN input shape differs.'}
+            $frames=[long]$entry.shape[2]
+            if($frames -lt 1){throw 'Captured AdaIN frames must be at least one.'}
+            if($entry.bytes%4 -or ($entry.bytes/4)%$contract.RealChannels -or [bigint]$entry.bytes -ne 4*[bigint]$contract.RealChannels*$frames){throw 'Captured AdaIN input shape differs.'}
+            $siteCoverage=$coverage[$site.Name]
+            $siteCoverage.Captures.Add([pscustomobject]@{CaptureRoot=$capture.Root;Frames=$frames})
+            $siteCoverage.CapturesUsed++
+        }
+    }
+    if(-not $used.Count){throw 'No non-peach training utterances remain.'}
+    $bounds=[ordered]@{}
+    foreach($contract in $Contracts){
+        $site=$contract.Site; $longest=0L
+        foreach($observation in $coverage[$site.Name].Captures){$longest=[math]::Max($longest,$observation.Frames)}
+        # ChannelStats widens each decoded int16 lane to double before squaring.
+        # Requiring integral sums <= 2^53 proves exact double accumulation and
+        # safe Int64 casts. BigInteger products do not have fixed-width overflow.
+        $sumBound=[bigint]$longest*32768; $squareBound=[bigint]$longest*1073741824L
+        $exactDoubleLimit=[bigint]9007199254740992L; $longLimit=[bigint][long]::MaxValue
+        if($sumBound -gt $longLimit -or $squareBound -gt $longLimit -or $sumBound -gt $exactDoubleLimit -or $squareBound -gt $exactDoubleLimit){throw "Corpus accumulator overflow assertion failed: $($site.Name), frames=$longest, absSum=$sumBound, squareSum=$squareBound."}
+        $epsilonBound=1.0
+        foreach($scale in $contract.InputScales){
+            if(-not [double]::IsFinite($scale) -or $scale -le 0){throw 'Corpus input scale must be positive and finite.'}
+            $epsilon=[math]::Max(1.0,[math]::Round(1e-5*[double]$longest*$longest/($scale*$scale),[MidpointRounding]::ToEven))
+            if(-not [double]::IsFinite($epsilon) -or [bigint]$epsilon -gt $longLimit){throw "Corpus epsilon overflow assertion failed: $($site.Name), frames=$longest."}
+            $epsilonBound=[math]::Max($epsilonBound,$epsilon)
+        }
+        $varianceBound=[bigint]$longest*$squareBound+[bigint]$epsilonBound
+        $varianceDouble=[double]$varianceBound
+        if(-not [double]::IsFinite($varianceDouble) -or [bigint][math]::Ceiling([math]::Sqrt($varianceDouble)) -ge $longLimit-1){throw "Corpus variance/root overflow assertion failed: $($site.Name), frames=$longest."}
+        $inverseBound=[double]$used.Count*$longest; $meanBound=[double]$used.Count*32768
+        if(-not [double]::IsFinite($inverseBound) -or -not [double]::IsFinite($meanBound)){throw 'Corpus average accumulator overflow assertion failed.'}
+        $floatElements=[bigint]$site.Width*$longest
+        $nativeBytes=64*[bigint]$site.Width*[bigint]::Divide(([bigint]$longest+31),32)
+        if($longest -gt [int]::MaxValue -or $floatElements -gt [Array]::MaxLength -or $nativeBytes -gt [Array]::MaxLength){throw "Corpus array/index overflow assertion failed: $($site.Name), frames=$longest."}
+        $bounds[$site.Name]=[pscustomobject]@{Site=$site.Name;LongestFrames=$longest;MaxAbsChannelSum=$sumBound;MaxChannelSquareSum=$squareBound;
+            DoubleExactIntegerLimit=$exactDoubleLimit;Int64Limit=$longLimit;MaxEpsilon=$epsilonBound;MaxVarianceNumerator=$varianceBound;
+            VarianceArithmetic='BigInteger';MaxCorpusInverseSum=$inverseBound;MaxCorpusAbsMeanSum=$meanBound;FloatElements=$floatElements;NativeBytes=$nativeBytes}
+    }
+    $population=[ordered]@{Tables=$null;Used=$used.ToArray();Excluded=$excluded.ToArray();Count=$used.Count;
+        SiteCoverage=@($coverage.Values);AccumulatorBounds=@($bounds.Values);MeanInverse=$inverseSums;MeanInput=$meanSums}
+    foreach($capture in $captures){
         foreach($contract in $Contracts){
             $site=$contract.Site; $width=$site.Width; $real=$contract.RealChannels
             $values=Read-KokoroCaptureTensor -Capture $capture -Name "$($contract.Norm).input.0"
-            if($values.Length%$real){throw 'Captured decoder norm input shape differs.'}
+            if($values.Length%$real){throw 'Captured AdaIN input shape differs.'}
             $frames=[int]($values.Length/$real)
-            if($frames -lt 1 -or $frames -gt 7801){throw 'Captured decoder moments exceed their admitted integer extent.'}
+            if($frames -lt 1){throw 'Captured AdaIN frames must be at least one.'}
             $padded=[float[]]::new($width*$frames); [Array]::Copy($values,$padded,$values.Length)
             $native=[byte[]]::new(64L*$width*[math]::Ceiling($frames/32))
             (Get-QuantizeCroutons16Kernel).Invoke($padded,$frames,$contract.InputScales,$native)
@@ -644,6 +703,10 @@ function New-KokoroDecoderCorpusConstants {
             $sums=[double[]]::new($width); $squares=[double[]]::new($width); $peaks=[double[]]::new($width)
             (Get-ChannelStatsKernel).Invoke($padded,$width,$peaks,$sums,$squares)
             for($channel=0;$channel -lt $width;$channel++){
+                if(-not [double]::IsFinite($sums[$channel]) -or -not [double]::IsFinite($squares[$channel]) -or
+                    [math]::Abs($sums[$channel]) -gt [double]$bounds[$site.Name].MaxAbsChannelSum -or $squares[$channel] -lt 0 -or
+                    $squares[$channel] -gt [double]$bounds[$site.Name].MaxChannelSquareSum -or
+                    $sums[$channel] -ne [math]::Truncate($sums[$channel]) -or $squares[$channel] -ne [math]::Truncate($squares[$channel])){throw 'Corpus channel accumulator overflow/integrality assertion failed.'}
                 $scale=$contract.InputScales[$channel]
                 $eps=[long][math]::Max(1.0,[math]::Round(1e-5*[double]$frames*$frames/($scale*$scale),[MidpointRounding]::ToEven))
                 $sum=[long]$sums[$channel]; $d=[bigint]$frames*[long]$squares[$channel]-[bigint]$sum*$sum+$eps
@@ -653,18 +716,51 @@ function New-KokoroDecoderCorpusConstants {
                 if($root -lt 1){throw 'Captured decoder variance root is zero.'}
                 $index=[int]($site.Offset/16+$channel)
                 $inverseSums[$index]+=[double]$frames/$root; $meanSums[$index]+=[double]$sum/$frames
+                if(-not [double]::IsFinite($inverseSums[$index]) -or -not [double]::IsFinite($meanSums[$index])){throw 'Corpus average is not finite.'}
             }
         }
-        $used.Add([pscustomobject]@{Directory=$capture.Root;Phonemes=$capture.Json.phonemes;IsPeach=$false})
     }
-    if(-not $used.Count){throw 'No non-peach training utterances remain.'}
     $result=[byte[]]::new($Layout.ConstantsParameterBytes); [Array]::Copy($Tables,$result,$Tables.Length)
     foreach($contract in $Contracts){for($channel=0;$channel -lt $contract.Site.Width;$channel++){
-        $index=[int]($contract.Site.Offset/16+$channel); $inverseSums[$index]/=$used.Count; $meanSums[$index]/=$used.Count
+        $index=[int]($contract.Site.Offset/16+$channel); $inverseSums[$index]/=$coverage[$contract.Site.Name].CapturesUsed; $meanSums[$index]/=$coverage[$contract.Site.Name].CapturesUsed
         $ka=[BitConverter]::ToInt64($Tables,[int]($contract.RecordOffset+32L*$channel))
         Set-KokoroDecoderConstantRatio -Tables $result -Offset ([int]($Layout.ConstantsTableOffset+$contract.Site.Offset+16L*$channel)) -Inverse $inverseSums[$index] -Mean $meanSums[$index] -Ka $ka
     }}
-    [pscustomobject]@{Tables=$result;Used=$used.ToArray();Excluded=$excluded.ToArray();Count=$used.Count;MeanInverse=$inverseSums;MeanInput=$meanSums}
+    $population.Tables=$result
+    [pscustomobject]$population
+}
+
+function Get-KokoroGeneratorSiteContracts {
+    # Reuse the packer's persisted residual and per-stage output units; do not
+    # recalibrate or infer scales from rounded epsilon records.
+    param([Parameter(Mandatory)]$Fixture,[Parameter(Mandatory)]$Layout,[Parameter(Mandatory)][byte[]]$Tables)
+    $ten=Get-Content -LiteralPath (Join-Path $Fixture.TenFixture 'fixture.json') -Raw | ConvertFrom-Json
+    $sixty=Get-Content -LiteralPath (Join-Path $Fixture.SixtyFixture 'fixture.json') -Raw | ConvertFrom-Json
+    $sources=@{'256/resblocks'=$ten.StageFixture;'256/noise_res'=$ten.NoiseResFixture;
+        '128/resblocks'=$sixty.StageFixture;'128/noise_res'=$sixty.NoiseResFixture}
+    $units=@{}; $metadata=@{}
+    foreach($key in $sources.Keys){
+        $directory=$sources[$key]; $f=Get-Content -LiteralPath (Join-Path $directory 'fixture.json') -Raw | ConvertFrom-Json
+        foreach($file in $f.Files){if((Get-FileHash -LiteralPath (Join-Path $directory $file.Name)).Hash -cne $file.SHA256){throw "Generator scale fixture integrity differs: $key/$($file.Name)."}}
+        $bytes=[IO.File]::ReadAllBytes((Join-Path $directory 'stage-output-scales.bin'))
+        $values=[double[]]::new($bytes.Length/8); [Buffer]::BlockCopy($bytes,0,$values,0,$bytes.Length)
+        if($values.Length -ne 6*$f.Blocks.Count*$f.OutputScales.Count){throw 'Generator output scale extent differs.'}
+        $metadata[$key]=$f; $units[$key]=$values
+    }
+    foreach($site in $Layout.MomentSites){
+        $key="$($site.Width)/$($site.Module)"; $f=$metadata[$key]
+        $branch=[Array]::IndexOf([int[]]$f.Blocks,[int]$site.Block)
+        if($branch -lt 0 -or $f.Frames -ne $site.Frames){throw "Generator scale fixture site differs: $($site.Name)."}
+        $scales=[double[]]::new($site.Width)
+        if($site.Stage%2){[Array]::Copy($units[$key],($branch*6+$site.Stage-1)*$site.Width,$scales,0,$site.Width)}
+        else{[Array]::Copy([double[]]$f.OutputScales,$scales,$site.Width)}
+        for($channel=0;$channel -lt $site.Width;$channel++){
+            $eps=[uint64][math]::Round(1e-5*[double]$site.Frames*$site.Frames/($scales[$channel]*$scales[$channel]),[MidpointRounding]::ToEven)
+            if($eps -ne [BitConverter]::ToUInt64($Tables,[int]($site.RecordOffset+32L*$channel+16))){throw "Generator input scale does not reproduce epsilon at $($site.Name)/$channel."}
+        }
+        [pscustomobject]@{Site=$site;Norm="generator.$($site.Module).$($site.Block).adain$(1+$site.Stage%2).$([int][math]::Floor($site.Stage/2))";
+            InputScales=$scales;RealChannels=$site.Width;RecordOffset=$site.RecordOffset}
+    }
 }
 
 function Test-KokoroDecoderConstants {
@@ -720,7 +816,8 @@ function Test-KokoroDecoderConstants {
 function Test-KokoroDecoderConstantsCorpus {
     param([Parameter(Mandatory)][string]$PeachFixtureDirectory,[Parameter(Mandatory)][string[]]$CorpusDirectories,
         [Parameter(Mandatory)][string]$OutputDirectory,[ValidateSet('SM8550','SM8635')][string]$Soc='SM8550',
-        [string]$Package='dev.mansfieldplumbing.kokoro')
+        [string]$Package='dev.mansfieldplumbing.kokoro',[string[]]$GeneratorCaptureDirectories,
+        [ValidatePattern('^[0-9A-F]{64}$')][string]$ExpectedDecoderConstantsSHA256)
     $out=[IO.Path]::GetFullPath($OutputDirectory); $peach=[IO.Path]::GetFullPath($PeachFixtureDirectory)
     if(-not $out.StartsWith($Build+[IO.Path]::DirectorySeparatorChar,[StringComparison]::OrdinalIgnoreCase) -or (Test-Path -LiteralPath $out)){throw 'Choose a fresh corpus constants directory under build/.'}
     [void][IO.Directory]::CreateDirectory($out)
@@ -743,6 +840,12 @@ function Test-KokoroDecoderConstantsCorpus {
         $tables=[IO.File]::ReadAllBytes((Join-Path $decoderDirectory 'tables.bin'))
         $corpus=New-KokoroDecoderCorpusConstants -Directories $CorpusDirectories -Contracts $contracts -Layout $layout -Tables $tables -PeachPhonemes $peachCapture.Json.phonemes
         $report.TrainingUtterances=$corpus.Count; $report.Training=$corpus.Used; $report.Excluded=$corpus.Excluded
+        $report.DecoderSiteCoverage=$corpus.SiteCoverage; $report.DecoderAccumulatorBounds=$corpus.AccumulatorBounds
+        $report.DecoderConstantsSHA256=[Convert]::ToHexString([Security.Cryptography.SHA256]::HashData($corpus.Tables))
+        if($ExpectedDecoderConstantsSHA256){
+            $report.DecoderConstantsUnchanged=$report.DecoderConstantsSHA256 -ceq $ExpectedDecoderConstantsSHA256
+            if(-not $report.DecoderConstantsUnchanged){throw "Decoder corpus constants bytes differ: expected $ExpectedDecoderConstantsSHA256, received $($report.DecoderConstantsSHA256)."}
+        }
         $report.NoneIsPeach=(@($corpus.Used | Where-Object IsPeach).Count -eq 0)
         foreach($term in @(@('inverse',$corpus.MeanInverse),@('input',$corpus.MeanInput))){
             $bytes=[byte[]]::new(8*$term[1].Length); [Buffer]::BlockCopy($term[1],0,$bytes,0,$bytes.Length)
@@ -791,38 +894,108 @@ function Test-KokoroDecoderConstantsCorpus {
         $constants=Invoke-KokoroEmission -Kernel KokoroDecoder16Run -Parameters @{DecoderFrames=[int]$fixture.Frames;DecoderMoments='Constants'}
         $generator=Invoke-KokoroEmission -Kernel KokoroGeneratorWholeSource16Run -Parameters @{ResBlockFrames=[int]$whole.Frames;ResidentHvxThreads=4;ResidentBatchTiles=14}
         if($generator.Layout.InputBytes -ne $layout.OutputBytes+$sourceBytes -or $generator.Layout.WeightBytes -ne $generatorWeightBytes -or $generator.Layout.ParameterBytes -ne $generatorTableBytes -or $generator.Layout.Samples -ne $whole.Samples){throw 'Accepted generator input contract differs.'}
+        if($generator.LibrarySHA256 -cne '13D75D38B0B5BC8695BCAFF49378F860B5E923C80D8F14872321B14854301428'){throw 'Statistics generator library differs from the accepted peach library.'}
+        Write-Host 'GeneratorStatisticsLibrary=Accepted Emitting=Export,Constants'
+        $exportGenerator=Invoke-KokoroEmission -Kernel KokoroGeneratorWholeSource16Run -Parameters @{ResBlockFrames=[int]$whole.Frames;ResidentHvxThreads=4;ResidentBatchTiles=14;GeneratorMoments='Export'}
+        $constantGenerator=Invoke-KokoroEmission -Kernel KokoroGeneratorWholeSource16Run -Parameters @{ResBlockFrames=[int]$whole.Frames;ResidentHvxThreads=4;ResidentBatchTiles=14;GeneratorMoments='Constants'}
+        if(@($constantGenerator.Steps | Where-Object {$_.Op -eq 'label' -and $_.Name -match '^(body_(moments|coeff)|adainmoments16|turnscoeff)'}).Count){throw 'Constants generator contains a moment or moment-derived coefficient body.'}
+        foreach($candidate in $exportGenerator,$constantGenerator){if($candidate.Layout.VtcmBytes -ne $generator.Layout.VtcmBytes){throw 'Generator constants/export changed the VTCM allocation.'}}
+        $packing=$generator.Layout.ConstantPacking
+        if($packing.MomentSites.Count -ne 48 -or @($packing.MomentSites | Where-Object Module -CEQ 'resblocks').Count -ne 36 -or @($packing.MomentSites | Where-Object Module -CEQ 'noise_res').Count -ne 12){throw 'Generator AdaIN site inventory differs from 36 residual and 12 noise sites.'}
+        $report.GeneratorLibraries=[pscustomobject]@{Statistics=$generator.LibrarySHA256;Export=$exportGenerator.LibrarySHA256;Constants=$constantGenerator.LibrarySHA256;VtcmBytes=$generator.Layout.VtcmBytes;ConstantBytes=$packing.ConstantsBytes}
+        $generatorOnlyTables=[byte[]]::new($generatorTableBytes); [Array]::Copy($generatorTables,$generatorOnlyTables,$generatorTableBytes)
+        $report.Stage='GeneratorSiteContracts'
+        $generatorContracts=@(Get-KokoroGeneratorSiteContracts -Fixture $whole -Layout $packing -Tables $generatorOnlyTables)
+        if($GeneratorCaptureDirectories -and $GeneratorCaptureDirectories.Count -ne $corpus.Count){throw 'Generator capture directory count differs from the decoder corpus.'}
+        $generatorCorpusDirectories=[Collections.Generic.List[string]]::new()
+        foreach($training in $corpus.Used){
+            $capture=Read-KokoroCapture -Directory $training.Directory
+            $leaf=[IO.Path]::GetFileName($capture.Root); $candidate=$null
+            if($GeneratorCaptureDirectories){$candidate=$GeneratorCaptureDirectories[$generatorCorpusDirectories.Count]}
+            if(-not $candidate -and $leaf.EndsWith('-decoder',[StringComparison]::Ordinal)){
+                $sibling=Join-Path ([IO.Path]::GetDirectoryName($capture.Root)) ($leaf.Substring(0,$leaf.Length-7)+'generator')
+                if(Test-Path -LiteralPath (Join-Path $sibling 'capture.json')){
+                    $cached=Read-KokoroCapture -Directory $sibling
+                    if($cached.Json.phonemes -ceq $capture.Json.phonemes -and $cached.Json.seed -eq $capture.Json.seed -and $cached.Json.voice -ceq $capture.Json.voice -and $cached.Json.checkpointSha256 -ceq $capture.Json.checkpointSha256){$candidate=$cached.Root}
+                }
+            }
+            if(-not $candidate){
+                $report.Stage="GeneratorCorpusCapture-$($generatorCorpusDirectories.Count)"
+                Write-Host "PreparingGeneratorCorpusCapture=$($generatorCorpusDirectories.Count)"
+                $candidate=Join-Path $out "generator-corpus-$($generatorCorpusDirectories.Count)"
+                & $PSCommandPath StockCapture -Block generator -PhonemesFrom $capture.Root -OutputDirectory $candidate | Out-Null
+            }
+            $captured=Read-KokoroCapture -Directory $candidate
+            if($captured.Json.phonemes -cne $capture.Json.phonemes -or $captured.Json.seed -ne $capture.Json.seed -or $captured.Json.voice -cne $capture.Json.voice -or $captured.Json.checkpointSha256 -cne $capture.Json.checkpointSha256){throw 'Generator corpus utterance, seed, voice or checkpoint differs from the decoder corpus.'}
+            $generatorCorpusDirectories.Add($candidate)
+        }
+        $report.Stage='GeneratorCorpusConstants'
+        $generatorCorpus=New-KokoroDecoderCorpusConstants -Directories $generatorCorpusDirectories.ToArray() -Contracts $generatorContracts -Layout $packing -Tables $generatorOnlyTables -PeachPhonemes $peachCapture.Json.phonemes
+        $report.GeneratorTraining=$generatorCorpus.Used
+        $report.GeneratorSiteCoverage=$generatorCorpus.SiteCoverage
+        $report.GeneratorExcluded=$generatorCorpus.Excluded
+        $report.GeneratorAccumulatorBounds=$generatorCorpus.AccumulatorBounds
+        foreach($siteCoverage in $generatorCorpus.SiteCoverage){Write-Host "GeneratorCorpusSite=$($siteCoverage.Site) Used=$($siteCoverage.CapturesUsed) Frames=$($siteCoverage.Captures.Frames -join ',')"}
+        if($generatorCorpus.Count -ne $corpus.Count){throw 'Generator corpus population differs from the decoder corpus.'}
+        Write-Host "GeneratorCorpusUtterances=$($generatorCorpus.Count) AdaInSites=$($packing.MomentSites.Count) VtcmBytes=$($generator.Layout.VtcmBytes)"
         $settings=@(@{Name='A';Description='Statistics';Tables=$tables;Emission=$statistics},@{Name='B';Description='Corpus constants';Tables=$corpus.Tables;Emission=$constants},
             @{Name='C';Description='Normalization off';Tables=$normalizationOff;Emission=$constants},@{Name='D';Description='AdaIN off';Tables=$adainOff;Emission=$constants},
             @{Name='E';Description='Zero decoder style vector; statistics normalization';Tables=$styleZero;Emission=$statistics})
+        foreach($setting in $settings){$setting.GeneratorEmission=$generator; $setting.GeneratorTables=$generatorOnlyTables}
+        $settings+=@(@{Name='F';Description='Decoder constants; generator constants';Tables=$corpus.Tables;Emission=$constants;GeneratorEmission=$constantGenerator;GeneratorTables=$generatorCorpus.Tables},
+            @{Name='G';Description='Decoder statistics; generator constants';Tables=$tables;Emission=$statistics;GeneratorEmission=$constantGenerator;GeneratorTables=$generatorCorpus.Tables})
+        $settings=@($settings | Where-Object {$_.Name -cin @('A','B','F','G')})
         $accepted=Get-KokoroRatchetCase -Name network-free-peach-sm8550
         foreach($variant in $settings){
+            $variantGenerator=$variant.GeneratorEmission
             $report.Stage="$($variant.Name)-Decoder"
             $directory=Join-Path $out $variant.Name; $decoderInput=Join-Path $directory 'decoder'; $generatorInput=Join-Path $directory 'generator'
             [void][IO.Directory]::CreateDirectory($decoderInput); [void][IO.Directory]::CreateDirectory($generatorInput)
             foreach($name in 'activations.bin','weights.bin'){[IO.File]::Copy((Join-Path $decoderDirectory $name),(Join-Path $decoderInput $name))}
             [IO.File]::WriteAllBytes((Join-Path $decoderInput 'tables.bin'),$variant.Tables)
             $decoderRun=Invoke-KokoroDeviceJob -EmissionDirectory $variant.Emission.Directory -EmissionArtifact $variant.Emission -InputDirectory $decoderInput -Soc $Soc -Runs 1 -Package $Package
-            $generatorActivation=[byte[]]::new($generator.Layout.InputBytes)
+            $generatorActivation=[byte[]]::new($variantGenerator.Layout.InputBytes)
             [Array]::Copy($decoderRun.Output,256,$generatorActivation,0,$layout.OutputBytes)
             [Array]::Copy($wholeActivation,0,$generatorActivation,$layout.OutputBytes,$sourceBytes)
             [IO.File]::WriteAllBytes((Join-Path $generatorInput 'activations.bin'),$generatorActivation)
             $weightPrefix=[byte[]]::new($generatorWeightBytes); [Array]::Copy($generatorWeights,$weightPrefix,$weightPrefix.Length)
-            $tablePrefix=[byte[]]::new($generatorTableBytes); [Array]::Copy($generatorTables,$tablePrefix,$tablePrefix.Length)
-            [IO.File]::WriteAllBytes((Join-Path $generatorInput 'weights.bin'),$weightPrefix); [IO.File]::WriteAllBytes((Join-Path $generatorInput 'tables.bin'),$tablePrefix)
+            [IO.File]::WriteAllBytes((Join-Path $generatorInput 'weights.bin'),$weightPrefix); [IO.File]::WriteAllBytes((Join-Path $generatorInput 'tables.bin'),$variant.GeneratorTables)
+            if($variant.Name -ceq 'A'){
+                $report.Stage='GeneratorExportParity'
+                $exportRun=Invoke-KokoroDeviceJob -EmissionDirectory $exportGenerator.Directory -EmissionArtifact $exportGenerator -InputDirectory $generatorInput -Soc $Soc -Runs 1 -Package $Package
+                $exportMetrics=& (Join-Path $Root 'tools/Measure-KokoroPcmSnr.ps1') -OutputPath $exportRun.OutputPath -FixtureDirectory $peach -PcmOffset $exportGenerator.Layout.PcmOffset -Samples $exportGenerator.Layout.Samples
+                if($exportMetrics.PcmSHA256 -cne $accepted.PcmSHA256){throw 'Export generator PCM differs byte for byte from the accepted statistics generator.'}
+                $report.ExportPcmSHA256=$exportMetrics.PcmSHA256
+                $report.Stage='GeneratorExportTerms'
+                $exact=New-KokoroDecoderConstantsTables -Layout $packing -Tables $generatorOnlyTables -Observation $exportRun.Output -OutputOffset 0 -Contracts $generatorContracts
+                $exactInput=Join-Path $directory 'generator-exact-constants'; [void][IO.Directory]::CreateDirectory($exactInput)
+                foreach($file in 'activations.bin','weights.bin'){[IO.File]::Copy((Join-Path $generatorInput $file),(Join-Path $exactInput $file))}
+                [IO.File]::WriteAllBytes((Join-Path $exactInput 'tables.bin'),$exact.Tables)
+                $report.Stage='GeneratorExactConstantsParity'
+                $exactRun=Invoke-KokoroDeviceJob -EmissionDirectory $constantGenerator.Directory -EmissionArtifact $constantGenerator -InputDirectory $exactInput -Soc $Soc -Runs 1 -Package $Package
+                $exactMetrics=& (Join-Path $Root 'tools/Measure-KokoroPcmSnr.ps1') -OutputPath $exactRun.OutputPath -FixtureDirectory $peach -PcmOffset $constantGenerator.Layout.PcmOffset -Samples $constantGenerator.Layout.Samples
+                if($exactMetrics.PcmSHA256 -cne $accepted.PcmSHA256){throw 'Generator constants supplied with exported exact ratios differ from statistics PCM.'}
+                $report.ExactConstantsPcmSHA256=$exactMetrics.PcmSHA256
+                Write-Host 'GeneratorExportParity=True GeneratorExactConstantsParity=True'
+            }
             $report.Stage="$($variant.Name)-GeneratorPlayback"
             Write-Host "Playing=$($variant.Name) $($variant.Description)"
-            $generatorRun=Invoke-KokoroDeviceJob -EmissionDirectory $generator.Directory -EmissionArtifact $generator -InputDirectory $generatorInput -Soc $Soc -Runs 1 -Package $Package
+            $generatorRun=Invoke-KokoroDeviceJob -EmissionDirectory $variantGenerator.Directory -EmissionArtifact $variantGenerator -InputDirectory $generatorInput -Soc $Soc -Runs 1 -Package $Package
             $wav=Join-Path $out "$($variant.Name).wav"
-            $metrics=& (Join-Path $Root 'tools/Measure-KokoroPcmSnr.ps1') -OutputPath $generatorRun.OutputPath -FixtureDirectory $peach -PcmOffset $generator.Layout.PcmOffset -Samples $generator.Layout.Samples -WavPath $wav
+            $metrics=& (Join-Path $Root 'tools/Measure-KokoroPcmSnr.ps1') -OutputPath $generatorRun.OutputPath -FixtureDirectory $peach -PcmOffset $variantGenerator.Layout.PcmOffset -Samples $variantGenerator.Layout.Samples -WavPath $wav
             $row=[pscustomobject]@{Variant=$variant.Name;Description=$variant.Description;Rms=$metrics.Rms;Peak=$metrics.Peak;ClippedSamples=$metrics.ClippedSamples;
-                DecoderDspMs=$decoderRun.MedianMs;GeneratorDspMs=$generatorRun.MedianMs;ListeningLabel='';WavPath=$wav;PcmSHA256=$metrics.PcmSHA256;DecoderOutputPath=$decoderRun.OutputPath;GeneratorOutputPath=$generatorRun.OutputPath}
+                DecoderDspMs=$decoderRun.MedianMs;GeneratorDspMs=$generatorRun.MedianMs;Samples=$metrics.Samples;PcmSnrDb=$metrics.PcmSnrDb;
+                DecoderLibrarySHA256=$variant.Emission.LibrarySHA256;GeneratorLibrarySHA256=$variantGenerator.LibrarySHA256;
+                ListeningLabel='';WavPath=$wav;PcmSHA256=$metrics.PcmSHA256;DecoderOutputPath=$decoderRun.OutputPath;GeneratorOutputPath=$generatorRun.OutputPath}
             $variants.Add($row); $row | Export-Clixml -LiteralPath (Join-Path $directory 'receipt.clixml')
             Write-Host "Completed=$($variant.Name) DecoderDspMs=$($row.DecoderDspMs) RMS=$($row.Rms) Peak=$($row.Peak) Clipped=$($row.ClippedSamples)"
             if($variant.Name -ceq 'A' -and $metrics.PcmSHA256 -cne $accepted.PcmSHA256){throw 'A PCM differs from the accepted peach generator hash.'}
         }
         $report.Status='Passed'; $report.Stage='Complete'
-    } catch {$report.Error=$_.Exception.Message}
-    $result=[pscustomobject]$report; $result | Export-Clixml -LiteralPath (Join-Path $out 'acceptance-b.clixml'); $result
+    } catch {
+        $report.Error=$_.Exception.Message; $report.ErrorPosition=$_.InvocationInfo.PositionMessage; $report.ErrorStack=$_.ScriptStackTrace
+    }
+    $result=[pscustomobject]$report; $result | Export-Clixml -LiteralPath (Join-Path $out 'acceptance-b.clixml') -Depth 12; $result
 }
 
 # Emits a diagnostic tensor job, runs it on the phone with a job input directory, and returns the output tensor bytes

@@ -257,7 +257,9 @@ function New-KokoroAdaInAffineCoefficientsLoopSteps {
 # S1/N. Exact fixture ratios retain the statistics path's integer rounding.
 # r1 is the unchanged Ka/Mb record; r2 receives the existing blocked K/M layout.
 function New-KokoroAdaInConstantCoefficientsLoopSteps {
-    param([ValidateRange(32,2048)][int]$Channels=1120,[string]$LabelPrefix='constantcoeff')
+    param([ValidateRange(32,2048)][int]$Channels=1120,[string]$LabelPrefix='constantcoeff',
+        # Generator Snake consumes flat K[C], M[C], S[C]; the decoder retains blocked K/M.
+        [switch]$Turns)
     if ($Channels % 32) { throw 'Channels must be whole 32-channel blocks' }
     $s = [Collections.Generic.List[hashtable]]::new()
     $s.Add(@{Op='allocframe';Bytes=64})
@@ -307,11 +309,16 @@ function New-KokoroAdaInConstantCoefficientsLoopSteps {
     $s.Add(@{Op='gtu';d=0;s=26;t=19}); $s.Add(@{Op='jump-p';u=0;Label=$positiveCorrection})
     $s.Add(@{Op='sub';d=22;s=16;t=22}); $s.Add(@{Op='label';Name=$positiveCorrection})
     $s.Add(@{Op='load';d=23;s=1;Offset=8}); $s.Add(@{Op='sub';d=23;s=23;t=22})
-    $s.Add(@{Op='store';s=2;t=21;Offset=0}); $s.Add(@{Op='store';s=2;t=23;Offset=128})
+    $s.Add(@{Op='store';s=2;t=21;Offset=0}); $s.Add(@{Op='store';s=2;t=23;Offset=$(if($Turns){4*$Channels}else{128})})
+    if($Turns){
+        $s.Add(@{Op='load';d=14;s=1;Offset=12})
+        $s.Add(@{Op='store';s=2;t=14;Offset=(8*$Channels)})
+    }
     $s.Add(@{Op='addi';d=0;s=0;i=16}); $s.Add(@{Op='addi';d=1;s=1;i=32}); $s.Add(@{Op='addi';d=2;s=2;i=4})
     $s.Add(@{Op='addi';d=17;s=17;i=-1}); $s.Add(@{Op='gtu';d=0;s=17;t=16})
     $s.Add(@{Op='jump-p';u=0;Label="${LabelPrefix}_channel"})
-    $s.Add(@{Op='addi';d=2;s=2;i=128}); $s.Add(@{Op='addi';d=4;s=4;i=-1})
+    if(-not $Turns){$s.Add(@{Op='addi';d=2;s=2;i=128})}
+    $s.Add(@{Op='addi';d=4;s=4;i=-1})
     $s.Add(@{Op='gtu';d=0;s=4;t=16}); $s.Add(@{Op='jump-p';u=0;Label="${LabelPrefix}_block"})
     foreach ($r in 16,18,20,22,24,26) { $s.Add(@{Op='load-d';d=$r;s=29;Offset=(($r-16)*4)}) }
     $s.Add(@{Op='dealloc-return'})

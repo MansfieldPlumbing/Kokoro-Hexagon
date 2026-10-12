@@ -35,6 +35,7 @@ param(
     # KokoroDecoder16Run AdaIN statistics: Accumulate, Export (records and coefficients after the output), Supplied (records
     # from the input) or Corrected (coefficient deltas from the input added to the accumulated coefficients).
     [ValidateSet('Accumulate','Export','Supplied','SuppliedExport','Corrected','Direct','Constants')][string] $DecoderMoments = 'Accumulate',
+    [ValidateSet('Accumulate','Export','Constants')][string] $GeneratorMoments = 'Accumulate',
     [ValidateSet(1, 3, 5)][int] $ConvDilation = 1,
     [switch] $ConvOutputPlanes,
     [ValidateSet(1,2)][int] $ConvWeightPlanes = 1,
@@ -403,7 +404,7 @@ if($Kernel -eq 'KokoroR0Sub0') {
 } elseif($Kernel -eq 'KokoroGeneratorWholeSource16Run') {
     # The whole generator with the harmonic source: decoder output, f0 and z to PCM (tail harness plays the PCM) under the generic tail harness (completion word 1).
     . (Join-Path $PSScriptRoot '..\src\jobs\Kokoro.Generator60x16Run.ps1')
-    $run=New-KokoroGenerator60x16RunSteps -Frames $ResBlockFrames -HvxThreads $ResidentHvxThreads -BatchTiles $ResidentBatchTiles -Whole -Source
+    $run=New-KokoroGenerator60x16RunSteps -Frames $ResBlockFrames -HvxThreads $ResidentHvxThreads -BatchTiles $ResidentBatchTiles -Whole -Source -AdaInMode $GeneratorMoments
     $steps=@($run.Steps)
     $symbol='kokoro_generator_tail_skel_handle_invoke'; $soname='libkokoro_generator_tail_skel.so'
     # The existing generator consumes the decoder tensor through the typed layout.

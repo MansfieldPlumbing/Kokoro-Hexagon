@@ -38,6 +38,7 @@ function Get-KokoroGenerator60x16Layout {
 
 function New-KokoroGenerator60x16RunSteps {
     param([ValidateRange(2,32768)][int]$Frames=7801,[ValidateRange(1,64)][int]$BatchTiles=22,[ValidateRange(1,4)][int]$HvxThreads=4,
+        [ValidateSet('Accumulate','Export','Constants')][string]$AdaInMode='Accumulate',
         # Capacity-sized residual stage with a live int32 frame count appended to the input.
         [switch]$RuntimeFrames,
         [ValidateCount(8,8)][ValidateRange(0,1023)][int[]]$PmuEvents,
@@ -181,6 +182,27 @@ function New-KokoroGenerator60x16RunSteps {
     $runtimeFramesOffset=$totalInput
     if($RuntimeFrames){$totalInput+=4}
     $bind={param([int]$i) $q=$bases[$i]; . $configure $sections[$i] $q[0] $q[1] $q[2] $q[3]}
+    # Site tables live in DDR. Only the active site's ratios occupy the existing
+    # moments scratch; K/M/S retain their existing addresses and extent.
+    $siteByRecord=[Collections.Generic.Dictionary[long,object]]::new()
+    $momentSites=[Collections.Generic.List[object]]::new(); $momentAt=0L; $kmsAt=0L
+    $constantsTableOffset=$totalParameters
+    for($section=0;$section -lt $sections.Count;$section++){
+        . $bind $section
+        $siteBlocks=@(for($bb=0;$bb -lt $branches;$bb++){@{Module='resblocks';Block=$(if($Channels -eq 256){$bb}else{3+$bb});Record=$pBase+6L*$bb*$recordBytes}})
+        if($Front){$siteBlocks+=@{Module='noise_res';Block=$(if($front10){0}else{1});Record=$noiseParameterOffset}}
+        foreach($siteBlock in $siteBlocks){for($st=0;$st -lt 6;$st++){
+            $site=[pscustomobject]@{Index=$momentSites.Count;Name="generator.$($siteBlock.Module).$($siteBlock.Block).stage$st";
+                Module=$siteBlock.Module;Block=$siteBlock.Block;Stage=$st;Width=$Channels;Frames=$Frames;
+                Offset=$momentAt;Bytes=16L*$Channels;KmOffset=$kmsAt;KmBytes=12L*$Channels;
+                RecordOffset=$siteBlock.Record+$st*$recordBytes;KmLayout='Turns'}
+            $momentSites.Add($site); $siteByRecord.Add([long]$site.RecordOffset,$site)
+            $momentAt+=$site.Bytes; $kmsAt+=$site.KmBytes
+        }}
+    }
+    $exportOffset=[long]([math]::Ceiling($totalOutput/128)*128)
+    if($AdaInMode -eq 'Export'){$totalOutput=$exportOffset+$momentAt+$kmsAt}
+    if($AdaInMode -eq 'Constants'){$totalParameters+=$momentAt}
     . $bind 0
     $vtcmBytes=$vtcmTotal
 
@@ -322,7 +344,7 @@ function New-KokoroGenerator60x16RunSteps {
         }
         & $mark 'TileFix'
     }
-    $moments={param([long]$srcOff,[int]$count) & $parallel "body_moments$sfx" @($srcOff,$offMoments) @($true,$false) $count -Moments; & $mark 'Moments' }
+    $moments={param([long]$srcOff,[int]$count) if($AdaInMode -eq 'Constants'){return}; & $parallel "body_moments$sfx" @($srcOff,$offMoments) @($true,$false) $count -Moments; & $mark 'Moments' }
 
     # Checked resource wrapper of the frozen K=11 resblock runner (as the resident stage), with admission
     # sizes and the VTCM request changed.
@@ -494,8 +516,10 @@ function New-KokoroGenerator60x16RunSteps {
         $b=$blk.B; $K=$blk.K
         if($b -lt 0 -and $front10){ & $front10Noise } elseif($b -lt 0){ & $frontNoise } else { & $dma 18 $offResidual $r0Base $r0Offset $tensorBytes }
         if($RuntimeFrames){ & $sync; & $padCapacity $offResidual 0 $tiles 0x8000 }
-        if($b -le 0){ & $zeroRecord $offMoments; & $moments $offResidual $tiles; if($b -eq 0){ & $copyRecord $offInputMoments $offMoments } }
-        else { & $copyRecord $offMoments $offInputMoments }
+        if($AdaInMode -ne 'Constants'){
+            if($b -le 0){ & $zeroRecord $offMoments; & $moments $offResidual $tiles; if($b -eq 0){ & $copyRecord $offInputMoments $offMoments } }
+            else { & $copyRecord $offMoments $offInputMoments }
+        }
         for($p=0;$p -lt 3 -and -not $stopped;$p++){
             $dilation=@(1,3,5)[$p]
             foreach($half in 0,1){
@@ -503,11 +527,18 @@ function New-KokoroGenerator60x16RunSteps {
                 $st=2*$p+$half
                 & $dma 18 $offParams 22 ($blk.P+$st*$recordBytes) $recordBytes
                 & $dma 18 $offWeights 21 ($blk.W+$st*2L*$Channels*$Channels*$K) (2L*$Channels*$Channels*$K)
+                $site=$siteByRecord[[long]($blk.P+$st*$recordBytes)]
+                if($AdaInMode -eq 'Constants'){& $dma 18 $offMoments 22 ($constantsTableOffset+$site.Offset) $site.Bytes}
+                elseif($AdaInMode -eq 'Export'){& $dma 23 ($exportOffset+$site.Offset) 18 $offMoments $site.Bytes}
                 & $ptr 0 18 $offMoments; & $ptr 1 18 $offParams; & $ptr 2 18 $offKms
-                if($RuntimeFrames){ & $liveFrames 3 }else{ & $imm 3 $Frames }
-                & $call "body_coeff$sfx"; & $mark 'Coefficients'
+                if($AdaInMode -eq 'Constants'){& $call "body_constant$sfx"}
+                else {
+                    if($RuntimeFrames){ & $liveFrames 3 }else{ & $imm 3 $Frames }
+                    & $call "body_coeff$sfx"; & $mark 'Coefficients'
+                }
+                if($AdaInMode -eq 'Export'){& $dma 23 ($exportOffset+$momentAt+$site.KmOffset) 18 $offKms $site.KmBytes}
                 if($b -ge 0){ & $dma 25 ($coefOffset+($b*6+$st)*$kmsBytes) 18 $offKms $kmsBytes }
-                & $zeroRecord $offMoments
+                if($AdaInMode -ne 'Constants'){& $zeroRecord $offMoments}
                 $convSource=if($half -eq 0){$offResidual}else{$offConv}
                 $convLabel="body_conv_b$($blk.Body)_d$(if($half -eq 0){$dilation}else{1})$sfx"
                 for($start=0;$start -lt $tiles;$start+=$batch){
@@ -587,8 +618,12 @@ function New-KokoroGenerator60x16RunSteps {
     for($section=0;$section -lt $sections.Count;$section++){
     if($sections.Count -gt 1){ . $bind $section }
     $bodies.Add(@("body_turns$sfx",@(New-KokoroAdaInSnakeTurnsSteps -TurnsBits 22 -Channels $Channels -LabelPrefix "adainsnaketurns$sfx")))
-    $bodies.Add(@("body_moments$sfx",@(New-KokoroAdaInMoments16Steps -Channels $Channels -LabelPrefix "adainmoments16$sfx")))
-    $bodies.Add(@("body_coeff$sfx",@(New-KokoroAdaInTurnsCoefficientsSteps -Channels $Channels -LabelPrefix "turnscoeff$sfx")))
+    if($AdaInMode -eq 'Constants'){
+        $bodies.Add(@("body_constant$sfx",@(New-KokoroAdaInConstantCoefficientsLoopSteps -Channels $Channels -Turns -LabelPrefix "turnsconstant$sfx")))
+    } else {
+        $bodies.Add(@("body_moments$sfx",@(New-KokoroAdaInMoments16Steps -Channels $Channels -LabelPrefix "adainmoments16$sfx")))
+        $bodies.Add(@("body_coeff$sfx",@(New-KokoroAdaInTurnsCoefficientsSteps -Channels $Channels -LabelPrefix "turnscoeff$sfx")))
+    }
     $bodies.Add(@("body_combine_conv$sfx",@(New-KokoroPlaneCombineSteps -Mode Conv -Channels $Channels -Groups 3 -Group3Shifts -PlaneStride $planeStride -LabelPrefix "combineconv$sfx")))
     $bodies.Add(@("body_combine_residual$sfx",@(New-KokoroPlaneCombineSteps -Mode Residual -Channels $Channels -Groups 3 -Group3Shifts -PlaneStride $planeStride -LabelPrefix "combineresidual$sfx")))
     $bodies.Add(@("body_mean$sfx",@(New-KokoroBranchMean16Steps -Channels $Channels -LabelPrefix "branchmean16$sfx")))
@@ -666,5 +701,10 @@ function New-KokoroGenerator60x16RunSteps {
     $labels=@{};$pcs=[Collections.Generic.Dictionary[object,long]]::new();$pc=0L;$isa=Get-InstructionSet
     foreach($step in $s){if($step.Op -eq 'label'){if($labels.ContainsKey($step.Name)){throw "Duplicate label $($step.Name)"};$labels[$step.Name]=$pc};$pcs[$step]=$pc;$pc+=& $isa.Length $step}
     foreach($c in $calls){$delta=[long]([uint32](($labels[$c.label]-$pcs[$c.pc]) -band 0xffffffffL));$c.low.i=$delta -band 65535;$c.high.i=$delta -shr 16}
-    [pscustomobject]@{Steps=$s.ToArray();Layout=[ordered]@{Frames=$Frames;Tiles=$tiles;InputBytes=$totalInput;WeightBytes=$totalWeights;ParameterBytes=$totalParameters;OutputBytes=$totalOutput;VtcmBytes=$vtcmTotal;Samples=$(if($Tail){5*($Frames-1)}else{1});PcmOffset=$(if($Tail){$pcmOffset}else{256});BranchStride=$stride;FinalWorkspaceOffset=$finalOffset;CoefficientOffset=$coefOffset;ScratchOffset=$scratchOffset;CompletedStages=$(6*$branches+[int]$withMean);BatchTiles=$batch;HvxThreads=$HvxThreads;Regions=$layout.Regions}}
+    $resultLayout=[ordered]@{Frames=$Frames;Tiles=$tiles;InputBytes=$totalInput;WeightBytes=$totalWeights;ParameterBytes=$totalParameters;OutputBytes=$totalOutput;VtcmBytes=$vtcmTotal;Samples=$(if($Tail){5*($Frames-1)}else{1});PcmOffset=$(if($Tail){$pcmOffset}else{256});BranchStride=$stride;FinalWorkspaceOffset=$finalOffset;CoefficientOffset=$coefOffset;ScratchOffset=$scratchOffset;CompletedStages=$(6*$branches+[int]$withMean);BatchTiles=$batch;HvxThreads=$HvxThreads;Regions=$layout.Regions}
+    $resultLayout.AdaInMode=$AdaInMode
+    $resultLayout.ConstantPacking=[pscustomobject]@{Frames=$Frames;ParameterBytes=$constantsTableOffset;ConstantsTableOffset=$constantsTableOffset;
+        ConstantsBytes=$momentAt;ConstantsParameterBytes=$constantsTableOffset+$momentAt;OutputBytes=$exportOffset;
+        MomentSites=$momentSites.ToArray();MomentsBytes=$momentAt;KmBytes=$kmsAt}
+    [pscustomobject]@{Steps=$s.ToArray();Layout=$resultLayout}
 }
