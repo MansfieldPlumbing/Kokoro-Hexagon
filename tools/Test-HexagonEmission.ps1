@@ -54,7 +54,7 @@ param(
 $ErrorActionPreference='Stop'
 $output=[IO.Path]::GetFullPath((Join-Path $OutputDirectory $Kernel))
 $pmuArgs=if($ResidentPmuEvents){@{ResidentPmuEvents=$ResidentPmuEvents}}else{@{}}
-$result=& (Join-Path $PSScriptRoot 'Emit-HexagonProbe.ps1') -OutputDirectory $output `
+$result=& (Join-Path $PSScriptRoot 'Emit-HexagonProbe.ps1') -OutputDirectory $output -ReferenceAssembly `
     -Kernel $Kernel -ResBlockFrames $ResBlockFrames -ResBlockKernel $ResBlockKernel -IntegerChannels $IntegerChannels -LinearRows $LinearRows -LinearInputChannels $LinearInputChannels `
     -LinearOutputChannels $LinearOutputChannels -LinearVectorOutputTiles:$LinearVectorOutputTiles `
     -AdaInFrames $AdaInFrames -AdaInChannels $AdaInChannels -AdaInVectorConvolution:$AdaInVectorConvolution -ConvChannels $ConvChannels -ConvInputChannels $ConvInputChannels -ConvOutputChannels $ConvOutputChannels -LeakyOutput $LeakyOutput -LeakyIdentity:$LeakyIdentity -DecoderPass $DecoderPass -DecoderFrames $DecoderFrames -DecoderHalfword $DecoderHalfword -DecoderChannel $DecoderChannel -CombineOutputTileSkip $CombineOutputTileSkip -DecoderStopAfterBlock $DecoderStopAfterBlock -DecoderDumpPoint $DecoderDumpPoint -ConvKernel $ConvKernel -ConvDilation $ConvDilation -ConvOutputPlanes:$ConvOutputPlanes -ConvWeightPlanes $ConvWeightPlanes -CombineMode $CombineMode -CombineGroups $CombineGroups -ResidentCostProbePasses $ResidentCostProbePasses -ResidentCostProbeTurnsBody:$ResidentCostProbeTurnsBody -ConvTiles $ConvTiles -RegionBody:$RegionBody `

@@ -64,9 +64,11 @@ param(
     [switch] $BypassAdaInCoefficients,
     [switch] $BypassStatisticsAndCoefficients,
     [switch] $BypassHmxCompute,
+    [switch] $ReferenceAssembly,
     [switch] $Force
 )
 $ErrorActionPreference = 'Stop'
+$emissionClock = [Diagnostics.Stopwatch]::StartNew()
 if ($RegionBody -and $Kernel -notin @('KokoroAlbertAttention3','KokoroAlbertAttentionOutput3')) {
     throw 'Region-body encoding is supported only for the ALBERT attention regions.'
 }
@@ -86,10 +88,21 @@ function Get-PinnedUpstreamText {
         [Parameter(Mandatory)][ValidatePattern('^(setup\.ps1|lib/[A-Za-z0-9._-]+)$')][string] $Path,
         [Parameter(Mandatory)][ValidatePattern('^[0-9A-Fa-f]{64}$')][string] $Sha256
     )
-    $response = Invoke-WebRequest -Uri ($script:PwshBaseUrl + $Path) -UseBasicParsing
-    $bytes = $response.RawContentStream.ToArray()
+    $cacheDirectory = Join-Path $PSScriptRoot '../build/upstream-text'
+    $cachePath = Join-Path $cacheDirectory $Sha256.ToUpperInvariant()
+    $cached = [IO.File]::Exists($cachePath)
+    if ($cached) {
+        $bytes = [IO.File]::ReadAllBytes($cachePath)
+    } else {
+        $response = Invoke-WebRequest -Uri ($script:PwshBaseUrl + $Path) -UseBasicParsing
+        $bytes = $response.RawContentStream.ToArray()
+    }
     $actual = [Convert]::ToHexString([Security.Cryptography.SHA256]::HashData($bytes))
     if ($actual -cne $Sha256) { throw "Pinned upstream source hash mismatch: $Path" }
+    if (-not $cached) {
+        [void][IO.Directory]::CreateDirectory($cacheDirectory)
+        [IO.File]::WriteAllBytes($cachePath, $bytes)
+    }
     [Text.Encoding]::UTF8.GetString($bytes)
 }
 $setupText = Get-PinnedUpstreamText 'setup.ps1' '44432CB738EDB13FB7B2AEA999C265A94F5EEAC867DC4E4E39C1503E0E813D62'
@@ -122,12 +135,18 @@ $definitions=foreach($name in $names) {
     if($nodes.Count -ne 1) { throw "Writer function not unique: $name" }
     $source=$nodes[0].Extent.Text
     if($name -eq 'New-ElfCodeLibrary') {
-        # Three explicit adaptations: permit zero imports, reserve one extra dynamic
-        # entry, and write the ABI-mandatory DT_HEXAGON_VER=3 (SDK 19.0.04 ABI guide).
+        # Permit zero imports, reserve the ABI-mandatory DT_HEXAGON_VER=3 entry
+        # (SDK 19.0.04 ABI guide), and retain lengths from the layout pass.
         $edits=@(
             @('[Parameter(Mandatory)][string[]] $Needed','[AllowEmptyCollection()][string[]] $Needed'),
             @('$L.Dynamic * (11 + $Needed.Count)','$L.Dynamic * (12 + $Needed.Count)'),
-            @('@($elf[''DT_NULL''], 0)))','@($elf[''DT_HEXAGON_VER''], 3), @($elf[''DT_NULL''], 0)))')
+            @('@($elf[''DT_NULL''], 0)))','@($elf[''DT_HEXAGON_VER''], 3), @($elf[''DT_NULL''], 0)))'),
+            @('$functionSize = @{}', '$functionSize = @{}; $functionLengths = @{}'),
+            @('$size = 0', '$size = 0; $lengths = [Collections.Generic.List[int]]::new(); $functionLengths[$name] = $lengths'),
+            @('$pc = [long]$functionOffset[$name]', '$pc = [long]$functionOffset[$name]; $lengthIndex = 0; $lengths = $functionLengths[$name]'),
+            @('$length = & $isa.Length -Step $step', '$length = $lengths[$lengthIndex]; $lengthIndex++'),
+            @('$size += & $isa.Length -Step $step', '$length = & $isa.Length -Step $step; $lengths.Add($length); $size += $length'),
+            @('Functions = $Functions', 'Functions = $Functions; CodeSizes = $functionSize; StepLengths = $functionLengths')
         )
         foreach($edit in $edits) {
             if(([regex]::Matches($source,[regex]::Escape($edit[0]))).Count -ne 1) { throw 'Writer adaptation anchor mismatch' }
@@ -157,6 +176,7 @@ $elf.DT_HEXAGON_VER=[Convert]::ToUInt32($m.Groups[1].Value.Substring(2),16)
 # llvm-project 08169f5fb1b7386002cdb66e52192580fc0fcf24 llvm/include/llvm/BinaryFormat/ELFRelocs/Hexagon.def:40,42
 $elf['R_HEX_GLOB_DAT']=[uint32]33; $elf['R_HEX_RELATIVE']=[uint32]35
 $script:Target=[pscustomobject]@{ElfClass=32;Machine='EM_HEXAGON';ElfFlags=@('EF_HEXAGON_ISA_V73');RelocationForm='RELA';GotRelocation='R_HEX_GLOB_DAT';RelativeRelocation='R_HEX_RELATIVE'}
+$setupSeconds = $emissionClock.Elapsed.TotalSeconds
 if($Kernel -eq 'KokoroR0Sub0') {
     $modelPath=Join-Path $PSScriptRoot '..\src\models\Kokoro.R0Sub0.ps1'
     $modelAst=[Management.Automation.Language.Parser]::ParseFile($modelPath,[ref]$tokens,[ref]$errors)
@@ -489,31 +509,41 @@ if ($RegionBody) {
     $steps+=@(@{Op='imm';d=0;i=0},@{Op='return'},@{Op='label';Name='encoding_domain'},@{Op='imm';d=0;i=33},@{Op='return'})
     $symbol+='_encoding_only'; $soname=$soname.Replace('_skel.so','_region_encoding_only.so')
 }
+$stepSeconds = $emissionClock.Elapsed.TotalSeconds - $setupSeconds
+$stageClock = [Diagnostics.Stopwatch]::StartNew()
 $library=New-ElfCodeLibrary -Soname $soname -Needed @() -Functions ([ordered]@{$symbol=$steps}) -PageSize 4096
+$librarySeconds = $stageClock.Elapsed.TotalSeconds
 if($Kernel -notin 'KokoroHarmonicSource16Run','KokoroDecoder16Run','KokoroGeneratorWholeSource16Run' -and $Kernel -in 'KokoroAlbertLinear16Run','KokoroAlbertLayerNorm16Run','KokoroAlbertGelu16Run','KokoroAlbertAttention16Run','KokoroAlbertEmbed16Run','KokoroAlbert16Run','KokoroDecoder16Run','KokoroDecoderGenerator16Run','KokoroResBlockRun','KokoroGenerator60xRun','KokoroGenerator60xResidentRun','KokoroGenerator60x16Run','KokoroGeneratorTailRun','KokoroGeneratorTail16Run','KokoroGeneratorStage16TailRun','KokoroResBlock16Run','KokoroGeneratorFrontStageTailRun','KokoroGeneratorFront10x16Run','KokoroGeneratorWhole16Run','KokoroHarmonicStft16Run','KokoroHarmonicSource16Run','KokoroGeneratorWholeSource16Run') {
     Write-NewOrIdenticalFile (Join-Path $OutputDirectory 'runner-link.json') ([Text.Encoding]::UTF8.GetBytes((@{Entry=$library.Exports[$symbol];Got=$library.GotSlots} | ConvertTo-Json -Depth 4))) -AllowOverwrite:$Force
 }
 $path=Join-Path $OutputDirectory $soname
 Write-NewOrIdenticalFile $path $library.Bytes -AllowOverwrite:$Force
-# GOT calls: give each step its resolved slot - pc so the independent assembly encodes the same bytes.
-$isaLength=(Get-InstructionSet).Length
-$pcAt=[long]$library.Exports[$symbol]
-foreach($step in $steps) {
-    if($step.Op -eq 'got-call') { $step.Delta=[long]$library.GotSlots[$step.Import]-$pcAt }
-    $pcAt+=& $isaLength $step
+$stageClock.Restart()
+if ($ReferenceAssembly) {
+    # GOT calls use the lengths already admitted by the writer's layout pass.
+    $pcAt=[long]$library.Exports[$symbol]
+    $lengths=$library.StepLengths[$symbol]
+    for ($stepIndex=0; $stepIndex -lt $steps.Count; $stepIndex++) {
+        $step=$steps[$stepIndex]
+        if($step.Op -eq 'got-call') { $step.Delta=[long]$library.GotSlots[$step.Import]-$pcAt }
+        $pcAt+=$lengths[$stepIndex]
+    }
+    $asm=@('.text','.p2align 2',".global $symbol",".type $symbol,@function","${symbol}:")
+    $asm+=@($steps | ForEach-Object {ConvertTo-HexagonAssembly $_})
+    Write-NewOrIdenticalFile (Join-Path $OutputDirectory 'probe-reference.s') ([Text.Encoding]::UTF8.GetBytes(($asm -join "`n")+"`n")) -AllowOverwrite:$Force
 }
-$asm=@('.text','.p2align 2',".global $symbol",".type $symbol,@function","${symbol}:")
-$asm+=@($steps | ForEach-Object {ConvertTo-HexagonAssembly $_})
-Write-NewOrIdenticalFile (Join-Path $OutputDirectory 'probe-reference.s') ([Text.Encoding]::UTF8.GetBytes(($asm -join "`n")+"`n")) -AllowOverwrite:$Force
+$referenceSeconds = $stageClock.Elapsed.TotalSeconds
+$stageClock.Restart()
 $codeStart=[int]$library.Exports[$symbol]
-$isa=Get-InstructionSet
-$codeLength=($steps | Where-Object Op -ne 'label' | ForEach-Object { & $isa.Length $_ } | Measure-Object -Sum).Sum
+$codeLength=[int]$library.CodeSizes[$symbol]
 $code=[byte[]]::new($codeLength); [Array]::Copy($library.Bytes,$codeStart,$code,0,$codeLength)
 Write-NewOrIdenticalFile (Join-Path $OutputDirectory 'emitted-code.bin') $code -AllowOverwrite:$Force
 $artifactHash=(Get-FileHash $path).Hash
 $emissionResult=[pscustomobject]@{PSTypeName='Kokoro.Hexagon.Emission';Kernel=$Kernel;Path=$path;Directory=$OutputDirectory;
     Bytes=$library.Bytes.Length;CodeBytes=$codeLength;SHA256=$artifactHash;LibrarySHA256=$artifactHash;
-    Imports=$library.Imports.Count;Relocations=0;RegionBodyEncodingOnly=[bool]$RegionBody}
+    Imports=$library.Imports.Count;Relocations=0;RegionBodyEncodingOnly=[bool]$RegionBody;
+    Timings=[pscustomobject]@{SetupSeconds=$setupSeconds;StepsSeconds=$stepSeconds;LibrarySeconds=$librarySeconds;
+        ReferenceSeconds=$referenceSeconds;CodeSeconds=$stageClock.Elapsed.TotalSeconds;TotalSeconds=$emissionClock.Elapsed.TotalSeconds}}
 if ($Kernel -cin 'KokoroHarmonicSource16Run','KokoroDecoder16Run','KokoroGeneratorWholeSource16Run') {
     $emissionResult | Add-Member -NotePropertyMembers @{
         Layout=$run.Layout;Steps=$steps;Link=[pscustomobject]@{Entry=$library.Exports[$symbol];Got=$library.GotSlots}
