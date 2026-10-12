@@ -538,8 +538,15 @@ function New-KokoroGenerator60x16RunSteps {
         & $dma 18 $gHi 25 $har60At ($tiles60*4096L); & $dma 18 $gLo 25 ($har60At+$tiles60*4096L) ($tiles60*4096L)
         & $fillVectors $gPmHi ($tiles10*128) 0x80008000L; & $fillVectors $gPmLo ($tiles10*128) 0
         & $mark 'Unmarked' -site 32; & $sync
-        & $imm 0 $upFramesWhole; & $ptr 1 18 $gHi; & $ptr 2 18 $gLo; & $ptr 3 18 $gPmHi; & $ptr 4 18 $gPmLo; & $imm 5 0
+        $phaseTileCount=[int][math]::Floor($upFramesWhole/32)
+        if(-not $RuntimeFrames -and $phaseTileCount -gt 0){
+            & $parallel 'body_har_phase_major_tiles' @($gHi,$gLo,$gPmHi,$gPmLo,$gPmHi) @($false,$false,$true,$true,$false) $phaseTileCount
+        }
+        # Complete output tiles are independent; retain the existing row body for the partial tile.
+        if($RuntimeFrames -or $upFramesWhole%32){
+        & $imm 0 $(if($RuntimeFrames){$upFramesWhole}else{$upFramesWhole%32}); & $ptr 1 18 $gHi; & $ptr 2 18 $gLo; & $ptr 3 18 $gPmHi; & $ptr 4 18 $gPmLo; & $imm 5 $(if($RuntimeFrames){0}else{32*$phaseTileCount})
         & $call 'body_har_phase_major'
+        }
         & $imm 0 1; & $ptr 1 18 $gHi; & $ptr 2 18 $gLo; & $ptr 3 18 $gPmHi; & $ptr 4 18 $gPmLo; & $imm 5 $upFramesWhole
         & $call 'body_har_phase_major_last'
         & $mark 'Unmarked' -site 33; & $sync
@@ -699,6 +706,7 @@ function New-KokoroGenerator60x16RunSteps {
     if($Source){
         foreach($pair in (Get-KokoroHarmonicSource16Bodies -PlaneStride $sourceLayout.Stft.PlaneStride)){ $bodies.Add($pair) }
         $bodies.Add(@('body_har_phase_major',@(New-KokoroHarPhaseMajor16Steps -Phases 6)))
+        $bodies.Add(@('body_har_phase_major_tiles',@(New-KokoroHarPhaseMajor16Steps -Phases 6 -TileBatch -LabelPrefix 'harphasemajor16tiles')))
         $bodies.Add(@('body_har_phase_major_last',@(New-KokoroHarPhaseMajor16Steps -Phases 1 -LabelPrefix 'harphasemajor16last')))
     }
     foreach($entry in $padBodies){

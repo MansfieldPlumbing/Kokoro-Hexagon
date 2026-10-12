@@ -9,8 +9,18 @@
 # r3 output high plane, r4 output low plane, r5 first m' (0). Rows per m' (6, or fewer for a last partial row) are set by
 # -Phases. Caller-saved registers only.
 function New-KokoroHarPhaseMajor16Steps {
-    param([ValidateRange(1,6)][int]$Phases=6,[string]$LabelPrefix='harphasemajor16',[switch]$NoReturn)
+    param([ValidateRange(1,6)][int]$Phases=6,[string]$LabelPrefix='harphasemajor16',[switch]$NoReturn,[switch]$TileBatch)
     $s = [Collections.Generic.List[hashtable]]::new()
+    if($TileBatch){
+        # Pool ABI: r0/r1 source planes, r2/r3 destination chunk, r4 full high-plane base, r5 tile count.
+        # A destination tile is 16384 bytes / 32 rows. Recover the absolute first row and full bases;
+        # the unchanged row body below then writes only this chunk's complete tiles.
+        $s.Add(@{Op='addi';d=7;s=0;i=0}); $s.Add(@{Op='addi';d=8;s=1;i=0})
+        $s.Add(@{Op='sub';d=6;s=2;t=4})
+        $s.Add(@{Op='sub';d=4;s=3;t=6}); $s.Add(@{Op='sub';d=3;s=2;t=6})
+        $s.Add(@{Op='asl-i';d=0;s=5;i=5}); $s.Add(@{Op='lsr-i';d=5;s=6;i=9})
+        $s.Add(@{Op='addi';d=1;s=7;i=0}); $s.Add(@{Op='addi';d=2;s=8;i=0})
+    }
     $imm = { param([int]$r,[long]$v) $u=[long]([uint32]($v -band 0xffffffffL)); $s.Add(@{Op='lo';x=$r;i=($u -band 65535)}); $s.Add(@{Op='hi';x=$r;i=($u -shr 16)}) }
     # Crouton row offset of row index in rs (tile bytes tb) into rd: (r >> 5) tb + ((r & 31) >> 1) 128 + (r & 1) 2.
     $rowOff = { param([int]$rd,[int]$rs,[int]$tileShift)
