@@ -92,10 +92,50 @@ $bindExport = {
     [Runtime.InteropServices.Marshal]::GetDelegateForFunctionPointer($address, $type)
 }.GetNewClosure()
 
+$newSharedPayload = {
+    param([IntPtr]$Library, [byte[]]$Bytes)
+    if ($null -eq $Bytes -or $Bytes.Length -lt 1) { throw 'Shared payload is empty.' }
+    # FastRPC d2475196 inc/rpcmem.h and inc/remote.h: system heap 25,
+    # uncached CPU allocation, static CDSP mapping. Payload is immutable after map.
+    $allocate = & $bindExport $Library 'rpcmem_alloc' ([IntPtr]) ([Type[]]@([int],[uint32],[int]))
+    $free = & $bindExport $Library 'rpcmem_free' ([void]) ([Type[]]@([IntPtr]))
+    $toFd = & $bindExport $Library 'rpcmem_to_fd' ([int]) ([Type[]]@([IntPtr]))
+    $map = & $bindExport $Library 'remote_mem_map' ([int]) ([Type[]]@([int],[int],[int],[uint64],[UIntPtr],([uint64]).MakeByRefType()))
+    $unmap = & $bindExport $Library 'remote_mem_unmap' ([int]) ([Type[]]@([int],[uint64],[UIntPtr]))
+    $size = [int64]([math]::Ceiling($Bytes.Length / 4096.0) * 4096)
+    if ($size -gt [int]::MaxValue) { throw 'Shared payload exceeds rpcmem_alloc bounds.' }
+    $pointer = $allocate.Invoke(25, [uint32]0, [int]$size)
+    if ($pointer -eq [IntPtr]::Zero) { throw 'rpcmem_alloc failed.' }
+    $remoteAddress = [uint64]0
+    $mapped = $false
+    try {
+        [Runtime.InteropServices.Marshal]::Copy($Bytes, 0, $pointer, $Bytes.Length)
+        $fd = $toFd.Invoke($pointer)
+        if ($fd -lt 0) { throw 'rpcmem_to_fd failed.' }
+        $mapArguments = [object[]]@([int]3,[int]$fd,[int]0,[uint64]$pointer.ToInt64(),[UIntPtr]::new([uint64]$size),[uint64]0)
+        $rc = [int]$map.DynamicInvoke($mapArguments)
+        if ($rc -ne 0) { throw "remote_mem_map failed rc=$rc" }
+        $remoteAddress = [uint64]$mapArguments[5]; $mapped = $true
+        if ($remoteAddress -eq 0 -or $remoteAddress + $Bytes.Length -gt [uint32]::MaxValue) {
+            throw 'Shared payload is outside the DSP address range.'
+        }
+        [pscustomobject]@{Pointer=$pointer;RemoteAddress=$remoteAddress;Bytes=$Bytes.Length;MappedBytes=$size;Free=$free;Unmap=$unmap}
+    }
+    catch {
+        if ($mapped) {
+            $cleanupRc = $unmap.Invoke(3,$remoteAddress,[UIntPtr]::new([uint64]$size))
+            if ($cleanupRc -ne 0) { throw "Shared payload cleanup failed rc=$cleanupRc; allocation retained until process exit." }
+        }
+        $free.Invoke($pointer)
+        throw
+    }
+}.GetNewClosure()
+
 [pscustomobject]@{
     PSTypeName = 'Kokoro.Native.Binding'
     Name = 'Native.Binding'
     CallingConvention = 'Cdecl'
     NewDelegateType = $newDelegateType
     BindExport = $bindExport
+    NewSharedPayload = $newSharedPayload
 }

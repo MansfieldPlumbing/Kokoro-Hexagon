@@ -20,6 +20,7 @@ function Write-KokoroProbeStage {
 $Marshal = [Runtime.InteropServices.Marshal]; $native = [IntPtr]::Zero; $opened = $false; $handle = [uint64]0
 $pins = [Collections.Generic.List[object]]::new(); $allocations = [Collections.Generic.List[object]]::new()
 $passed = $false; $stream = $null; $audio = $null
+$sharedPayloads = [Collections.Generic.List[object]]::new()
 try {
     $kv = @{}; foreach ($l in [IO.File]::ReadAllLines([IO.Path]::Combine($dir, 'spec.txt'))) { $p = $l.Split('=', 2); if ($p.Count -eq 2) { $kv[$p[0]] = $p[1] } }
     $tiles = [int]$kv.Tiles; $runs = [int]$kv.Runs; $outputBytes = [int]$kv.OutputBytes; $pcmOffset = [int]$kv.PcmOffset; $samples = [int]$kv.Samples
@@ -84,17 +85,40 @@ try {
     $inputBytes = if ($kv.InputBytes) { [long]$kv.InputBytes } else { $tiles * 8192L }
     if ($act.Length -ne $inputBytes) { throw 'Input length' }
     $config = [BitConverter]::GetBytes([uint32]$tiles)
+    $resident = $kv.ContainsKey('ResidentPayloads')
+    $mappingMs = 0.0
+    if ($resident) {
+        $mappingClock = [Diagnostics.Stopwatch]::StartNew()
+        $sharedWeights = & $abi.NewSharedPayload $native $wts; $sharedPayloads.Add($sharedWeights)
+        $sharedTables = & $abi.NewSharedPayload $native $tbl; $sharedPayloads.Add($sharedTables)
+        $config = [byte[]]::new(20)
+        $fields = [uint32[]]@($tiles,$sharedWeights.RemoteAddress,$wts.Length,$sharedTables.RemoteAddress,$tbl.Length)
+        [Buffer]::BlockCopy($fields,0,$config,0,20)
+        $mappingClock.Stop(); $mappingMs = $mappingClock.Elapsed.TotalMilliseconds
+        $lines.Add("ResidentPayloads=True MappingMs=$($mappingMs.ToString('F3',$inv)) WeightsBytes=$($wts.Length) TablesBytes=$($tbl.Length) Allocation=RpcmemSystemUncached Mapping=RemoteMemMapStatic OncePerSession=True")
+    }
     $ticks = [Collections.Generic.List[long]]::new(); $pcmHash = $null; $allOk = $true; $pcm = $null
     for ($run = 0; $run -lt $runs; $run++) {
+        $phaseClock = [Diagnostics.Stopwatch]::StartNew()
+        $setupEntry = $phaseClock.ElapsedTicks
         $out = [byte[]]::new($outputBytes)
-        $bufs = @($config, $act, $wts, $tbl, $out)
+        $bufs = if ($resident) { @($config,$act,$out) } else { @($config, $act, $wts, $tbl, $out) }
         $argBlock = $Marshal::AllocHGlobal(16 * $bufs.Count); $allocations.Add($argBlock)
         for ($i = 0; $i -lt $bufs.Count; $i++) { $Marshal::WriteIntPtr($argBlock, 16 * $i, (& $pin $bufs[$i])); $Marshal::WriteInt64($argBlock, 16 * $i + 8, [long]$bufs[$i].Length) }
+        $scalars = if ($resident) { [uint32]0x03020100 } else { [uint32]0x02040100 }
+        $invokeArguments = [object[]]@($handle, $scalars, $argBlock)
+        $invokeEntry = $phaseClock.ElapsedTicks
         $sw = [Diagnostics.Stopwatch]::StartNew()
-        $rc = [int]$invoke.DynamicInvoke([object[]]@($handle, [uint32]0x02040100, $argBlock))
+        $rc = [int]$invoke.DynamicInvoke($invokeArguments)
         $sw.Stop()
         $stage = [BitConverter]::ToInt32($out, 36); $done = [BitConverter]::ToInt32($out, 44)
         $t0 = [BitConverter]::ToUInt64($out, 0); $t1 = [BitConverter]::ToUInt64($out, 8); $dt = [long]($t1 - $t0)
+        if ($resident) {
+            $entryTick = [BitConverter]::ToUInt64($out,64); $returnTick = [BitConverter]::ToUInt64($out,72)
+            if ($entryTick -gt $t0 -or $returnTick -lt $t1) { throw 'Skel timing order is invalid.' }
+            $lines.Add("Run=$run SkelEntryTicks=$entryTick RegionStartTicks=$t0 RegionEndTicks=$t1 SkelReturnTicks=$returnTick EntryToRegionMs=$((($t0-$entryTick)/19200.0).ToString('F3',$inv)) RegionToReturnMs=$((($returnTick-$t1)/19200.0).ToString('F3',$inv))")
+            if ($run -eq 0) { $lines.Add("FirstCallIncludingMappingMs=$(($mappingMs+$sw.Elapsed.TotalMilliseconds+($invokeEntry-$setupEntry)*1000.0/[Diagnostics.Stopwatch]::Frequency).ToString('F3',$inv))") }
+        }
         $pcmBytes = [byte[]]::new(2 * $samples); [Buffer]::BlockCopy($out, $pcmOffset, $pcmBytes, 0, $pcmBytes.Length)
         $hash = [Convert]::ToHexString([Security.Cryptography.SHA256]::HashData($pcmBytes))
         if ($run -eq 0) {
@@ -132,6 +156,14 @@ try {
 catch { $lines.Add('Error=' + $_.Exception.Message.Replace("`r", ' ').Replace("`n", ' ')) }
 finally {
     if ($null -ne $stream -and $null -ne $audio) { try { $null = & $audio.Close $stream } catch { $lines.Add('CloseError=' + $_.Exception.Message) } }
+    foreach ($payload in $sharedPayloads) {
+        try {
+            $unmapRc = $payload.Unmap.Invoke(3,[uint64]$payload.RemoteAddress,[UIntPtr]::new([uint64]$payload.MappedBytes))
+            $lines.Add("PayloadUnmapRc=$unmapRc")
+            if ($unmapRc -eq 0) { $payload.Free.Invoke($payload.Pointer) } else { $passed=$false }
+        }
+        catch { $passed=$false; $lines.Add('PayloadCleanupError=' + $_.Exception.Message) }
+    }
     if ($opened) { $null = $close.DynamicInvoke([object[]]@($handle)) }
     foreach ($g in $pins) { $g.Free() }
     foreach ($a in $allocations) { $Marshal::FreeHGlobal($a) }

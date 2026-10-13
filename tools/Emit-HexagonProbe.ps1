@@ -73,6 +73,7 @@ param(
     [switch] $BypassAdaInCoefficients,
     [switch] $BypassStatisticsAndCoefficients,
     [switch] $BypassHmxCompute,
+    [switch] $ResidentPayloads,
     [switch] $ReferenceAssembly,
     [switch] $Force
 )
@@ -601,6 +602,12 @@ if($Kernel -eq 'KokoroR0Sub0') {
 } else {
     $steps=@(New-HexagonProbeSteps)
     $symbol='kqnn_emit_skel_handle_invoke'; $soname='libkqnn_emit_skel.so'
+}
+if ($ResidentPayloads) {
+    if ($Kernel -cne 'KokoroDecoderGenerator16Run' -or $ResidentPmuEvents) { throw 'Resident payload adapter requires the combined job without PMU telemetry.' }
+    . (Join-Path $PSScriptRoot '../src/jobs/Kokoro.ResidentPayload.ps1')
+    $steps=@(Add-KokoroResidentPayloadEntry -Steps $steps -Layout $run.Layout)
+    $run.Layout.ResidentPayloads=$true
 }
 if ($RegionBody) {
     # Close external control flow solely for independent encoding verification.

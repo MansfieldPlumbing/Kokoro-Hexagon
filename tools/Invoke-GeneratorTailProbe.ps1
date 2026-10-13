@@ -19,7 +19,10 @@ param(
     [string] $Adb = 'C:\backup\Android\platform-tools\adb.exe',
     [string] $Package = 'dev.mansfieldplumbing.kokoro',
     [ValidateRange(10, 600)][int] $TimeoutSeconds = 180,
-    [pscustomobject] $EmissionArtifact
+    [pscustomobject] $EmissionArtifact,
+    [ValidatePattern('^[0-9A-F]{64}$')][string] $ExpectedPcmSHA256,
+    [switch] $AttributeBuffers,
+    [switch] $ResidentPayloads
 )
 $ErrorActionPreference = 'Stop'
 if ($Package -notmatch '^[a-zA-Z0-9_.]+$') { throw 'Invalid Android package name' }
@@ -59,6 +62,12 @@ foreach ($p in $harness, $binding, $aaudio) { $e = $null; $null = [Management.Au
 $id = [Guid]::NewGuid().ToString('N')
 $spec = Join-Path $emission "tail-spec-$id.txt"
 [IO.File]::WriteAllLines($spec, @("Tiles=$($layout.Tiles)", "Runs=$Runs", "OutputBytes=$($layout.OutputBytes)", "PcmOffset=$($layout.PcmOffset)", "Samples=$($layout.Samples)", "InputBytes=$($layout.InputBytes)"))
+if ($ExpectedPcmSHA256) { [IO.File]::AppendAllText($spec, "ExpectedPcmSHA256=$ExpectedPcmSHA256`n") }
+if ($AttributeBuffers) { [IO.File]::AppendAllText($spec, "AttributeBuffers=True`n") }
+if ($ResidentPayloads) {
+    if ($AttributeBuffers -or -not $layout.ResidentPayloads) { throw 'Resident payloads require the admitted adapter and no buffer probe.' }
+    [IO.File]::AppendAllText($spec, "ResidentPayloads=True`n")
+}
 $temp = "/data/local/tmp/kokoro-tail-$id"
 $backup = "files/kokoro-fl/generator-tail-backup-$id"
 $target = 'files/kokoro-fl/generator-tail'
