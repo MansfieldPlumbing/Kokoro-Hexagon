@@ -105,5 +105,18 @@ hash; generated artifacts stay under the ignored `build/` directory. Phone comma
 run only against an attached, authorized device, and results from different phone
 models are kept separate.
 
-Kokoro-82M is by hexgrad and is licensed under Apache-2.0. This implementation is
-independently authored.
+## Provenance
+
+Kokoro-82M is developed by hexgrad and released under the Apache-2.0 license.
+PowerShell and .NET are developed by Microsoft and released under the MIT license.
+We acknowledge both with respect; this project is not affiliated with or endorsed
+by either.
+
+This repository contains no Kokoro weights, voices or model-derived data. Model
+inputs come from the upstream Kokoro release, pinned by hash; everything generated
+from them stays in the ignored `build/` directory and is not distributed.
+
+All code in this repository, including the Hexagon instruction encoder, the DSP
+kernels, the phonemizer and the text front end, is written independently in
+PowerShell. It does not copy, translate or port code from other Kokoro
+implementations.
