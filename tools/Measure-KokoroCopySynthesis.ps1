@@ -1,5 +1,5 @@
 #requires -Version 7.4
-param([Parameter(Mandatory)][string]$OutputDirectory,[string]$CorrelationReceipt)
+param([Parameter(Mandatory)][string]$OutputDirectory,[string]$CorrelationReceipt,[string]$LadderReceipt)
 $ErrorActionPreference='Stop'
 Set-StrictMode -Version Latest
 $root=Split-Path $PSScriptRoot -Parent
@@ -160,6 +160,75 @@ if($CorrelationReceipt){
     $receipt
     return
 }
+function Measure-CopyCandidate([double[]]$candidate,[string]$mode){
+    $gain=[math]::Sqrt($numeric.Dot.Invoke($stock,$stock)/$numeric.Dot.Invoke($candidate,$candidate))
+    if(-not [double]::IsFinite($gain)){throw 'Nonfinite level match.'}
+    $numeric.Scale.Invoke($candidate,$gain)
+    if(-not [double]::IsFinite([Linq.Enumerable]::Min($candidate)) -or -not [double]::IsFinite([Linq.Enumerable]::Max($candidate))){throw 'Nonfinite synthesis.'}
+    $wav=Join-Path $out ($reference.Name+'-'+$mode+'.wav');Write-CopyWave $wav $candidate
+    $rms=[double[]]::new($frames);$sumSquared=0.0;$active=0
+    $stockLog=[double[]]::new($bins);$synthLog=[double[]]::new($bins)
+    $envStockLog=[double[]]::new(64);$envSynthLog=[double[]]::new(64);$envSynth=[double[]]::new(64)
+    $pairedStock=[double[]]::new(64*$frames);$pairedSynth=[double[]]::new(64*$frames)
+    $grain=[double[]]::new($length);$spec=[double[]]::new(2*$bins);$power=[double[]]::new($bins);$stats=[double[]]::new(100)
+    $gate=[Linq.Enumerable]::Max($stockRms)*0.001
+    for($frame=0;$frame -lt $frames;$frame++){
+        $numeric.Window.Invoke($candidate,$frame*$hop,$window,$grain);Invoke-CopyMatrix $grain $forward $spec
+        $numeric.Power.Invoke($spec,$power,2.0/($length*$windowEnergy));$rms[$frame]=[math]::Sqrt([Linq.Enumerable]::Sum($power))
+        if($stockRms[$frame] -lt $gate){continue}
+        $numeric.Log.Invoke($analysis[$frame].Power,$floorPower,$stockLog);$numeric.Log.Invoke($power,$floorPower,$synthLog)
+        $sumSquared+=$numeric.SquaredDistance.Invoke($stockLog,$synthLog)
+        [Array]::Clear($stats);$numeric.Bands.Invoke($power,0.0,$stats)
+        for($j=0;$j -lt 64;$j++){$envSynth[$j]=$stats[$j]/$envelopeCounts[$j]}
+        $numeric.Log.Invoke($analysis[$frame].Envelope,$floorPower,$envStockLog);$numeric.Log.Invoke($envSynth,$floorPower,$envSynthLog)
+        [Array]::Copy($envStockLog,0,$pairedStock,64*$active,64);[Array]::Copy($envSynthLog,0,$pairedSynth,64*$active,64);$active++
+    }
+    if($active -lt 1){throw 'No active evaluation frames.'}
+    $left=[double[]]::new(64*$active);$right=[double[]]::new($left.Length)
+    [Array]::Copy($pairedStock,$left,$left.Length);[Array]::Copy($pairedSynth,$right,$right.Length)
+    [pscustomobject]@{Reference=$reference.Name;Label=$reference.Label;Mode=$mode;Samples=$samples;Frames=$frames;ActiveFrames=$active;
+        LsdDb=[math]::Sqrt($sumSquared/($active*$bins));SpectralEnvelopeCorrelation=(Get-CopyCorrelation $left $right);
+        TemporalEnvelopeCorrelation=(Get-CopyCorrelation $stockRms $rms);LevelMatchGain=$gain;StockWav=$stockWave;Wav=$wav;
+        WavSHA256=(Get-FileHash $wav).Hash;PcmInput=$reference.Pcm.Path;PcmSHA256=$reference.Pcm.SHA256;F0Input=$reference.Pitch.Path;F0SHA256=$reference.Pitch.SHA256}
+}
+function Get-CopyOverlap([double[]]$Values){
+    $grain=[double[]]::new($length);$sum=[double[]]::new($Values.Length);$weights=[double[]]::new($Values.Length)
+    for($center=0;$center -lt $Values.Length;$center+=$hop){
+        $numeric.Window.Invoke($Values,$center,$constantWindow,$grain)
+        $numeric.Overlap.Invoke($grain,$center,$constantWindow,$sum,$weights)
+    }
+    if([Linq.Enumerable]::Min($weights) -le 0){throw 'Uncovered overlap-add sample.'}
+    $effective=[double[]]$weights.Clone();$numeric.Normalize.Invoke($effective,$weights)
+    if([Linq.Enumerable]::Min($effective) -ne 1.0 -or [Linq.Enumerable]::Max($effective) -ne 1.0){throw 'Normalized overlap-add is not constant.'}
+    $numeric.Normalize.Invoke($sum,$weights)
+    ,$sum
+}
+if($LadderReceipt){
+    $ladderSource=[IO.Path]::GetFullPath($LadderReceipt)
+    if(-not $ladderSource.StartsWith($build,[StringComparison]::OrdinalIgnoreCase)){throw 'Use the original run2 receipt in this worktree build/.'}
+    $baseline=Import-Clixml -LiteralPath $ladderSource
+    $baselineMetrics=Import-Clixml (Join-Path $root 'docs/results/copy-synthesis-correlation-20261013.clixml')
+    if($baselineMetrics.RenderingReceiptSHA256 -cne (Get-FileHash $ladderSource).Hash){throw 'Corrected baseline metrics do not match run2.'}
+    if($baseline.SampleRate -ne $sampleRate -or $baseline.WindowSamples -ne $length -or $baseline.HopSamples -ne $hop -or $baseline.EnvelopeBands -ne 64){throw 'Run2 settings differ.'}
+    $baselineHashes=[Collections.Generic.Dictionary[string,string]]::new([StringComparer]::OrdinalIgnoreCase)
+    foreach($baselineResult in $baseline.Results){foreach($wave in @($baselineResult.Wav,$baselineResult.StockWav)){$baselineHashes[$wave]=(Get-FileHash $wave).Hash}}
+    $constantWindow=[double[]]::new($length);$windowSums=[double[]]::new($hop)
+    for($j=0;$j -lt $length;$j++){$windowSums[$j%$hop]+=$window[$j]}
+    for($j=0;$j -lt $length;$j++){$constantWindow[$j]=$window[$j]/$windowSums[$j%$hop]}
+    $constantSums=[double[]]::new($hop)
+    for($j=0;$j -lt $length;$j++){$constantSums[$j%$hop]+=$constantWindow[$j]}
+    $constantDeviation=0.0;foreach($value in $constantSums){$constantDeviation=[math]::Max($constantDeviation,[math]::Abs($value-1))}
+    if($constantDeviation -gt 1e-12){throw 'Constant-sum window assertion failed.'}
+    # Exercise continuous tracks with an affine amplitude and a known carrier.
+    $trackPhase=[double[]]::new(360);$trackAmplitude=[double[][]]@(@(0,1),@(0,2),@(0,3));$trackOffset=[double[][]]@(@(0,0),@(0,0),@(0,0))
+    $trackResult=[double[]]::new(360);$numeric.Tracks.Invoke($trackPhase,$trackAmplitude,$trackOffset,120,$trackResult)
+    for($j=0;$j -lt 240;$j++){if([math]::Abs($trackResult[$j]-(1+$j/120.0)) -gt 1e-12){throw 'Harmonic amplitude interpolation assertion failed.'}}
+    $continuity=[Collections.Generic.List[object]]::new();$sharedAnalysis=[Collections.Generic.List[object]]::new()
+    $voicingSource=Join-Path $inputRoot 'generator-constants-gate2b-20261012-140157/generator-corpus-6/source/kokoro/istftnet.py'
+    $voicingSourceHash='66515CB3369D1C0BBB2015AD7293D019FB1F80FEFCB2D56E70E73B6B146AF11C'
+    if((Get-FileHash $voicingSource).Hash -cne $voicingSourceHash){throw 'Pinned voicing source differs.'}
+    $voicedThreshold=10.0
+}
 # Meaningful independent transform checks before processing captures.
 $test=[double[]]::new($length);$test[13]=1.0;$spectrum=[double[]]::new(2*$bins);$reconstructed=[double[]]::new($length)
 Invoke-CopyMatrix $test $forward $spectrum;Invoke-CopyMatrix $spectrum $inverse $reconstructed
@@ -225,7 +294,12 @@ if((Test-Path -LiteralPath $archivePath) -and (Test-Path -LiteralPath $stockPath
 $rows=[Collections.Generic.List[object]]::new();$windowEnergy=$numeric.Dot.Invoke($window,$window)
 $clock=[Diagnostics.Stopwatch]::StartNew()
 foreach($reference in $references){
+    $analysisClock=[Diagnostics.Stopwatch]::StartNew()
     $stock=$reference.Pcm.Values;$pitch=$reference.Pitch.Values;$samples=$stock.Length
+    if($LadderReceipt){
+        $baselineRow=@($baseline.Results|Where-Object {$_.Reference -ceq $reference.Name -and $_.Mode -ceq 'copy'})
+        if($baselineRow.Count -ne 1 -or $baselineRow[0].PcmSHA256 -cne $reference.Pcm.SHA256 -or $baselineRow[0].F0SHA256 -cne $reference.Pitch.SHA256){throw 'Ladder inputs differ from run2.'}
+    }
     if($samples -ne 300*$pitch.Length){throw 'PCM/F0 timebase extent differs.'}
     $positive=[double[]]@($pitch|Where-Object {$_ -gt 0});[Array]::Sort($positive)
     if(-not $positive.Length -or -not [double]::IsFinite($positive[-1])){throw 'No valid captured F0.'}
@@ -248,9 +322,88 @@ foreach($reference in $references){
         }
         $stockRms[$frame]=[math]::Sqrt([Linq.Enumerable]::Sum($power))
         $analysis[$frame]=[pscustomobject]@{Envelope=$envelope;Periodicity=$periodicity;Power=$power.Clone()}
+        if($LadderReceipt){$analysis[$frame]|Add-Member Spectrum $spec.Clone()}
     }
     $stockWave=Join-Path $out ($reference.Name+'-stock.wav');Write-CopyWave $stockWave $stock
     $floorPower=[math]::Max(1e-30,($analysis|ForEach-Object{[Linq.Enumerable]::Max([double[]]$_.Power)}|Measure-Object -Maximum).Maximum*1e-8)
+    if($LadderReceipt){
+        $sharedAnalysis.Add([pscustomobject]@{Reference=$reference.Name;Seconds=$analysisClock.Elapsed.TotalSeconds})
+        $rungClock=[Diagnostics.Stopwatch]::StartNew()
+        $measuredPhase=[double[]]::new($samples);$numeric.Phase.Invoke($pitch,$measuredPhase)
+        $measuredAmplitude=[double[][]]::new($frames);$measuredOffset=[double[][]]::new($frames)
+        $run2Amplitude=[double[][]]::new($frames);$zeroOffset=[double[][]]::new($frames)
+        $lastOffset=[double[]]::new(1201);$windowTotal=[Linq.Enumerable]::Sum($window)
+        for($frame=0;$frame -lt $frames;$frame++){
+            $center=$frame*$hop;$f0=Get-CopyF0 $carrier $center;$data=$analysis[$frame]
+            Invoke-CopyMatrix $data.Envelope $interpolation $envBin;Invoke-CopyMatrix $data.Periodicity $periodLookup $periodBin
+            $lo=[math]::Max(0,[int][math]::Floor(($center-$length/2)/300));$hi=[math]::Min($carrier.Length-1,[int][math]::Ceiling(($center+$length/2)/300))
+            $maximum=0.0;for($j=$lo;$j -le $hi;$j++){$maximum=[math]::Max($maximum,$carrier[$j])}
+            $run2Limit=1+[int][math]::Floor(11999/$maximum)
+            $run2Amplitude[$frame]=[double[]]::new($run2Limit);$numeric.Amplitudes.Invoke($envBin,$periodBin,$f0,$run2Amplitude[$frame])
+            $zeroOffset[$frame]=[double[]]::new(1)
+            $capturedF0=Get-CopyF0 $pitch $center
+            $measuredLimit=if($capturedF0 -gt $voicedThreshold){1+[int][math]::Floor(11999/$capturedF0)}else{1}
+            $measuredAmplitude[$frame]=[double[]]::new($measuredLimit);$measuredOffset[$frame]=[double[]]::new($measuredLimit)
+            for($harmonic=1;$harmonic -lt $measuredLimit;$harmonic++){
+                $frequency=$harmonic*$capturedF0
+                $position=$frequency*$length/$sampleRate;$bin=[int][math]::Floor($position);$fraction=$position-$bin
+                # Center the STFT phase BEFORE interpolating its complex samples.
+                # For an even window, the center shift is (-1)^bin at DFT bins.
+                $sign=if($bin%2){-1.0}else{1.0};$nextSign=-$sign
+                $real=$data.Spectrum[$bin]*$sign*(1-$fraction)+$data.Spectrum[$bin+1]*$nextSign*$fraction
+                $imag=$data.Spectrum[$bins+$bin]*$sign*(1-$fraction)+$data.Spectrum[$bins+$bin+1]*$nextSign*$fraction
+                $amplitude=2*[math]::Sqrt($real*$real+$imag*$imag)/$windowTotal
+                $measuredAmplitude[$frame][$harmonic]=$amplitude
+                $offset=[math]::Atan2($imag,$real)-$harmonic*$measuredPhase[$center]
+                $delta=$offset-$lastOffset[$harmonic];$delta-=(2*[math]::PI)*[math]::Floor(($delta+[math]::PI)/(2*[math]::PI))
+                if($amplitude -gt 1e-12){$lastOffset[$harmonic]+=$delta}
+                $measuredOffset[$frame][$harmonic]=$lastOffset[$harmonic]
+            }
+        }
+        $harmonicPart=[double[]]::new($samples);$residual=[double[]]::new($samples)
+        $numeric.Tracks.Invoke($measuredPhase,$measuredAmplitude,$measuredOffset,$hop,$harmonicPart)
+        $harmonicPart=Get-CopyOverlap $harmonicPart
+        $numeric.Subtract.Invoke($stock,$harmonicPart,$residual)
+        $candidate=[double[]]::new($samples);$numeric.Add.Invoke($harmonicPart,$residual,$candidate)
+        $row=Measure-CopyCandidate $candidate 'R1';$row|Add-Member RuntimeSeconds $rungClock.Elapsed.TotalSeconds;$rows.Add($row)
+        if($row.LsdDb -gt 1e-9){throw 'R1 reconstruction gate failed.'}
+        Write-Host "$($reference.Name) R1 complete"
+        foreach($rung in 'R4c'){
+            $rungClock.Restart();$part=[double[]]::new($samples)
+            $amplitudeTrack=$run2Amplitude
+            $offsetTrack=$zeroOffset
+            $numeric.Tracks.Invoke($phase,$amplitudeTrack,$offsetTrack,$hop,$part);$part=Get-CopyOverlap $part
+            if($rung -ceq 'R4c'){
+                $noiseSum=[double[]]::new($samples);$noiseWeights=[double[]]::new($samples);$shaped=[double[]]::new(2*$bins)
+                for($frame=0;$frame -lt $frames;$frame++){
+                    $center=$frame*$hop;$data=$analysis[$frame]
+                    Invoke-CopyMatrix $data.Envelope $interpolation $envBin;Invoke-CopyMatrix $data.Periodicity $periodLookup $periodBin
+                    $numeric.Window.Invoke($noise,$center,$window,$grain);Invoke-CopyMatrix $grain $forward $spec
+                    $numeric.Noise.Invoke($spec,$envBin,$periodBin,$shaped);Invoke-CopyMatrix $shaped $inverse $grain
+                    for($j=0;$j -lt $length;$j++){$grain[$j]/=$windowSums[$j%$hop]}
+                    $numeric.Overlap.Invoke($grain,$center,$constantWindow,$noiseSum,$noiseWeights)
+                }
+                $numeric.Normalize.Invoke($noiseSum,$noiseWeights);$numeric.Add.Invoke($part,$noiseSum,$candidate)
+            }
+            $row=Measure-CopyCandidate $candidate $rung;$row|Add-Member RuntimeSeconds $rungClock.Elapsed.TotalSeconds;$rows.Add($row)
+            Write-Host "$($reference.Name) $rung complete"
+        }
+        $continuity.Add([pscustomobject]@{Reference=$reference.Name;PhaseResets=$false;AmplitudeInterpolation='Linear between per-harmonic frame knots';
+            FrequencyInterpolation='Shared sample-clock F0 integral; measured phase offsets unwrapped, smoothstep interpolated';
+            RawConstantWindowMaxDeviation=$constantDeviation;NormalizedWindowMaxDeviation=0.0;Residual='Stock minus the continuous R1 harmonic waveform; R2 and R3 skipped'})
+        $baselineWave=Join-Path $out ($reference.Name+'-R4.wav')
+        Copy-Item -LiteralPath $baselineRow[0].Wav -Destination $baselineWave
+        if((Get-FileHash $baselineWave).Hash -cne (Get-FileHash $baselineRow[0].Wav).Hash){throw 'R4 byte mismatch against run2.'}
+        if((Get-FileHash $stockWave).Hash -cne (Get-FileHash $baselineRow[0].StockWav).Hash){throw 'Stock reference byte mismatch against run2.'}
+        $saved=@($baselineMetrics.Results|Where-Object {$_.Reference -ceq $reference.Name -and $_.Mode -ceq 'copy'})
+        if($saved.Count -ne 1){throw 'Missing corrected R4 metrics.'}
+        $savedRow=[ordered]@{};foreach($property in $saved[0].PSObject.Properties){$savedRow[$property.Name]=$property.Value}
+        $savedRow.Mode='R4';$savedRow.Wav=$baselineWave;$savedRow.StockWav=$stockWave
+        $savedRow.RuntimeSeconds=$null;$savedRow.RuntimeScope='Reused run2 WAV and corrected metrics; not re-rendered. Original 596.114452 s covers all references and both original modes, not R4 alone.'
+        $rows.Add([pscustomobject]$savedRow)
+        if((Get-FileHash -LiteralPath $reference.Pcm.Path).Hash -cne $reference.Pcm.SHA256 -or (Get-FileHash -LiteralPath $reference.Pitch.Path).Hash -cne $reference.Pitch.SHA256){throw 'Read-only input changed.'}
+        continue
+    }
     foreach($mode in 'copy','buzzy'){
         $synth=[double[]]::new($samples);$weights=[double[]]::new($samples);$shaped=[double[]]::new(2*$bins)
         for($frame=0;$frame -lt $frames;$frame++){
@@ -306,5 +459,16 @@ $receipt=[pscustomobject]@{Status='Passed';BaseCommit=(& git -C $root rev-parse 
     ExtraPeach=$extraPeach;NoiseSeed=20261013;NoiseDistribution='Uniform, zero mean, unit variance';FloorDb=-80;ActiveFrameGateDb=-60;
     OriginalPitchRows=$pitchRows;Results=$rows.ToArray();ElapsedSeconds=$clock.Elapsed.TotalSeconds;
     KernelSHA256=(Get-FileHash (Join-Path $PSScriptRoot 'Kokoro.CopySynthesisKernels.psm1')).Hash;HarnessSHA256=(Get-FileHash $PSCommandPath).Hash}
+if($LadderReceipt){
+    foreach($wave in $baselineHashes.Keys){if((Get-FileHash $wave).Hash -cne $baselineHashes[$wave]){throw 'Run2 audio changed during ladder.'}}
+    $receipt|Add-Member Operation 'CopySynthesisLadder';$receipt|Add-Member Run2Receipt $ladderSource
+    $receipt|Add-Member Run2ReceiptSHA256 (Get-FileHash $ladderSource).Hash
+    $receipt|Add-Member VoicingSource ([pscustomobject]@{Path=$voicingSource;SHA256=$voicingSourceHash;StockCommit='dfb907a02bba8152ca444717ca5d78747ccb4bec';ThresholdHz=$voicedThreshold;
+        GeneratorLine='265: harmonic_num=8, voiced_threshod=10)';SineGenLine='139: uv = (f0 > self.voiced_threshold).type(torch.float32)'})
+    $receipt|Add-Member SharedAnalysis $sharedAnalysis.ToArray();$receipt|Add-Member Continuity $continuity.ToArray()
+    $receipt|Add-Member TimingScope 'Per-reference R1 and R4c times include synthesis, WAV verification, and metrics; shared stock analysis separate. R1 also includes measured harmonic analysis and creation of the residual. R4 reused without rendering. R2 and R3 skipped. No runtime optimization.'
+    $receipt|Add-Member Run2Listening 'Copy synthesis: band-limited and distorted, without excessive buzz. Fully voiced control: buzzy as expected.'
+    $receipt|Add-Member Run2Continuity ([pscustomobject]@{PhaseResets=$false;ExplicitAmplitudeInterpolation=$false;AmplitudeBlending='Hann overlap-add of frame-constant amplitudes';RawWindowMin=[Linq.Enumerable]::Min($windowSums);RawWindowMax=[Linq.Enumerable]::Max($windowSums);RawWindowMaxDeviation=0.00437113909807341;NormalizedWindowMaxDeviation=0.0})
+}
 $receipt|Export-Clixml -LiteralPath (Join-Path $out 'receipt.clixml') -Depth 8
 $receipt

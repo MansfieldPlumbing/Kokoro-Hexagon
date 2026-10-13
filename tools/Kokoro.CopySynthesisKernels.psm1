@@ -137,7 +137,49 @@ function Get-KokoroCopySynthesisKernels {
             $E::AddAssign($squaredB,$E::Multiply($centeredB,$centeredB)),
             $E::AddAssign($cross,$E::Multiply($centeredA,$centeredB))))),
         $E::Condition($E::AndAlso($E::GreaterThan($squaredA,$dz),$E::GreaterThan($squaredB,$dz)),
-            $E::Divide($cross,$denominator),$undefined)) -Value
+            $E::Condition($E::AndAlso($E::Equal($cross,$squaredA),$E::Equal($cross,$squaredB)),
+                $do,$E::Divide($cross,$denominator)),$undefined)) -Value
+    # Continuous harmonic tracks: linear amplitude, and smooth unwrapped phase
+    # corrections relative to the shared F0 integral. Corrections have zero slope
+    # at frame knots, so instantaneous frequency is continuous at those knots.
+    $hop=$E::Parameter([int],'hop')
+    $amplitudes=$E::Parameter([double[][]],'amplitudes');$offsets=$E::Parameter([double[][]],'offsets')
+    $frameAmplitude=$E::Variable([double[]],'frameAmplitude');$nextAmplitude=$E::Variable([double[]],'nextAmplitude')
+    $frameOffset=$E::Variable([double[]],'frameOffset');$nextOffset=$E::Variable([double[]],'nextOffset')
+    $frame=$E::Variable([int],'frame');$next=$E::Variable([int],'next')
+    $limit=$E::Variable([int],'trackLimit')
+    $blend=$E::Variable([double],'blend');$amplitudeValue=$E::Variable([double],'amplitudeValue')
+    $correction=$E::Variable([double],'correction')
+    $trackFrames=$E::ArrayLength($amplitudes)
+    $firstAmplitude=$E::Condition($E::LessThan($h,$E::ArrayLength($frameAmplitude)),$E::ArrayIndex($frameAmplitude,$h),$dz)
+    $secondAmplitude=$E::Condition($E::LessThan($h,$E::ArrayLength($nextAmplitude)),$E::ArrayIndex($nextAmplitude,$h),$dz)
+    $firstOffset=$E::Condition($E::LessThan($h,$E::ArrayLength($frameOffset)),$E::ArrayIndex($frameOffset,$h),
+        $E::Condition($E::LessThan($h,$E::ArrayLength($nextOffset)),$E::ArrayIndex($nextOffset,$h),$dz))
+    $secondOffset=$E::Condition($E::LessThan($h,$E::ArrayLength($nextOffset)),$E::ArrayIndex($nextOffset,$h),$firstOffset)
+    $smooth=$E::Multiply($E::Multiply($fraction,$fraction),$E::Subtract($E::Constant(3.0),$E::Multiply($E::Constant(2.0),$fraction)))
+    $kernels.Tracks=New-CopyKernel ([Action[double[],double[][],double[][],int,double[]]]) @($a,$amplitudes,$offsets,$hop,$d) @(
+        $i,$h,$frame,$next,$limit,$frameAmplitude,$nextAmplitude,$frameOffset,$nextOffset,$fraction,$blend,$amplitudeValue,$correction,$sum) @(
+        (New-CopyLoop $i ($E::ArrayLength($d)) ($E::Block(
+            $E::Assign($frame,$E::Divide($i,$hop)),
+            $E::Assign($next,$E::Condition($E::LessThan($E::Add($frame,$one),$trackFrames),$E::Add($frame,$one),$frame)),
+            $E::Assign($frameAmplitude,$E::ArrayIndex($amplitudes,$frame)),$E::Assign($nextAmplitude,$E::ArrayIndex($amplitudes,$next)),
+            $E::Assign($frameOffset,$E::ArrayIndex($offsets,$frame)),$E::Assign($nextOffset,$E::ArrayIndex($offsets,$next)),
+            $E::Assign($limit,$E::Condition($E::GreaterThan($E::ArrayLength($frameAmplitude),$E::ArrayLength($nextAmplitude)),
+                $E::ArrayLength($frameAmplitude),$E::ArrayLength($nextAmplitude))),
+            $E::Assign($fraction,$E::Divide($E::Convert($E::Modulo($i,$hop),[double]),$E::Convert($hop,[double]))),
+            $E::Assign($blend,$smooth),$E::Assign($sum,$dz),
+            (New-CopyLoop $h $limit ($E::Block(
+                $E::Assign($amplitudeValue,$E::Add($E::Multiply($firstAmplitude,$E::Subtract($do,$fraction)),
+                    $E::Multiply($secondAmplitude,$fraction))),
+                $E::Assign($correction,$E::Add($E::Multiply($firstOffset,$E::Subtract($do,$blend)),
+                    $E::Multiply($secondOffset,$blend))),
+                $E::AddAssign($sum,$E::Multiply($amplitudeValue,(New-CopyMath Cos @(
+                    $E::Add($E::Multiply($E::Convert($h,[double]),$ai),$correction))))))) -Start 1),
+            $E::Assign($di,$sum)))))
+    $kernels.Subtract=New-CopyKernel ([Action[double[],double[],double[]]]) @($a,$b,$c) @($i) @(
+        (New-CopyLoop $i ($E::ArrayLength($a)) ($E::Assign($ci,$E::Subtract($ai,$bi)))))
+    $kernels.Add=New-CopyKernel ([Action[double[],double[],double[]]]) @($a,$b,$c) @($i) @(
+        (New-CopyLoop $i ($E::ArrayLength($a)) ($E::Assign($ci,$E::Add($ai,$bi)))))
     [pscustomobject]$kernels
 }
 Export-ModuleMember -Function Get-KokoroCopySynthesisKernels

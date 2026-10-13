@@ -12,6 +12,7 @@ twice, or written as a scratch script, is a missing command: add it here.
                               no adb, no phone, no network. Phone access is only in Run, Ratchet and Compare.
   Verify                      Check tracked source, repository hygiene, handoff, Status, tests and optional case pairs.
   CopySynthesis -OutputDirectory [-Path receipt.clixml]  Offline copy-synthesis; -Path rescoring changes only correlation.
+                              -Parameters @{Ladder=$true} -Path run2/receipt.clixml renders R1/R4c and reuses R4.
   BuildHost -OutputDirectory  Build and retain the pinned arm64 diagnostic APK; no phone access.
   Ratchet  [-Case]            Case-pair check, then every unblocked ratchet case on the phone; throws on regression.
   Run      -Case [-Hypothesis] [-Runs]
@@ -2089,7 +2090,10 @@ switch ($Command) {
     'CopySynthesis' {
         if(-not $OutputDirectory){throw 'CopySynthesis needs a fresh -OutputDirectory under this worktree build/.'}
         $copyArguments=@{OutputDirectory=$OutputDirectory}
-        if($Path){$copyArguments.CorrelationReceipt=$Path}
+        if($Parameters -and $Parameters.Ladder){
+            if(-not $Path){throw 'The ladder requires -Path to the run2 rendering receipt.'}
+            $copyArguments.LadderReceipt=$Path
+        }elseif($Path){$copyArguments.CorrelationReceipt=$Path}
         & (Join-Path $Root 'tools/Measure-KokoroCopySynthesis.ps1') @copyArguments
     }
     'StageResidency' {

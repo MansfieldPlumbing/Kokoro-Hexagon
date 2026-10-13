@@ -1,0 +1,614 @@
+<Objs Version="1.1.0.1" xmlns="http://schemas.microsoft.com/powershell/2004/04">
+  <Obj RefId="0">
+    <TN RefId="0">
+      <T>Deserialized.System.Management.Automation.PSCustomObject</T>
+      <T>Deserialized.System.Object</T>
+    </TN>
+    <MS>
+      <S N="Status">Passed</S>
+      <S N="BaseCommit">6313acef4e2355a28f5dd94d830e1a7d3560d859</S>
+      <I32 N="SampleRate">24000</I32>
+      <I32 N="HopSamples">120</I32>
+      <I32 N="WindowSamples">1024</I32>
+      <I32 N="EnvelopeBands">64</I32>
+      <I32 N="PeriodicityBands">12</I32>
+      <S N="ExtraPeach">Included: captured F0 in existing target-eval.npz; existing PowerShell NPY reader reused.</S>
+      <I32 N="NoiseSeed">20261013</I32>
+      <S N="NoiseDistribution">Uniform, zero mean, unit variance</S>
+      <I32 N="FloorDb">-80</I32>
+      <I32 N="ActiveFrameGateDb">-60</I32>
+      <Obj N="OriginalPitchRows" RefId="1">
+        <TN RefId="1">
+          <T>Deserialized.System.Object[]</T>
+          <T>Deserialized.System.Array</T>
+          <T>Deserialized.System.Object</T>
+        </TN>
+        <LST>
+          <Obj RefId="2">
+            <TNRef RefId="0" />
+            <MS>
+              <S N="Root">C:\Dev\Kokoro-Hexagon\build\capture-iphone-bench\0-generator</S>
+              <S N="Phonemes">həlˈO ðˈɛɹ.</S>
+              <Db N="P95">255.8899688720703</Db>
+            </MS>
+          </Obj>
+          <Obj RefId="3">
+            <TNRef RefId="0" />
+            <MS>
+              <S N="Root">C:\Dev\Kokoro-Hexagon\build\generator-constants-gate2b-20261012-140157\generator-corpus-1</S>
+              <S N="Phonemes">ði ˈɜɹli mˈɔɹnɪŋ sˈʌn kˈæst lˈɔŋ ʃˈædOz əkɹˈɔs ði ˈɛmpti stɹˈit.</S>
+              <Db N="P95">259.2438659667969</Db>
+            </MS>
+          </Obj>
+          <Obj RefId="4">
+            <TNRef RefId="0" />
+            <MS>
+              <S N="Root">C:\Dev\Kokoro-Hexagon\build\generator-constants-gate2b-20261012-140157\generator-corpus-2</S>
+              <S N="Phonemes">ʃˌi hæd bɪn wˈATɪŋ fɔɹ nˈɪɹli ɐn ˈWəɹ. ðə bˈʌs, æz jˈuʒəwəl, wʌz lˈAt. ɐ kˈOld wˈɪnd pˈɪkt ˌʌp, ɹˈʌsᵊlɪŋ ðə lˈivz æt hɜɹ fˈit.</S>
+              <Db N="P95">260.58087158203125</Db>
+            </MS>
+          </Obj>
+          <Obj RefId="5">
+            <TNRef RefId="0" />
+            <MS>
+              <S N="Root">C:\Dev\Kokoro-Hexagon\build\generator-constants-gate2b-20261012-140157\generator-corpus-3</S>
+              <S N="Phonemes">ɪn ðə kwˈIət tˈWn ʌv mˈɪlbɹʊk, nˈuz tɹˈævəld fˈæstəɹ ðən ðə wˈɪnd. bˌI ðə tˈIm ðə ʃˈɛɹəf əɹˈIvd æt ðə sˈin, hˈæf ðə ɹˈɛzədᵊnts hæd ˌɔlɹˈɛdi ɡˈæðəɹd, wˈɪspəɹɪŋ θˈɪɹiz ænd tɹˈAdɪŋ hˌæfɹəmˈɛmbəɹd fˈækts. nˈObˌɑdi ɹˈiᵊli nˈu wˌʌt hæd hˈæpənd, bˌʌt ˈɛvɹibədi hæd ɐn əpˈɪnjᵊn.</S>
+              <Db N="P95">261.72589111328125</Db>
+            </MS>
+          </Obj>
+          <Obj RefId="6">
+            <TNRef RefId="0" />
+            <MS>
+              <S N="Root">C:\Dev\Kokoro-Hexagon\build\generator-constants-gate2b-20261012-140157\generator-corpus-4</S>
+              <S N="Phonemes">ði ˌɛkspədˈɪʃən dəpˈɑɹTᵻd ˌɔn mˈɑɹʧ fˌɔɹtˈinθ, nˌIntˈin twˈɛnti θɹˈi, wɪð twˈɛlv mˈɛn, θɹˈi slˈɛdz, ænd pɹəvˈɪʒᵊnz ɪnˈʌf fɔɹ sˈɪksti dˈAz. wɪðˈɪn tˈu wˈiks, ɐ sˈʌdᵊn blˈɪzəɹd hæd sˈɛpəɹˌATᵻd ðə lˈid pˈɑɹTi fɹʌm ðə səplˈI tɹˈAn; wˌʌt ʃˌʊd hæv bɪn ɐ ɹutˈin kɹˈɔsɪŋ bəkˈAm ɐ dˈɛspəɹət fˈIt fɔɹ səɹvˈIvᵊl. bˌI ðə tˈIm ɹˈɛskju əɹˈIvd, ˈOnli fˈɔɹ mˈɛmbəɹz ʌv ði əɹˈɪʤənᵊl tˈim ɹəmˈAnd, ðɛɹ ʤˈɜɹnᵊlz lˈATəɹ hˈAld æz ɐ ɹəmˈɑɹkəbᵊl ɹˈɛkəɹd ʌv pˈOləɹ ˌɛkspləɹˈAʃən.</S>
+              <Db N="P95">258.957763671875</Db>
+            </MS>
+          </Obj>
+          <Obj RefId="7">
+            <TNRef RefId="0" />
+            <MS>
+              <S N="Root">C:\Dev\Kokoro-Hexagon\build\generator-constants-gate2b-20261012-140157\generator-corpus-5</S>
+              <S N="Phonemes">ðə hˈɪstəɹi ʌv hjˈumən flˈIt ɪz, ɪn mˈɛni ɹəspˈɛkts, ɐ hˈɪstəɹi ʌv stˈʌbəɹn ɹəfjˈuzᵊl. fˌɔɹ θˈWzᵊndz ʌv jˈɪɹz, əbzˈɜɹvəɹz wˈɑʧt bˈɜɹdz sˈɔɹ ˈɛfəɹtləsli əbˈʌv ðˌɛm ænd kənklˈudᵻd ðæt hjˈumənz wɜɹ nˌɑt mˈɛnt tə ʤˈYn ðˌɛm. jˈɛt ɪnvˈɛntəɹz pəɹsˈɪstᵻd. ðˌA bˈɪlt wˈɪŋz ʌv fˈɛðəɹz ænd wˈæks; ɡlˈIdəɹz ʌv sˈɪlk ænd bˌæmbˈu; bəlˈunz fˈɪld wɪð hˈIdɹəʤᵊn, hˈiliəm, ɔɹ sˈɪmpli hˈɑt ˈɛɹ fɹʌm ɐ smˈOki fˈIəɹ. ˈiʧ fˈAljəɹ tˈɔt sˈʌmθˌɪŋ nˈu əbˈWt lˈɪft, dɹˈæɡ, ænd ðə kjˈʊɹiəs bəhˈAvjəɹ ʌv flˈuɪdz ˈOvəɹ ðiz kˈɜɹvd sˈɜɹfəsᵻz.</S>
+              <Db N="P95">254.7448272705078</Db>
+            </MS>
+          </Obj>
+          <Obj RefId="8">
+            <TNRef RefId="0" />
+            <MS>
+              <S N="Root">C:\Dev\Kokoro-Hexagon\build\generator-constants-gate2b-20261012-140157\generator-corpus-6</S>
+              <S N="Phonemes">hˌW ɑɹ ju tədˈA? ˌI ɐm dˈuɪŋ ɹˈizənəbli wˈɛl, θˈæŋk ju fɔɹ ˈæskɪŋ</S>
+              <Db N="P95">259.521484375</Db>
+            </MS>
+          </Obj>
+        </LST>
+      </Obj>
+      <Obj N="Results" RefId="9">
+        <TNRef RefId="1" />
+        <LST>
+          <Obj RefId="10">
+            <TNRef RefId="0" />
+            <MS>
+              <S N="Reference">peach-fixture</S>
+              <S N="Label">stock synthesis of the network-free peach fixture</S>
+              <S N="Mode">R1</S>
+              <I32 N="Samples">51000</I32>
+              <I32 N="Frames">425</I32>
+              <I32 N="ActiveFrames">289</I32>
+              <Db N="LsdDb">0</Db>
+              <Db N="SpectralEnvelopeCorrelation">1</Db>
+              <Db N="TemporalEnvelopeCorrelation">1</Db>
+              <Db N="LevelMatchGain">1</Db>
+              <S N="StockWav">C:\Dev\Kokoro-Hexagon-copysynth\build\copy-synthesis-ladder-20261013-run1\peach-fixture-stock.wav</S>
+              <S N="Wav">C:\Dev\Kokoro-Hexagon-copysynth\build\copy-synthesis-ladder-20261013-run1\peach-fixture-R1.wav</S>
+              <S N="WavSHA256">25C05343CFC33748AF1EB24631BC60B5E05B88EEB0BA3D3B65E687F1633AD489</S>
+              <S N="PcmInput">C:\Dev\Kokoro-Hexagon\build\speak-20261010-h0-fast\job-input\decoder-generator-fixture-20261009\expected-pcm-f32.bin</S>
+              <S N="PcmSHA256">32FC0E2975A4FD14EFABF3F190B03A0A48BB4182469B71B0648BB44EA3495099</S>
+              <S N="F0Input">C:\Dev\Kokoro-Hexagon\build\speak-20261010-h0-fast\generator\f0.f32</S>
+              <S N="F0SHA256">79CB5AA47247A09DBE885DA6F8ABB440613B77C0431CDEE3DBEF0E5728E1D79E</S>
+              <Db N="RuntimeSeconds">2.214917</Db>
+            </MS>
+          </Obj>
+          <Obj RefId="11">
+            <TNRef RefId="0" />
+            <MS>
+              <S N="Reference">peach-fixture</S>
+              <S N="Label">stock synthesis of the network-free peach fixture</S>
+              <S N="Mode">R4c</S>
+              <I32 N="Samples">51000</I32>
+              <I32 N="Frames">425</I32>
+              <I32 N="ActiveFrames">289</I32>
+              <Db N="LsdDb">7.643310694829737</Db>
+              <Db N="SpectralEnvelopeCorrelation">0.9656303582362167</Db>
+              <Db N="TemporalEnvelopeCorrelation">0.9809686976048059</Db>
+              <Db N="LevelMatchGain">0.958595363275507</Db>
+              <S N="StockWav">C:\Dev\Kokoro-Hexagon-copysynth\build\copy-synthesis-ladder-20261013-run1\peach-fixture-stock.wav</S>
+              <S N="Wav">C:\Dev\Kokoro-Hexagon-copysynth\build\copy-synthesis-ladder-20261013-run1\peach-fixture-R4c.wav</S>
+              <S N="WavSHA256">AE597EFCCB68A2CAE1A2C66B2EC5B363237096FC83A6DF0B40143D07686CC1D3</S>
+              <S N="PcmInput">C:\Dev\Kokoro-Hexagon\build\speak-20261010-h0-fast\job-input\decoder-generator-fixture-20261009\expected-pcm-f32.bin</S>
+              <S N="PcmSHA256">32FC0E2975A4FD14EFABF3F190B03A0A48BB4182469B71B0648BB44EA3495099</S>
+              <S N="F0Input">C:\Dev\Kokoro-Hexagon\build\speak-20261010-h0-fast\generator\f0.f32</S>
+              <S N="F0SHA256">79CB5AA47247A09DBE885DA6F8ABB440613B77C0431CDEE3DBEF0E5728E1D79E</S>
+              <Db N="RuntimeSeconds">4.8601011</Db>
+            </MS>
+          </Obj>
+          <Obj RefId="12">
+            <TNRef RefId="0" />
+            <MS>
+              <S N="Reference">peach-fixture</S>
+              <S N="Label">stock synthesis of the network-free peach fixture</S>
+              <S N="Mode">R4</S>
+              <I32 N="Samples">51000</I32>
+              <I32 N="Frames">425</I32>
+              <I32 N="ActiveFrames">289</I32>
+              <Db N="LsdDb">7.669550236469391</Db>
+              <Db N="SpectralEnvelopeCorrelation">0.9650445191001022</Db>
+              <Db N="TemporalEnvelopeCorrelation">0.9796787637103653</Db>
+              <Db N="LevelMatchGain">0.9726637481970628</Db>
+              <S N="StockWav">C:\Dev\Kokoro-Hexagon-copysynth\build\copy-synthesis-ladder-20261013-run1\peach-fixture-stock.wav</S>
+              <S N="Wav">C:\Dev\Kokoro-Hexagon-copysynth\build\copy-synthesis-ladder-20261013-run1\peach-fixture-R4.wav</S>
+              <S N="PcmInput">C:\Dev\Kokoro-Hexagon\build\speak-20261010-h0-fast\job-input\decoder-generator-fixture-20261009\expected-pcm-f32.bin</S>
+              <S N="PcmSHA256">32FC0E2975A4FD14EFABF3F190B03A0A48BB4182469B71B0648BB44EA3495099</S>
+              <S N="F0Input">C:\Dev\Kokoro-Hexagon\build\speak-20261010-h0-fast\generator\f0.f32</S>
+              <S N="F0SHA256">79CB5AA47247A09DBE885DA6F8ABB440613B77C0431CDEE3DBEF0E5728E1D79E</S>
+              <I32 N="EnvelopePairs">18496</I32>
+              <S N="SpectralFramePopulation">Paired 64-band log powers pooled over the original stock-active frames</S>
+              <S N="TemporalFramePopulation">Paired window RMS over every original frame</S>
+              <S N="WavSHA256">B8B7F6ED6AC7602E69AB0ADCD7859D294A2B047996A2E2FF2A0D204BEC51386B</S>
+              <S N="StockWavSHA256">25C05343CFC33748AF1EB24631BC60B5E05B88EEB0BA3D3B65E687F1633AD489</S>
+              <Nil N="RuntimeSeconds" />
+              <S N="RuntimeScope">Reused run2 WAV and corrected metrics; not re-rendered. Original 596.114452 s covers all references and both original modes, not R4 alone.</S>
+            </MS>
+          </Obj>
+          <Obj RefId="13">
+            <TNRef RefId="0" />
+            <MS>
+              <S N="Reference">corpus-high-pitch</S>
+              <S N="Label">ɪn ðə kwˈIət tˈWn ʌv mˈɪlbɹʊk, nˈuz tɹˈævəld fˈæstəɹ ðən ðə wˈɪnd. bˌI ðə tˈIm ðə ʃˈɛɹəf əɹˈIvd æt ðə sˈin, hˈæf ðə ɹˈɛzədᵊnts hæd ˌɔlɹˈɛdi ɡˈæðəɹd, wˈɪspəɹɪŋ θˈɪɹiz ænd tɹˈAdɪŋ hˌæfɹəmˈɛmbəɹd fˈækts. nˈObˌɑdi ɹˈiᵊli nˈu wˌʌt hæd hˈæpənd, bˌʌt ˈɛvɹibədi hæd ɐn əpˈɪnjᵊn.</S>
+              <S N="Mode">R1</S>
+              <I32 N="Samples">390000</I32>
+              <I32 N="Frames">3250</I32>
+              <I32 N="ActiveFrames">2930</I32>
+              <Db N="LsdDb">0</Db>
+              <Db N="SpectralEnvelopeCorrelation">1</Db>
+              <Db N="TemporalEnvelopeCorrelation">1</Db>
+              <Db N="LevelMatchGain">1</Db>
+              <S N="StockWav">C:\Dev\Kokoro-Hexagon-copysynth\build\copy-synthesis-ladder-20261013-run1\corpus-high-pitch-stock.wav</S>
+              <S N="Wav">C:\Dev\Kokoro-Hexagon-copysynth\build\copy-synthesis-ladder-20261013-run1\corpus-high-pitch-R1.wav</S>
+              <S N="WavSHA256">E06CAD26E29C13E6DC5CCF2CFB4F07893A98509F4E0543C34DDCD6C64C8E6B7E</S>
+              <S N="PcmInput">C:\Dev\Kokoro-Hexagon\build\generator-constants-gate2b-20261012-140157\generator-corpus-3\output.f32</S>
+              <S N="PcmSHA256">08E839C119B343E9E841B47F8E6B625318E35040D593EA615EBBD5C1A42A3C96</S>
+              <S N="F0Input">C:\Dev\Kokoro-Hexagon\build\generator-constants-gate2b-20261012-140157\generator-corpus-3\f0.f32</S>
+              <S N="F0SHA256">BA90927201111BFDBB17A9A38A6DF1CB138136C9CFA5B77C888D9803B718E85C</S>
+              <Db N="RuntimeSeconds">19.772861</Db>
+            </MS>
+          </Obj>
+          <Obj RefId="14">
+            <TNRef RefId="0" />
+            <MS>
+              <S N="Reference">corpus-high-pitch</S>
+              <S N="Label">ɪn ðə kwˈIət tˈWn ʌv mˈɪlbɹʊk, nˈuz tɹˈævəld fˈæstəɹ ðən ðə wˈɪnd. bˌI ðə tˈIm ðə ʃˈɛɹəf əɹˈIvd æt ðə sˈin, hˈæf ðə ɹˈɛzədᵊnts hæd ˌɔlɹˈɛdi ɡˈæðəɹd, wˈɪspəɹɪŋ θˈɪɹiz ænd tɹˈAdɪŋ hˌæfɹəmˈɛmbəɹd fˈækts. nˈObˌɑdi ɹˈiᵊli nˈu wˌʌt hæd hˈæpənd, bˌʌt ˈɛvɹibədi hæd ɐn əpˈɪnjᵊn.</S>
+              <S N="Mode">R4c</S>
+              <I32 N="Samples">390000</I32>
+              <I32 N="Frames">3250</I32>
+              <I32 N="ActiveFrames">2930</I32>
+              <Db N="LsdDb">7.811624494893535</Db>
+              <Db N="SpectralEnvelopeCorrelation">0.9680817620286314</Db>
+              <Db N="TemporalEnvelopeCorrelation">0.983384238235399</Db>
+              <Db N="LevelMatchGain">0.9720599418242224</Db>
+              <S N="StockWav">C:\Dev\Kokoro-Hexagon-copysynth\build\copy-synthesis-ladder-20261013-run1\corpus-high-pitch-stock.wav</S>
+              <S N="Wav">C:\Dev\Kokoro-Hexagon-copysynth\build\copy-synthesis-ladder-20261013-run1\corpus-high-pitch-R4c.wav</S>
+              <S N="WavSHA256">E2772EC1F4182A9D3B1B8581BC71B4149AEB444816D99BD46B1A42497C49BEEA</S>
+              <S N="PcmInput">C:\Dev\Kokoro-Hexagon\build\generator-constants-gate2b-20261012-140157\generator-corpus-3\output.f32</S>
+              <S N="PcmSHA256">08E839C119B343E9E841B47F8E6B625318E35040D593EA615EBBD5C1A42A3C96</S>
+              <S N="F0Input">C:\Dev\Kokoro-Hexagon\build\generator-constants-gate2b-20261012-140157\generator-corpus-3\f0.f32</S>
+              <S N="F0SHA256">BA90927201111BFDBB17A9A38A6DF1CB138136C9CFA5B77C888D9803B718E85C</S>
+              <Db N="RuntimeSeconds">46.9470009</Db>
+            </MS>
+          </Obj>
+          <Obj RefId="15">
+            <TNRef RefId="0" />
+            <MS>
+              <S N="Reference">corpus-high-pitch</S>
+              <S N="Label">ɪn ðə kwˈIət tˈWn ʌv mˈɪlbɹʊk, nˈuz tɹˈævəld fˈæstəɹ ðən ðə wˈɪnd. bˌI ðə tˈIm ðə ʃˈɛɹəf əɹˈIvd æt ðə sˈin, hˈæf ðə ɹˈɛzədᵊnts hæd ˌɔlɹˈɛdi ɡˈæðəɹd, wˈɪspəɹɪŋ θˈɪɹiz ænd tɹˈAdɪŋ hˌæfɹəmˈɛmbəɹd fˈækts. nˈObˌɑdi ɹˈiᵊli nˈu wˌʌt hæd hˈæpənd, bˌʌt ˈɛvɹibədi hæd ɐn əpˈɪnjᵊn.</S>
+              <S N="Mode">R4</S>
+              <I32 N="Samples">390000</I32>
+              <I32 N="Frames">3250</I32>
+              <I32 N="ActiveFrames">2930</I32>
+              <Db N="LsdDb">7.85109485278013</Db>
+              <Db N="SpectralEnvelopeCorrelation">0.9674062401933814</Db>
+              <Db N="TemporalEnvelopeCorrelation">0.9812712471867877</Db>
+              <Db N="LevelMatchGain">0.983350731885367</Db>
+              <S N="StockWav">C:\Dev\Kokoro-Hexagon-copysynth\build\copy-synthesis-ladder-20261013-run1\corpus-high-pitch-stock.wav</S>
+              <S N="Wav">C:\Dev\Kokoro-Hexagon-copysynth\build\copy-synthesis-ladder-20261013-run1\corpus-high-pitch-R4.wav</S>
+              <S N="PcmInput">C:\Dev\Kokoro-Hexagon\build\generator-constants-gate2b-20261012-140157\generator-corpus-3\output.f32</S>
+              <S N="PcmSHA256">08E839C119B343E9E841B47F8E6B625318E35040D593EA615EBBD5C1A42A3C96</S>
+              <S N="F0Input">C:\Dev\Kokoro-Hexagon\build\generator-constants-gate2b-20261012-140157\generator-corpus-3\f0.f32</S>
+              <S N="F0SHA256">BA90927201111BFDBB17A9A38A6DF1CB138136C9CFA5B77C888D9803B718E85C</S>
+              <I32 N="EnvelopePairs">187520</I32>
+              <S N="SpectralFramePopulation">Paired 64-band log powers pooled over the original stock-active frames</S>
+              <S N="TemporalFramePopulation">Paired window RMS over every original frame</S>
+              <S N="WavSHA256">6BE79BD4511B202B96040F4EC48791AA4627EA66AC70AA25D660E76E60CD4A8C</S>
+              <S N="StockWavSHA256">E06CAD26E29C13E6DC5CCF2CFB4F07893A98509F4E0543C34DDCD6C64C8E6B7E</S>
+              <Nil N="RuntimeSeconds" />
+              <S N="RuntimeScope">Reused run2 WAV and corrected metrics; not re-rendered. Original 596.114452 s covers all references and both original modes, not R4 alone.</S>
+            </MS>
+          </Obj>
+          <Obj RefId="16">
+            <TNRef RefId="0" />
+            <MS>
+              <S N="Reference">corpus-consonants</S>
+              <S N="Label">ʃˌi hæd bɪn wˈATɪŋ fɔɹ nˈɪɹli ɐn ˈWəɹ. ðə bˈʌs, æz jˈuʒəwəl, wʌz lˈAt. ɐ kˈOld wˈɪnd pˈɪkt ˌʌp, ɹˈʌsᵊlɪŋ ðə lˈivz æt hɜɹ fˈit.</S>
+              <S N="Mode">R1</S>
+              <I32 N="Samples">193200</I32>
+              <I32 N="Frames">1610</I32>
+              <I32 N="ActiveFrames">1389</I32>
+              <Db N="LsdDb">0</Db>
+              <Db N="SpectralEnvelopeCorrelation">1</Db>
+              <Db N="TemporalEnvelopeCorrelation">1</Db>
+              <Db N="LevelMatchGain">1</Db>
+              <S N="StockWav">C:\Dev\Kokoro-Hexagon-copysynth\build\copy-synthesis-ladder-20261013-run1\corpus-consonants-stock.wav</S>
+              <S N="Wav">C:\Dev\Kokoro-Hexagon-copysynth\build\copy-synthesis-ladder-20261013-run1\corpus-consonants-R1.wav</S>
+              <S N="WavSHA256">55EBC4484703331B6B2670B166CA732D4A48FD4156B9487732DA9FEA67E612D3</S>
+              <S N="PcmInput">C:\Dev\Kokoro-Hexagon\build\generator-constants-gate2b-20261012-140157\generator-corpus-2\output.f32</S>
+              <S N="PcmSHA256">197EA7E841486BF425397EC0C0E95436900C2500DCF3852E89698B500943F225</S>
+              <S N="F0Input">C:\Dev\Kokoro-Hexagon\build\generator-constants-gate2b-20261012-140157\generator-corpus-2\f0.f32</S>
+              <S N="F0SHA256">D351D166316D6D8165C35ED9F72759E615745C89B2CDC693FAF55E3E03055F1B</S>
+              <Db N="RuntimeSeconds">9.3327625</Db>
+            </MS>
+          </Obj>
+          <Obj RefId="17">
+            <TNRef RefId="0" />
+            <MS>
+              <S N="Reference">corpus-consonants</S>
+              <S N="Label">ʃˌi hæd bɪn wˈATɪŋ fɔɹ nˈɪɹli ɐn ˈWəɹ. ðə bˈʌs, æz jˈuʒəwəl, wʌz lˈAt. ɐ kˈOld wˈɪnd pˈɪkt ˌʌp, ɹˈʌsᵊlɪŋ ðə lˈivz æt hɜɹ fˈit.</S>
+              <S N="Mode">R4c</S>
+              <I32 N="Samples">193200</I32>
+              <I32 N="Frames">1610</I32>
+              <I32 N="ActiveFrames">1389</I32>
+              <Db N="LsdDb">7.8677509996531425</Db>
+              <Db N="SpectralEnvelopeCorrelation">0.9683110981621214</Db>
+              <Db N="TemporalEnvelopeCorrelation">0.9828594739963106</Db>
+              <Db N="LevelMatchGain">0.9558556436759563</Db>
+              <S N="StockWav">C:\Dev\Kokoro-Hexagon-copysynth\build\copy-synthesis-ladder-20261013-run1\corpus-consonants-stock.wav</S>
+              <S N="Wav">C:\Dev\Kokoro-Hexagon-copysynth\build\copy-synthesis-ladder-20261013-run1\corpus-consonants-R4c.wav</S>
+              <S N="WavSHA256">3CAD7676E18F2A8FEE22194328F388E10BC5FFAFD11072BEDB048B09E17E7E95</S>
+              <S N="PcmInput">C:\Dev\Kokoro-Hexagon\build\generator-constants-gate2b-20261012-140157\generator-corpus-2\output.f32</S>
+              <S N="PcmSHA256">197EA7E841486BF425397EC0C0E95436900C2500DCF3852E89698B500943F225</S>
+              <S N="F0Input">C:\Dev\Kokoro-Hexagon\build\generator-constants-gate2b-20261012-140157\generator-corpus-2\f0.f32</S>
+              <S N="F0SHA256">D351D166316D6D8165C35ED9F72759E615745C89B2CDC693FAF55E3E03055F1B</S>
+              <Db N="RuntimeSeconds">40.0651892</Db>
+            </MS>
+          </Obj>
+          <Obj RefId="18">
+            <TNRef RefId="0" />
+            <MS>
+              <S N="Reference">corpus-consonants</S>
+              <S N="Label">ʃˌi hæd bɪn wˈATɪŋ fɔɹ nˈɪɹli ɐn ˈWəɹ. ðə bˈʌs, æz jˈuʒəwəl, wʌz lˈAt. ɐ kˈOld wˈɪnd pˈɪkt ˌʌp, ɹˈʌsᵊlɪŋ ðə lˈivz æt hɜɹ fˈit.</S>
+              <S N="Mode">R4</S>
+              <I32 N="Samples">193200</I32>
+              <I32 N="Frames">1610</I32>
+              <I32 N="ActiveFrames">1389</I32>
+              <Db N="LsdDb">7.901997654299053</Db>
+              <Db N="SpectralEnvelopeCorrelation">0.9677151672433013</Db>
+              <Db N="TemporalEnvelopeCorrelation">0.9806392013152324</Db>
+              <Db N="LevelMatchGain">0.9664361240898871</Db>
+              <S N="StockWav">C:\Dev\Kokoro-Hexagon-copysynth\build\copy-synthesis-ladder-20261013-run1\corpus-consonants-stock.wav</S>
+              <S N="Wav">C:\Dev\Kokoro-Hexagon-copysynth\build\copy-synthesis-ladder-20261013-run1\corpus-consonants-R4.wav</S>
+              <S N="PcmInput">C:\Dev\Kokoro-Hexagon\build\generator-constants-gate2b-20261012-140157\generator-corpus-2\output.f32</S>
+              <S N="PcmSHA256">197EA7E841486BF425397EC0C0E95436900C2500DCF3852E89698B500943F225</S>
+              <S N="F0Input">C:\Dev\Kokoro-Hexagon\build\generator-constants-gate2b-20261012-140157\generator-corpus-2\f0.f32</S>
+              <S N="F0SHA256">D351D166316D6D8165C35ED9F72759E615745C89B2CDC693FAF55E3E03055F1B</S>
+              <I32 N="EnvelopePairs">88896</I32>
+              <S N="SpectralFramePopulation">Paired 64-band log powers pooled over the original stock-active frames</S>
+              <S N="TemporalFramePopulation">Paired window RMS over every original frame</S>
+              <S N="WavSHA256">914301B3364983549C5EC00732F27C45393EFC6A29BE9F8F411B001DBE27BF61</S>
+              <S N="StockWavSHA256">55EBC4484703331B6B2670B166CA732D4A48FD4156B9487732DA9FEA67E612D3</S>
+              <Nil N="RuntimeSeconds" />
+              <S N="RuntimeScope">Reused run2 WAV and corrected metrics; not re-rendered. Original 596.114452 s covers all references and both original modes, not R4 alone.</S>
+            </MS>
+          </Obj>
+          <Obj RefId="19">
+            <TNRef RefId="0" />
+            <MS>
+              <S N="Reference">corpus-question</S>
+              <S N="Label">hˌW ɑɹ ju tədˈA? ˌI ɐm dˈuɪŋ ɹˈizənəbli wˈɛl, θˈæŋk ju fɔɹ ˈæskɪŋ</S>
+              <S N="Mode">R1</S>
+              <I32 N="Samples">99000</I32>
+              <I32 N="Frames">825</I32>
+              <I32 N="ActiveFrames">685</I32>
+              <Db N="LsdDb">0</Db>
+              <Db N="SpectralEnvelopeCorrelation">1</Db>
+              <Db N="TemporalEnvelopeCorrelation">1</Db>
+              <Db N="LevelMatchGain">1.0000000000000002</Db>
+              <S N="StockWav">C:\Dev\Kokoro-Hexagon-copysynth\build\copy-synthesis-ladder-20261013-run1\corpus-question-stock.wav</S>
+              <S N="Wav">C:\Dev\Kokoro-Hexagon-copysynth\build\copy-synthesis-ladder-20261013-run1\corpus-question-R1.wav</S>
+              <S N="WavSHA256">AEBF45810494EBF184202B8D9D50C22FA04E28ECCC02AF725DE1ACF68A43639D</S>
+              <S N="PcmInput">C:\Dev\Kokoro-Hexagon\build\generator-constants-gate2b-20261012-140157\generator-corpus-6\output.f32</S>
+              <S N="PcmSHA256">DE680E26C4A073A0AFB1A105B4ECD3B9F580F5D4C87D4F8F08B55206D58550D6</S>
+              <S N="F0Input">C:\Dev\Kokoro-Hexagon\build\generator-constants-gate2b-20261012-140157\generator-corpus-6\f0.f32</S>
+              <S N="F0SHA256">E277B21337F6602FDF4ED10C2207684E06359A170BC47B4E4A44F0664ABE59E6</S>
+              <Db N="RuntimeSeconds">5.1711226</Db>
+            </MS>
+          </Obj>
+          <Obj RefId="20">
+            <TNRef RefId="0" />
+            <MS>
+              <S N="Reference">corpus-question</S>
+              <S N="Label">hˌW ɑɹ ju tədˈA? ˌI ɐm dˈuɪŋ ɹˈizənəbli wˈɛl, θˈæŋk ju fɔɹ ˈæskɪŋ</S>
+              <S N="Mode">R4c</S>
+              <I32 N="Samples">99000</I32>
+              <I32 N="Frames">825</I32>
+              <I32 N="ActiveFrames">685</I32>
+              <Db N="LsdDb">7.8835588742022935</Db>
+              <Db N="SpectralEnvelopeCorrelation">0.9699515109233064</Db>
+              <Db N="TemporalEnvelopeCorrelation">0.9824966233770812</Db>
+              <Db N="LevelMatchGain">0.9501057264750125</Db>
+              <S N="StockWav">C:\Dev\Kokoro-Hexagon-copysynth\build\copy-synthesis-ladder-20261013-run1\corpus-question-stock.wav</S>
+              <S N="Wav">C:\Dev\Kokoro-Hexagon-copysynth\build\copy-synthesis-ladder-20261013-run1\corpus-question-R4c.wav</S>
+              <S N="WavSHA256">E8B0AC41391709BC0DCF74E18344CD6632FD470E7AF5E82643C5F3C173D24E9D</S>
+              <S N="PcmInput">C:\Dev\Kokoro-Hexagon\build\generator-constants-gate2b-20261012-140157\generator-corpus-6\output.f32</S>
+              <S N="PcmSHA256">DE680E26C4A073A0AFB1A105B4ECD3B9F580F5D4C87D4F8F08B55206D58550D6</S>
+              <S N="F0Input">C:\Dev\Kokoro-Hexagon\build\generator-constants-gate2b-20261012-140157\generator-corpus-6\f0.f32</S>
+              <S N="F0SHA256">E277B21337F6602FDF4ED10C2207684E06359A170BC47B4E4A44F0664ABE59E6</S>
+              <Db N="RuntimeSeconds">11.6643397</Db>
+            </MS>
+          </Obj>
+          <Obj RefId="21">
+            <TNRef RefId="0" />
+            <MS>
+              <S N="Reference">corpus-question</S>
+              <S N="Label">hˌW ɑɹ ju tədˈA? ˌI ɐm dˈuɪŋ ɹˈizənəbli wˈɛl, θˈæŋk ju fɔɹ ˈæskɪŋ</S>
+              <S N="Mode">R4</S>
+              <I32 N="Samples">99000</I32>
+              <I32 N="Frames">825</I32>
+              <I32 N="ActiveFrames">685</I32>
+              <Db N="LsdDb">7.913876103278749</Db>
+              <Db N="SpectralEnvelopeCorrelation">0.9693394745836115</Db>
+              <Db N="TemporalEnvelopeCorrelation">0.9811002453893891</Db>
+              <Db N="LevelMatchGain">0.9604381323037507</Db>
+              <S N="StockWav">C:\Dev\Kokoro-Hexagon-copysynth\build\copy-synthesis-ladder-20261013-run1\corpus-question-stock.wav</S>
+              <S N="Wav">C:\Dev\Kokoro-Hexagon-copysynth\build\copy-synthesis-ladder-20261013-run1\corpus-question-R4.wav</S>
+              <S N="PcmInput">C:\Dev\Kokoro-Hexagon\build\generator-constants-gate2b-20261012-140157\generator-corpus-6\output.f32</S>
+              <S N="PcmSHA256">DE680E26C4A073A0AFB1A105B4ECD3B9F580F5D4C87D4F8F08B55206D58550D6</S>
+              <S N="F0Input">C:\Dev\Kokoro-Hexagon\build\generator-constants-gate2b-20261012-140157\generator-corpus-6\f0.f32</S>
+              <S N="F0SHA256">E277B21337F6602FDF4ED10C2207684E06359A170BC47B4E4A44F0664ABE59E6</S>
+              <I32 N="EnvelopePairs">43840</I32>
+              <S N="SpectralFramePopulation">Paired 64-band log powers pooled over the original stock-active frames</S>
+              <S N="TemporalFramePopulation">Paired window RMS over every original frame</S>
+              <S N="WavSHA256">F786386D28707A4B8A28BA147F6746CAEFDB27D1E299027D1540354E8B411C85</S>
+              <S N="StockWavSHA256">AEBF45810494EBF184202B8D9D50C22FA04E28ECCC02AF725DE1ACF68A43639D</S>
+              <Nil N="RuntimeSeconds" />
+              <S N="RuntimeScope">Reused run2 WAV and corrected metrics; not re-rendered. Original 596.114452 s covers all references and both original modes, not R4 alone.</S>
+            </MS>
+          </Obj>
+          <Obj RefId="22">
+            <TNRef RefId="0" />
+            <MS>
+              <S N="Reference">peach-original</S>
+              <S N="Label">stock end-to-end peach, existing 16-bit reference</S>
+              <S N="Mode">R1</S>
+              <I32 N="Samples">49200</I32>
+              <I32 N="Frames">410</I32>
+              <I32 N="ActiveFrames">284</I32>
+              <Db N="LsdDb">0</Db>
+              <Db N="SpectralEnvelopeCorrelation">1</Db>
+              <Db N="TemporalEnvelopeCorrelation">1</Db>
+              <Db N="LevelMatchGain">1</Db>
+              <S N="StockWav">C:\Dev\Kokoro-Hexagon-copysynth\build\copy-synthesis-ladder-20261013-run1\peach-original-stock.wav</S>
+              <S N="Wav">C:\Dev\Kokoro-Hexagon-copysynth\build\copy-synthesis-ladder-20261013-run1\peach-original-R1.wav</S>
+              <S N="WavSHA256">423A63BD9346209E394807E088FB676BAD971C2D5A95E9EABBFE7C84322FFD26</S>
+              <S N="PcmInput">C:\Dev\Kokoro-Hexagon\build\unit-selection-20261010\target-stock.wav</S>
+              <S N="PcmSHA256">90AB999962D56D48F80345BC96FD38FB39D1D3ED39F1A26A4F0FA66CA5DE1608</S>
+              <S N="F0Input">C:\Dev\Kokoro-Hexagon\build\unit-selection-20261010\target-eval.npz</S>
+              <S N="F0SHA256">D3BB55C02330A032C4F58857D3227944B8AFCB34D79FBB36A78274A679DAEF22</S>
+              <Db N="RuntimeSeconds">2.6847687</Db>
+            </MS>
+          </Obj>
+          <Obj RefId="23">
+            <TNRef RefId="0" />
+            <MS>
+              <S N="Reference">peach-original</S>
+              <S N="Label">stock end-to-end peach, existing 16-bit reference</S>
+              <S N="Mode">R4c</S>
+              <I32 N="Samples">49200</I32>
+              <I32 N="Frames">410</I32>
+              <I32 N="ActiveFrames">284</I32>
+              <Db N="LsdDb">7.557361120429336</Db>
+              <Db N="SpectralEnvelopeCorrelation">0.9667830824583595</Db>
+              <Db N="TemporalEnvelopeCorrelation">0.9783235537500289</Db>
+              <Db N="LevelMatchGain">0.9334398041546255</Db>
+              <S N="StockWav">C:\Dev\Kokoro-Hexagon-copysynth\build\copy-synthesis-ladder-20261013-run1\peach-original-stock.wav</S>
+              <S N="Wav">C:\Dev\Kokoro-Hexagon-copysynth\build\copy-synthesis-ladder-20261013-run1\peach-original-R4c.wav</S>
+              <S N="WavSHA256">C771E4C8C31DD82B54FD110D086F37A4BD9B693898633B9A6C1362846A6404A7</S>
+              <S N="PcmInput">C:\Dev\Kokoro-Hexagon\build\unit-selection-20261010\target-stock.wav</S>
+              <S N="PcmSHA256">90AB999962D56D48F80345BC96FD38FB39D1D3ED39F1A26A4F0FA66CA5DE1608</S>
+              <S N="F0Input">C:\Dev\Kokoro-Hexagon\build\unit-selection-20261010\target-eval.npz</S>
+              <S N="F0SHA256">D3BB55C02330A032C4F58857D3227944B8AFCB34D79FBB36A78274A679DAEF22</S>
+              <Db N="RuntimeSeconds">15.1186421</Db>
+            </MS>
+          </Obj>
+          <Obj RefId="24">
+            <TNRef RefId="0" />
+            <MS>
+              <S N="Reference">peach-original</S>
+              <S N="Label">stock end-to-end peach, existing 16-bit reference</S>
+              <S N="Mode">R4</S>
+              <I32 N="Samples">49200</I32>
+              <I32 N="Frames">410</I32>
+              <I32 N="ActiveFrames">284</I32>
+              <Db N="LsdDb">7.597703776975149</Db>
+              <Db N="SpectralEnvelopeCorrelation">0.9662329195546442</Db>
+              <Db N="TemporalEnvelopeCorrelation">0.9769866849527662</Db>
+              <Db N="LevelMatchGain">0.9475456672212511</Db>
+              <S N="StockWav">C:\Dev\Kokoro-Hexagon-copysynth\build\copy-synthesis-ladder-20261013-run1\peach-original-stock.wav</S>
+              <S N="Wav">C:\Dev\Kokoro-Hexagon-copysynth\build\copy-synthesis-ladder-20261013-run1\peach-original-R4.wav</S>
+              <S N="PcmInput">C:\Dev\Kokoro-Hexagon\build\unit-selection-20261010\target-stock.wav</S>
+              <S N="PcmSHA256">90AB999962D56D48F80345BC96FD38FB39D1D3ED39F1A26A4F0FA66CA5DE1608</S>
+              <S N="F0Input">C:\Dev\Kokoro-Hexagon\build\unit-selection-20261010\target-eval.npz</S>
+              <S N="F0SHA256">D3BB55C02330A032C4F58857D3227944B8AFCB34D79FBB36A78274A679DAEF22</S>
+              <I32 N="EnvelopePairs">18176</I32>
+              <S N="SpectralFramePopulation">Paired 64-band log powers pooled over the original stock-active frames</S>
+              <S N="TemporalFramePopulation">Paired window RMS over every original frame</S>
+              <S N="WavSHA256">44043786DA37D2844599250C219F03F6C5030F78FEA399D41CFF83DA087AB593</S>
+              <S N="StockWavSHA256">423A63BD9346209E394807E088FB676BAD971C2D5A95E9EABBFE7C84322FFD26</S>
+              <Nil N="RuntimeSeconds" />
+              <S N="RuntimeScope">Reused run2 WAV and corrected metrics; not re-rendered. Original 596.114452 s covers all references and both original modes, not R4 alone.</S>
+            </MS>
+          </Obj>
+        </LST>
+      </Obj>
+      <Db N="ElapsedSeconds">184.5092121</Db>
+      <S N="KernelSHA256">7FC7D5179FB2F0066F924BC4B1BEF24CBA177406B7AC881CDDA4C29443028109</S>
+      <S N="HarnessSHA256">7B88B8B541BEF941CC0BA60A7E895AA32EA0F36D8623FEA26988D4DFB71051EB</S>
+      <S N="Operation">CopySynthesisLadder</S>
+      <S N="Run2Receipt">C:\Dev\Kokoro-Hexagon-copysynth\build\copy-synthesis-20261013-run2\receipt.clixml</S>
+      <S N="Run2ReceiptSHA256">ECEF753E3B2FBD9F157FBD79A7B10FD5FAE67E1944CEDC6988D90E7355478B88</S>
+      <Obj N="VoicingSource" RefId="25">
+        <TNRef RefId="0" />
+        <MS>
+          <S N="Path">C:\Dev\Kokoro-Hexagon\build\generator-constants-gate2b-20261012-140157\generator-corpus-6\source\kokoro\istftnet.py</S>
+          <S N="SHA256">66515CB3369D1C0BBB2015AD7293D019FB1F80FEFCB2D56E70E73B6B146AF11C</S>
+          <S N="StockCommit">dfb907a02bba8152ca444717ca5d78747ccb4bec</S>
+          <Db N="ThresholdHz">10</Db>
+          <S N="GeneratorLine">265: harmonic_num=8, voiced_threshod=10)</S>
+          <S N="SineGenLine">139: uv = (f0 &gt; self.voiced_threshold).type(torch.float32)</S>
+        </MS>
+      </Obj>
+      <Obj N="SharedAnalysis" RefId="26">
+        <TNRef RefId="1" />
+        <LST>
+          <Obj RefId="27">
+            <TNRef RefId="0" />
+            <MS>
+              <S N="Reference">peach-fixture</S>
+              <Db N="Seconds">1.5980914</Db>
+            </MS>
+          </Obj>
+          <Obj RefId="28">
+            <TNRef RefId="0" />
+            <MS>
+              <S N="Reference">corpus-high-pitch</S>
+              <Db N="Seconds">13.4180258</Db>
+            </MS>
+          </Obj>
+          <Obj RefId="29">
+            <TNRef RefId="0" />
+            <MS>
+              <S N="Reference">corpus-consonants</S>
+              <Db N="Seconds">5.8358201</Db>
+            </MS>
+          </Obj>
+          <Obj RefId="30">
+            <TNRef RefId="0" />
+            <MS>
+              <S N="Reference">corpus-question</S>
+              <Db N="Seconds">3.3999864</Db>
+            </MS>
+          </Obj>
+          <Obj RefId="31">
+            <TNRef RefId="0" />
+            <MS>
+              <S N="Reference">peach-original</S>
+              <Db N="Seconds">2.2754121</Db>
+            </MS>
+          </Obj>
+        </LST>
+      </Obj>
+      <Obj N="Continuity" RefId="32">
+        <TNRef RefId="1" />
+        <LST>
+          <Obj RefId="33">
+            <TNRef RefId="0" />
+            <MS>
+              <S N="Reference">peach-fixture</S>
+              <B N="PhaseResets">false</B>
+              <S N="AmplitudeInterpolation">Linear between per-harmonic frame knots</S>
+              <S N="FrequencyInterpolation">Shared sample-clock F0 integral; measured phase offsets unwrapped, smoothstep interpolated</S>
+              <Db N="RawConstantWindowMaxDeviation">4.440892098500626E-16</Db>
+              <Db N="NormalizedWindowMaxDeviation">0</Db>
+              <S N="Residual">Stock minus the continuous R1 harmonic waveform; R2 and R3 skipped</S>
+            </MS>
+          </Obj>
+          <Obj RefId="34">
+            <TNRef RefId="0" />
+            <MS>
+              <S N="Reference">corpus-high-pitch</S>
+              <B N="PhaseResets">false</B>
+              <S N="AmplitudeInterpolation">Linear between per-harmonic frame knots</S>
+              <S N="FrequencyInterpolation">Shared sample-clock F0 integral; measured phase offsets unwrapped, smoothstep interpolated</S>
+              <Db N="RawConstantWindowMaxDeviation">4.440892098500626E-16</Db>
+              <Db N="NormalizedWindowMaxDeviation">0</Db>
+              <S N="Residual">Stock minus the continuous R1 harmonic waveform; R2 and R3 skipped</S>
+            </MS>
+          </Obj>
+          <Obj RefId="35">
+            <TNRef RefId="0" />
+            <MS>
+              <S N="Reference">corpus-consonants</S>
+              <B N="PhaseResets">false</B>
+              <S N="AmplitudeInterpolation">Linear between per-harmonic frame knots</S>
+              <S N="FrequencyInterpolation">Shared sample-clock F0 integral; measured phase offsets unwrapped, smoothstep interpolated</S>
+              <Db N="RawConstantWindowMaxDeviation">4.440892098500626E-16</Db>
+              <Db N="NormalizedWindowMaxDeviation">0</Db>
+              <S N="Residual">Stock minus the continuous R1 harmonic waveform; R2 and R3 skipped</S>
+            </MS>
+          </Obj>
+          <Obj RefId="36">
+            <TNRef RefId="0" />
+            <MS>
+              <S N="Reference">corpus-question</S>
+              <B N="PhaseResets">false</B>
+              <S N="AmplitudeInterpolation">Linear between per-harmonic frame knots</S>
+              <S N="FrequencyInterpolation">Shared sample-clock F0 integral; measured phase offsets unwrapped, smoothstep interpolated</S>
+              <Db N="RawConstantWindowMaxDeviation">4.440892098500626E-16</Db>
+              <Db N="NormalizedWindowMaxDeviation">0</Db>
+              <S N="Residual">Stock minus the continuous R1 harmonic waveform; R2 and R3 skipped</S>
+            </MS>
+          </Obj>
+          <Obj RefId="37">
+            <TNRef RefId="0" />
+            <MS>
+              <S N="Reference">peach-original</S>
+              <B N="PhaseResets">false</B>
+              <S N="AmplitudeInterpolation">Linear between per-harmonic frame knots</S>
+              <S N="FrequencyInterpolation">Shared sample-clock F0 integral; measured phase offsets unwrapped, smoothstep interpolated</S>
+              <Db N="RawConstantWindowMaxDeviation">4.440892098500626E-16</Db>
+              <Db N="NormalizedWindowMaxDeviation">0</Db>
+              <S N="Residual">Stock minus the continuous R1 harmonic waveform; R2 and R3 skipped</S>
+            </MS>
+          </Obj>
+        </LST>
+      </Obj>
+      <S N="TimingScope">Per-reference R1 and R4c times include synthesis, WAV verification, and metrics; shared stock analysis separate. R1 also includes measured harmonic analysis and creation of the residual. R4 reused without rendering. R2 and R3 skipped. No runtime optimization.</S>
+      <S N="Run2Listening">Copy synthesis: band-limited and distorted, without excessive buzz. Fully voiced control: buzzy as expected.</S>
+      <Obj N="Run2Continuity" RefId="38">
+        <TNRef RefId="0" />
+        <MS>
+          <B N="PhaseResets">false</B>
+          <B N="ExplicitAmplitudeInterpolation">false</B>
+          <S N="AmplitudeBlending">Hann overlap-add of frame-constant amplitudes</S>
+          <Db N="RawWindowMin">4.262483680788856</Db>
+          <Db N="RawWindowMax">4.27103780576474</Db>
+          <Db N="RawWindowMaxDeviation">0.00437113909807341</Db>
+          <Db N="NormalizedWindowMaxDeviation">0</Db>
+        </MS>
+      </Obj>
+      <S N="CommittedHarnessSHA256">9EA0C3EEA6475B506740A9B1DAA498A344EBB279637AABBC712D9D847252B0E4</S>
+      <S N="PostRenderSourceChange">Only local parameter identifier casing changed in the harness for the existing case-pair gate; archived rendered source differs only in casing. No numerical or workflow changes.</S>
+      <Obj N="IndependentContinuityChecks" RefId="39">
+        <TN RefId="2">
+          <T>System.Management.Automation.PSCustomObject</T>
+          <T>System.Object</T>
+        </TN>
+        <MS>
+          <Db N="ChirpPhaseMaxErrorRadians">9.992007221626409E-16</Db>
+          <Db N="TrackInterpolationMaxError">0</Db>
+          <Db N="AmplitudeKnotJump">0</Db>
+          <Db N="PhaseCorrectionSlopeAtKnots">0</Db>
+          <B N="R1WavByteIdenticalToStock">true</B>
+          <B N="R4WavByteIdenticalToRun2">true</B>
+        </MS>
+      </Obj>
+    </MS>
+  </Obj>
+</Objs>
