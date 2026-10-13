@@ -11,6 +11,7 @@ twice, or written as a scratch script, is a missing command: add it here.
   Status                      Project state, next step, cases, commands (default). Reads the repository only:
                               no adb, no phone, no network. Phone access is only in Run, Ratchet and Compare.
   Verify                      Check tracked source, repository hygiene, handoff, Status, tests and optional case pairs.
+  CopySynthesis -OutputDirectory [-Path receipt.clixml]  Offline copy-synthesis; -Path rescoring changes only correlation.
   BuildHost -OutputDirectory  Build and retain the pinned arm64 diagnostic APK; no phone access.
   Ratchet  [-Case]            Case-pair check, then every unblocked ratchet case on the phone; throws on regression.
   Run      -Case [-Hypothesis] [-Runs]
@@ -92,7 +93,7 @@ pwsh -NoProfile -File ./Invoke-KokoroDevelopment.ps1 Run -Case benchmark-0-sm855
 [CmdletBinding()]
 param(
     [Parameter(Position = 0)]
-    [ValidateSet('Status', 'Verify', 'BuildHost', 'Ratchet', 'Run', 'Emit', 'Check', 'Compare', 'JobInput', 'Capture', 'StockCapture', 'Speak', 'Zira', 'Albert', 'AlbertError', 'AlbertLinear', 'AlbertLayerNorm', 'AlbertGelu', 'AlbertAttention', 'AlbertEmbed', 'AlbertJob', 'Api', 'Find', 'Tools', 'StageResidency')]
+    [ValidateSet('Status', 'Verify', 'BuildHost', 'Ratchet', 'Run', 'Emit', 'Check', 'Compare', 'JobInput', 'Capture', 'StockCapture', 'Speak', 'Zira', 'Albert', 'AlbertError', 'AlbertLinear', 'AlbertLayerNorm', 'AlbertGelu', 'AlbertAttention', 'AlbertEmbed', 'AlbertJob', 'Api', 'Find', 'Tools', 'StageResidency', 'CopySynthesis')]
     [string] $Command = 'Status',
     [string] $Case,
     [string] $Kernel,
@@ -2085,6 +2086,12 @@ function New-KokoroDiagnosticHost {
 if ($MyInvocation.InvocationName -eq '.') { return }
 
 switch ($Command) {
+    'CopySynthesis' {
+        if(-not $OutputDirectory){throw 'CopySynthesis needs a fresh -OutputDirectory under this worktree build/.'}
+        $copyArguments=@{OutputDirectory=$OutputDirectory}
+        if($Path){$copyArguments.CorrelationReceipt=$Path}
+        & (Join-Path $Root 'tools/Measure-KokoroCopySynthesis.ps1') @copyArguments
+    }
     'StageResidency' {
         if ($null -eq $Parameters) { Measure-KokoroStageResidency }
         else { Measure-KokoroStageResidency @Parameters }
