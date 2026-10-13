@@ -14,7 +14,7 @@ no serial is printed. Check the retrieved buffer with tools/Test-KokoroGenerator
 param(
     [Parameter(Mandatory)][string] $EmissionDirectory,
     [Parameter(Mandatory)][string] $FixtureDirectory,
-    [ValidateRange(1, 20)][int] $Runs = 3,
+    [ValidateRange(1, 121)][int] $Runs = 3,
     [ValidateSet('SM8550', 'SM8635')][string] $Soc = 'SM8550',
     [string] $Adb = 'C:\backup\Android\platform-tools\adb.exe',
     [string] $Package = 'dev.mansfieldplumbing.kokoro',
@@ -22,7 +22,8 @@ param(
     [pscustomobject] $EmissionArtifact,
     [ValidatePattern('^[0-9A-F]{64}$')][string] $ExpectedPcmSHA256,
     [switch] $AttributeBuffers,
-    [switch] $ResidentPayloads
+    [switch] $ResidentPayloads,
+    [switch] $RequestLifetime
 )
 $ErrorActionPreference = 'Stop'
 if ($Package -notmatch '^[a-zA-Z0-9_.]+$') { throw 'Invalid Android package name' }
@@ -67,6 +68,10 @@ if ($AttributeBuffers) { [IO.File]::AppendAllText($spec, "AttributeBuffers=True`
 if ($ResidentPayloads) {
     if ($AttributeBuffers -or -not $layout.ResidentPayloads) { throw 'Resident payloads require the admitted adapter and no buffer probe.' }
     [IO.File]::AppendAllText($spec, "ResidentPayloads=True`n")
+}
+if ($RequestLifetime) {
+    if (-not $ResidentPayloads -or $Runs -ne 31) { throw 'Request lifetime measurement requires resident payloads and 31 runs (one warmup and 30 requests).' }
+    [IO.File]::AppendAllText($spec, "RequestLifetime=True`n")
 }
 $temp = "/data/local/tmp/kokoro-tail-$id"
 $backup = "files/kokoro-fl/generator-tail-backup-$id"

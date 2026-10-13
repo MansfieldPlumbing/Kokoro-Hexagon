@@ -24,7 +24,7 @@ $sharedPayloads = [Collections.Generic.List[object]]::new()
 try {
     $kv = @{}; foreach ($l in [IO.File]::ReadAllLines([IO.Path]::Combine($dir, 'spec.txt'))) { $p = $l.Split('=', 2); if ($p.Count -eq 2) { $kv[$p[0]] = $p[1] } }
     $tiles = [int]$kv.Tiles; $runs = [int]$kv.Runs; $outputBytes = [int]$kv.OutputBytes; $pcmOffset = [int]$kv.PcmOffset; $samples = [int]$kv.Samples
-    if ($tiles -lt 1 -or $tiles -gt 1024 -or $runs -lt 1 -or $runs -gt 20 -or $samples -lt 1 -or $pcmOffset + 2 * $samples -gt $outputBytes) { throw 'Spec out of range' }
+    if ($tiles -lt 1 -or $tiles -gt 1024 -or $runs -lt 1 -or $runs -gt 121 -or $samples -lt 1 -or $pcmOffset + 2 * $samples -gt $outputBytes) { throw 'Spec out of range' }
     $lines.Add("Tiles=$tiles Runs=$runs Samples=$samples")
     $load = { param([string]$Name, [object[]]$Arguments)
         $ast = [Management.Automation.Language.Parser]::ParseFile([IO.Path]::Combine($root, $Name), [ref]$null, [ref]$null)
@@ -98,13 +98,25 @@ try {
         $lines.Add("ResidentPayloads=True MappingMs=$($mappingMs.ToString('F3',$inv)) WeightsBytes=$($wts.Length) TablesBytes=$($tbl.Length) Allocation=RpcmemSystemUncached Mapping=RemoteMemMapStatic OncePerSession=True")
     }
     $ticks = [Collections.Generic.List[long]]::new(); $pcmHash = $null; $allOk = $true; $pcm = $null
+    $requestLifetime = $kv.ContainsKey('RequestLifetime')
+    $requestClock = [Diagnostics.Stopwatch]::StartNew()
+    $requestProcess = [Environment]::ProcessId
+    $requestThread = [Environment]::CurrentManagedThreadId
+    $requestFloats = $null
+    if ($requestLifetime) { $lines.Add('RequestLifetime=True ProcessCount=1 FastRpcOpenCount=1 PayloadMapCount=2 Warmups=1 Requests=30') }
     for ($run = 0; $run -lt $runs; $run++) {
+        $idleSeconds = if ($requestLifetime -and $run -gt 0) { @(0,1,5)[($run-1)%3] } else { 0 }
+        if ($idleSeconds) { [Threading.Thread]::Sleep(1000*$idleSeconds) }
+        if ([Environment]::ProcessId -ne $requestProcess -or [Environment]::CurrentManagedThreadId -ne $requestThread) { throw 'Measurement process or runspace thread changed.' }
+        if ($requestLifetime) { $lines.Add("Request=$run GapSeconds=$idleSeconds ElapsedMs=$($requestClock.Elapsed.TotalMilliseconds.ToString('F3',$inv)) SameProcess=True SameSession=True") }
         $phaseClock = [Diagnostics.Stopwatch]::StartNew()
         $setupEntry = $phaseClock.ElapsedTicks
-        $out = [byte[]]::new($outputBytes)
-        $bufs = if ($resident) { @($config,$act,$out) } else { @($config, $act, $wts, $tbl, $out) }
-        $argBlock = $Marshal::AllocHGlobal(16 * $bufs.Count); $allocations.Add($argBlock)
-        for ($i = 0; $i -lt $bufs.Count; $i++) { $Marshal::WriteIntPtr($argBlock, 16 * $i, (& $pin $bufs[$i])); $Marshal::WriteInt64($argBlock, 16 * $i + 8, [long]$bufs[$i].Length) }
+        if (-not $requestLifetime -or $run -eq 0) {
+            $out = [byte[]]::new($outputBytes)
+            $bufs = if ($resident) { @($config,$act,$out) } else { @($config, $act, $wts, $tbl, $out) }
+            $argBlock = $Marshal::AllocHGlobal(16 * $bufs.Count); $allocations.Add($argBlock)
+            for ($i = 0; $i -lt $bufs.Count; $i++) { $Marshal::WriteIntPtr($argBlock, 16 * $i, (& $pin $bufs[$i])); $Marshal::WriteInt64($argBlock, 16 * $i + 8, [long]$bufs[$i].Length) }
+        }
         $scalars = if ($resident) { [uint32]0x03020100 } else { [uint32]0x02040100 }
         $invokeArguments = [object[]]@($handle, $scalars, $argBlock)
         $invokeEntry = $phaseClock.ElapsedTicks
@@ -137,12 +149,52 @@ try {
         $timer72 = if ($out.Length -ge 80) { [BitConverter]::ToUInt64($out, 72) } else { [uint64]0 }
         $lines.Add("Run=$run InvokeRc=$rc Stage=$stage Done=$done RegionTicks=$dt Timer48=$timer48 Timer56=$timer56 Timer64=$timer64 Timer72=$timer72 InvokeMs=$($sw.Elapsed.TotalMilliseconds.ToString('F3', $inv)) PcmSHA256=$hash")
         [IO.File]::WriteAllLines($receipt, $lines)
+        if (-not $allOk) { throw 'Invocation or PCM parity failed; stopping before playback.' }
+        if ($requestLifetime) {
+            if ($null -eq $audio) {
+                $audio = & $load 'Audio.AAudio.psm1' @($abi)
+                $requestFloats = [float[]]::new($samples)
+                for ($j=0;$j -lt $samples;$j++) { $requestFloats[$j]=[float]($pcm[$j]/32768.0) }
+            }
+            $stream = & $audio.Open 24000 1
+            $playClock = [Diagnostics.Stopwatch]::StartNew()
+            $written = & $audio.Write $stream $requestFloats $playClock
+            $drain = & $audio.Drain $stream 10000
+            $lines.Add("Request=$run Played=True WrittenFrames=$written DrainComplete=$($drain.Complete) XRunCount=$($drain.XRunCount) DrainAtMs=$($requestClock.Elapsed.TotalMilliseconds.ToString('F3',$inv))")
+            $closeRc = & $audio.Close $stream; $stream=$null
+            if (-not $drain.Complete -or $drain.XRunCount -ne 0 -or $closeRc -ne 0) { throw 'Request audio drain, xrun or close gate failed.' }
+            [IO.File]::WriteAllLines($receipt,$lines)
+        }
         if ($rc -ne 0) { break }
+    }
+    if ($requestLifetime) {
+        $lines.Add("RequestsComplete=30 RequestSpanMs=$($requestClock.Elapsed.TotalMilliseconds.ToString('F3',$inv))")
+        if ($requestClock.Elapsed.TotalSeconds -lt 120) { throw 'Request measurement was shorter than two minutes.' }
+    }
+    if ($allOk -and $kv.ContainsKey('AttributeBuffers')) {
+        # The existing HmxConvRun dispatch returns AEE_EUNSUPPORTED (20) before
+        # reading buffers for method 127. Keep its four-input/one-output ABI.
+        # These calls produce no PCM and never replace the synthesis output.
+        $cases = @(
+            [pscustomobject]@{Name='Full'; Lengths=[long[]]@(4,$act.Length,$wts.Length,$tbl.Length,$out.Length)},
+            [pscustomobject]@{Name='Small'; Lengths=[long[]]@(4,4,4,4,4)},
+            [pscustomobject]@{Name='WithoutWeights'; Lengths=[long[]]@(4,$act.Length,4,$tbl.Length,$out.Length)})
+        for ($probeRun = 0; $probeRun -lt 6; $probeRun++) {
+            foreach ($case in $cases) {
+                for ($i = 0; $i -lt 5; $i++) { $Marshal::WriteInt64($argBlock, 16 * $i + 8, $case.Lengths[$i]) }
+                $probeArguments = [object[]]@($handle, [uint32]0x7F040100, $argBlock)
+                $probeClock = [Diagnostics.Stopwatch]::StartNew()
+                $probeRc = [int]$invoke.DynamicInvoke($probeArguments)
+                $probeClock.Stop()
+                $lines.Add("BufferProbe=$($case.Name) Run=$probeRun InvokeRc=$probeRc InvokeMs=$($probeClock.Elapsed.TotalMilliseconds.ToString('F3', $inv))")
+                if ($probeRc -ne 20) { throw 'Buffer attribution dispatch did not return AEE_EUNSUPPORTED.' }
+            }
+        }
     }
     if ($ticks.Count) { $sorted = $ticks.ToArray(); [Array]::Sort($sorted); $median = $sorted[[int][math]::Floor($sorted.Count / 2)]
         $lines.Add("MedianRegionTicks=$median MedianRegionMs=$(($median / 19200.0).ToString('F3', $inv)) AudioSeconds=$(($samples / 24000.0).ToString('F3', $inv))") }
     # Diagnostic jobs without PCM declare Samples=1: nothing to play.
-    if ($allOk -and $null -ne $pcm -and $samples -gt 1) {
+    if (-not $requestLifetime -and $allOk -and $null -ne $pcm -and $samples -gt 1) {
         $audio = & $load 'Audio.AAudio.psm1' @($abi)
         $stream = & $audio.Open 24000 1
         $floats = [float[]]::new($samples); for ($j = 0; $j -lt $samples; $j++) { $floats[$j] = [float]($pcm[$j] / 32768.0) }
