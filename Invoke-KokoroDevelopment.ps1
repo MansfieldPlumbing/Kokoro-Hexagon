@@ -28,6 +28,8 @@ twice, or written as a scratch script, is a missing command: add it here.
   JobInput -Reference -CaptureMap -OutputDirectory
                               Build a test case's job input from stock captures; prints which inputs match the reference.
   Capture  -Path [-Pattern]   List a stock capture's tensors: name, shape, bytes, hash prefix, and its capture spec.
+  MeasureAudio -Path         Read a WAV or folder of WAVs; return typed BS.1770-4 loudness, true peak and RMS measurements.
+                              PCM16/float32, mono/stereo, native sample rate. No phone access or audio writes.
   StockCapture [-Block albert|decoder|generator] [-Phonemes] [-Voice] [-Seed] [-PhonemesFrom capture] [-DecoderInput json] [-OutputDirectory]
                               Run pinned stock PyTorch Kokoro on Windows (reference only) and record one block's tensors
                               under build/ with source, checkpoint and voice integrity checks. -PhonemesFrom reuses the phonemes,
@@ -92,7 +94,7 @@ pwsh -NoProfile -File ./Invoke-KokoroDevelopment.ps1 Run -Case benchmark-0-sm855
 [CmdletBinding()]
 param(
     [Parameter(Position = 0)]
-    [ValidateSet('Status', 'Verify', 'BuildHost', 'Ratchet', 'Run', 'Emit', 'Check', 'Compare', 'JobInput', 'Capture', 'StockCapture', 'Speak', 'Zira', 'Albert', 'AlbertError', 'AlbertLinear', 'AlbertLayerNorm', 'AlbertGelu', 'AlbertAttention', 'AlbertEmbed', 'AlbertJob', 'Api', 'Find', 'Tools', 'StageResidency')]
+    [ValidateSet('Status', 'Verify', 'BuildHost', 'Ratchet', 'Run', 'Emit', 'Check', 'Compare', 'JobInput', 'Capture', 'MeasureAudio', 'StockCapture', 'Speak', 'Zira', 'Albert', 'AlbertError', 'AlbertLinear', 'AlbertLayerNorm', 'AlbertGelu', 'AlbertAttention', 'AlbertEmbed', 'AlbertJob', 'Api', 'Find', 'Tools', 'StageResidency')]
     [string] $Command = 'Status',
     [string] $Case,
     [string] $Kernel,
@@ -2085,6 +2087,11 @@ function New-KokoroDiagnosticHost {
 if ($MyInvocation.InvocationName -eq '.') { return }
 
 switch ($Command) {
+    'MeasureAudio' {
+        if (-not $Path) { throw 'MeasureAudio needs -Path (a WAV file or folder).' }
+        Import-Module (Join-Path $Root 'tools/Kokoro.AudioMeasurement.psm1')
+        Measure-KokoroAudio -Path $Path
+    }
     'StageResidency' {
         if ($null -eq $Parameters) { Measure-KokoroStageResidency }
         else { Measure-KokoroStageResidency @Parameters }
@@ -2103,7 +2110,7 @@ switch ($Command) {
         }
         ''
         'Commands (Get-Help ./Invoke-KokoroDevelopment.ps1 -Full):'
-        '  Status Verify BuildHost Ratchet Run Emit Check Compare JobInput Capture StockCapture Speak Zira Albert Find Tools'
+        '  Status Verify BuildHost Ratchet Run Emit Check Compare JobInput Capture MeasureAudio StockCapture Speak Zira Albert Find Tools'
         'Contract: AGENTS.md. Reference manuals: Find-Reference (Pwsh-Development/tools/SharedLibrary.psm1).'
     }
     'BuildHost' {
@@ -2173,6 +2180,10 @@ switch ($Command) {
                 if ($LASTEXITCODE -ne 0) { throw "Test-SplitBreathGroups exited ${LASTEXITCODE}: $output" }
             }
             'case-pairs' = { Test-KokoroCasePairs }
+            'audio-measurement' = {
+                Import-Module (Join-Path $Root 'tools/Kokoro.AudioMeasurement.psm1')
+                Test-KokoroAudioMeasurement
+            }
         }
         $failed = $false
         foreach ($name in $checks.Keys) {
