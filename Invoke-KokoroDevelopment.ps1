@@ -2501,9 +2501,15 @@ switch ($Command) {
         $r.Runs | ForEach-Object { '  ' + $_ }
     }
     'FrontEnd' {
-        if (-not $Parameters -or -not $OutputDirectory) { throw 'FrontEnd needs typed bank -Parameters and a fresh -OutputDirectory.' }
-        Import-Module (Join-Path $Root 'tools/Kokoro.ProsodyBank.psm1')
-        New-KokoroProsodyBank @Parameters -OutputDirectory $OutputDirectory
+        if (-not $Parameters) { throw 'FrontEnd needs typed -Parameters.' }
+        if ($Parameters.ContainsKey('CaptureDirectory')) {
+            Import-Module (Join-Path $Root 'tools/Kokoro.TextEncoder.psm1')
+            Test-KokoroTextEncoder @Parameters
+        } else {
+            if (-not $OutputDirectory) { throw 'Prosody manufacture needs a fresh -OutputDirectory.' }
+            Import-Module (Join-Path $Root 'tools/Kokoro.ProsodyBank.psm1')
+            New-KokoroProsodyBank @Parameters -OutputDirectory $OutputDirectory
+        }
     }
     'Api' { Get-KokoroApi -Pattern $Pattern | Format-Table -AutoSize -Wrap | Out-String -Width 220 }
     'Find' {
