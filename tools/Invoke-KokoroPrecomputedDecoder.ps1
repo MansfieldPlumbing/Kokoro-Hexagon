@@ -1,6 +1,3 @@
-#requires -Version 7.7
-using namespace System.Runtime.Intrinsics
-using namespace System.Runtime.Intrinsics.X86
 <#
 .SYNOPSIS
 Offline float32 decoder/generator admission and precomputed-unit join experiment.
@@ -11,18 +8,47 @@ No phone access. -h prints help. Admission precedes the render gates.
 Admit checks compiled SIMD workers; Nodes compares 25 dog intermediates;
 Levels checks exact normalization replay; Gate measures ten Supplied renders;
 Seeded renders the capture inputs with deterministic noise; Join runs the bank experiment.
+.PARAMETER Threads
+Compiled convolution workers, 2 through 64; default 4.
+.PARAMETER Runs
+Supplied gate renders per case, 1 through 10; default 10. Report run ten as warm.
+.PARAMETER CaseName
+Optional dog or peach filter for capture diagnostics.
+.PARAMETER InputRepository
+Read-only main checkout containing the preserved captures, checkpoint and bank.
+.PARAMETER OutputDirectory
+Outputs below this worktree's build directory. Join defaults to
+build/precomputed-decoder-20261014; other modes choose a fresh timestamped child.
+Completed results and existing compiled artifacts are never overwritten.
 .PARAMETER Seed
 Seeded and Join reset this seed for each render, using uniform phase and Gaussian noise.
+.PARAMETER SelectedUnits
+An existing in-process mine.ps1 result, or its selection.clixml record. Reuses
+the recorded paths; the unchanged reference reader supplies donor provenance.
+.PARAMETER DonorRecords
+The existing donors.clixml objects. Reads their precomputed native features and
+moments, validates source chunks, and runs the join/generator stage without
+decoding the same donors again. Existing WAVs must reproduce exactly.
+.PARAMETER h
+Show help without compiling, loading weights or rendering.
+.EXAMPLE
+& ./Invoke-KokoroDevelopment.ps1 PrecomputedDecoder -Parameters @{Mode='Join'; Seed=17}
 #>
+
+#requires -Version 7.7
+using namespace System.Runtime.Intrinsics
+using namespace System.Runtime.Intrinsics.X86
 [CmdletBinding()]
 param(
     [ValidateSet('Admit','Nodes','Levels','Gate','Seeded','Join')][string] $Mode = 'Gate',
     [ValidateRange(2,64)][int] $Threads = 4,
     [ValidateRange(1,10)][int] $Runs = 10,
-    [string] $CaseName = '',
+    [ValidateSet('','dog','peach')][string] $CaseName = '',
     [string] $InputRepository = 'C:\Dev\Kokoro-Hexagon',
     [string] $OutputDirectory = '',
     [int] $Seed = 17,
+    [Collections.IDictionary] $SelectedUnits = $null,
+    [object[]] $DonorRecords = @(),
     [switch] $h
 )
 
@@ -37,6 +63,162 @@ class OfflineLevelRecord {
 class OfflineDecoderResult {
     [float[]] $Features
     [OfflineLevelRecord[]] $Levels
+}
+class OfflineDonor {
+    [int] $Sentence
+    [string] $Text
+    [int[]] $Durations
+    [int[]] $Offsets
+    [float[]] $TextEncoder
+    [float[]] $F0
+    [float[]] $N
+    [OfflineDecoderResult] $Decoded
+    [double] $DecoderMs
+}
+
+class OfflineExperimentMath {
+    static [int[]] Durations([short[]] $source, [int] $start, [int] $count) {
+        $result = [int[]]::new($count)
+        for ($i = 0; $i -lt $count; $i++) {
+            $value = [int]$source[$start + $i]
+            if ($value -le 0) { throw [ArgumentException]::new('Nonpositive bank duration.') }
+            $result[$i] = $value
+        }
+        return $result
+    }
+    static [int[]] Offsets([int[]] $durations) {
+        $result = [int[]]::new($durations.Length + 1)
+        for ($i = 0; $i -lt $durations.Length; $i++) { $result[$i + 1] = $result[$i] + $durations[$i] }
+        return $result
+    }
+    static [float[]] EncoderSlice([short[]] $source, [float[]] $scales, [int] $allTokens, [int] $start, [int] $count) {
+        if ($source.Length -ne 512 * $allTokens -or $scales.Length -ne 512 -or $start -lt 0 -or $start + $count -gt $allTokens) { throw [ArgumentException]::new('Bank encoder shape mismatch.') }
+        $result = [float[]]::new(512 * $count)
+        for ($c = 0; $c -lt 512; $c++) {
+            for ($i = 0; $i -lt $count; $i++) { $result[$c * $count + $i] = [float]([float]$source[$c * $allTokens + $start + $i] * $scales[$c]) }
+        }
+        return $result
+    }
+    static [float[]] HalfSlice([ushort[]] $source, [int] $start, [int] $count) {
+        if ($start -lt 0 -or $start + $count -gt $source.Length) { throw [ArgumentException]::new('Bank contour range mismatch.') }
+        $result = [float[]]::new($count)
+        for ($i = 0; $i -lt $count; $i++) {
+            $bits = [int]$source[$start + $i]; $exponent = ($bits -shr 10) -band 31; $mantissa = $bits -band 1023
+            $value = [float]0
+            if ($exponent -eq 0) { $value = [float]([double]$mantissa * [double]0.000000059604644775390625) }
+            elseif ($exponent -lt 31) { $value = [BitConverter]::Int32BitsToSingle((($exponent + 112) -shl 23) -bor ($mantissa -shl 13)) }
+            else { throw [ArgumentException]::new('Nonfinite bank contour.') }
+            if (($bits -band 32768) -ne 0) { $value = -$value }
+            $result[$i] = $value
+        }
+        return $result
+    }
+    static [void] CopyFrames([float[]] $source, [int] $sourceFrames, [int] $firstFrame, [int] $count, [float[]] $destination, [int] $destinationFrames, [int] $destinationFirst) {
+        if ($source.Length -ne 512 * $sourceFrames -or $destination.Length -ne 512 * $destinationFrames -or $firstFrame -lt 0 -or $firstFrame + $count -gt $sourceFrames -or $destinationFirst -lt 0 -or $destinationFirst + $count -gt $destinationFrames) { throw [ArgumentException]::new('Feature slice range mismatch.') }
+        for ($c = 0; $c -lt 512; $c++) { [Array]::Copy($source, $c * $sourceFrames + $firstFrame, $destination, $c * $destinationFrames + $destinationFirst, $count) }
+    }
+    static [void] AddTokenMoments([double[]] $source, [int] $channels, [int] $tokens, [int] $token, [double[]] $total) {
+        if ($source.Length -ne 2 * $channels * ($tokens + 1) -or $total.Length -ne 2 * $channels -or $token -lt 0 -or $token -ge $tokens) { throw [ArgumentException]::new('Token moment shape mismatch.') }
+        for ($c = 0; $c -lt $channels; $c++) {
+            $total[$c] += $source[2 * $channels + $token * $channels + $c]
+            $total[$channels + $c] += $source[2 * $channels + $tokens * $channels + $token * $channels + $c]
+        }
+    }
+    static [double[]] FinishMoments([double[]] $total, [int] $frames) {
+        if ($frames -le 0 -or $total.Length % 2 -ne 0) { throw [ArgumentException]::new('Invalid composed moments.') }
+        $channels = [int]($total.Length / 2); $result = [double[]]::new($total.Length)
+        for ($c = 0; $c -lt $channels; $c++) {
+            $mean = $total[$c] / [double]$frames
+            $variance = [Math]::Max([double]0, $total[$channels + $c] / [double]$frames - $mean * $mean)
+            $result[$c] = [double][float]$mean; $result[$channels + $c] = [double][float]$variance
+        }
+        return $result
+    }
+    static [void] AddLiveLevels([double[]] $source, [double[]] $total) {
+        if ($source.Length -lt $total.Length) { throw [ArgumentException]::new('Live level shape mismatch.') }
+        for ($i = 0; $i -lt $total.Length; $i++) { $total[$i] += $source[$i] }
+    }
+    static [double[]] AverageLevels([double[]] $total, [int] $count) {
+        $result = [double[]]::new($total.Length)
+        for ($i = 0; $i -lt $total.Length; $i++) { $result[$i] = [double][float]($total[$i] / [double]$count) }
+        return $result
+    }
+    static [double] Median([double[]] $values) {
+        if ($values.Length -eq 0) { return [double]0 }
+        $sorted = [double[]]$values.Clone(); [Array]::Sort($sorted)
+        $middle = [int][Math]::Floor([double]$sorted.Length / [double]2)
+        if ($sorted.Length % 2 -ne 0) { return $sorted[$middle] }
+        return ($sorted[$middle - 1] + $sorted[$middle]) / [double]2
+    }
+    static [double[]] LevelErrors([double[]] $supplied, [double[]] $live, [int] $channels) {
+        $means = [double[]]::new($channels); $deviations = [double[]]::new($channels); $maxMean = [double]0; $maxDeviation = [double]0
+        for ($c = 0; $c -lt $channels; $c++) {
+            $means[$c] = [Math]::Abs($supplied[$c] - $live[$c]) / [Math]::Max([double]0.000000000001, [Math]::Abs($live[$c]))
+            $sd = [Math]::Sqrt($live[$channels + $c]); $bankSd = [Math]::Sqrt($supplied[$channels + $c])
+            $deviations[$c] = [Math]::Abs($bankSd - $sd) / [Math]::Max([double]0.000000000001, $sd)
+            $maxMean = [Math]::Max($maxMean, $means[$c]); $maxDeviation = [Math]::Max($maxDeviation, $deviations[$c])
+        }
+        return [double[]]@($maxMean, [OfflineExperimentMath]::Median($means), $maxDeviation, [OfflineExperimentMath]::Median($deviations))
+    }
+    static [float[]] Windows([int[]] $frameOffsets, [int] $extension) {
+        if ($extension -le 0 -or $frameOffsets.Length -lt 2) { throw [ArgumentException]::new('Invalid overlap window.') }
+        $units = $frameOffsets.Length - 1; $frames = $frameOffsets[$units]; $result = [float[]]::new($units * $frames)
+        for ($t = 0; $t -lt $frames; $t++) {
+            $leftRamp = [double]1; $accumulated = [float]0
+            for ($u = 0; $u -lt $units; $u++) {
+                $rightRamp = [double]0
+                if ($u + 1 -lt $units) {
+                    $position = ([double]$t + [double]0.5 - [double]($frameOffsets[$u + 1] - $extension)) / [double](2 * $extension)
+                    if ($position -ge [double]1) { $rightRamp = [double]1 }
+                    elseif ($position -gt [double]0) { $sine = [Math]::Sin([double]1.5707963267948966 * $position); $rightRamp = $sine * $sine }
+                }
+                # A rising sine-squared ramp at each ordered join. Differences telescope,
+                # including when a short unit lies inside two overlap windows.
+                $weight = [float]($leftRamp - $rightRamp)
+                if ($rightRamp -eq [double]0) { $weight = [float]([float]1 - $accumulated) }
+                if ($weight -lt [float]0) { throw [ArgumentException]::new('Negative overlap weight.') }
+                $result[$u * $frames + $t] = $weight; $accumulated = [float]($accumulated + $weight); $leftRamp = $rightRamp
+            }
+            if ($accumulated -ne [float]1) { throw [ArgumentException]::new('Overlap weights do not sum exactly to one.') }
+        }
+        return $result
+    }
+    static [void] AddWindowedUnit([float[]] $source, [int] $sourceFirst, [int] $targetFirst, [int] $unit, [float[]] $weights, [float[]] $destination, [int] $frames) {
+        $sourceFrames = [int]($source.Length / 512)
+        if ($destination.Length -ne 512 * $frames -or $weights.Length % $frames -ne 0) { throw [ArgumentException]::new('Overlap shape mismatch.') }
+        for ($t = 0; $t -lt $frames; $t++) {
+            $weight = $weights[$unit * $frames + $t]
+            if ($weight -eq [float]0) { continue }
+            $from = $sourceFirst + $t - $targetFirst
+            if ($from -lt 0 -or $from -ge $sourceFrames) { throw [ArgumentException]::new('Required donor neighbouring frame is unavailable; no padding invented.') }
+            for ($c = 0; $c -lt 512; $c++) {
+                $at = $c * $frames + $t
+                $destination[$at] = [float]($destination[$at] + [float]($source[$c * $sourceFrames + $from] * $weight))
+            }
+        }
+    }
+    static [double[]] JoinMetrics([float[]] $pcm, [int[]] $joins) {
+        if ($pcm.Length -lt 480) { throw [ArgumentException]::new('Audio shorter than 20 ms.') }
+        $differences = [double[]]::new($pcm.Length - 1)
+        for ($i = 0; $i -lt $differences.Length; $i++) { $differences[$i] = [Math]::Abs([double]$pcm[$i + 1] - [double]$pcm[$i]) }
+        # Every complete 480-sample window, one-sample hop; 479 differences.
+        $windows = [double[]]::new($pcm.Length - 479); $deque = [int[]]::new($differences.Length); $head = 0; $tail = 0
+        for ($i = 0; $i -lt $differences.Length; $i++) {
+            while ($tail -gt $head -and $differences[$deque[$tail - 1]] -le $differences[$i]) { $tail-- }
+            $deque[$tail] = $i; $tail++
+            while ($tail -gt $head -and $deque[$head] -lt $i - 478) { $head++ }
+            if ($i -ge 478) { $windows[$i - 478] = $differences[$deque[$head]] }
+        }
+        $baseline = [OfflineExperimentMath]::Median($windows); $ratios = [double[]]::new($joins.Length); $largest = [double]0
+        for ($j = 0; $j -lt $joins.Length; $j++) {
+            $peak = [double]0; $first = [Math]::Max(0, $joins[$j] - 240); $last = [Math]::Min($differences.Length - 1, $joins[$j] + 239)
+            for ($i = $first; $i -le $last; $i++) { $peak = [Math]::Max($peak, $differences[$i]) }
+            $ratio = [double]0
+            if ($baseline -gt [double]0) { $ratio = $peak / $baseline } elseif ($peak -gt [double]0) { $ratio = [double]::PositiveInfinity }
+            $ratios[$j] = $ratio; $largest = [Math]::Max($largest, $ratio)
+        }
+        return [double[]]@($largest, [OfflineExperimentMath]::Median($ratios), $baseline)
+    }
 }
 
 class OfflineConvolutionWorker {
@@ -418,11 +600,26 @@ class OfflineRenderMath {
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 if ($h) { Get-Help $PSCommandPath -Detailed; return }
+if ($CaseName) { $CaseName = $CaseName.ToLowerInvariant() }
+if ($Mode -eq 'Nodes' -and $CaseName -eq 'peach') { throw 'The supplied intermediate-node reference covers dog only.' }
 $root = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..'))
-if (-not $OutputDirectory) { $OutputDirectory = Join-Path $root 'build/precomputed-decoder-20261014' }
+if (-not $OutputDirectory) {
+    $OutputDirectory = Join-Path $root 'build/precomputed-decoder-20261014'
+    if ($Mode -ne 'Join') { $OutputDirectory = Join-Path $OutputDirectory ($Mode + '-' + [DateTime]::UtcNow.ToString('yyyyMMdd-HHmmssfff')) }
+}
 $output = [IO.Path]::GetFullPath($OutputDirectory)
 if (-not $output.StartsWith((Join-Path $root 'build') + [IO.Path]::DirectorySeparatorChar, [StringComparison]::OrdinalIgnoreCase)) { throw 'Output must be in this worktree build/.' }
 [void][IO.Directory]::CreateDirectory($output)
+$finishedOutputs = switch ($Mode) {
+    'Gate' { 'part1-gate.clixml' }
+    'Nodes' { 'nodes.clixml' }
+    'Levels' { 'dog-level-gate.clixml'; 'peach-level-gate.clixml' }
+    'Seeded' { 'dog-seeded-pcm.f32'; 'peach-seeded-pcm.f32' }
+    'Join' { 'store-size.clixml' }
+}
+foreach ($finishedOutput in $finishedOutputs) {
+    if ([IO.File]::Exists((Join-Path $output $finishedOutput))) { throw 'Existing completed result is immutable; choose a fresh output directory.' }
+}
 $compiler = Join-Path $root 'build/phonemizer/inputs/pslowering-1afabe056235a570da29e268824784557d4f6cdd'
 $pins = @(Import-Csv -LiteralPath (Join-Path $compiler 'verified-source.tsv') -Delimiter "`t")
 if ($pins.Count -ne 9) { throw 'Incomplete pinned frontend compiler.' }
@@ -436,6 +633,7 @@ $sourceHash = (Get-FileHash -LiteralPath $PSCommandPath).Hash
 $dllDirectory = Join-Path $output $sourceHash
 [void][IO.Directory]::CreateDirectory($dllDirectory)
 $dll = Join-Path $dllDirectory 'Kokoro.OfflineRender.dll'
+if ([IO.File]::Exists($dll)) { throw 'Existing compiled artifact is immutable; choose a fresh output directory.' }
 $compiled = Export-LoweredAssembly -SourcePath $PSCommandPath -ClassName OfflineConvolutionWorker -OutputPath $dll -Deterministic
 $admission = Test-LoweredAssembly -AssemblyPath $dll
 if (-not $admission.ClrOnlyAdmitted) { throw 'Offline numeric kernels reference SMA.' }
@@ -741,6 +939,256 @@ function New-OfflineDraws([int] $SampleCount) {
     [Array]::Copy($flat, 9 + $gaussian.Length, $extraNoise, 0, $SampleCount)
     return [pscustomobject]@{ Uniform = $uniform; Harmonic = $gaussian; Extra = $extraNoise }
 }
+function Write-OfflineArray([string] $DestinationPath, [Array] $ArrayValues) {
+    $raw = [byte[]]::new([Buffer]::ByteLength($ArrayValues)); [Buffer]::BlockCopy($ArrayValues, 0, $raw, 0, $raw.Length)
+    [IO.File]::WriteAllBytes($DestinationPath, $raw)
+}
+function Read-OfflineArray([string] $SourcePath, [type] $ElementType, [int] $ElementCount) {
+    $raw = [IO.File]::ReadAllBytes($SourcePath); $values = [Array]::CreateInstance($ElementType, $ElementCount)
+    if ($raw.Length -ne [Buffer]::ByteLength($values)) { throw "Native array length mismatch: $SourcePath" }
+    [Buffer]::BlockCopy($raw, 0, $values, 0, $raw.Length); return , $values
+}
+function Write-OfflineWave([string] $DestinationPath, [float[]] $PcmValues) {
+    if ([IO.File]::Exists($DestinationPath)) {
+        $existing = [IO.File]::ReadAllBytes($DestinationPath); $newBytes = [byte[]]::new(4 * $PcmValues.Length)
+        [Buffer]::BlockCopy($PcmValues, 0, $newBytes, 0, $newBytes.Length)
+        if ($existing.Length -ne 44 + $newBytes.Length -or [BitConverter]::ToUInt16($existing,20) -ne 3 -or [BitConverter]::ToUInt16($existing,22) -ne 1 -or [BitConverter]::ToInt32($existing,24) -ne 24000) { throw 'Existing WAV does not match this experiment format.' }
+        $oldBytes = [byte[]]::new($newBytes.Length); [Array]::Copy($existing,44,$oldBytes,0,$oldBytes.Length)
+        if (-not [Linq.Enumerable]::SequenceEqual[byte]($oldBytes,$newBytes)) { throw "Existing WAV differs; refusing overwrite: $DestinationPath" }
+        Write-Host "Preserved identical existing WAV: $DestinationPath"; return
+    }
+    $stream = [IO.File]::Create($DestinationPath); $writer = [IO.BinaryWriter]::new($stream)
+    try {
+        $writer.Write([Text.Encoding]::ASCII.GetBytes('RIFF')); $writer.Write([int](36 + 4 * $PcmValues.Length))
+        $writer.Write([Text.Encoding]::ASCII.GetBytes('WAVEfmt ')); $writer.Write([int]16)
+        $writer.Write([short]3); $writer.Write([short]1); $writer.Write([int]24000); $writer.Write([int]96000)
+        $writer.Write([short]4); $writer.Write([short]32); $writer.Write([Text.Encoding]::ASCII.GetBytes('data')); $writer.Write([int](4 * $PcmValues.Length))
+        $raw = [byte[]]::new(4 * $PcmValues.Length); [Buffer]::BlockCopy($PcmValues, 0, $raw, 0, $raw.Length); $writer.Write($raw)
+    } finally { $writer.Dispose(); $stream.Dispose() }
+}
+function Invoke-OfflineBankSelection {
+    # mine.ps1 was authored for PowerShell's default non-strict indexing:
+    # its third context character extends beyond the terminal padding. Keep
+    # that existing script's execution semantics without changing its source.
+    Set-StrictMode -Off
+    $selectionDirectory = Join-Path $output 'selection'
+    if ($null -ne $SelectedUnits) { $selectionDirectory = Join-Path $output ('selection-reader-' + [Guid]::NewGuid().ToString('N')) }
+    [void][IO.Directory]::CreateDirectory($selectionDirectory)
+    $heldoutSource = Join-Path $InputRepository 'build/unit-bank/scripts/heldout.json'; $heldoutCopy = Join-Path $selectionDirectory 'heldout.json'
+    if ([IO.File]::Exists($heldoutCopy)) {
+        if ((Get-FileHash -LiteralPath $heldoutCopy).Hash -cne (Get-FileHash -LiteralPath $heldoutSource).Hash) { throw 'Held-out copy differs from preserved input.' }
+    } else { [IO.File]::Copy($heldoutSource, $heldoutCopy, $false) }
+    $savedWeights = $env:KOKORO_TARGETW
+    try {
+        $env:KOKORO_TARGETW = '4,1,0.5,4,8,2'
+        # Existing trusted selector owns its preserved JSON boundary. Retain its
+        # in-process objects; this experiment neither parses nor produces JSON.
+        $requestedSizes = [int[]]@(1000000)
+        if ($null -ne $SelectedUnits) { $requestedSizes = [int[]]::new(0) }
+        . (Join-Path $root 'tools/reference/unit-bank/mine.ps1') -Dir $selectionDirectory -Sizes $requestedSizes -K 40 | Out-Host
+        $selection = $SelectedUnits
+        if ($null -eq $selection) {
+            $selection = $results["$sent"]
+            $selection | Export-Clixml -LiteralPath (Join-Path $output 'selection.clixml')
+        }
+        if ($selection['sentences'] -ne $order.Count -or $selection['picks'].Count -ne 9) { throw 'Saved selection does not cover the full bank and nine targets.' }
+        return [pscustomobject]@{ Picks = $selection['picks']; Order = $order; ReadNpy = (Get-Command Read-Npy).ScriptBlock; BankSentences = $selection['sentences']; BankUnits = $selection['units'] }
+    } finally { $env:KOKORO_TARGETW = $savedWeights }
+}
+function Read-OfflineBankArray([IO.Compression.ZipArchive] $Archive, [string] $ArrayName, [string] $ExpectedType, [type] $ElementType) {
+    $npy = & $bankSelection.ReadNpy $Archive $ArrayName
+    if ($npy.Type -cne $ExpectedType) { throw "Unexpected bank dtype: $ArrayName" }
+    $width = [int]$ExpectedType.Substring(2)
+    if (($npy.Bytes.Length - $npy.Offset) % $width -ne 0) { throw 'Truncated bank array.' }
+    $values = [Array]::CreateInstance($ElementType, [int](($npy.Bytes.Length - $npy.Offset) / $width))
+    [Buffer]::BlockCopy($npy.Bytes, $npy.Offset, $values, 0, [Buffer]::ByteLength($values)); return , $values
+}
+function Invoke-OfflineJoinExperiment {
+    if (@(Get-ChildItem -LiteralPath $output -Filter '*.wav' -File).Count -and $DonorRecords.Count -eq 0) { throw 'Existing WAVs require their recorded donor inputs.' }
+    $measurementRoot = 'C:\Users\Scott\.codex\worktrees\measure-audio\Kokoro-Hexagon'
+    if ((& git -C $measurementRoot rev-parse HEAD) -cne '93a6d8220ed20734b0f5a943ef95b03c922d5be1') { throw 'MeasureAudio revision differs from requested commit.' }
+    $experimentType = $assembly.GetType('OfflineExperimentMath', $true)
+    $bankDurations = $experimentType.GetMethod('Durations').CreateDelegate([Func[short[],int,int,int[]]])
+    $offsets = $experimentType.GetMethod('Offsets').CreateDelegate([Func[int[],int[]]])
+    $encoderSlice = $experimentType.GetMethod('EncoderSlice').CreateDelegate([Func[short[],float[],int,int,int,float[]]])
+    $halfSlice = $experimentType.GetMethod('HalfSlice').CreateDelegate([Func[ushort[],int,int,float[]]])
+    $copyFrames = $experimentType.GetMethod('CopyFrames').CreateDelegate([Action[float[],int,int,int,float[],int,int]])
+    $addMoments = $experimentType.GetMethod('AddTokenMoments').CreateDelegate([Action[double[],int,int,int,double[]]])
+    $finishMoments = $experimentType.GetMethod('FinishMoments').CreateDelegate([Func[double[],int,double[]]])
+    $addLive = $experimentType.GetMethod('AddLiveLevels').CreateDelegate([Action[double[],double[]]])
+    $averageLevels = $experimentType.GetMethod('AverageLevels').CreateDelegate([Func[double[],int,double[]]])
+    $levelErrors = $experimentType.GetMethod('LevelErrors').CreateDelegate([Func[double[],double[],int,double[]]])
+    $windows = $experimentType.GetMethod('Windows').CreateDelegate([Func[int[],int,float[]]])
+    $addWindow = $experimentType.GetMethod('AddWindowedUnit').CreateDelegate([Action[float[],int,int,int,float[],float[],int]])
+    $joinMetrics = $experimentType.GetMethod('JoinMetrics').CreateDelegate([Func[float[],int[],double[]]])
+    # Verify half conversion against the existing runtime on all 65,536 encodings
+    # that represent finite half values; this is data-format admission, not fitting.
+    $halfCodes = [ushort[]]::new(63488); $at = 0
+    for ($code = 0; $code -lt 65536; $code++) { if (($code -band 31744) -ne 31744) { $halfCodes[$at] = [ushort]$code; $at++ } }
+    $halfValues = $halfSlice.Invoke($halfCodes, 0, $halfCodes.Length)
+    for ($at = 0; $at -lt $halfCodes.Length; $at++) {
+        $expectedHalf = [float][BitConverter]::ToHalf([BitConverter]::GetBytes($halfCodes[$at]), 0)
+        if ([BitConverter]::SingleToInt32Bits($expectedHalf) -ne [BitConverter]::SingleToInt32Bits($halfValues[$at])) { throw 'Half decoding admission failed.' }
+    }
+    $bankSelection = Invoke-OfflineBankSelection
+    if ($bankSelection.Picks.Count -ne 9) { throw 'Expected nine held-out selections.' }
+    $donorIds = [Collections.Generic.SortedSet[int]]::new()
+    foreach ($pick in $bankSelection.Picks) { foreach ($unit in $pick.path) { [void]$donorIds.Add([int]$unit.s) } }
+    $voicePath = Join-Path $InputRepository 'build/inputs/kokoro/f3ff3571791e39611d31c381e3a41a3af07b4987/voices/af_heart.pt'
+    if ((Get-FileHash -LiteralPath $voicePath).Hash -cne '0AB5709B8FFAB19BFD849CD11D98F75B60AF7733253AD0D67B12382A102CB4FF') { throw 'Voice integrity mismatch.' }
+    $voiceArchive = & $reader.ReadTensor $voicePath '0AB5709B8FFAB19BFD849CD11D98F75B60AF7733253AD0D67B12382A102CB4FF'; $rowBytes = & $reader.TensorRow $voiceArchive 25
+    $fixedStyle = [float[]]::new(128); [Buffer]::BlockCopy($rowBytes, 0, $fixedStyle, 0, 512)
+    $donors = [Collections.Generic.Dictionary[int,OfflineDonor]]::new()
+    $prepared = [Collections.Generic.Dictionary[int,object]]::new()
+    foreach ($recordedDonor in $DonorRecords) { $prepared.Add([int]$recordedDonor.Sentence, $recordedDonor) }
+    if ($prepared.Count -ne 0 -and $prepared.Count -ne $donorIds.Count) { throw 'Prepared donor set does not cover the selected units.' }
+    $donorDirectory = Join-Path $output 'donors'; [void][IO.Directory]::CreateDirectory($donorDirectory)
+    $donorResults = [Collections.Generic.List[object]]::new(); $lastChunk = -1; $arrays = $null
+    foreach ($sourceId in $donorIds) {
+        $chunk = [int][Math]::Floor($sourceId / 1000.0)
+        if ($chunk -ne $lastChunk) {
+            $chunkPath = Join-Path $InputRepository ('build/unit-bank/chunk-{0:D4}.npz' -f $chunk)
+            $zip = [IO.Compression.ZipFile]::OpenRead($chunkPath)
+            try {
+                $arrays = [pscustomobject]@{
+                    Tokens = Read-OfflineBankArray $zip 't_en' '<i2' ([short]); Scales = Read-OfflineBankArray $zip 'scale' '<f4' ([float])
+                    Durations = Read-OfflineBankArray $zip 'dur' '<i2' ([short]); F0 = Read-OfflineBankArray $zip 'f0' '<f2' ([ushort]); N = Read-OfflineBankArray $zip 'n' '<f2' ([ushort])
+                    TokenOffsets = Read-OfflineBankArray $zip 'tok_off' '<i8' ([long]); FrameOffsets = Read-OfflineBankArray $zip 'frm_off' '<i8' ([long])
+                }
+            } finally { $zip.Dispose() }
+            $lastChunk = $chunk
+        }
+        $localId = $sourceId % 1000; $tokenFirst = [int]$arrays.TokenOffsets[$localId]; $tokenCount = [int]($arrays.TokenOffsets[$localId + 1] - $tokenFirst)
+        $frameFirst = [int]$arrays.FrameOffsets[$localId]; $frameCount = [int]($arrays.FrameOffsets[$localId + 1] - $frameFirst)
+        $donor = [OfflineDonor]::new(); $donor.Sentence = $sourceId; $donor.Text = $bankSelection.Order[$sourceId].text
+        $donor.Durations = $bankDurations.Invoke($arrays.Durations, $tokenFirst, $tokenCount); $donor.Offsets = $offsets.Invoke($donor.Durations)
+        if ($donor.Offsets[$tokenCount] -ne $frameCount) { throw 'Bank duration/frame offset mismatch.' }
+        $donor.TextEncoder = $encoderSlice.Invoke($arrays.Tokens, $arrays.Scales, $arrays.Durations.Length, $tokenFirst, $tokenCount)
+        $donor.F0 = $halfSlice.Invoke($arrays.F0, 2 * $frameFirst, 2 * $frameCount); $donor.N = $halfSlice.Invoke($arrays.N, 2 * $frameFirst, 2 * $frameCount)
+        if ($prepared.Count -gt 0) {
+            $savedDonor = $prepared[$sourceId]
+            if ($savedDonor.SourceChunkSHA256 -cne (Get-FileHash -LiteralPath $chunkPath).Hash -or $savedDonor.Frames -ne $donor.F0.Length -or
+                -not [Linq.Enumerable]::SequenceEqual[int]([int[]]$savedDonor.Durations,$donor.Durations)) { throw 'Prepared donor provenance/shape mismatch.' }
+            $donor.Decoded = [OfflineDecoderResult]::new(); $donor.Decoded.Features = Read-OfflineArray (Join-Path $donorDirectory "$sourceId-decoder.f32") ([float]) (512 * $donor.F0.Length)
+            $restoredSites = [Collections.Generic.List[OfflineLevelRecord]]::new()
+            foreach ($savedSite in $savedDonor.Sites) {
+                if ($savedSite.Name -cnotmatch '^(encode|decode\.[0-3])\.norm[12]$') { throw 'Invalid prepared site name.' }
+                $site = [OfflineLevelRecord]::new(); $site.Name = $savedSite.Name; $site.Channels = $savedSite.Channels; $site.Frames = $savedSite.Frames; $site.TokenFrames = [int[]]$savedSite.TokenFrames
+                $site.Statistics = Read-OfflineArray (Join-Path $donorDirectory ("$sourceId-" + $site.Name + '-moments.f64')) ([double]) (2 * $site.Channels * ($tokenCount + 1))
+                $restoredSites.Add($site)
+            }
+            if ($restoredSites.Count -ne 10) { throw 'Incomplete prepared normalization sites.' }
+            $donor.Decoded.Levels = $restoredSites.ToArray(); $donor.DecoderMs = $savedDonor.DecoderMs
+            $donors.Add($sourceId,$donor); $donorResults.Add($savedDonor); continue
+        }
+        $donorAsr = $align.Invoke($donor.TextEncoder, $donor.Durations); $profile.Clear(); $donorWatch = [Diagnostics.Stopwatch]::StartNew()
+        $donor.Decoded = Invoke-OfflineDecoder $donorAsr $donor.F0 $donor.N $fixedStyle -TokenDurations $donor.Durations
+        $donorWatch.Stop(); $donor.DecoderMs = $donorWatch.Elapsed.TotalMilliseconds
+        Write-OfflineArray (Join-Path $donorDirectory "$sourceId-decoder.f32") $donor.Decoded.Features
+        $originalEncoder = [short[]]::new(512 * $tokenCount)
+        for ($channel = 0; $channel -lt 512; $channel++) { [Array]::Copy($arrays.Tokens, $channel * $arrays.Durations.Length + $tokenFirst, $originalEncoder, $channel * $tokenCount, $tokenCount) }
+        Write-OfflineArray (Join-Path $donorDirectory "$sourceId-t_en.i16") $originalEncoder
+        foreach ($site in $donor.Decoded.Levels) { Write-OfflineArray (Join-Path $donorDirectory ("$sourceId-" + $site.Name + '-moments.f64')) $site.Statistics }
+        $donorResults.Add([pscustomobject]@{ Sentence = $sourceId; Text = $donor.Text; Tokens = $tokenCount; Frames = 2 * $frameCount; Durations = $donor.Durations; DecoderMs = $donor.DecoderMs; Sites = @($donor.Decoded.Levels | Select-Object Name, Channels, Frames, TokenFrames); SourceChunkSHA256 = (Get-FileHash -LiteralPath $chunkPath).Hash })
+        $donors.Add($sourceId, $donor); $donorResults.ToArray() | Export-Clixml -LiteralPath (Join-Path $output 'donors.clixml')
+        Write-Host ('donor {0}: {1} tokens, {2} output frames, decoder {3:F3} ms ({4}/{5})' -f $sourceId,$tokenCount,(2*$frameCount),$donor.DecoderMs,$donors.Count,$donorIds.Count)
+    }
+    $frozen = [Collections.Generic.Dictionary[string,object]]::new([StringComparer]::Ordinal)
+    $firstDonor = $donors[$donorIds.Min]
+    foreach ($template in $firstDonor.Decoded.Levels) {
+        $totals = [double[]]::new(2 * $template.Channels)
+        foreach ($donor in $donors.Values) { $site = @($donor.Decoded.Levels | Where-Object Name -CEQ $template.Name)[0]; $addLive.Invoke($site.Statistics, $totals) }
+        $record = [OfflineLevelRecord]::new(); $record.Name = $template.Name; $record.Channels = $template.Channels; $record.Statistics = $averageLevels.Invoke($totals, $donors.Count)
+        $frozen.Add($record.Name, $record)
+    }
+    $measurements = [Collections.Generic.List[object]]::new(); $levelsReport = [Collections.Generic.List[object]]::new(); $unitReport = [Collections.Generic.List[object]]::new()
+    $targetIndex = 0
+    foreach ($pick in $bankSelection.Picks) {
+        $targetIndex++; $units = @($pick.path); $targetDurations = [int[]]::new($units.Count)
+        for ($u = 0; $u -lt $units.Count; $u++) { $targetDurations[$u] = $donors[[int]$units[$u].s].Durations[[int]$units[$u].i] }
+        $targetOffsets = $offsets.Invoke($targetDurations); $targetFrames = $targetOffsets[$units.Count]; $decoderFrames = 2 * $targetFrames
+        $targetEncoder = [float[]]::new(512 * $units.Count); $targetF0 = [float[]]::new($decoderFrames); $targetN = [float[]]::new($decoderFrames)
+        $rawFeatures = [float[]]::new(512 * $decoderFrames); $outputOffsets = $scaleFrames.Invoke($targetOffsets, 2)
+        $joinSamples = [int[]]::new($units.Count - 1)
+        for ($u = 0; $u -lt $units.Count; $u++) {
+            $donor = $donors[[int]$units[$u].s]; $token = [int]$units[$u].i; $sourceFirst = 2 * $donor.Offsets[$token]; $length = 2 * $targetDurations[$u]; $destinationFirst = 2 * $targetOffsets[$u]
+            $copyFrames.Invoke($donor.TextEncoder, $donor.Durations.Length, $token, 1, $targetEncoder, $units.Count, $u)
+            [Array]::Copy($donor.F0, $sourceFirst, $targetF0, $destinationFirst, $length); [Array]::Copy($donor.N, $sourceFirst, $targetN, $destinationFirst, $length)
+            $copyFrames.Invoke($donor.Decoded.Features, $donor.F0.Length, $sourceFirst, $length, $rawFeatures, $decoderFrames, $destinationFirst)
+            if ($u -gt 0) { $joinSamples[$u - 1] = $destinationFirst * 300 }
+            $unitReport.Add([pscustomobject]@{ Target = $targetIndex; TargetToken = $u; Donor = $donor.Sentence; DonorText = $donor.Text; TokenFirst = $token; TokenEndExclusive = $token + 1; FrameFirst = $sourceFirst; FrameEndExclusive = $sourceFirst + $length; TargetFrameFirst = $destinationFirst })
+        }
+        $unitReport.ToArray() | Export-Clixml -LiteralPath (Join-Path $output 'selected-units.clixml')
+        $targetAsr = $align.Invoke($targetEncoder, $targetDurations); $profile.Clear(); $targetWatch = [Diagnostics.Stopwatch]::StartNew()
+        $planned = Invoke-OfflineDecoder $targetAsr $targetF0 $targetN $fixedStyle -TokenDurations $targetDurations
+        $targetWatch.Stop(); $plannedMs = $targetWatch.Elapsed.TotalMilliseconds
+        $composed = [Collections.Generic.Dictionary[string,object]]::new([StringComparer]::Ordinal)
+        foreach ($template in $planned.Levels) {
+            $totals = [double[]]::new(2 * $template.Channels)
+            for ($u = 0; $u -lt $units.Count; $u++) {
+                $donor = $donors[[int]$units[$u].s]; $site = @($donor.Decoded.Levels | Where-Object Name -CEQ $template.Name)[0]
+                $addMoments.Invoke($site.Statistics, $site.Channels, $donor.Durations.Length, [int]$units[$u].i, $totals)
+            }
+            $record = [OfflineLevelRecord]::new(); $record.Name = $template.Name; $record.Channels = $template.Channels; $record.Frames = $template.Frames
+            $record.Statistics = $finishMoments.Invoke($totals, $record.Frames); $composed.Add($record.Name, $record)
+            $relative = $levelErrors.Invoke($record.Statistics, $template.Statistics, $record.Channels)
+            $levelsReport.Add([pscustomobject]@{ Target = $targetIndex; Site = $record.Name; MeanMaxRelative = $relative[0]; MeanMedianRelative = $relative[1]; StdMaxRelative = $relative[2]; StdMedianRelative = $relative[3] })
+        }
+        $levelsReport.ToArray() | Export-Clixml -LiteralPath (Join-Path $output 'level-errors.clixml')
+        $seededDraws = New-OfflineDraws ($decoderFrames * 300)
+        foreach ($variant in @('A','B','C1','C2','C4','D','E')) {
+            $features = $null; $decodeMs = [double]0; $featureSnr = [double]::NaN
+            switch ($variant) {
+                'A' { $features = $planned.Features; $decodeMs = $plannedMs }
+                'B' { $features = $rawFeatures }
+                { $_ -in @('C1','C2','C4') } {
+                    $extension = [int]$variant.Substring(1); $weights = $windows.Invoke($outputOffsets, $extension); $features = [float[]]::new(512 * $decoderFrames)
+                    for ($u = 0; $u -lt $units.Count; $u++) {
+                        $donor = $donors[[int]$units[$u].s]; $token = [int]$units[$u].i
+                        $addWindow.Invoke($donor.Decoded.Features, 2 * $donor.Offsets[$token], $outputOffsets[$u], $u, $weights, $features, $decoderFrames)
+                    }
+                }
+                'D' {
+                    $profile.Clear(); $targetWatch.Restart(); $banked = Invoke-OfflineDecoder $targetAsr $targetF0 $targetN $fixedStyle -TokenDurations $targetDurations -LevelMode Supplied -SuppliedLevels $composed
+                    $targetWatch.Stop(); $decodeMs = $targetWatch.Elapsed.TotalMilliseconds; $features = $banked.Features
+                    $featureSnr = $compare.Invoke($features, $planned.Features)[0]
+                }
+                'E' {
+                    $profile.Clear(); $targetWatch.Restart(); $control = Invoke-OfflineDecoder $targetAsr $targetF0 $targetN $fixedStyle -TokenDurations $targetDurations -LevelMode Supplied -SuppliedLevels $frozen
+                    $targetWatch.Stop(); $decodeMs = $targetWatch.Elapsed.TotalMilliseconds; $features = $control.Features
+                    $featureSnr = $compare.Invoke($features, $planned.Features)[0]
+                }
+            }
+            $profile.Clear(); $targetWatch.Restart(); $pcm = Invoke-OfflineGenerator $features $fixedStyle $targetF0 $seededDraws.Uniform $seededDraws.Harmonic $seededDraws.Extra
+            $targetWatch.Stop(); $generatorMs = $targetWatch.Elapsed.TotalMilliseconds; $path = Join-Path $output ('{0:D2}-{1}.wav' -f $targetIndex,$variant)
+            Write-OfflineWave $path $pcm
+            $join = $joinMetrics.Invoke($pcm, $joinSamples)
+            $measurements.Add([pscustomobject]@{ Sentence = $targetIndex; Text = $pick.text; Variant = $variant; Path = $path; IntegratedLufs = [double]::NaN; TruePeakDbtp = [double]::NaN; JoinMax = $join[0]; JoinMedian = $join[1]; WindowMedianDelta = $join[2]; DecoderOutputSnrDb = $featureSnr; DecoderMs = $decodeMs; GeneratorMs = $generatorMs; Frames = $decoderFrames; Seed = $Seed; VoiceRow = 25; SourceSHA256 = $sourceHash; AssemblySHA256 = $admission.SHA256 })
+            $measurements.ToArray() | Export-Clixml -LiteralPath (Join-Path $output 'measurements.clixml')
+            Write-Host ('sentence {0} {1}: join max/median {2:F3}/{3:F3}; generator {4:F3} ms; decoder-output SNR {5:F3} dB' -f $targetIndex,$variant,$join[0],$join[1],$generatorMs,$featureSnr)
+        }
+    }
+    # The requested pinned MeasureAudio command admits folders. Batch all WAVs
+    # after rendering, retaining its own implementation and avoiding its
+    # single-FileInfo Count failure. Execute from its owning worktree.
+    Push-Location -LiteralPath $measurementRoot
+    try { $audioMeasurements = @(& ./Invoke-KokoroDevelopment.ps1 MeasureAudio -Path $output) }
+    finally { Pop-Location }
+    if ($audioMeasurements.Count -ne $measurements.Count) { throw 'MeasureAudio did not return every variant.' }
+    foreach ($render in $measurements) {
+        $audio = @($audioMeasurements | Where-Object Path -CEQ $render.Path)
+        if ($audio.Count -ne 1) { throw 'Missing/duplicate WAV measurement.' }
+        $render.IntegratedLufs = $audio[0].IntegratedLufs; $render.TruePeakDbtp = $audio[0].TruePeakDbtp
+    }
+    $measurements.ToArray() | Export-Clixml -LiteralPath (Join-Path $output 'measurements.clixml')
+    $tokenTotal = [long]0; foreach ($donor in $donors.Values) { $tokenTotal += $donor.Durations.Length }
+    $decoderBytes = (Get-ChildItem $donorDirectory -Filter '*-decoder.f32' | Measure-Object Length -Sum).Sum
+    $encoderBytes = (Get-ChildItem $donorDirectory -Filter '*-t_en.i16' | Measure-Object Length -Sum).Sum
+    $momentBytes = (Get-ChildItem $donorDirectory -Filter '*-moments.f64' | Measure-Object Length -Sum).Sum
+    [pscustomobject]@{ Donors = $donors.Count; Units = $tokenTotal; DecoderBytes = $decoderBytes; TextEncoderBytes = $encoderBytes; MomentBytes = $momentBytes; DecoderBytesPerUnit = $decoderBytes / $tokenTotal; TextEncoderBytesPerUnit = $encoderBytes / $tokenTotal } | Export-Clixml -LiteralPath (Join-Path $output 'store-size.clixml')
+    return $measurements.ToArray()
+}
+if ($Mode -eq 'Join') { Invoke-OfflineJoinExperiment; return }
 $captures = Import-PowerShellDataFile (Join-Path $InputRepository 'build/score-capture-20261014/capture.psd1')
 $gateResults = [Collections.Generic.List[object]]::new()
 foreach ($case in $captures.Cases) {
@@ -791,4 +1239,3 @@ foreach ($case in $captures.Cases) {
     }
 }
 $gateResults.ToArray()
-if ($Mode -eq 'Join') { throw 'Join implementation is not yet complete.' }
