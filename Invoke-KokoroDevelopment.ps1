@@ -41,6 +41,8 @@ twice, or written as a scratch script, is a missing command: add it here.
                               bank, select units in PowerShell, assemble table prosody, capture the stock teacher on those
                               inputs, pack the existing job, run and play through AAudio. Generated files stay under build/.
   Zira -Text <sentence> [-OutputDirectory]  Windows speech API reference; returns typed phoneme/word events and a WAV.
+  FrontEnd -Parameters <typed bank inputs> -OutputDirectory
+                              Manufacture and gate the compact prosody bank on the laptop; no phone access.
   AlbertLinear -Linear name[,name...] [-Path] [-Soc] [-Runs]
                               One ALBERT linear (mapping_in, query.0 .. ffn_output.11, bert_encoder) on the phone: job input
                               from the capture, emit, run, decode, SNR against stock. Default capture stock-albert-capture-hello.
@@ -92,7 +94,7 @@ pwsh -NoProfile -File ./Invoke-KokoroDevelopment.ps1 Run -Case benchmark-0-sm855
 [CmdletBinding()]
 param(
     [Parameter(Position = 0)]
-    [ValidateSet('Status', 'Verify', 'BuildHost', 'Ratchet', 'Run', 'Emit', 'Check', 'Compare', 'JobInput', 'Capture', 'StockCapture', 'Speak', 'Zira', 'Albert', 'AlbertError', 'AlbertLinear', 'AlbertLayerNorm', 'AlbertGelu', 'AlbertAttention', 'AlbertEmbed', 'AlbertJob', 'Api', 'Find', 'Tools', 'StageResidency')]
+    [ValidateSet('Status', 'Verify', 'BuildHost', 'Ratchet', 'Run', 'Emit', 'Check', 'Compare', 'JobInput', 'Capture', 'StockCapture', 'Speak', 'FrontEnd', 'Zira', 'Albert', 'AlbertError', 'AlbertLinear', 'AlbertLayerNorm', 'AlbertGelu', 'AlbertAttention', 'AlbertEmbed', 'AlbertJob', 'Api', 'Find', 'Tools', 'StageResidency')]
     [string] $Command = 'Status',
     [string] $Case,
     [string] $Kernel,
@@ -2103,7 +2105,7 @@ switch ($Command) {
         }
         ''
         'Commands (Get-Help ./Invoke-KokoroDevelopment.ps1 -Full):'
-        '  Status Verify BuildHost Ratchet Run Emit Check Compare JobInput Capture StockCapture Speak Zira Albert Find Tools'
+        '  Status Verify BuildHost Ratchet Run Emit Check Compare JobInput Capture StockCapture Speak FrontEnd Zira Albert Find Tools'
         'Contract: AGENTS.md. Reference manuals: Find-Reference (Pwsh-Development/tools/SharedLibrary.psm1).'
     }
     'BuildHost' {
@@ -2497,6 +2499,11 @@ switch ($Command) {
         'stream after mapping_in and each repeat (dB): ' + ($r.StreamDb -join '  ')
         if ($r.StopAfter) { 'stopped after {0}: {1} dB against stock' -f $r.StopAfter, $r.StopDb }
         $r.Runs | ForEach-Object { '  ' + $_ }
+    }
+    'FrontEnd' {
+        if (-not $Parameters -or -not $OutputDirectory) { throw 'FrontEnd needs typed bank -Parameters and a fresh -OutputDirectory.' }
+        Import-Module (Join-Path $Root 'tools/Kokoro.ProsodyBank.psm1')
+        New-KokoroProsodyBank @Parameters -OutputDirectory $OutputDirectory
     }
     'Api' { Get-KokoroApi -Pattern $Pattern | Format-Table -AutoSize -Wrap | Out-String -Width 220 }
     'Find' {
