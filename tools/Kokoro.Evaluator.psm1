@@ -65,7 +65,7 @@ function Invoke-KokoroEmission {
     $pairs = foreach ($k in ($Parameters.Keys | Sort-Object)) { "$k=$($Parameters[$k])" }
     $key = [Convert]::ToHexString([Security.Cryptography.SHA256]::HashData([Text.Encoding]::UTF8.GetBytes("$Kernel`n$($pairs -join "`n")`n$SourceKey"))).Substring(0, 16)
     $dir = Join-Path $script:Root "build/evaluator/emit/$Kernel-$key"
-    if ($Kernel -cin 'KokoroHarmonicSource16Run','KokoroDecoder16Run','KokoroGeneratorWholeSource16Run','KokoroDecoderGenerator16Run') {
+    if ($Kernel -cin 'KokoroGeneratorTemplate1Run','KokoroHarmonicSource16Run','KokoroDecoder16Run','KokoroGeneratorWholeSource16Run','KokoroDecoderGenerator16Run') {
         if (-not $script:TypedEmissions.ContainsKey($key)) {
             # The source worker's layout and link state remain live objects. No generated
             # metadata file or child PowerShell process is its execution contract.
@@ -177,7 +177,7 @@ function Test-KokoroKernel {
         $pairs = foreach ($n in ($Parameters.Keys | Sort-Object)) { "$n=$($Parameters[$n])" }
         $key = [Convert]::ToHexString([Security.Cryptography.SHA256]::HashData([Text.Encoding]::UTF8.GetBytes("$k`n$($pairs -join "`n")`n$sourceKey"))).Substring(0, 16)
         $dir = Join-Path $script:Root "build/evaluator/kernel/$k-$key"
-        $row = [ordered]@{ Kernel = $k; Parameters = ($pairs -join ' '); CodeBytes = $null; AssemblerMatch = $false; Reason = '' }
+        $row = [ordered]@{ Kernel = $k; Parameters = ($pairs -join ' '); CodeBytes = $null; AssemblerMatch = $false; LibrarySHA256 = ''; Reason = '' }
         try {
             # Test-HexagonEmission.ps1 writes its verdict to <dir>/<kernel>/check-<guid>/verification.json.
             if (-not (Test-Path -LiteralPath $dir) -or -not (Get-ChildItem -LiteralPath $dir -Recurse -Filter 'verification.json' | Select-Object -First 1)) {
@@ -187,7 +187,7 @@ function Test-KokoroKernel {
                 if ($LASTEXITCODE) { throw (($out | Select-Object -Last 3) -join ' | ') }
             }
             $v = Get-ChildItem -LiteralPath $dir -Recurse -Filter 'verification.json' | Select-Object -First 1 | Get-Content -Raw | ConvertFrom-Json
-            $row.CodeBytes = $v.CodeBytes; $row.AssemblerMatch = [bool]$v.InstructionBytesMatch
+            $row.CodeBytes = $v.CodeBytes; $row.AssemblerMatch = [bool]$v.InstructionBytesMatch; $row.LibrarySHA256 = $v.LibrarySHA256
         } catch { $row.Reason = "$_" }
         Write-Host ('{0,-6} {1,-36} {2,7} bytes {3}' -f $(if ($row.AssemblerMatch) { 'PASS' } else { 'FAIL' }), $k, $row.CodeBytes, $row.Reason) -ForegroundColor $(if ($row.AssemblerMatch) { 'Green' } else { 'Yellow' })
         if (-not $row.AssemblerMatch) { Write-Host "  ! $($script:Standards.Fail)" -ForegroundColor DarkYellow }

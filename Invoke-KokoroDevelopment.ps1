@@ -144,7 +144,9 @@ $Python = 'C:/bin/micromamba/envs/mono/python.exe'
 function Import-Evaluator { Import-Module (Join-Path $Root 'tools/Kokoro.Evaluator.psm1') -Force -Global }
 
 function Get-Adb {
-    foreach ($candidate in $env:KOKORO_QNN_ADB, (Get-Command adb -ErrorAction Ignore).Source, 'C:/backup/Android/platform-tools/adb.exe') {
+    $pathCommand = Get-Command adb -ErrorAction Ignore
+    $pathCandidate = if ($null -ne $pathCommand) { $pathCommand.Source } else { $null }
+    foreach ($candidate in $env:KOKORO_QNN_ADB, $pathCandidate, 'C:/backup/Android/platform-tools/adb.exe') {
         if ($candidate -and (Test-Path $candidate)) { return $candidate }
     }
     throw 'adb not found: set KOKORO_QNN_ADB or put adb on PATH.'
@@ -2211,6 +2213,12 @@ switch ($Command) {
             break
         }
         if ($Case -ceq 'device-readiness') { Get-KokoroDeviceReadiness -Soc $Soc -Package $HostPackage; break }
+        if ($Case -ceq 'generator-template1') {
+            if (-not $OutputDirectory) { throw 'Template-1 gate needs -OutputDirectory <fresh build directory>.' }
+            $templateParameters = if ($Parameters) { $Parameters } else { @{} }
+            & (Join-Path $Root 'tools/Test-KokoroGeneratorTemplate1.ps1') -OutputDirectory $OutputDirectory -Soc $Soc -Package $HostPackage -Runs $(if ($Runs) { $Runs } else { 5 }) @templateParameters
+            break
+        }
         if ($Case -ceq 'host-install') { Install-KokoroDiagnosticHost -Path $Path -Soc $Soc; break }
         if ($Case -ceq 'harmonic-source-objects') {
             if (-not $Path) { throw 'Harmonic-source object check needs -Path <existing source fixture>.' }

@@ -23,25 +23,31 @@ function New-KokoroHmxConvSteps {
         [ValidateSet(3, 7, 11)][int] $Kernel = 3,
         [ValidateSet(1, 3, 5)][int] $Dilation = 1,
         [string] $LabelPrefix = 'hmxconv',
+        # FP16 uses the same real-tap address schedule and native 2 KB croutons.
+        # Weights: output block, tap, input block, 32x32 FP16, input pairs interleaved.
+        # Tables: bias-mxmem2 FP16 conversion table, 256 B per output block.
+        [switch] $Fp16,
         # Two accumulator byte planes per output (see calling convention).
         [switch] $OutputPlanes,
         # Fall through instead of returning, for inlining into a caller.
         [switch] $NoReturn
     )
-    [int]$cb = $InputChannels / 32; [int]$ob = $OutputChannels / 32; [int]$groups = $OutputChannels / 64
+    if ($Fp16 -and $OutputPlanes) { throw 'FP16 has one native output crouton, not integer byte planes' }
+    [int]$cb = $InputChannels / 32; [int]$ob = $OutputChannels / 32
+    [int]$groups = if ($Fp16) { $ob } else { $OutputChannels / 64 }
     [int]$half = ($Kernel - 1) / 2
     if ($Dilation * $half -gt 31) { throw 'Tap shift exceeds one crouton' }
     $s = [Collections.Generic.List[hashtable]]::new()
     # rt for the :single read: dY = one time tile (CB croutons), all-Y spatial mask, channels 0..31.
     $dy = $cb * 2048
-    $rt = $dy -bor 0x7ff
+    $rt = $dy -bor $(if ($Fp16) { 0x7fe } else { 0x7ff })
     $s.Add(@{Op='lo'; x=7; i=($rt -band 65535)}); $s.Add(@{Op='hi'; x=7; i=($rt -shr 16)})
     $s.Add(@{Op='imm'; d=8; i=0x7ff})                 # weight :deep range (2 KB)
     $s.Add(@{Op='imm'; d=9; i=0})                     # store Rt, loop compare zero
     $s.Add(@{Op='label'; Name="${LabelPrefix}_tile"})
     $s.Add(@{Op='addi'; d=10; s=1; i=0})              # weight pointer restarts each tile
     for ($g = 0; $g -lt $groups; $g++) {
-        $s.Add(@{Op='mxclracc'})
+        $s.Add(@{Op=$(if ($Fp16) { 'mxclracc.hf' } else { 'mxclracc' })})
         for ($k = 0; $k -lt $Kernel; $k++) {
             $shift = $Dilation * ($k - $half)
             [int]$tile = [math]::Floor($shift / 32); [int]$row = $shift - 32 * $tile
@@ -49,11 +55,16 @@ function New-KokoroHmxConvSteps {
                 $offset = (($tile * $cb) + $c) * 2048 + (($row -shr 1) -shl 7) + (($row -band 1) -shl 1)
                 if ($offset -lt -32768 -or $offset -gt 32767) { throw 'Activation offset out of addi range' }
                 $s.Add(@{Op='addi'; d=6; s=0; i=$offset})
-                $s.Add(@{Op='hmx-pair'; Act='act-ub-single'; Wt='wt-b-deep'; s=6; t=7; u=10; v=8})
+                $s.Add(@{Op='hmx-pair'; Act=$(if ($Fp16) { 'act-hf-single' } else { 'act-ub-single' }); Wt=$(if ($Fp16) { 'wt-hf' } else { 'wt-b-deep' }); s=6; t=7; u=10; v=8})
                 $s.Add(@{Op='addi'; d=10; s=10; i=2048})
             }
         }
-        foreach ($h in 0, 1) {
+        if ($Fp16) {
+            $s.Add(@{Op='addi'; d=11; s=3; i=(256 * $g)})
+            $s.Add(@{Op='bias-mxmem2'; s=11})
+            $s.Add(@{Op='addi'; d=12; s=2; i=(2048 * $g)})
+            $s.Add(@{Op='mxmem-after-hf'; s=12; t=9})
+        } else { foreach ($h in 0, 1) {
             $o = 2 * $g + $h
             if ($OutputPlanes) {
                 # Retained stores repeat this half; the final non-retaining store moves to the next
@@ -72,7 +83,7 @@ function New-KokoroHmxConvSteps {
                 $s.Add(@{Op='addi'; d=12; s=2; i=(2048 * $o)})
                 $s.Add(@{Op='mxmem-after-sat-ub'; s=12; t=9})
             }
-        }
+        } }
     }
     $s.Add(@{Op='addi'; d=0; s=0; i=$dy})             # next input tile
     $s.Add(@{Op='addi'; d=2; s=2; i=($ob * 2048)})    # next output tile

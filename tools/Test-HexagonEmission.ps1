@@ -4,7 +4,7 @@
 param(
     [string] $OutputDirectory = (Join-Path $PSScriptRoot '..\build\hexagon-emission\emitted'),
     [string] $ToolRoot = '/home/scott/hexagon/Hexagon_SDK/6.4.0.2/tools/HEXAGON_Tools/19.0.04/Tools/bin',
-    [ValidateSet('Probe','KokoroAffine','KokoroAdaIn','KokoroAdaInResBlock','KokoroAdaInStatistics','KokoroAdaInIntegerCoefficients','KokoroAdaInIntegerAffine','KokoroSnakeInteger','KokoroResidualInteger','KokoroAlbertSoftmax3','KokoroAlbertAttention3','KokoroAlbertAttentionOutput3','KokoroAlbertConnectedAttention3','KokoroConvTile','KokoroLinearTile','KokoroR0Sub0','KokoroHmxLock','KokoroHmxMatrix','KokoroHmxConv','KokoroHmxConvPlanes','KokoroHmxConvPlanesLoop','KokoroPlaneCombine','KokoroPlaneCombineLoop','KokoroAdaInMoments16','KokoroAdaInMoments16Loop','KokoroAdaInTurnsCoefficients','KokoroAdaInAffineCoefficientsLoop','KokoroAdaInLeaky16','KokoroDecoderPass','KokoroDecoder16Run','KokoroHmxConvRun','KokoroResBlockRun','KokoroBranchAverageInteger','KokoroGenerator60xRun','KokoroLeakyReluInteger','KokoroVtcmQuery','KokoroDmaCopy','KokoroDmaBench','KokoroAdaInSnakeInteger','KokoroAdaInSnakeTurns','KokoroGenerator60xResidentRun','KokoroGenerator60x16Run','KokoroGeneratorTailRun','KokoroGeneratorTail16Run','KokoroGeneratorStage16TailRun','KokoroResBlock16Run','KokoroGeneratorFrontStageTailRun','KokoroGeneratorFront10x16Run','KokoroGeneratorWhole16Run','KokoroHarmonicStft16Run','KokoroHarmonicSource16Run','KokoroGeneratorWholeSource16Run','KokoroDecoderGenerator16Run')][string] $Kernel='Probe',
+    [ValidateSet('KokoroGeneratorTemplate1Run','Probe','KokoroAffine','KokoroAdaIn','KokoroAdaInResBlock','KokoroAdaInStatistics','KokoroAdaInIntegerCoefficients','KokoroAdaInIntegerAffine','KokoroSnakeInteger','KokoroResidualInteger','KokoroAlbertSoftmax3','KokoroAlbertAttention3','KokoroAlbertAttentionOutput3','KokoroAlbertConnectedAttention3','KokoroConvTile','KokoroLinearTile','KokoroR0Sub0','KokoroHmxLock','KokoroHmxMatrix','KokoroHmxConv','KokoroHmxConvPlanes','KokoroHmxConvPlanesLoop','KokoroPlaneCombine','KokoroPlaneCombineLoop','KokoroAdaInMoments16','KokoroAdaInMoments16Loop','KokoroAdaInTurnsCoefficients','KokoroAdaInAffineCoefficientsLoop','KokoroAdaInLeaky16','KokoroDecoderPass','KokoroDecoder16Run','KokoroHmxConvRun','KokoroResBlockRun','KokoroBranchAverageInteger','KokoroGenerator60xRun','KokoroLeakyReluInteger','KokoroVtcmQuery','KokoroDmaCopy','KokoroDmaBench','KokoroAdaInSnakeInteger','KokoroAdaInSnakeTurns','KokoroGenerator60xResidentRun','KokoroGenerator60x16Run','KokoroGeneratorTailRun','KokoroGeneratorTail16Run','KokoroGeneratorStage16TailRun','KokoroResBlock16Run','KokoroGeneratorFrontStageTailRun','KokoroGeneratorFront10x16Run','KokoroGeneratorWhole16Run','KokoroHarmonicStft16Run','KokoroHarmonicSource16Run','KokoroGeneratorWholeSource16Run','KokoroDecoderGenerator16Run')][string] $Kernel='Probe',
     [ValidateRange(2, 32768)][int] $ResBlockFrames = 7801,
     [ValidateSet(3,7,11)][int] $ResBlockKernel = 3,
     [ValidateSet(128,256)][int] $IntegerChannels = 128,
@@ -24,6 +24,9 @@ param(
     [ValidateRange(-1, 4)][int] $DecoderStopAfterBlock = -1,
     [ValidateSet('Block','Shortcut','Conv1','Windows1','Pool','Coeff')][string] $DecoderDumpPoint = 'Block',
     [ValidateSet(1, 3, 5)][int] $ConvDilation = 1,
+    [ValidateSet(1,3)][int] $TemplateBranches = 1,
+    [switch] $TemplateAddResidual,
+    [switch] $TemplateStoreResidual,
     [switch] $ConvOutputPlanes,
     [ValidateSet(1,2)][int] $ConvWeightPlanes = 1,
     [ValidateSet('Conv','Residual','Scale')][string] $CombineMode = 'Conv',
@@ -54,6 +57,9 @@ param(
 $ErrorActionPreference='Stop'
 $output=[IO.Path]::GetFullPath((Join-Path $OutputDirectory $Kernel))
 $pmuArgs=if($ResidentPmuEvents){@{ResidentPmuEvents=$ResidentPmuEvents}}else{@{}}
+$pmuArgs.TemplateBranches=$TemplateBranches
+$pmuArgs.TemplateAddResidual=$TemplateAddResidual.IsPresent
+$pmuArgs.TemplateStoreResidual=$TemplateStoreResidual.IsPresent
 $result=& (Join-Path $PSScriptRoot 'Emit-HexagonProbe.ps1') -OutputDirectory $output -ReferenceAssembly `
     -Kernel $Kernel -ResBlockFrames $ResBlockFrames -ResBlockKernel $ResBlockKernel -IntegerChannels $IntegerChannels -LinearRows $LinearRows -LinearInputChannels $LinearInputChannels `
     -LinearOutputChannels $LinearOutputChannels -LinearVectorOutputTiles:$LinearVectorOutputTiles `
