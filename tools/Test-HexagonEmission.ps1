@@ -27,6 +27,7 @@ param(
     [ValidateSet(1,3)][int] $TemplateBranches = 1,
     [switch] $TemplateAddResidual,
     [switch] $TemplateStoreResidual,
+    [switch] $TemplateUpsample,
     [ValidateSet('Lock','Smoothstep')][string] $TemplateShape = 'Lock',
     [ValidateSet(0,128,256,512)][int] $TemplateInputChannels = 0,
     [ValidateRange(16,64)][int] $TemplateBlockFrames = 16,
@@ -64,6 +65,7 @@ $pmuArgs=if($ResidentPmuEvents){@{ResidentPmuEvents=$ResidentPmuEvents}}else{@{}
 $pmuArgs.TemplateBranches=$TemplateBranches
 $pmuArgs.TemplateAddResidual=$TemplateAddResidual.IsPresent
 $pmuArgs.TemplateStoreResidual=$TemplateStoreResidual.IsPresent
+$pmuArgs.TemplateUpsample=$TemplateUpsample.IsPresent
 $pmuArgs.TemplateShape=$TemplateShape
 $pmuArgs.TemplateInputChannels=$TemplateInputChannels
 $pmuArgs.TemplateBlockFrames=$TemplateBlockFrames
@@ -123,6 +125,8 @@ $rejections=0
 $badOps = @(
     @{Op='imm';d=32;i=1},
     @{Op='imm';d=0;i=32768},
+    @{Op='loop0-r';s=32;Label='invalid'},
+    @{Op='loop1-r';s=-1;Label='invalid'},
     @{Op='load';d=0;s=1;Offset=3},
     @{Op='hi';x=0;i=65536},
     @{Op='vload';d=32;s=0;Offset=0},
@@ -158,6 +162,13 @@ foreach($bad in $badOps) {
     catch { $loweredRejections++ }
 }
 if($loweredRejections -ne $badOps.Count) { throw 'Lowered encoder accepted an invalid operand.' }
+$loopTargetRejections = 0
+foreach ($badTarget in -260L,256L,3L) {
+    $loopStep = @{Op='loop0-r';s=4;Label='invalid'}
+    try { $null=New-HexagonInstruction $loopStep 0L $badTarget } catch { $loopTargetRejections++ }
+    try { $typed=$stepType::Convert([hashtable[]]@($loopStep)); $null=$encoder.Instruction($typed[0],0L,$badTarget) } catch { $loopTargetRejections++ }
+}
+if ($loopTargetRejections -ne 6) { throw 'Encoder accepted an out-of-range or unaligned hardware loop start.' }
 $strictRejections = 0
 foreach($wrong in @([uint32]1, [double]1, [decimal]1, [Management.Automation.PSObject]::new(1), [int[]]@(1), $null)) {
     try { $null = $stepType::Convert([hashtable[]]@(@{Op='imm';d=0;i=$wrong})) }

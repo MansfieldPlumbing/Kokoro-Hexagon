@@ -9,6 +9,9 @@ $script:HexagonForms = @{
     'eq'     = '11110010-00sssssPP-ttttt---000dd'
     'gtu'    = '11110010-11sssssPP-ttttt---000dd'
     'jump-p' = '01011100ii0iiiiiPPi00-uuiiiiiii-'
+    # V73 PRM 80-N2040-53 Rev. AB pp.195,146: register-count hardware loops.
+    'loop0-r' = '01100000000sssssPP-iiiii---ii---'
+    'loop1-r' = '01100000001sssssPP-iiiii---ii---'
     'load'   = '10010ii1100sssssPPiiiiiiiiiddddd'
     'store'  = '10100ii1100sssssPPitttttiiiiiiii'
     'add'    = '11110011000sssssPP-ttttt---ddddd'
@@ -401,6 +404,8 @@ class HexagonEncoder {
 
     static [int] Length([HexagonStep] $Step) {
         if ($Step.Op -eq 'label') { return 0 }
+        if ($Step.Op -eq 'endloop0') { return 8 }
+        if ($Step.Op -eq 'endloop1') { return 12 }
         if ($Step.Op -in 'mxmpy-fp16','mxmpy-w8a8','mxmpy-w4a8','mxmpy-w8a8-cm','mxmpy-w4a8-cm','hmx-pair') { return 8 }
         if ($Step.Op -eq 'got-call') { return 16 }
         return 4
@@ -452,6 +457,29 @@ class HexagonEncoder {
         $fields.Set('P', 3L)
         foreach ($key in [string[]]@('d','s','t','x','u','e')) { if ($Step.ContainsKey($key)) { $fields.Set($key, $Step.Get($key)) } }
         switch ($Step.Op) {
+            { $_ -in 'loop0-r','loop1-r' } {
+                [long] $loopDelta = $Target-$Pc
+                if ($loopDelta % 4L -ne 0L -or $loopDelta -lt -256L -or $loopDelta -gt 252L) { throw 'Hardware loop start out of range or unaligned' }
+                $fields.Set('i', [long]($loopDelta/4L) -band 127L)
+            }
+            { $_ -in 'endloop0','endloop1' } {
+                # The required loop-end packet contains only preserving adds.
+                # This admits loop control without bundling arithmetic work.
+                [int] $words = 2
+                if ($Step.Op -eq 'endloop1') { $words = 3 }
+                [byte[]] $loopBytes = [byte[]]::new(4*$words)
+                for ([int]$loopWord=0; $loopWord -lt $words; $loopWord++) {
+                    [HexagonFields] $loopFields = [HexagonFields]::new()
+                    [long] $reg = 16-$words+$loopWord
+                    $loopFields.Set('s',$reg); $loopFields.Set('d',$reg); $loopFields.Set('i',0L)
+                    [long] $parse = 1L
+                    if ($loopWord -eq $words-1) { $parse = 3L }
+                    elseif (($words -eq 2 -and $loopWord -eq 0) -or ($words -eq 3 -and $loopWord -eq 1)) { $parse = 2L }
+                    $loopFields.Set('P',$parse)
+                    [Array]::Copy([BitConverter]::GetBytes($this.Word('addi',$loopFields)),0,$loopBytes,4*$loopWord,4)
+                }
+                return $loopBytes
+            }
             'vmpy-hf-qf32' {
                 if ($Step.d % 2 -ne 0 -or $Step.d -lt 0 -or $Step.d -gt 30) { throw 'FP32 conversion destination pair must be even and 0..30' }
             }
@@ -687,6 +715,22 @@ function New-HexagonInstruction {
     $fields = @{ P=3 }
     foreach ($key in 'd','s','t','x','u','e') { if ($Step.ContainsKey($key)) { $fields[$key] = $Step[$key] } }
     switch ($Step.Op) {
+        { $_ -in 'loop0-r','loop1-r' } {
+            $loopDelta = $Target-$Pc
+            if ($loopDelta % 4L -ne 0L -or $loopDelta -lt -256L -or $loopDelta -gt 252L) { throw 'Hardware loop start out of range or unaligned' }
+            $fields.i = [long]($loopDelta/4L) -band 127L
+        }
+        { $_ -in 'endloop0','endloop1' } {
+            $words = if ($Step.Op -eq 'endloop0') { 2 } else { 3 }
+            $loopBytes = [byte[]]::new(4*$words)
+            for ($loopWord=0; $loopWord -lt $words; $loopWord++) {
+                $reg = 16-$words+$loopWord
+                $parse = if ($loopWord -eq $words-1) { 3L } elseif (($words -eq 2 -and $loopWord -eq 0) -or ($words -eq 3 -and $loopWord -eq 1)) { 2L } else { 1L }
+                $word = ConvertTo-HexagonWord 'addi' @{s=[long]$reg;d=[long]$reg;i=0L;P=$parse}
+                [Array]::Copy([BitConverter]::GetBytes([uint32]$word),0,$loopBytes,4*$loopWord,4)
+            }
+            return $loopBytes
+        }
         'vmpy-hf-qf32' {
             if ($Step.d % 2 -ne 0 -or $Step.d -lt 0 -or $Step.d -gt 30) { throw 'FP32 conversion destination pair must be even and 0..30' }
         }
@@ -875,6 +919,8 @@ function Get-InstructionSet {
         Id='HexagonV73'; Name='Hexagon V73'; StateBit=0
         Length={ param($Step)
             if ($Step.Op -eq 'label') { 0 }
+            elseif ($Step.Op -eq 'endloop0') { 8 }
+            elseif ($Step.Op -eq 'endloop1') { 12 }
             elseif ($Step.Op -in 'mxmpy-fp16','mxmpy-w8a8','mxmpy-w4a8','mxmpy-w8a8-cm','mxmpy-w4a8-cm','hmx-pair') { 8 }
             elseif ($Step.Op -eq 'got-call') { 16 }
             else { 4 }
@@ -887,6 +933,10 @@ function ConvertTo-HexagonAssembly {
     param([hashtable] $Step)
     switch ($Step.Op) {
         'label' { return "$($Step.Name):" }
+        'loop0-r' { $s = "loop0($($Step.Label),r$($Step.s))" }
+        'loop1-r' { $s = "loop1($($Step.Label),r$($Step.s))" }
+        'endloop0' { return '{ r14 = add(r14,#0); r15 = add(r15,#0) }:endloop0' }
+        'endloop1' { return '{ r13 = add(r13,#0); r14 = add(r14,#0); r15 = add(r15,#0) }:endloop1' }
         'imm' { $s = "r$($Step.d) = #$($Step.i)" }
         'lo' { $s = "r$($Step.x).l = #$($Step.i)" }
         'hi' { $s = "r$($Step.x).h = #$($Step.i)" }

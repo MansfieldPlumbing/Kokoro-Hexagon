@@ -236,3 +236,79 @@ function New-KokoroGeneratorEpilogueSteps {
     $s.Add(@{Op='return'})
     $s.ToArray()
 }
+
+# Repack one 32-position tile per transposed-convolution phase into native
+# chronological croutons. This is the fixed upsampler handoff, with no float
+# arithmetic or utterance-length storage. r0 phases, r1 destination; consumes LC0.
+function New-KokoroGeneratorUpsampleInterleaveSteps {
+    param(
+        [ValidateSet(128,256)][int] $Channels = 256,
+        [ValidateSet(6,10)][int] $Stride = 10,
+        [ValidateRange(1,5)][int] $PhaseTiles = 1,
+        [string] $LabelPrefix = 'generator_ups_interleave'
+    )
+    if (($Channels -eq 256 -and $Stride -ne 10) -or ($Channels -eq 128 -and $Stride -ne 6)) {
+        throw 'Upsampler channels and stride must describe the same generator stage.'
+    }
+    $tileBytes = 64*$Channels
+    $tileShift = if ($Channels -eq 256) { 14 } else { 13 }
+    $s = [Collections.Generic.List[hashtable]]::new()
+    $s.Add(@{Op='lo';x=15;i=65535}); $s.Add(@{Op='hi';x=15;i=0}); $s.Add(@{Op='vsplat';d=4;s=15})
+    $s.Add(@{Op='lo';x=15;i=0}); $s.Add(@{Op='hi';x=15;i=65535}); $s.Add(@{Op='vsplat';d=5;s=15})
+    $s.Add(@{Op='imm';d=4;i=0}); $s.Add(@{Op='imm';d=5;i=16})
+    $s.Add(@{Op='imm';d=6;i=31}); $s.Add(@{Op='imm';d=7;i=16})
+    $s.Add(@{Op='loop0-r';s=5;Label="${LabelPrefix}_pair"})
+    $s.Add(@{Op='label';Name="${LabelPrefix}_pair"})
+    $storePair = {
+        param([int]$Position,[int]$Block)
+        $s.Add(@{Op='addi';d=8;s=4;i=$Position})
+        $s.Add(@{Op='lsr-i';d=9;s=8;i=5})
+        $s.Add(@{Op='asl-i';d=9;s=9;i=$tileShift})
+        $s.Add(@{Op='and';d=10;s=8;t=6})
+        $s.Add(@{Op='asl-i';d=10;s=10;i=6})
+        $s.Add(@{Op='add';d=9;s=9;t=10})
+        $s.Add(@{Op='addi';d=9;s=9;i=($Block*2048)})
+        $s.Add(@{Op='add';d=8;s=1;t=9})
+        $s.Add(@{Op='vstore';s=8;t=2;Offset=0})
+    }
+    for ($block=0; $block -lt $Channels/32; $block++) {
+        for ($phase=0; $phase -lt $Stride; $phase+=2) {
+            $sourceOffset=$phase*$PhaseTiles*$tileBytes+$block*2048
+            $s.Add(@{Op='lo';x=15;i=($sourceOffset -band 65535)})
+            $s.Add(@{Op='hi';x=15;i=($sourceOffset -shr 16)})
+            $s.Add(@{Op='add';d=8;s=0;t=15})
+            $phaseStride=$PhaseTiles*$tileBytes
+            $s.Add(@{Op='lo';x=15;i=($phaseStride -band 65535)})
+            $s.Add(@{Op='hi';x=15;i=($phaseStride -shr 16)})
+            $s.Add(@{Op='add';d=9;s=8;t=15})
+            $s.Add(@{Op='vload';d=0;s=8;Offset=0}); $s.Add(@{Op='vload';d=1;s=9;Offset=0})
+            $s.Add(@{Op='vand';d=2;s=0;t=4}); $s.Add(@{Op='vand';d=3;s=1;t=4})
+            $s.Add(@{Op='vasl-w';d=3;s=3;t=7}); $s.Add(@{Op='vor';d=2;s=2;t=3})
+            & $storePair $phase $block
+            $s.Add(@{Op='vlsr-uw';d=2;s=0;t=7}); $s.Add(@{Op='vand';d=3;s=1;t=5})
+            $s.Add(@{Op='vor';d=2;s=2;t=3})
+            & $storePair ($phase+$Stride) $block
+        }
+    }
+    $s.Add(@{Op='addi';d=0;s=0;i=128})
+    $s.Add(@{Op='addi';d=4;s=4;i=(2*$Stride)})
+    $s.Add(@{Op='endloop0'}); $s.Add(@{Op='return'})
+    $s.ToArray()
+}
+
+# Stage B's first chronological column is the reflection-pad value: copy the
+# second unpadded sample (column 2 in this shifted phase output) into column 0.
+# r0 native output; fixed first-block prologue, not a runtime-length variant.
+function New-KokoroGeneratorLeadingReflectionSteps {
+    param([ValidateSet(128)][int]$Channels=128)
+    $s = [Collections.Generic.List[hashtable]]::new()
+    $s.Add(@{Op='lo';x=15;i=65535}); $s.Add(@{Op='hi';x=15;i=0}); $s.Add(@{Op='vsplat';d=2;s=15})
+    $s.Add(@{Op='lo';x=15;i=0}); $s.Add(@{Op='hi';x=15;i=65535}); $s.Add(@{Op='vsplat';d=3;s=15})
+    for ($block=0; $block -lt $Channels/32; $block++) {
+        $s.Add(@{Op='addi';d=8;s=0;i=($block*2048)})
+        $s.Add(@{Op='vload';d=0;s=8;Offset=0}); $s.Add(@{Op='vload';d=1;s=8;Offset=128})
+        $s.Add(@{Op='vand';d=0;s=0;t=3}); $s.Add(@{Op='vand';d=1;s=1;t=2})
+        $s.Add(@{Op='vor';d=0;s=0;t=1}); $s.Add(@{Op='vstore';s=8;t=0;Offset=0})
+    }
+    $s.ToArray()
+}

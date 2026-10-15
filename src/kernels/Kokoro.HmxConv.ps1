@@ -10,6 +10,7 @@
 #   r2 = output tile 0 (VTCM), crouton (tb, ob) at (tb*OB + ob)*2048, byte 2*IDX(row, c) + 1.
 #   r3 = column tables, 256 B per output block ob: words 0..31 fp16 scale, words 32..63 int32 bias.
 #   r4 = number of 32-row output tiles (>= 1).
+#   FP16 consumes hardware loop 0 (SA0/LC0); an enclosing job uses loop 1.
 #   With -OutputPlanes: r3 holds two tables per output block at 512*ob (high plane, then low plane),
 #   and r5 = low-plane output tile 0, same crouton addressing as r2. The high store keeps the
 #   accumulator (:retain:sat.ub); the low store wraps (.ub). With power-of-two scales 2^(1-L) and
@@ -45,6 +46,7 @@ function New-KokoroHmxConvSteps {
     $s.Add(@{Op='lo'; x=7; i=($rt -band 65535)}); $s.Add(@{Op='hi'; x=7; i=($rt -shr 16)})
     $s.Add(@{Op='imm'; d=8; i=0x7ff})                 # weight :deep range (2 KB)
     $s.Add(@{Op='imm'; d=9; i=0})                     # store Rt, loop compare zero
+    if ($Fp16) { $s.Add(@{Op='loop0-r';s=4;Label="${LabelPrefix}_tile"}) }
     $s.Add(@{Op='label'; Name="${LabelPrefix}_tile"})
     $s.Add(@{Op='addi'; d=10; s=1; i=0})              # weight pointer restarts each tile
     for ($g = 0; $g -lt $groups; $g++) {
@@ -92,9 +94,11 @@ function New-KokoroHmxConvSteps {
     } else { $s.Add(@{Op='addi'; d=0; s=0; i=$dy}) }  # next input tile
     $s.Add(@{Op='addi'; d=2; s=2; i=($ob * 2048)})    # next output tile
     if ($OutputPlanes) { $s.Add(@{Op='addi'; d=5; s=5; i=($ob * 2048)}) }
-    $s.Add(@{Op='addi'; d=4; s=4; i=-1})
-    $s.Add(@{Op='gtu'; d=0; s=4; t=9})
-    $s.Add(@{Op='jump-p'; u=0; Label="${LabelPrefix}_tile"})
+    if ($Fp16) { $s.Add(@{Op='endloop0'}) } else {
+        $s.Add(@{Op='addi'; d=4; s=4; i=-1})
+        $s.Add(@{Op='gtu'; d=0; s=4; t=9})
+        $s.Add(@{Op='jump-p'; u=0; Label="${LabelPrefix}_tile"})
+    }
     if (-not $NoReturn) { $s.Add(@{Op='return'}) }
     $s.ToArray()
 }
