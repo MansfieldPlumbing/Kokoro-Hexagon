@@ -1,4 +1,3 @@
-#requires -Version 7.4
 <#
 .SYNOPSIS
 The one entrypoint for Kokoro-Hexagon work: where the project stands, what to do next, and every routine operation.
@@ -50,6 +49,9 @@ twice, or written as a scratch script, is a missing command: add it here.
   FrontEnd -Parameters <typed bank inputs> -OutputDirectory
   PrecomputedDecoder -Parameters @{ Mode = 'Gate' } (offline decoder/generator experiment)
                               Manufacture and gate the compact prosody bank on the laptop; no phone access.
+  Student -Parameters @{ Step = 'Measure' } -OutputDirectory <fresh build directory>
+                              Offline student opcode loop: real exemplars and direction medoids. -Path selects the bank.
+                              Typed results; read-only bank; no phone. -h prints entrypoint help.
   AlbertLinear -Linear name[,name...] [-Path] [-Soc] [-Runs]
                               One ALBERT linear (mapping_in, query.0 .. ffn_output.11, bert_encoder) on the phone: job input
                               from the capture, emit, run, decode, SNR against stock. Default capture stock-albert-capture-hello.
@@ -98,10 +100,11 @@ pwsh -NoProfile -File ./Invoke-KokoroDevelopment.ps1 AlbertLinear -Linear query.
 pwsh -NoProfile -File ./Invoke-KokoroDevelopment.ps1 Api -Pattern 'Conv|Croutons'
 pwsh -NoProfile -File ./Invoke-KokoroDevelopment.ps1 Run -Case benchmark-0-sm8550 -Hypothesis 'layout slack'
 #>
+#requires -Version 7.4
 [CmdletBinding()]
 param(
     [Parameter(Position = 0)]
-    [ValidateSet('Status', 'Verify', 'BuildHost', 'Ratchet', 'Run', 'Emit', 'Check', 'Compare', 'JobInput', 'Capture', 'MeasureAudio', 'StockCapture', 'Speak', 'FrontEnd', 'PrecomputedDecoder', 'Zira', 'Albert', 'AlbertError', 'AlbertLinear', 'AlbertLayerNorm', 'AlbertGelu', 'AlbertAttention', 'AlbertEmbed', 'AlbertJob', 'Api', 'Find', 'Tools', 'StageResidency', 'CopySynthesis', 'WeightAssembly')]
+    [ValidateSet('Status', 'Verify', 'BuildHost', 'Ratchet', 'Run', 'Emit', 'Check', 'Compare', 'JobInput', 'Capture', 'MeasureAudio', 'StockCapture', 'Speak', 'FrontEnd', 'PrecomputedDecoder', 'Student', 'Zira', 'Albert', 'AlbertError', 'AlbertLinear', 'AlbertLayerNorm', 'AlbertGelu', 'AlbertAttention', 'AlbertEmbed', 'AlbertJob', 'Api', 'Find', 'Tools', 'StageResidency', 'CopySynthesis', 'WeightAssembly')]
     [string] $Command = 'Status',
     [string] $Case,
     [string] $Kernel,
@@ -138,10 +141,12 @@ param(
     # Pwsh-Development checkout; CI passes its own (checkout cannot write outside the workspace).
     [string] $SharedRoot,
     # Verify: a missing shared library is a failure, not a skip (CI).
-    [switch] $RequireShared
+    [switch] $RequireShared,
+    [Alias('help')][switch] $h
 )
 
 $ErrorActionPreference = 'Stop'
+if($h){Get-Help $PSCommandPath -Detailed;return}
 $Root = $PSScriptRoot
 $Build = Join-Path $Root 'build'
 $Shared = if ($SharedRoot) { [IO.Path]::GetFullPath($SharedRoot) } else { [IO.Path]::GetFullPath((Join-Path $Root '../Pwsh-Development')) }
@@ -2096,6 +2101,14 @@ function New-KokoroDiagnosticHost {
 if ($MyInvocation.InvocationName -eq '.') { return }
 
 switch ($Command) {
+    'Student' {
+        Import-Module (Join-Path $Root 'tools/Kokoro.Student.psm1')
+        $studentArguments=@{}
+        if($Parameters){foreach($key in $Parameters.Keys){$studentArguments[$key]=$Parameters[$key]}}
+        if($OutputDirectory){$studentArguments.OutputDirectory=$OutputDirectory}
+        if($Path){$studentArguments.BankPath=$Path}
+        Invoke-KokoroStudent @studentArguments
+    }
     'MeasureAudio' {
         if (-not $Path) { throw 'MeasureAudio needs -Path (a WAV file or folder).' }
         Import-Module (Join-Path $Root 'tools/Kokoro.AudioMeasurement.psm1')
@@ -2133,7 +2146,7 @@ switch ($Command) {
         }
         ''
         'Commands (Get-Help ./Invoke-KokoroDevelopment.ps1 -Full):'
-        '  Status Verify BuildHost Ratchet Run Emit Check Compare JobInput Capture MeasureAudio StockCapture Speak FrontEnd PrecomputedDecoder Zira Albert Find Tools'
+        '  Status Verify BuildHost Ratchet Run Emit Check Compare JobInput Capture MeasureAudio StockCapture Speak FrontEnd PrecomputedDecoder Student Zira Albert Find Tools'
         'Contract: AGENTS.md. Reference manuals: Find-Reference (Pwsh-Development/tools/SharedLibrary.psm1).'
     }
     'BuildHost' {
