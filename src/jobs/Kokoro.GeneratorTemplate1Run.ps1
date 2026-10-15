@@ -11,7 +11,9 @@ function New-KokoroGeneratorTemplate1RunSteps {
         [ValidateRange(1,60)][int] $Tiles = 60,
         [ValidateSet(1,3)][int] $Branches = 1,
         [switch] $AddResidual,
-        [switch] $StoreResidual
+        [switch] $StoreResidual,
+        [ValidateSet('Lock','Smoothstep')][string] $Shape = 'Lock',
+        [ValidateRange(16,64)][int] $BlockFrames = 16
     )
     . (Join-Path $PSScriptRoot '../kernels/Kokoro.HmxConv.ps1')
     . (Join-Path $PSScriptRoot '../kernels/Kokoro.GeneratorEpilogue.ps1')
@@ -21,17 +23,23 @@ function New-KokoroGeneratorTemplate1RunSteps {
     $activationBytes = ($Tiles+2)*$tileBytes
     $resultBytes = $Tiles*$tileBytes
     $conversionBytes = $blocks*256L
-    $epilogueBytes = (128L + $blocks*$Branches*640L + 255L) -band -256L
+    $epilogueBytes = ($blocks*$Branches*640L + 255L) -band -256L
+    if ($Shape -ceq 'Lock') {
+        $positions = if ($Channels -eq 256) { 10 } else { 60 }
+        if ($positions*$BlockFrames % 32 -ne 0) { throw 'Lock block must contain full HMX tiles.' }
+        $lockBlocks = [long][Math]::Ceiling(32.0*$Tiles/($positions*$BlockFrames))
+        $epilogueBytes = $lockBlocks*$blocks*$Branches*(640L+$positions/2*1024L)
+    }
     $convolutionWeightBytes = 2L*$Channels*$Channels*$Kernel
-    $identityWeightBytes = 6L*$Channels*$Channels
+    $identityWeightBytes = 2L*$Kernel*$Channels*$Channels
     $weightBytes = $convolutionWeightBytes+$identityWeightBytes
     $tableBytes = 2*$conversionBytes+$epilogueBytes
-    $inputBytes = $activationBytes + $(if ($AddResidual) { $resultBytes } else { 0L })
+    $inputBytes = 2*$activationBytes + $(if ($AddResidual) { $resultBytes } else { 0L })
     $keepResidual = $StoreResidual -or $AddResidual -or $Branches -eq 3
     $regions = [ordered]@{}
     $cursor = 0L
     $declarations = [Collections.Generic.List[object]]::new()
-    $declarations.Add(@('Input',$inputBytes)); $declarations.Add(@('Weights',$weightBytes))
+    $declarations.Add(@('Input',($inputBytes-$activationBytes))); $declarations.Add(@('Weights',$weightBytes))
     $declarations.Add(@('Tables',$tableBytes)); $declarations.Add(@('Convolution',$resultBytes))
     if ($keepResidual) { $declarations.Add(@('Residual',$resultBytes)) }
     for ($branch=0; $branch -lt $Branches; $branch++) { $declarations.Add(@("Operand$branch",$activationBytes)) }
@@ -49,13 +57,16 @@ function New-KokoroGeneratorTemplate1RunSteps {
         OutputBytes=(256L+$resultBytes*(2+$Branches+[int]$keepResidual));Samples=1;PcmOffset=256;
         VtcmBytes=$cursor;Regions=$regions}
     $job = {
-        & $dma 18 $regions.Input.Offset 20 0 $inputBytes
+        & $dma 18 $regions.Input.Offset 20 0 $activationBytes
+        if ($AddResidual) {
+            & $dma 18 ($regions.Input.Offset+$activationBytes) 20 (2*$activationBytes) $resultBytes
+        }
         & $dma 18 $regions.Weights.Offset 21 0 $weightBytes
         & $dma 18 $regions.Tables.Offset 22 0 $tableBytes
         # Initialize linear before/after croutons from the already packed input, then overwrite
         # every live output row in the epilogue. This is initialization, not a layout conversion.
         for ($branch=0; $branch -lt $Branches; $branch++) {
-            & $dma 18 $regions["Operand$branch"].Offset 20 0 $activationBytes
+            & $dma 18 $regions["Operand$branch"].Offset 20 $activationBytes $activationBytes
         }
         & $ptr 0 18 ($regions.Input.Offset+$tileBytes)
         & $ptr 1 18 $regions.Weights.Offset
@@ -100,8 +111,8 @@ function New-KokoroGeneratorTemplate1RunSteps {
     }
     $bodies = @(
         @('template1_convolution',@(New-KokoroHmxConvSteps -InputChannels $Channels -OutputChannels $Channels -Kernel $Kernel -Dilation $Dilation -Fp16 -LabelPrefix 'template1_conv')),
-        @('template1_epilogue',@(New-KokoroGeneratorEpilogueSteps -Channels $Channels -Branches $Branches -AddResidual:$AddResidual -StoreResidual:$keepResidual)),
-        @('template1_consumer',@(New-KokoroHmxConvSteps -InputChannels $Channels -OutputChannels $Channels -Kernel 3 -Dilation 1 -Fp16 -LabelPrefix 'template1_consumer'))
+        @('template1_epilogue',@(New-KokoroGeneratorEpilogueSteps -Channels $Channels -Branches $Branches -AddResidual:$AddResidual -StoreResidual:$keepResidual -Shape $Shape -BlockFrames $BlockFrames)),
+        @('template1_consumer',@(New-KokoroHmxConvSteps -InputChannels $Channels -OutputChannels $Channels -Kernel $Kernel -Dilation 1 -Fp16 -LabelPrefix 'template1_consumer'))
     )
     $steps = New-KokoroWrappedJobSteps -Minimum @(4L,$inputBytes,$weightBytes,$tableBytes,$layout.OutputBytes) -VtcmBytes $cursor -Tiles $Tiles -Job $job -Bodies $bodies
     [pscustomobject]@{Layout=$layout;Steps=$steps}

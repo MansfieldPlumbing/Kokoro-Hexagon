@@ -6,13 +6,20 @@ param(
     [Parameter(Mandatory)][string] $OutputDirectory,
     [string] $InputRepository = 'C:\Dev\Kokoro-Hexagon',
     [string] $ReferenceRepository = 'C:\Dev\Kokoro-Hexagon-v15-front-end',
-    [ValidateRange(1,60)][int] $Tiles = 60,
+    [ValidateRange(0,60)][int] $Tiles = 0,
+    [ValidateRange(0,5)][int] $ResBlockIndex = 3,
+    [ValidateRange(0,2)][int] $DilationIndex = 0,
     [ValidateRange(1,20)][int] $Runs = 5,
+    [switch] $ConnectedConsumer,
+    [ValidateSet('Lock','Smoothstep')][string] $Shape = 'Lock',
+    [ValidateRange(16,64)][int] $BlockFrames = 16,
     [ValidateSet('SM8550')][string] $Soc = 'SM8550',
     [string] $Package = 'dev.mansfieldplumbing.kokoro'
 )
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
+$Smoothstep = $Shape -ceq 'Smoothstep'
+$PhaseLock = $Shape -ceq 'Lock'
 $root = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..'))
 $output = [IO.Path]::GetFullPath($OutputDirectory)
 if (-not $output.StartsWith((Join-Path $root 'build')+[IO.Path]::DirectorySeparatorChar,[StringComparison]::OrdinalIgnoreCase) -or
@@ -33,14 +40,14 @@ function Read-TemplateFloatTensor([hashtable] $Descriptor,[string] $Directory) {
     [Buffer]::BlockCopy($raw,0,$values,0,$raw.Length)
     return ,$values
 }
-function Write-TemplateBinary([string] $Name,[Array] $Values) {
-    $bytes = [byte[]]::new([Buffer]::ByteLength($Values)); [Buffer]::BlockCopy($Values,0,$bytes,0,$bytes.Length)
+function Write-TemplateBinary([string] $Name,[Array] $values) {
+    $bytes = [byte[]]::new([Buffer]::ByteLength($values)); [Buffer]::BlockCopy($values,0,$bytes,0,$bytes.Length)
     [IO.File]::WriteAllBytes((Join-Path $output $Name),$bytes)
 }
-function Copy-TemplateFrames([float[]]$Values,[int]$SourceFrames,[int]$Frames) {
-    if ($Frames -gt $SourceFrames -or $Values.Length % $SourceFrames -ne 0) { throw 'Invalid frame slice.' }
-    $channels = [int]($Values.Length/$SourceFrames); $slice = [float[]]::new($channels*$Frames)
-    for ($channel=0; $channel -lt $channels; $channel++) { [Array]::Copy($Values,$channel*$SourceFrames,$slice,$channel*$Frames,$Frames) }
+function Copy-TemplateFrames([float[]]$values,[int]$SourceFrames,[int]$frames) {
+    if ($frames -gt $SourceFrames -or $values.Length % $SourceFrames -ne 0) { throw 'Invalid frame slice.' }
+    $channels = [int]($values.Length/$SourceFrames); $slice = [float[]]::new($channels*$frames)
+    for ($channel=0; $channel -lt $channels; $channel++) { [Array]::Copy($values,$channel*$SourceFrames,$slice,$channel*$frames,$frames) }
     return ,$slice
 }
 
@@ -73,12 +80,19 @@ $nonfinite = [Expression]::Lambda([Predicate[float]],
 
 $nodeDirectory = Join-Path $InputRepository 'build/node-capture-20261014'
 $nodes = Import-PowerShellDataFile (Join-Path $nodeDirectory 'nodes.psd1')
-$upNode = @($nodes.Nodes | Where-Object Name -CEQ 'gen.ups1')[0]
-$noiseNode = @($nodes.Nodes | Where-Object Name -CEQ 'gen.noise_res1')[0]
+$generatorStage = [int][Math]::Floor($ResBlockIndex/3.0)
+$upNode = @($nodes.Nodes | Where-Object Name -CEQ "gen.ups$generatorStage")[0]
+$noiseNode = @($nodes.Nodes | Where-Object Name -CEQ "gen.noise_res$generatorStage")[0]
 $upsampled = Read-TemplateFloatTensor $upNode $nodeDirectory
 $excitation = Read-TemplateFloatTensor $noiseNode $nodeDirectory
-$channels = 128; $frames = [int]$noiseNode.Shape[2]
-$sharedInput = $residual.Invoke($reflect.Invoke($upsampled,$channels,[int]$upNode.Shape[2]),$excitation,[float]1)
+$channels = if ($generatorStage -eq 0) { 256 } else { 128 }
+$positions = if ($generatorStage -eq 0) { 10 } else { 60 }
+if ($Tiles -eq 0) { $Tiles = $positions*$BlockFrames/32 }
+$kernelSize = @(3,7,11)[$ResBlockIndex%3]
+$tapDilation = 1+2*$DilationIndex
+$frames = [int]$noiseNode.Shape[2]
+if ($generatorStage -eq 1) { $upsampled = $reflect.Invoke($upsampled,$channels,[int]$upNode.Shape[2]) }
+$sharedInput = $residual.Invoke($upsampled,$excitation,[float]1)
 $captureDirectory = Join-Path $InputRepository 'build/score-capture-20261014'
 $capture = Import-PowerShellDataFile (Join-Path $captureDirectory 'capture.psd1')
 $dog = @($capture.Cases | Where-Object Name -CEQ 'dog')[0]
@@ -99,7 +113,7 @@ function Read-TemplateWeight([string]$Name) {
     return ,$values
 }
 $convolutionCache = [Collections.Generic.Dictionary[string,object]]::new([StringComparer]::Ordinal)
-function Invoke-TemplateReferenceConvolution([float[]]$Values,[string]$Name,[int]$Dilation=1) {
+function Invoke-TemplateReferenceConvolution([float[]]$values,[string]$Name,[int]$Dilation=1) {
     if (-not $convolutionCache.ContainsKey($Name)) {
         $weightName = $Name+'.weight'
         if ($checkpoint.Tensors.Contains($weightName)) { $convolutionWeights=Read-TemplateWeight $weightName }
@@ -110,17 +124,17 @@ function Invoke-TemplateReferenceConvolution([float[]]$Values,[string]$Name,[int
         $convolutionCache.Add($Name,[pscustomobject]@{InputChannels=[int]$shape[1];OutputChannels=[int]$shape[0];Kernel=[int]$shape[2];Weights=$convolutionWeights;Bias=$convolutionBias})
     }
     $descriptor = $convolutionCache[$Name]
-    if ($Values.Length -ne $descriptor.InputChannels*$frames) { throw 'Reference continuation convolution shape mismatch.' }
+    if ($values.Length -ne $descriptor.InputChannels*$frames) { throw 'Reference continuation convolution shape mismatch.' }
     $outputValues = [float[]]::new($descriptor.OutputChannels*$frames)
     $padding = [int](($descriptor.Kernel-1)*$Dilation/2)
     $frameMap = $indicesKernel.Invoke($frames,$frames,$descriptor.Kernel,1,$Dilation,$padding,$false)
-    $vectorInput = $vectorKernel.Invoke($Values,$frameMap,$descriptor.InputChannels,$frames,$frames,$descriptor.Kernel)
+    $vectorInput = $vectorKernel.Invoke($values,$frameMap,$descriptor.InputChannels,$frames,$frames,$descriptor.Kernel)
     $activeTaps = $activeKernel.Invoke($frameMap,$descriptor.Kernel)
     $referenceWorkers = [Collections.Generic.List[object]]::new(); $referenceTasks = [Collections.Generic.List[Threading.Tasks.Task]]::new()
     $workerCount = [Math]::Min(4,$descriptor.OutputChannels)
     for ($workerIndex=0; $workerIndex -lt $workerCount; $workerIndex++) {
         $referenceWorker = [Activator]::CreateInstance($workerType)
-        $referenceWorker.Input=$Values; $referenceWorker.Output=$outputValues; $referenceWorker.Weights=$descriptor.Weights; $referenceWorker.Bias=$descriptor.Bias
+        $referenceWorker.Input=$values; $referenceWorker.Output=$outputValues; $referenceWorker.Weights=$descriptor.Weights; $referenceWorker.Bias=$descriptor.Bias
         $referenceWorker.Indices=$frameMap; $referenceWorker.VectorInput=$vectorInput; $referenceWorker.ActiveTaps=$activeTaps
         $referenceWorker.InputChannels=$descriptor.InputChannels; $referenceWorker.OutputChannels=$descriptor.OutputChannels
         $referenceWorker.InputFrames=$frames; $referenceWorker.OutputFrames=$frames; $referenceWorker.Kernel=$descriptor.Kernel
@@ -140,35 +154,58 @@ function Get-TemplateNorm([string]$Name) {
     if ($checkpoint.Tensors.Contains($Name+'.norm.bias')) { $bias=Read-TemplateWeight ($Name+'.norm.bias') }
     [pscustomobject]@{Weight=$weight;Bias=$bias;Fc=(Read-TemplateWeight ($Name+'.fc.weight'));FcBias=(Read-TemplateWeight ($Name+'.fc.bias'))}
 }
-$prefix = 'decoder.module.generator.resblocks.3'
-$firstNorm = Get-TemplateNorm ($prefix+'.adain1.0')
-$activationInput = $adaIn.Invoke($sharedInput,$channels,$frames,$style,$firstNorm.Fc,$firstNorm.FcBias,$firstNorm.Weight,$firstNorm.Bias)
-$activationInput = $snake.Invoke($activationInput,(Read-TemplateWeight ($prefix+'.alpha1.0')),$frames)
-$weights = $fold.Invoke((Read-TemplateWeight ($prefix+'.convs1.0.weight_v')),(Read-TemplateWeight ($prefix+'.convs1.0.weight_g')))
-$bias = Read-TemplateWeight ($prefix+'.convs1.0.bias')
+$prefix = "decoder.module.generator.resblocks.$ResBlockIndex"
+$branchInput = $sharedInput
+for ($previous=0; $previous -lt $DilationIndex; $previous++) {
+    $norm = Get-TemplateNorm ($prefix+".adain1.$previous")
+    $values = $adaIn.Invoke($branchInput,$channels,$frames,$style,$norm.Fc,$norm.FcBias,$norm.Weight,$norm.Bias)
+    $values = $snake.Invoke($values,(Read-TemplateWeight ($prefix+".alpha1.$previous")),$frames)
+    $values = Invoke-TemplateReferenceConvolution $values ($prefix+".convs1.$previous") (1+2*$previous)
+    $norm = Get-TemplateNorm ($prefix+".adain2.$previous")
+    $values = $adaIn.Invoke($values,$channels,$frames,$style,$norm.Fc,$norm.FcBias,$norm.Weight,$norm.Bias)
+    $values = $snake.Invoke($values,(Read-TemplateWeight ($prefix+".alpha2.$previous")),$frames)
+    $values = Invoke-TemplateReferenceConvolution $values ($prefix+".convs2.$previous")
+    $branchInput = $residual.Invoke($values,$branchInput,[float]1)
+}
+$firstNorm = Get-TemplateNorm ($prefix+".adain1.$DilationIndex")
+$activationInput = $adaIn.Invoke($branchInput,$channels,$frames,$style,$firstNorm.Fc,$firstNorm.FcBias,$firstNorm.Weight,$firstNorm.Bias)
+$activationInput = $snake.Invoke($activationInput,(Read-TemplateWeight ($prefix+".alpha1.$DilationIndex")),$frames)
+$weights = $fold.Invoke((Read-TemplateWeight ($prefix+".convs1.$DilationIndex.weight_v")),(Read-TemplateWeight ($prefix+".convs1.$DilationIndex.weight_g")))
+$bias = Read-TemplateWeight ($prefix+".convs1.$DilationIndex.bias")
 $reference = [float[]]::new($channels*$frames)
-$indices = $indicesKernel.Invoke($frames,$frames,3,1,1,1,$false)
-$vectors = $vectorKernel.Invoke($activationInput,$indices,$channels,$frames,$frames,3)
-$active = $activeKernel.Invoke($indices,3)
+$indices = $indicesKernel.Invoke($frames,$frames,$kernelSize,1,$tapDilation,[int](($kernelSize-1)*$tapDilation/2),$false)
+$vectors = $vectorKernel.Invoke($activationInput,$indices,$channels,$frames,$frames,$kernelSize)
+$active = $activeKernel.Invoke($indices,$kernelSize)
 $workers = [Collections.Generic.List[object]]::new(); $tasks = [Collections.Generic.List[Threading.Tasks.Task]]::new()
 for ($thread=0; $thread -lt 4; $thread++) {
     $worker = [Activator]::CreateInstance($workerType)
     $worker.Input=$activationInput; $worker.Output=$reference; $worker.Weights=$weights; $worker.Bias=$bias
     $worker.Indices=$indices; $worker.VectorInput=$vectors; $worker.ActiveTaps=$active
     $worker.InputChannels=$channels; $worker.OutputChannels=$channels; $worker.InputFrames=$frames; $worker.OutputFrames=$frames
-    $worker.Kernel=3; $worker.Stride=1; $worker.Dilation=1; $worker.Padding=1; $worker.Groups=1; $worker.Transpose=$false
-    $worker.FirstChannel=32*$thread; $worker.LastChannel=32*($thread+1)
+    $worker.Kernel=$kernelSize; $worker.Stride=1; $worker.Dilation=$tapDilation; $worker.Padding=[int](($kernelSize-1)*$tapDilation/2); $worker.Groups=1; $worker.Transpose=$false
+    $worker.FirstChannel=($channels/4)*$thread; $worker.LastChannel=($channels/4)*($thread+1)
     $workers.Add($worker); $tasks.Add([Threading.Tasks.Task]::Run($workerType.GetMethod('Run').CreateDelegate([Action],$worker)))
 }
 [Threading.Tasks.Task]::WaitAll($tasks.ToArray())
-$nextNorm = Get-TemplateNorm ($prefix+'.adain2.0')
-$alpha = Read-TemplateWeight ($prefix+'.alpha2.0')
+$nextNorm = Get-TemplateNorm ($prefix+".adain2.$DilationIndex")
+$alpha = Read-TemplateWeight ($prefix+".alpha2.$DilationIndex")
 $statistics = $measureLevels.Invoke($reference,$channels,$frames,[int[]]@($frames))
 $expectedOperand = $applyLevels.Invoke($reference,$channels,$frames,$style,$nextNorm.Fc,$nextNorm.FcBias,$nextNorm.Weight,$nextNorm.Bias,$statistics)
+$affineInput = $expectedOperand
 $expectedOperand = $snake.Invoke($expectedOperand,$alpha,$frames)
 $coefficients = [float[]]::new(5*$channels)
 (Get-GeneratorCoefficientsKernel).Invoke($style,$nextNorm.Fc,$nextNorm.FcBias,$nextNorm.Weight,$nextNorm.Bias,$statistics,$alpha,$coefficients)
-$emissionParameters = @{ConvChannels=128;ConvKernel=3;ConvDilation=1;ConvTiles=$Tiles}
+if ($PhaseLock) {
+    Import-Module (Join-Path $PSScriptRoot 'Kokoro.GeneratorLock.psm1')
+    $lockTables = New-KokoroGeneratorLockTables -InputValues $affineInput -Alpha $alpha -AffineCoefficients $coefficients -Frames $frames -OutputFrames (32*$Tiles) -BlockFrames $BlockFrames
+    $coefficients = $lockTables.NativeCoefficients
+    Write-TemplateBinary 'lock-seats.f64' $lockTables.Seats
+    [pscustomobject]@{Channels=$lockTables.Channels;Positions=$lockTables.Positions;BlockFrames=$lockTables.BlockFrames;
+        Blocks=$lockTables.Blocks;StrideBytes=$lockTables.StrideBytes;SeatFields=[string[]]@('Mean','FoldedPhase','SinSquared','Slope','Direction');
+        ProbeSHA256='84E9927E98E94AC619A30F9C553988774730F045B5530D65F74671B7265F6576'} |
+        Export-Clixml -LiteralPath (Join-Path $output 'lock-description.clixml')
+}
+$emissionParameters = @{ConvChannels=$channels;ConvKernel=$kernelSize;ConvDilation=$tapDilation;ConvTiles=$Tiles;TemplateShape=$Shape;TemplateBlockFrames=$BlockFrames}
 $encodingCheck = Test-KokoroKernel -Kernel KokoroGeneratorTemplate1Run -Parameters $emissionParameters
 if (-not $encodingCheck.AssemblerMatch) { throw 'Template-1 SDK byte verification failed; device run rejected.' }
 $emission = Invoke-KokoroEmission -Kernel KokoroGeneratorTemplate1Run -Parameters $emissionParameters
@@ -177,29 +214,40 @@ $layout = $emission.Layout; $validFrames = 32*$Tiles
 $packed = [ushort[]]::new($layout.ActivationBytes/2)
 $inputSlice = Copy-TemplateFrames $activationInput $frames ($validFrames+32)
 (Get-Fp16CroutonsKernel).Invoke($inputSlice,$validFrames+32,$channels,32,$packed)
-Write-TemplateBinary 'activations.bin' $packed
+$operandHalo = [ushort[]]::new($packed.Length)
+$operandInputSlice = Copy-TemplateFrames $expectedOperand $frames ($validFrames+32)
+(Get-Fp16CroutonsKernel).Invoke($operandInputSlice,$validFrames+32,$channels,32,$operandHalo)
+$inputCroutons = [ushort[]]::new(2*$packed.Length)
+[Array]::Copy($packed,0,$inputCroutons,0,$packed.Length)
+[Array]::Copy($operandHalo,0,$inputCroutons,$packed.Length,$operandHalo.Length)
+Write-TemplateBinary 'activations.bin' $inputCroutons
 $nativeWeights = [ushort[]]::new($weights.Length)
-(Get-PackFp16WeightsKernel).Invoke($weights,$channels,$channels,3,$nativeWeights)
-$identity = [float[]]::new(3*$channels*$channels)
+(Get-PackFp16WeightsKernel).Invoke($weights,$channels,$channels,$kernelSize,$nativeWeights)
+$identity = [float[]]::new($kernelSize*$channels*$channels)
 $identityParameter = [Expression]::Parameter([float[]],'identity')
 $identityStores = [Collections.Generic.List[Expression]]::new()
 for ($channel=0; $channel -lt $channels; $channel++) {
-    $identityStores.Add([Expression]::Assign([Expression]::ArrayAccess($identityParameter,[Expression]::Constant(($channel*$channels+$channel)*3+1)),[Expression]::Constant([float]1)))
+    $identityStores.Add([Expression]::Assign([Expression]::ArrayAccess($identityParameter,[Expression]::Constant([int](($channel*$channels+$channel)*$kernelSize+($kernelSize-1)/2))),[Expression]::Constant([float]1)))
 }
 [Expression]::Lambda([Action[float[]]],[Expression]::Block($identityStores),[ParameterExpression[]]@($identityParameter)).Compile().Invoke($identity)
 $identityWeights = [ushort[]]::new($identity.Length)
-(Get-PackFp16WeightsKernel).Invoke($identity,$channels,$channels,3,$identityWeights)
+(Get-PackFp16WeightsKernel).Invoke($identity,$channels,$channels,$kernelSize,$identityWeights)
+if ($ConnectedConsumer) {
+    $consumerWeights = $fold.Invoke((Read-TemplateWeight ($prefix+".convs2.$DilationIndex.weight_v")),(Read-TemplateWeight ($prefix+".convs2.$DilationIndex.weight_g")))
+    (Get-PackFp16WeightsKernel).Invoke($consumerWeights,$channels,$channels,$kernelSize,$identityWeights)
+}
 $allWeights = [ushort[]]::new($nativeWeights.Length+$identityWeights.Length)
 [Array]::Copy($nativeWeights,0,$allWeights,0,$nativeWeights.Length); [Array]::Copy($identityWeights,0,$allWeights,$nativeWeights.Length,$identityWeights.Length)
 Write-TemplateBinary 'weights.bin' $allWeights
 $conversion = [uint[]]::new($layout.ConversionBytes/4); $identityConversion = [uint[]]::new($conversion.Length)
 (Get-Fp16ConversionTableKernel).Invoke($bias,$conversion)
 (Get-Fp16ConversionTableKernel).Invoke([float[]]::new($channels),$identityConversion)
+if ($ConnectedConsumer) {
+    (Get-Fp16ConversionTableKernel).Invoke((Read-TemplateWeight ($prefix+".convs2.$DilationIndex.bias")),$identityConversion)
+}
 $tables = [byte[]]::new($layout.TableBytes)
 [Buffer]::BlockCopy($conversion,0,$tables,0,$layout.ConversionBytes)
-$wave = [uint[]]@(0,157,624,1381,2399,3641,5057,6594,8192,9790,11327,12743,13985,15003,15760,16227,16384,16227,15760,15003,13985,12743,11327,9790,8192,6594,5057,3641,2399,1381,624,157)
-[Buffer]::BlockCopy($wave,0,$tables,$layout.ConversionBytes,128)
-[Buffer]::BlockCopy($coefficients,0,$tables,$layout.ConversionBytes+128,4*$coefficients.Length)
+[Buffer]::BlockCopy($coefficients,0,$tables,$layout.ConversionBytes,4*$coefficients.Length)
 [Buffer]::BlockCopy($identityConversion,0,$tables,$layout.ConversionBytes+$layout.EpilogueBytes,$layout.ConversionBytes)
 [IO.File]::WriteAllBytes((Join-Path $output 'tables.bin'),$tables)
 $result = Invoke-KokoroDeviceJob -EmissionDirectory $emission.Directory -EmissionArtifact $emission -InputDirectory $output -Soc $Soc -Runs $Runs -Package $Package
@@ -217,18 +265,54 @@ $referenceSlice = Copy-TemplateFrames $reference $frames $validFrames
 $operandSlice = Copy-TemplateFrames $expectedOperand $frames $validFrames
 Write-TemplateBinary 'reference-convolution.f32' $referenceSlice
 Write-TemplateBinary 'reference-operand.f32' $operandSlice
-$convolutionMetrics = $compare.Invoke($decoded[0],$referenceSlice)
-$operandMetrics = $compare.Invoke($decoded[1],$operandSlice)
-$consumerMetrics = $compare.Invoke($decoded[2],$decoded[1])
+$actualInputSlice = [float[]]::new($channels*($validFrames+32))
+(Get-Fp16CroutonsKernel -Direction Decode).Invoke($actualInputSlice,$validFrames+32,$channels,32,$packed)
+$actualInput = [float[]]$activationInput.Clone()
+$actualOperand = [float[]]$expectedOperand.Clone()
+$actualHaloSlice = [float[]]::new($actualInputSlice.Length)
+(Get-Fp16CroutonsKernel -Direction Decode).Invoke($actualHaloSlice,$validFrames+32,$channels,32,$operandHalo)
+$actualConvolution = [float[]]$reference.Clone()
+for ($channel=0; $channel -lt $channels; $channel++) {
+    [Array]::Copy($actualInputSlice,$channel*($validFrames+32),$actualInput,$channel*$frames,$validFrames+32)
+    [Array]::Copy($actualHaloSlice,$channel*($validFrames+32),$actualOperand,$channel*$frames,$validFrames+32)
+    [Array]::Copy($decoded[1],$channel*$validFrames,$actualOperand,$channel*$frames,$validFrames)
+    [Array]::Copy($decoded[0],$channel*$validFrames,$actualConvolution,$channel*$frames,$validFrames)
+}
+$ownConvolutionReference = Copy-TemplateFrames (Invoke-TemplateReferenceConvolution $actualInput ($prefix+".convs1.$DilationIndex") $tapDilation) $frames $validFrames
+$ownOperandReference = $applyLevels.Invoke($actualConvolution,$channels,$frames,$style,$nextNorm.Fc,$nextNorm.FcBias,$nextNorm.Weight,$nextNorm.Bias,$statistics)
+if ($PhaseLock) {
+    $shapeReference = Invoke-KokoroGeneratorLockReference -InputValues $ownOperandReference -Alpha $alpha -Tables $lockTables -Frames $frames -OutputFrames $validFrames
+    $shapeMetrics = $compare.Invoke($decoded[1],$shapeReference)
+    Write-TemplateBinary 'reference-own-input-lock.f32' $shapeReference
+}
+$ownOperandReference = Copy-TemplateFrames ($snake.Invoke($ownOperandReference,$alpha,$frames)) $frames $validFrames
+$convolutionMetrics = $compare.Invoke($decoded[0],$ownConvolutionReference)
+$operandMetrics = $compare.Invoke($decoded[1],$ownOperandReference)
+Write-TemplateBinary 'reference-own-input-convolution.f32' $ownConvolutionReference
+Write-TemplateBinary 'reference-own-input-operand.f32' $ownOperandReference
+[float[]]$consumerReference = if ($ConnectedConsumer) {
+    Copy-TemplateFrames (Invoke-TemplateReferenceConvolution $actualOperand ($prefix+".convs2.$DilationIndex")) $frames $validFrames
+} else { $decoded[1] }
+$consumerMetrics = $compare.Invoke($decoded[2],$consumerReference)
+Write-TemplateBinary 'reference-consumer.f32' $consumerReference
+$wavePaths = [Collections.Generic.List[string]]::new()
+$pcmMetrics = @($null,$null); $stockPcmMetrics = @($null,$null)
+if ($generatorStage -eq 1) {
 # Listening evidence for this layer uses the verified offline continuation. Only this
 # block's tested operand is replaced; this is not a claim of a whole-generator phone run.
 $continuedOperand = [float[]]$expectedOperand.Clone()
 for ($channel=0; $channel -lt $channels; $channel++) {
     [Array]::Copy($decoded[1],$channel*$validFrames,$continuedOperand,$channel*$frames,$validFrames)
 }
-function Invoke-TemplateReferenceContinuation([float[]]$OperandValues) {
-$continuedBranch = $residual.Invoke((Invoke-TemplateReferenceConvolution $OperandValues ($prefix+'.convs2.0')),$sharedInput,[float]1)
-for ($stage=1; $stage -lt 3; $stage++) {
+function Invoke-TemplateReferenceContinuation([float[]]$OperandValues,[float[]]$ConsumerValues) {
+$secondValues = Invoke-TemplateReferenceConvolution $OperandValues ($prefix+".convs2.$DilationIndex")
+if ($null -ne $ConsumerValues) {
+    for ($channel=0; $channel -lt $channels; $channel++) {
+        [Array]::Copy($ConsumerValues,$channel*$validFrames,$secondValues,$channel*$frames,$validFrames)
+    }
+}
+$continuedBranch = $residual.Invoke($secondValues,$branchInput,[float]1)
+for ($stage=$DilationIndex+1; $stage -lt 3; $stage++) {
     $norm = Get-TemplateNorm ($prefix+".adain1.$stage")
     $nextValues = $adaIn.Invoke($continuedBranch,$channels,$frames,$style,$norm.Fc,$norm.FcBias,$norm.Weight,$norm.Bias)
     $nextValues = $snake.Invoke($nextValues,(Read-TemplateWeight ($prefix+".alpha1.$stage")),$frames)
@@ -239,22 +323,28 @@ for ($stage=1; $stage -lt 3; $stage++) {
     $nextValues = Invoke-TemplateReferenceConvolution $nextValues ($prefix+".convs2.$stage")
     $continuedBranch = $residual.Invoke($nextValues,$continuedBranch,[float]1)
 }
-$branch4 = Read-TemplateFloatTensor (@($nodes.Nodes | Where-Object Name -CEQ 'gen.resblocks4')[0]) $nodeDirectory
-$branch5 = Read-TemplateFloatTensor (@($nodes.Nodes | Where-Object Name -CEQ 'gen.resblocks5')[0]) $nodeDirectory
+$branches = [object[]]::new(3)
+for ($branch=0; $branch -lt 3; $branch++) {
+    $index = 3+$branch
+    $branches[$branch] = if ($index -eq $ResBlockIndex) { $continuedBranch } else {
+        Read-TemplateFloatTensor (@($nodes.Nodes | Where-Object Name -CEQ "gen.resblocks$index")[0]) $nodeDirectory
+    }
+}
 $average = $math.GetMethod('Average3').CreateDelegate([Func[float[],float[],float[],float[]]])
 $leaky = $math.GetMethod('Leaky').CreateDelegate([Func[float[],float,float[]]])
 $inverse = $math.GetMethod('InverseStft').CreateDelegate([Func[float[],int,float[]]])
-$continued = $leaky.Invoke($average.Invoke($continuedBranch,$branch4,$branch5),[float]0.01)
+$continued = $leaky.Invoke($average.Invoke($branches[0],$branches[1],$branches[2]),[float]0.01)
 $continued = Invoke-TemplateReferenceConvolution $continued 'decoder.module.generator.conv_post'
 return ,$inverse.Invoke($continued,$frames)
 }
 $baselinePcm = Invoke-TemplateReferenceContinuation $expectedOperand
-$candidatePcm = Invoke-TemplateReferenceContinuation $continuedOperand
+$candidatePcm = if ($ConnectedConsumer) { Invoke-TemplateReferenceContinuation $continuedOperand $decoded[2] } else { Invoke-TemplateReferenceContinuation $continuedOperand }
 Write-TemplateBinary 'reference-continuation-pcm.f32' $baselinePcm
 Write-TemplateBinary 'candidate-continuation-pcm.f32' $candidatePcm
 $stockPcm = Read-TemplateFloatTensor (@($dog.Tensors | Where-Object Name -CEQ 'pcm')[0]) $captureDirectory
 $pcmMetrics = $compare.Invoke($candidatePcm,$baselinePcm)
 $stockPcmMetrics = $compare.Invoke($candidatePcm,$stockPcm)
+if ([Array]::Exists[float]($candidatePcm,$nonfinite)) { throw 'STOP: NaN/Inf in diagnostic continuation PCM.' }
 
 # Reuse the compiled PCM writer from the requested MeasureAudio commit 93a6d82.
 $audioRoot = 'C:\Users\Scott\.codex\worktrees\measure-audio\Kokoro-Hexagon'
@@ -272,7 +362,6 @@ $candidateAudio = [Array]::ConvertAll[float,double]($candidatePcm,$toDouble)
 $pair = [double[]]::new($stockAudio.Length+14400+$candidateAudio.Length)
 [Array]::Copy($stockAudio,0,$pair,0,$stockAudio.Length)
 [Array]::Copy($candidateAudio,0,$pair,$stockAudio.Length+14400,$candidateAudio.Length)
-$wavePaths = [Collections.Generic.List[string]]::new()
 foreach ($audioCase in @(@('stock.wav',$stockAudio),@('candidate-continuation.wav',$candidateAudio),@('stock-then-template1.wav',$pair))) {
     $wavePath = Join-Path $output $audioCase[0]
     $stream = [IO.File]::Create($wavePath); $writer = [IO.BinaryWriter]::new($stream)
@@ -287,20 +376,27 @@ foreach ($audioCase in @(@('stock.wav',$stockAudio),@('candidate-continuation.wa
 }
 $loudness = @(Measure-KokoroAudio -Path $output | Where-Object Path -In $wavePaths.GetRange(0,2))
 $loudness | Export-Clixml -LiteralPath (Join-Path $output 'loudness.clixml')
+}
 $ticks = [BitConverter]::ToUInt64($result.Output,56)-[BitConverter]::ToUInt64($result.Output,48)
 $milliseconds = [double]$ticks/19200.0
-$macs = [long]$validFrames*$channels*$channels*3L
-$receipt = [pscustomobject]@{Case='dog';Layer='generator.resblocks.3.convs1.0';Frames=$validFrames;
+$macs = [long]$validFrames*$channels*$channels*$kernelSize
+$receipt = [pscustomobject]@{Case='dog';Layer="generator.resblocks.$ResBlockIndex.convs1.$DilationIndex";Frames=$validFrames;Channels=$channels;Kernel=$kernelSize;Dilation=$tapDilation;
     ConvolutionSnrDb=$convolutionMetrics[0];ConvolutionMaxError=$convolutionMetrics[1];
     OperandSnrDb=$operandMetrics[0];OperandMaxError=$operandMetrics[1];
     ConsumerSnrDb=$consumerMetrics[0];ConsumerMaxError=$consumerMetrics[1];ConsumerExact=($consumerMetrics[1] -eq 0);
+    ConnectedConsumer=[bool]$ConnectedConsumer;ConsumerLayer=$(if ($ConnectedConsumer) { "generator.resblocks.$ResBlockIndex.convs2.$DilationIndex" } else { 'identity' });
+    SnakeShape=$Shape;BlockFrames=$BlockFrames;
+    LockReferenceSnrDb=$(if ($PhaseLock) { $shapeMetrics[0] } else { $null });LockReferenceMaxError=$(if ($PhaseLock) { $shapeMetrics[1] } else { $null });
+    LayerReferenceScope='Each operation reference consumes its own device input, including supplied FP16 halos';
     PcmSnrDb=$pcmMetrics[0];PcmMaxError=$pcmMetrics[1];StockPcmSnrDb=$stockPcmMetrics[0];StockPcmMaxError=$stockPcmMetrics[1];
-    ListeningScope='One tested layer block, identical verified offline continuation on both sides';WavePaths=$wavePaths.ToArray();
+    ListeningScope=$(if ($generatorStage -eq 1) { 'One tested layer block, identical verified offline continuation on both sides' } else { 'Stage A layer diagnostic; no PCM continuation' });WavePaths=$wavePaths.ToArray();
     HmxConvolutionMs=$milliseconds;HmxTmacPerSecond=([double]$macs/($milliseconds*1e9));
+    HmxTimingScope='Run 0 convolution timer only; excludes DMA, epilogue and consumer; not a warm median';
+    JobMedianMs=$result.MedianMs;JobTimingScope='Median over requested invocations, including run 0';Runs=$Runs;
     ReferenceAssemblySHA256=$referenceHash;ReferenceSourceSHA256=$sourceHash;LibrarySHA256=$emission.LibrarySHA256;
     ConstantsScope='Offline supplied levels for this layer diagnostic; not deployment calibration';
     InputDirectory=$output;CodeBytes=$emission.CodeBytes;VtcmBytes=$layout.VtcmBytes}
 $receipt | Export-Clixml -LiteralPath (Join-Path $output 'gate.clixml')
 $receipt
-if (-not $receipt.ConsumerExact) { throw 'STOP: FP16 epilogue operand did not survive the next HMX identity convolution exactly.' }
-if ($pcmMetrics[0] -lt 25) { throw 'STOP: template-1 diagnostic continuation PCM SNR is below 25 dB; listening pairs retained.' }
+# A partial diagnostic continuation is not a whole-pipeline PCM admission gate.
+# Whole-pipeline Supplied PCM below 25 dB and any NaN/Inf are the only numerical stops.

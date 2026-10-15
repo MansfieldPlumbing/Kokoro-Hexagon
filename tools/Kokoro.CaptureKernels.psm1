@@ -502,8 +502,8 @@ function Get-GeneratorCoefficientsKernel {
         $E::Assign($at,$E::Add($E::Multiply($E::RightShift($channel,(New-Int 5)),(New-Int 160)),$E::And($channel,(New-Int 31)))),
         $E::Assign($E::ArrayAccess($destination,$at),$E::Convert($affineA,[float])),
         $E::Assign($E::ArrayAccess($destination,$E::Add($at,(New-Int 32))),$E::Convert($affineB,[float])),
-        $E::Assign($E::ArrayAccess($destination,$E::Add($at,(New-Int 64))),$E::Convert($E::Multiply($E::Multiply($alphaValue,$affineA),$E::Constant(65536.0/[Math]::PI)),[float])),
-        $E::Assign($E::ArrayAccess($destination,$E::Add($at,(New-Int 96))),$E::Convert($E::Multiply($E::Multiply($alphaValue,$affineB),$E::Constant(65536.0/[Math]::PI)),[float])),
+        $E::Assign($E::ArrayAccess($destination,$E::Add($at,(New-Int 64))),$E::Convert($E::Multiply($E::Multiply($alphaValue,$affineA),$E::Constant(16777216.0/[Math]::PI)),[float])),
+        $E::Assign($E::ArrayAccess($destination,$E::Add($at,(New-Int 96))),$E::Convert($E::Multiply($E::Multiply($alphaValue,$affineB),$E::Constant(16777216.0/[Math]::PI)),[float])),
         $E::Assign($E::ArrayAccess($destination,$E::Add($at,(New-Int 128))),
             $E::Condition($E::Equal($alphaValue,$E::Constant(0.0)),$zero,$E::Convert($E::Divide($E::Constant(1.0),$alphaValue),[float]))))
     $body = $E::Block([ParameterExpression[]]@($channel,$styleIndex,$at,$gamma,$beta,$inverse,$affineA,$affineB),

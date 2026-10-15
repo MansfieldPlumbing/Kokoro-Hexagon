@@ -18,8 +18,8 @@
 # Activation u8 = x + 128; the table's int32 must carry -128*sum(w) for the zero point.
 function New-KokoroHmxConvSteps {
     param(
-        [ValidateSet(128, 256)][int] $InputChannels = 128,
-        [ValidateSet(128, 256)][int] $OutputChannels = 128,
+        [ValidateSet(128, 256, 512)][int] $InputChannels = 128,
+        [ValidateSet(32, 128, 256)][int] $OutputChannels = 128,
         [ValidateSet(3, 7, 11)][int] $Kernel = 3,
         [ValidateSet(1, 3, 5)][int] $Dilation = 1,
         [string] $LabelPrefix = 'hmxconv',
@@ -33,6 +33,7 @@ function New-KokoroHmxConvSteps {
         [switch] $NoReturn
     )
     if ($Fp16 -and $OutputPlanes) { throw 'FP16 has one native output crouton, not integer byte planes' }
+    if ($OutputChannels -eq 32 -and -not $Fp16) { throw 'The 32-channel output form requires FP16.' }
     [int]$cb = $InputChannels / 32; [int]$ob = $OutputChannels / 32
     [int]$groups = if ($Fp16) { $ob } else { $OutputChannels / 64 }
     [int]$half = ($Kernel - 1) / 2
@@ -85,7 +86,10 @@ function New-KokoroHmxConvSteps {
             }
         } }
     }
-    $s.Add(@{Op='addi'; d=0; s=0; i=$dy})             # next input tile
+    if ($dy -gt 32767) {
+        $s.Add(@{Op='lo';x=6;i=($dy -band 65535)}); $s.Add(@{Op='hi';x=6;i=($dy -shr 16)})
+        $s.Add(@{Op='add';d=0;s=0;t=6})
+    } else { $s.Add(@{Op='addi'; d=0; s=0; i=$dy}) }  # next input tile
     $s.Add(@{Op='addi'; d=2; s=2; i=($ob * 2048)})    # next output tile
     if ($OutputPlanes) { $s.Add(@{Op='addi'; d=5; s=5; i=($ob * 2048)}) }
     $s.Add(@{Op='addi'; d=4; s=4; i=-1})

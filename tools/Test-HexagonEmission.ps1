@@ -27,6 +27,8 @@ param(
     [ValidateSet(1,3)][int] $TemplateBranches = 1,
     [switch] $TemplateAddResidual,
     [switch] $TemplateStoreResidual,
+    [ValidateSet('Lock','Smoothstep')][string] $TemplateShape = 'Lock',
+    [ValidateRange(16,64)][int] $TemplateBlockFrames = 16,
     [switch] $ConvOutputPlanes,
     [ValidateSet(1,2)][int] $ConvWeightPlanes = 1,
     [ValidateSet('Conv','Residual','Scale')][string] $CombineMode = 'Conv',
@@ -60,6 +62,8 @@ $pmuArgs=if($ResidentPmuEvents){@{ResidentPmuEvents=$ResidentPmuEvents}}else{@{}
 $pmuArgs.TemplateBranches=$TemplateBranches
 $pmuArgs.TemplateAddResidual=$TemplateAddResidual.IsPresent
 $pmuArgs.TemplateStoreResidual=$TemplateStoreResidual.IsPresent
+$pmuArgs.TemplateShape=$TemplateShape
+$pmuArgs.TemplateBlockFrames=$TemplateBlockFrames
 $result=& (Join-Path $PSScriptRoot 'Emit-HexagonProbe.ps1') -OutputDirectory $output -ReferenceAssembly `
     -Kernel $Kernel -ResBlockFrames $ResBlockFrames -ResBlockKernel $ResBlockKernel -IntegerChannels $IntegerChannels -LinearRows $LinearRows -LinearInputChannels $LinearInputChannels `
     -LinearOutputChannels $LinearOutputChannels -LinearVectorOutputTiles:$LinearVectorOutputTiles `

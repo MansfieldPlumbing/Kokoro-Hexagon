@@ -3,10 +3,13 @@
 # Native FP16 croutons throughout: one vector is two time rows interleaved by channel.
 # r0 convolution output; r1 residual input; r2 updated residual output;
 # r3 first activated operand; r6/r7 second/third activated operands when Branches=3;
+# r6 is the third mean input when AddThird is selected with one branch.
 # r12 constants; r13 tile count. All pointers are linear VTCM addresses, never :circ HMX operands.
-# Constants: 128 B wave table (32 Q14 values in the low half of each word), followed by
-# [channel block][branch][A, B, K, PHI, Height], each coefficient a 128 B float32 vector.
-# K = alpha*A/pi*65536, PHI = alpha*B/pi*65536, Height = 1/alpha (zero for alpha=0).
+# Constants: [channel block][branch][A, B, K, PHI, Height], each a 128 B float32 vector.
+# K = alpha*A/pi*2^24, PHI = alpha*B/pi*2^24, Height = 1/alpha (zero for alpha=0).
+# The wrapping phase is folded and shaped in registers. Smoothstep evaluates
+# s*s*(3-2*s); Lock folds the supplied seat phase and evaluates its bounded tangent.
+# No lookup or waveform table is present.
 # Each convolution crouton is loaded once; optional residual and up to three operands are stored
 # from that register pass. Arithmetic is unbundled until whole-generator correctness passes.
 function New-KokoroGeneratorEpilogueSteps {
@@ -15,8 +18,17 @@ function New-KokoroGeneratorEpilogueSteps {
         [ValidateSet(1,3)][int] $Branches = 1,
         [switch] $AddResidual,
         [switch] $StoreResidual,
+        [switch] $AddThird,
+        [ValidateRange(0.0,1.0)][double] $LeakySlope = 1.0,
+        [ValidateSet('Lock','Smoothstep')][string] $Shape = 'Lock',
+        [ValidateRange(16,64)][int] $BlockFrames = 16,
         [string] $LabelPrefix = 'generator_epilogue'
     )
+    $Smoothstep = $Shape -ceq 'Smoothstep'
+    $PhaseLock = $Shape -ceq 'Lock'
+    if ($AddThird -and (-not $AddResidual -or $Branches -ne 1)) { throw 'The third mean input requires one residual branch.' }
+    $positions = if ($Channels -eq 256) { 10 } else { 60 }
+    $lockStride = $Channels/32 * (640 + $positions/2 * 1024) * $Branches
     $s = [Collections.Generic.List[hashtable]]::new()
     $splat = {
         param([int]$Vector, [long]$Value)
@@ -46,19 +58,28 @@ function New-KokoroGeneratorEpilogueSteps {
         $s.Add(@{Op='vmpy-sf-qf32';d=($Source+1);s=($Source+1);t=3})
         $s.Add(@{Op='vconv-qf32-hf';d=$Destination;s=$Source})
     }
-    # V73 HVX PRM Rev AB pp.227-229: control 0/1 matches index bytes 0..15/16..31.
-    # The even byte of each native halfword selects into the low half of the table word;
-    # vlut16's even destination vector therefore has exactly the original row/channel order.
-    $s.Add(@{Op='vload';d=31;s=12;Offset=0})
     foreach ($constant in @(
         @(30,0x007fffffL),@(29,0x00800000L),@(28,255L),@(27,150L),
-        @(26,31L),@(25,-31L),@(24,0x001f001fL),@(23,0x07ff07ffL),
-        @(22,0x00010001L),@(21,0x4b000000L),@(20,0x38800000L),@(19,0xcb000000L)
+        @(26,31L),@(25,-31L),@(24,0x00ffffffL),@(23,0x01000000L),
+        @(22,0x4b000000L),@(21,0xcb000000L),
+        @(20,[BitConverter]::SingleToInt32Bits([float]($(if ($Smoothstep) { 2.0 } else { [Math]::PI })/16777216.0)))
     )) { & $splat $constant[0] $constant[1] }
     $s.Add(@{Op='imm';d=4;i=0})
     $s.Add(@{Op='imm';d=5;i=1})
+    if ($PhaseLock) { $s.Add(@{Op='imm';d=11;i=0}) }
     $s.Add(@{Op='label';Name="${LabelPrefix}_tile"})
     for ($block = 0; $block -lt $Channels/32; $block++) {
+        if ($PhaseLock) {
+            $s.Add(@{Op='addi';d=9;s=11;i=0})
+            $s.Add(@{Op='imm';d=10;i=$positions})
+            $s.Add(@{Op='label';Name="${LabelPrefix}_b${block}_seat"})
+            $s.Add(@{Op='gtu';d=0;s=10;t=9})
+            $s.Add(@{Op='jump-p';u=0;Label="${LabelPrefix}_b${block}_seat_ready"})
+            $s.Add(@{Op='addi';d=9;s=9;i=(-$positions)})
+            $s.Add(@{Op='gtu';d=0;s=5;t=4})
+            $s.Add(@{Op='jump-p';u=0;Label="${LabelPrefix}_b${block}_seat"})
+            $s.Add(@{Op='label';Name="${LabelPrefix}_b${block}_seat_ready"})
+        }
         $s.Add(@{Op='imm';d=14;i=16})
         $s.Add(@{Op='label';Name="${LabelPrefix}_b${block}_pair"})
         $s.Add(@{Op='vload-post';d=2;s=0;i=1})
@@ -69,13 +90,29 @@ function New-KokoroGeneratorEpilogueSteps {
             & $fp32 'vadd-sf-qf32' 0 0 2
             & $fp32 'vadd-sf-qf32' 1 1 3
         }
+        if ($AddThird) {
+            $s.Add(@{Op='vload-post';d=2;s=6;i=1})
+            & $fromHalf 2 2
+            & $fp32 'vadd-sf-qf32' 0 0 2
+            & $fp32 'vadd-sf-qf32' 1 1 3
+        }
+        if ($LeakySlope -ne 1.0) {
+            & $splat 14 ([BitConverter]::SingleToInt32Bits([float]$LeakySlope))
+            & $splat 15 0
+            foreach ($row in 0,1) {
+                $s.Add(@{Op='vmin-w';d=2;s=$row;t=15})
+                $s.Add(@{Op='vmax-w';d=3;s=$row;t=15})
+                & $fp32 'vmpy-sf-qf32' 2 2 14
+                & $fp32 'vadd-sf-qf32' $row 3 2
+            }
+        }
         if ($StoreResidual) {
             & $toHalf 0 2
             $s.Add(@{Op='vstore-post';s=2;t=2;i=1})
             & $fromHalf 2 0
         }
         for ($branch = 0; $branch -lt $Branches; $branch++) {
-            $offset = 128 + ($block*$Branches+$branch)*640
+            $offset = ($block*$Branches+$branch)*640
             $s.Add(@{Op='addi';d=8;s=12;i=$offset})
             for ($coefficient = 0; $coefficient -lt 5; $coefficient++) {
                 $s.Add(@{Op='vload';d=(14+$coefficient);s=8;Offset=($coefficient*128)})
@@ -84,11 +121,21 @@ function New-KokoroGeneratorEpilogueSteps {
             foreach ($row in 0,1) {
                 & $fp32 'vmpy-sf-qf32' (8+$row) $row 14
                 & $fp32 'vadd-sf-qf32' (8+$row) (8+$row) 15
+                if ($PhaseLock) {
+                    $s.Add(@{Op='asl-i';d=8;s=9;i=9})
+                    $s.Add(@{Op='add';d=8;s=8;t=12})
+                    $lockOffset = $Channels/32*$Branches*640 + ($block*$Branches+$branch)*($positions/2*1024)
+                    $s.Add(@{Op='lo';x=15;i=($lockOffset -band 65535)})
+                    $s.Add(@{Op='hi';x=15;i=($lockOffset -shr 16)})
+                    $s.Add(@{Op='add';d=8;s=8;t=15})
+                    $s.Add(@{Op='vload';d=16;s=8;Offset=($row*128)})
+                    $s.Add(@{Op='vload';d=17;s=8;Offset=(256+$row*128)})
+                }
                 & $fp32 'vmpy-sf-qf32' (2+$row) $row 16
                 & $fp32 'vadd-sf-qf32' (2+$row) (2+$row) 17
             }
             # Convert the phase's IEEE significand/exponent to low integer bits. Clamping the
-            # shift to [-31,31] preserves all low 16 bits, including negative phases, without
+            # shift to [-31,31] preserves all low 24 bits, including negative phases, without
             # an input-magnitude-dependent range reduction or a sine call.
             foreach ($phase in 2,3) {
                 $s.Add(@{Op='imm';d=10;i=31})
@@ -105,44 +152,63 @@ function New-KokoroGeneratorEpilogueSteps {
                 $s.Add(@{Op='vxor';d=5;s=5;t=6})
                 $s.Add(@{Op='vsub-w';d=$phase;s=5;t=6})
             }
-            $s.Add(@{Op='vshuffe-h';d=2;s=3;t=2})
-            $s.Add(@{Op='imm';d=10;i=11})
-            $s.Add(@{Op='vlsr-uw';d=4;s=2;t=10})
-            $s.Add(@{Op='vand';d=4;s=4;t=24})
-            $s.Add(@{Op='vadd-h';d=5;s=4;t=22})
-            $s.Add(@{Op='vand';d=5;s=5;t=24})
-            $s.Add(@{Op='vand';d=6;s=2;t=23})
-            $s.Add(@{Op='imm';d=10;i=4})
-            $s.Add(@{Op='vasl-h';d=6;s=6;t=10})
-            $s.Add(@{Op='vlut16';d=10;s=4;v=31;x=4})
-            $s.Add(@{Op='vlut16-or';d=10;s=4;v=31;x=5})
-            $s.Add(@{Op='vlut16';d=12;s=5;v=31;x=4})
-            $s.Add(@{Op='vlut16-or';d=12;s=5;v=31;x=5})
-            $s.Add(@{Op='vsub-h';d=12;s=12;t=10})
-            $s.Add(@{Op='vmpy-h-rnd-sat';d=12;s=12;t=6})
-            $s.Add(@{Op='vadd-h';d=10;s=10;t=12})
-            # Exact Q14 integer -> FP32 conversion through the 2^23 mantissa offset.
-            # This keeps the interpolation in registers and avoids another FP16 rounding.
-            $s.Add(@{Op='imm';d=10;i=16})
-            $s.Add(@{Op='vlsr-uw';d=11;s=10;t=10})
-            $s.Add(@{Op='vasl-w';d=10;s=10;t=10})
-            $s.Add(@{Op='vlsr-uw';d=10;s=10;t=10})
+            & $splat 14 0x3f800000L
             foreach ($row in 0,1) {
-                $s.Add(@{Op='vadd-w';d=(10+$row);s=(10+$row);t=21})
-                & $fp32 'vadd-sf-qf32' (10+$row) (10+$row) 19
-            }
-            foreach ($row in 0,1) {
-                & $fp32 'vmpy-sf-qf32' (10+$row) (10+$row) 20
-                & $fp32 'vmpy-sf-qf32' (10+$row) (10+$row) 18
-                & $fp32 'vadd-sf-qf32' (8+$row) (8+$row) (10+$row)
+                $phase = 2+$row
+                $s.Add(@{Op='vand';d=4;s=$phase;t=24})
+                $s.Add(@{Op='vsub-w';d=5;s=23;t=4})
+                $s.Add(@{Op='vmin-w';d=4;s=4;t=5})
+                $s.Add(@{Op='vadd-w';d=4;s=4;t=22})
+                & $fp32 'vadd-sf-qf32' 4 4 21
+                & $fp32 'vmpy-sf-qf32' 4 4 20
+                if ($PhaseLock) {
+                    $s.Add(@{Op='vload';d=5;s=8;Offset=(512+$row*128)})
+                    $s.Add(@{Op='vload';d=6;s=8;Offset=(768+$row*128)})
+                    & $fp32 'vmpy-sf-qf32' $phase 4 6
+                    & $fp32 'vadd-sf-qf32' $phase $phase 5
+                    # w is nonnegative FP32: integer min/max has the same order.
+                    & $splat 5 0
+                    & $splat 6 0x3f800000L
+                    $s.Add(@{Op='vmax-w';d=$phase;s=$phase;t=5})
+                    $s.Add(@{Op='vmin-w';d=$phase;s=$phase;t=6})
+                } else {
+                    & $fp32 'vmpy-sf-qf32' 5 4 4
+                    # Folded s is in [0,1]. Evaluate s*s*(3-2*s) directly.
+                    # No waveform lookup or sine evaluation in this build setting.
+                    & $splat 6 0xc0000000L
+                    & $fp32 'vmpy-sf-qf32' 6 4 6
+                    & $splat 14 0x40400000L
+                    & $fp32 'vadd-sf-qf32' 6 14 6
+                    & $fp32 'vmpy-sf-qf32' $phase 5 6
+                }
+                & $fp32 'vmpy-sf-qf32' $phase $phase 18
+                & $fp32 'vadd-sf-qf32' (8+$row) (8+$row) $phase
             }
             & $toHalf 8 2
             $destination = @(3,6,7)[$branch]
             $s.Add(@{Op='vstore-post';s=$destination;t=2;i=1})
         }
+        if ($PhaseLock) {
+            $s.Add(@{Op='addi';d=9;s=9;i=2})
+            $s.Add(@{Op='imm';d=10;i=$positions})
+            $s.Add(@{Op='gtu';d=0;s=10;t=9})
+            $s.Add(@{Op='jump-p';u=0;Label="${LabelPrefix}_b${block}_seat_next"})
+            $s.Add(@{Op='addi';d=9;s=9;i=(-$positions)})
+            $s.Add(@{Op='label';Name="${LabelPrefix}_b${block}_seat_next"})
+        }
         $s.Add(@{Op='addi';d=14;s=14;i=-1})
         $s.Add(@{Op='gtu';d=0;s=14;t=4})
         $s.Add(@{Op='jump-p';u=0;Label="${LabelPrefix}_b${block}_pair"})
+    }
+    if ($PhaseLock) {
+        $s.Add(@{Op='addi';d=11;s=11;i=32})
+        $s.Add(@{Op='imm';d=10;i=($positions*$BlockFrames)})
+        $s.Add(@{Op='gtu';d=0;s=10;t=11})
+        $s.Add(@{Op='jump-p';u=0;Label="${LabelPrefix}_lock_block_next"})
+        & $splat 15 $lockStride
+        $s.Add(@{Op='add';d=12;s=12;t=15})
+        $s.Add(@{Op='imm';d=11;i=0})
+        $s.Add(@{Op='label';Name="${LabelPrefix}_lock_block_next"})
     }
     $s.Add(@{Op='addi';d=13;s=13;i=-1})
     $s.Add(@{Op='gtu';d=0;s=13;t=4})
