@@ -1,5 +1,8 @@
 #requires -Version 7.4
 # Fixed upsampler stamp: phase convolutions, then the native crouton handoff.
+# Temporary component-test scaffolding, not the resident generator architecture.
+# Replace this standalone wrapper with the connected template's fixed loop schedule;
+# retain reusable kernels only where the connected generator actually consumes them.
 # Both phase and interleave loops use hardware loop 1; their callees use loop 0.
 # No source branch, decoder, normalization statistics or runtime lengths.
 function New-KokoroGeneratorUpsampleRunSteps {

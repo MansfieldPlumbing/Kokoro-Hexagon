@@ -1,5 +1,8 @@
 #requires -Version 7.4
 # Template-1 correctness gate under the existing checked job/skel wrapper.
+# Temporary component-test scaffolding: isolated stamps and identity consumers
+# establish correctness; they do not prescribe the resident generator's buffers,
+# invocation boundaries or normalization producer.
 # Output: 256 B telemetry, convolution croutons, optional residual croutons,
 # each branch's activated operand croutons, then a second FP16 HMX identity convolution.
 # The second convolution consumes the epilogue's first operand without any rearrangement.
