@@ -4,7 +4,8 @@
 # r0 convolution output; r1 residual input; r2 updated residual output;
 # r3 first activated operand; r6/r7 second/third activated operands when Branches=3;
 # r6 is the third mean input when AddThird is selected with one branch.
-# r12 constants; r13 tile count. All pointers are linear VTCM addresses, never :circ HMX operands.
+# r12 fixed constants; r5 streamed lock blocks for Lock; r13 tile count.
+# All pointers are linear VTCM addresses, never :circ HMX operands.
 # Constants: [channel block][branch][A, B, K, PHI, Height], each a 128 B float32 vector.
 # K = alpha*A/pi*2^24, PHI = alpha*B/pi*2^24, Height = 1/alpha (zero for alpha=0).
 # The wrapping phase is folded and shaped in registers. Smoothstep evaluates
@@ -22,13 +23,15 @@ function New-KokoroGeneratorEpilogueSteps {
         [ValidateRange(0.0,1.0)][double] $LeakySlope = 1.0,
         [ValidateSet('Lock','Smoothstep')][string] $Shape = 'Lock',
         [ValidateRange(16,64)][int] $BlockFrames = 16,
+        [ValidateRange(0,63)][int] $InitialFrameOffset = 0,
         [string] $LabelPrefix = 'generator_epilogue'
     )
     $Smoothstep = $Shape -ceq 'Smoothstep'
     $PhaseLock = $Shape -ceq 'Lock'
+    if ($InitialFrameOffset -ge $BlockFrames) { throw 'Initial lock frame offset must be inside its block.' }
     if ($AddThird -and (-not $AddResidual -or $Branches -ne 1)) { throw 'The third mean input requires one residual branch.' }
     $positions = if ($Channels -eq 256) { 10 } else { 60 }
-    $lockStride = $Channels/32 * (640 + $positions/2 * 1024) * $Branches
+    $lockStride = $Channels/32 * ($positions/2 * 1024) * $Branches
     $s = [Collections.Generic.List[hashtable]]::new()
     $splat = {
         param([int]$Vector, [long]$Value)
@@ -65,8 +68,8 @@ function New-KokoroGeneratorEpilogueSteps {
         @(20,[BitConverter]::SingleToInt32Bits([float]($(if ($Smoothstep) { 2.0 } else { [Math]::PI })/16777216.0)))
     )) { & $splat $constant[0] $constant[1] }
     $s.Add(@{Op='imm';d=4;i=0})
-    $s.Add(@{Op='imm';d=5;i=1})
-    if ($PhaseLock) { $s.Add(@{Op='imm';d=11;i=0}) }
+    if (-not $PhaseLock) { $s.Add(@{Op='imm';d=5;i=1}) }
+    if ($PhaseLock) { $s.Add(@{Op='imm';d=11;i=($InitialFrameOffset*$positions)}) }
     $s.Add(@{Op='label';Name="${LabelPrefix}_tile"})
     for ($block = 0; $block -lt $Channels/32; $block++) {
         if ($PhaseLock) {
@@ -123,11 +126,28 @@ function New-KokoroGeneratorEpilogueSteps {
                 & $fp32 'vadd-sf-qf32' (8+$row) (8+$row) 15
                 if ($PhaseLock) {
                     $s.Add(@{Op='asl-i';d=8;s=9;i=9})
-                    $s.Add(@{Op='add';d=8;s=8;t=12})
-                    $lockOffset = $Channels/32*$Branches*640 + ($block*$Branches+$branch)*($positions/2*1024)
+                    $s.Add(@{Op='add';d=8;s=8;t=5})
+                    $lockOffset = ($block*$Branches+$branch)*($positions/2*1024)
                     $s.Add(@{Op='lo';x=15;i=($lockOffset -band 65535)})
                     $s.Add(@{Op='hi';x=15;i=($lockOffset -shr 16)})
                     $s.Add(@{Op='add';d=8;s=8;t=15})
+                    if ($InitialFrameOffset) {
+                        # A fixed convolution context can begin inside a lock block.
+                        # Select the next block for a pair that straddles the tile's epoch.
+                        $s.Add(@{Op='imm';d=10;i=16})
+                        $s.Add(@{Op='sub';d=10;s=10;t=14})
+                        $s.Add(@{Op='asl-i';d=10;s=10;i=1})
+                        $s.Add(@{Op='add';d=10;s=10;t=11})
+                        $limit = $positions*$BlockFrames
+                        $s.Add(@{Op='lo';x=15;i=($limit -band 65535)})
+                        $s.Add(@{Op='hi';x=15;i=($limit -shr 16)})
+                        $s.Add(@{Op='gtu';d=0;s=15;t=10})
+                        $s.Add(@{Op='jump-p';u=0;Label="${LabelPrefix}_b${block}_br${branch}_row${row}_epoch"})
+                        $s.Add(@{Op='lo';x=15;i=($lockStride -band 65535)})
+                        $s.Add(@{Op='hi';x=15;i=($lockStride -shr 16)})
+                        $s.Add(@{Op='add';d=8;s=8;t=15})
+                        $s.Add(@{Op='label';Name="${LabelPrefix}_b${block}_br${branch}_row${row}_epoch"})
+                    }
                     $s.Add(@{Op='vload';d=16;s=8;Offset=($row*128)})
                     $s.Add(@{Op='vload';d=17;s=8;Offset=(256+$row*128)})
                 }
@@ -206,8 +226,8 @@ function New-KokoroGeneratorEpilogueSteps {
         $s.Add(@{Op='gtu';d=0;s=10;t=11})
         $s.Add(@{Op='jump-p';u=0;Label="${LabelPrefix}_lock_block_next"})
         & $splat 15 $lockStride
-        $s.Add(@{Op='add';d=12;s=12;t=15})
-        $s.Add(@{Op='imm';d=11;i=0})
+        $s.Add(@{Op='add';d=5;s=5;t=15})
+        $s.Add(@{Op='addi';d=11;s=11;i=(-$positions*$BlockFrames)})
         $s.Add(@{Op='label';Name="${LabelPrefix}_lock_block_next"})
     }
     $s.Add(@{Op='addi';d=13;s=13;i=-1})

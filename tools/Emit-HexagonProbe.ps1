@@ -41,7 +41,9 @@ param(
     [switch] $TemplateAddResidual,
     [switch] $TemplateStoreResidual,
     [ValidateSet('Lock','Smoothstep')][string] $TemplateShape = 'Lock',
+    [ValidateSet(0,128,256,512)][int] $TemplateInputChannels = 0,
     [ValidateRange(16,64)][int] $TemplateBlockFrames = 16,
+    [ValidateRange(0,63)][int] $TemplateInitialFrameOffset = 0,
     [switch] $ConvOutputPlanes,
     [ValidateSet(1,2)][int] $ConvWeightPlanes = 1,
     [ValidateSet('Conv','Residual','Scale')][string] $CombineMode = 'Conv',
@@ -569,7 +571,7 @@ if($Kernel -eq 'KokoroR0Sub0') {
     $symbol='kokoro_adain_turns_coefficients'; $soname='libkokoro_adain_turns_coefficients.so'
 } elseif($Kernel -eq 'KokoroGeneratorTemplate1Run') {
     . (Join-Path $PSScriptRoot '..\src\jobs\Kokoro.GeneratorTemplate1Run.ps1')
-    $run=New-KokoroGeneratorTemplate1RunSteps -Channels $ConvChannels -Kernel $ConvKernel -Dilation $ConvDilation -Tiles $ConvTiles -Branches $TemplateBranches -AddResidual:$TemplateAddResidual -StoreResidual:$TemplateStoreResidual -Shape $TemplateShape -BlockFrames $TemplateBlockFrames
+    $run=New-KokoroGeneratorTemplate1RunSteps -Channels $ConvChannels -InputChannels $TemplateInputChannels -Kernel $ConvKernel -Dilation $ConvDilation -Tiles $ConvTiles -Branches $TemplateBranches -AddResidual:$TemplateAddResidual -StoreResidual:$TemplateStoreResidual -Shape $TemplateShape -BlockFrames $TemplateBlockFrames -InitialFrameOffset $TemplateInitialFrameOffset
     $steps=@($run.Steps)
     $symbol='kokoro_generator_tail_skel_handle_invoke'; $soname='libkokoro_generator_tail_skel.so'
 } elseif($Kernel -eq 'KokoroHmxConvRun') {

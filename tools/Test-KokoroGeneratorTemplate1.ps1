@@ -13,6 +13,8 @@ param(
     [switch] $ConnectedConsumer,
     [ValidateSet('Lock','Smoothstep')][string] $Shape = 'Lock',
     [ValidateRange(16,64)][int] $BlockFrames = 16,
+    [ValidateRange(0,63)][int] $InitialFrameOffset = 0,
+    [switch] $LockIdentity,
     [ValidateSet('SM8550')][string] $Soc = 'SM8550',
     [string] $Package = 'dev.mansfieldplumbing.kokoro'
 )
@@ -20,6 +22,8 @@ Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 $Smoothstep = $Shape -ceq 'Smoothstep'
 $PhaseLock = $Shape -ceq 'Lock'
+if ($LockIdentity -and (-not $PhaseLock -or $ConnectedConsumer)) { throw 'Lock identity checks require Lock and an identity consumer.' }
+if ($InitialFrameOffset -and -not $LockIdentity) { throw 'Use LockIdentity for the isolated lock-offset diagnostic.' }
 $root = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..'))
 $output = [IO.Path]::GetFullPath($OutputDirectory)
 if (-not $output.StartsWith((Join-Path $root 'build')+[IO.Path]::DirectorySeparatorChar,[StringComparison]::OrdinalIgnoreCase) -or
@@ -44,10 +48,10 @@ function Write-TemplateBinary([string] $Name,[Array] $values) {
     $bytes = [byte[]]::new([Buffer]::ByteLength($values)); [Buffer]::BlockCopy($values,0,$bytes,0,$bytes.Length)
     [IO.File]::WriteAllBytes((Join-Path $output $Name),$bytes)
 }
-function Copy-TemplateFrames([float[]]$values,[int]$SourceFrames,[int]$frames) {
-    if ($frames -gt $SourceFrames -or $values.Length % $SourceFrames -ne 0) { throw 'Invalid frame slice.' }
+function Copy-TemplateFrames([float[]]$values,[int]$SourceFrames,[int]$frames,[int]$Start=0) {
+    if ($frames+$Start -gt $SourceFrames -or $Start -lt 0 -or $values.Length % $SourceFrames -ne 0) { throw 'Invalid frame slice.' }
     $channels = [int]($values.Length/$SourceFrames); $slice = [float[]]::new($channels*$frames)
-    for ($channel=0; $channel -lt $channels; $channel++) { [Array]::Copy($values,$channel*$SourceFrames,$slice,$channel*$frames,$frames) }
+    for ($channel=0; $channel -lt $channels; $channel++) { [Array]::Copy($values,$channel*$SourceFrames+$Start,$slice,$channel*$frames,$frames) }
     return ,$slice
 }
 
@@ -87,6 +91,7 @@ $upsampled = Read-TemplateFloatTensor $upNode $nodeDirectory
 $excitation = Read-TemplateFloatTensor $noiseNode $nodeDirectory
 $channels = if ($generatorStage -eq 0) { 256 } else { 128 }
 $positions = if ($generatorStage -eq 0) { 10 } else { 60 }
+$firstPosition = $InitialFrameOffset*$positions
 if ($Tiles -eq 0) { $Tiles = $positions*$BlockFrames/32 }
 $kernelSize = @(3,7,11)[$ResBlockIndex%3]
 $tapDilation = 1+2*$DilationIndex
@@ -195,27 +200,40 @@ $affineInput = $expectedOperand
 $expectedOperand = $snake.Invoke($expectedOperand,$alpha,$frames)
 $coefficients = [float[]]::new(5*$channels)
 (Get-GeneratorCoefficientsKernel).Invoke($style,$nextNorm.Fc,$nextNorm.FcBias,$nextNorm.Weight,$nextNorm.Bias,$statistics,$alpha,$coefficients)
+if ($LockIdentity) {
+    $activationInput=$affineInput; $reference=$affineInput
+    $weights=[float[]]::new($kernelSize*$channels*$channels); $bias=[float[]]::new($channels)
+    [Array]::Clear($coefficients)
+    for ($channel=0; $channel -lt $channels; $channel++) {
+        $weights[($channel*$channels+$channel)*$kernelSize+($kernelSize-1)/2]=1
+        $at=(($channel-$channel%32)/32)*160+$channel%32
+        $coefficients[$at]=1; $coefficients[$at+64]=[float]($alpha[$channel]*16777216/[Math]::PI)
+        $coefficients[$at+128]=[float](1.0/$alpha[$channel])
+    }
+    $convolutionCache[$prefix+".convs1.$DilationIndex"]=[pscustomobject]@{
+        InputChannels=$channels;OutputChannels=$channels;Kernel=$kernelSize;Weights=$weights;Bias=$bias}
+}
 if ($PhaseLock) {
     Import-Module (Join-Path $PSScriptRoot 'Kokoro.GeneratorLock.psm1')
-    $lockTables = New-KokoroGeneratorLockTables -InputValues $affineInput -Alpha $alpha -AffineCoefficients $coefficients -Frames $frames -OutputFrames (32*$Tiles) -BlockFrames $BlockFrames
+    $lockTables = New-KokoroGeneratorLockTables -InputValues $affineInput -Alpha $alpha -AffineCoefficients $coefficients -Frames $frames -OutputFrames (32*$Tiles+$firstPosition) -BlockFrames $BlockFrames
     $coefficients = $lockTables.NativeCoefficients
     Write-TemplateBinary 'lock-seats.f64' $lockTables.Seats
     [pscustomobject]@{Channels=$lockTables.Channels;Positions=$lockTables.Positions;BlockFrames=$lockTables.BlockFrames;
-        Blocks=$lockTables.Blocks;StrideBytes=$lockTables.StrideBytes;SeatFields=[string[]]@('Mean','FoldedPhase','SinSquared','Slope','Direction');
+        Blocks=$lockTables.Blocks;StrideBytes=$lockTables.StrideBytes;StaticBytes=$lockTables.StaticBytes;SeatFields=[string[]]@('Mean','FoldedPhase','SinSquared','Slope','Direction');
         ProbeSHA256='84E9927E98E94AC619A30F9C553988774730F045B5530D65F74671B7265F6576'} |
         Export-Clixml -LiteralPath (Join-Path $output 'lock-description.clixml')
 }
-$emissionParameters = @{ConvChannels=$channels;ConvKernel=$kernelSize;ConvDilation=$tapDilation;ConvTiles=$Tiles;TemplateShape=$Shape;TemplateBlockFrames=$BlockFrames}
+$emissionParameters = @{ConvChannels=$channels;ConvKernel=$kernelSize;ConvDilation=$tapDilation;ConvTiles=$Tiles;TemplateShape=$Shape;TemplateBlockFrames=$BlockFrames;TemplateInitialFrameOffset=$InitialFrameOffset}
 $encodingCheck = Test-KokoroKernel -Kernel KokoroGeneratorTemplate1Run -Parameters $emissionParameters
 if (-not $encodingCheck.AssemblerMatch) { throw 'Template-1 SDK byte verification failed; device run rejected.' }
 $emission = Invoke-KokoroEmission -Kernel KokoroGeneratorTemplate1Run -Parameters $emissionParameters
 if ($emission.LibrarySHA256 -cne $encodingCheck.LibrarySHA256) { throw 'Phone candidate differs from the SDK-verified artifact.' }
 $layout = $emission.Layout; $validFrames = 32*$Tiles
 $packed = [ushort[]]::new($layout.ActivationBytes/2)
-$inputSlice = Copy-TemplateFrames $activationInput $frames ($validFrames+32)
+$inputSlice = Copy-TemplateFrames $activationInput $frames ($validFrames+32) $firstPosition
 (Get-Fp16CroutonsKernel).Invoke($inputSlice,$validFrames+32,$channels,32,$packed)
 $operandHalo = [ushort[]]::new($packed.Length)
-$operandInputSlice = Copy-TemplateFrames $expectedOperand $frames ($validFrames+32)
+$operandInputSlice = Copy-TemplateFrames $expectedOperand $frames ($validFrames+32) $firstPosition
 (Get-Fp16CroutonsKernel).Invoke($operandInputSlice,$validFrames+32,$channels,32,$operandHalo)
 $inputCroutons = [ushort[]]::new(2*$packed.Length)
 [Array]::Copy($packed,0,$inputCroutons,0,$packed.Length)
@@ -261,8 +279,8 @@ for ($part=0; $part -lt 3; $part++) {
     if ([Array]::Exists[float]($values,$nonfinite)) { throw "STOP: NaN/Inf in template-1 output part $part; native output retained under $output" }
     $decoded.Add($values)
 }
-$referenceSlice = Copy-TemplateFrames $reference $frames $validFrames
-$operandSlice = Copy-TemplateFrames $expectedOperand $frames $validFrames
+$referenceSlice = Copy-TemplateFrames $reference $frames $validFrames $firstPosition
+$operandSlice = Copy-TemplateFrames $expectedOperand $frames $validFrames $firstPosition
 Write-TemplateBinary 'reference-convolution.f32' $referenceSlice
 Write-TemplateBinary 'reference-operand.f32' $operandSlice
 $actualInputSlice = [float[]]::new($channels*($validFrames+32))
@@ -273,19 +291,21 @@ $actualHaloSlice = [float[]]::new($actualInputSlice.Length)
 (Get-Fp16CroutonsKernel -Direction Decode).Invoke($actualHaloSlice,$validFrames+32,$channels,32,$operandHalo)
 $actualConvolution = [float[]]$reference.Clone()
 for ($channel=0; $channel -lt $channels; $channel++) {
-    [Array]::Copy($actualInputSlice,$channel*($validFrames+32),$actualInput,$channel*$frames,$validFrames+32)
-    [Array]::Copy($actualHaloSlice,$channel*($validFrames+32),$actualOperand,$channel*$frames,$validFrames+32)
-    [Array]::Copy($decoded[1],$channel*$validFrames,$actualOperand,$channel*$frames,$validFrames)
-    [Array]::Copy($decoded[0],$channel*$validFrames,$actualConvolution,$channel*$frames,$validFrames)
+    [Array]::Copy($actualInputSlice,$channel*($validFrames+32),$actualInput,$channel*$frames+$firstPosition,$validFrames+32)
+    [Array]::Copy($actualHaloSlice,$channel*($validFrames+32),$actualOperand,$channel*$frames+$firstPosition,$validFrames+32)
+    [Array]::Copy($decoded[1],$channel*$validFrames,$actualOperand,$channel*$frames+$firstPosition,$validFrames)
+    [Array]::Copy($decoded[0],$channel*$validFrames,$actualConvolution,$channel*$frames+$firstPosition,$validFrames)
 }
-$ownConvolutionReference = Copy-TemplateFrames (Invoke-TemplateReferenceConvolution $actualInput ($prefix+".convs1.$DilationIndex") $tapDilation) $frames $validFrames
-$ownOperandReference = $applyLevels.Invoke($actualConvolution,$channels,$frames,$style,$nextNorm.Fc,$nextNorm.FcBias,$nextNorm.Weight,$nextNorm.Bias,$statistics)
+$ownConvolutionReference = Copy-TemplateFrames (Invoke-TemplateReferenceConvolution $actualInput ($prefix+".convs1.$DilationIndex") $tapDilation) $frames $validFrames $firstPosition
+$ownOperandReference = if ($LockIdentity) { $actualConvolution } else {
+    $applyLevels.Invoke($actualConvolution,$channels,$frames,$style,$nextNorm.Fc,$nextNorm.FcBias,$nextNorm.Weight,$nextNorm.Bias,$statistics)
+}
 if ($PhaseLock) {
-    $shapeReference = Invoke-KokoroGeneratorLockReference -InputValues $ownOperandReference -Alpha $alpha -Tables $lockTables -Frames $frames -OutputFrames $validFrames
+    $shapeReference = Invoke-KokoroGeneratorLockReference -InputValues $ownOperandReference -Alpha $alpha -Tables $lockTables -Frames $frames -OutputFrames $validFrames -FirstPosition $firstPosition
     $shapeMetrics = $compare.Invoke($decoded[1],$shapeReference)
     Write-TemplateBinary 'reference-own-input-lock.f32' $shapeReference
 }
-$ownOperandReference = Copy-TemplateFrames ($snake.Invoke($ownOperandReference,$alpha,$frames)) $frames $validFrames
+$ownOperandReference = Copy-TemplateFrames ($snake.Invoke($ownOperandReference,$alpha,$frames)) $frames $validFrames $firstPosition
 $convolutionMetrics = $compare.Invoke($decoded[0],$ownConvolutionReference)
 $operandMetrics = $compare.Invoke($decoded[1],$ownOperandReference)
 Write-TemplateBinary 'reference-own-input-convolution.f32' $ownConvolutionReference
@@ -297,7 +317,7 @@ $consumerMetrics = $compare.Invoke($decoded[2],$consumerReference)
 Write-TemplateBinary 'reference-consumer.f32' $consumerReference
 $wavePaths = [Collections.Generic.List[string]]::new()
 $pcmMetrics = @($null,$null); $stockPcmMetrics = @($null,$null)
-if ($generatorStage -eq 1) {
+if ($generatorStage -eq 1 -and -not $LockIdentity) {
 # Listening evidence for this layer uses the verified offline continuation. Only this
 # block's tested operand is replaced; this is not a claim of a whole-generator phone run.
 $continuedOperand = [float[]]$expectedOperand.Clone()
@@ -380,16 +400,17 @@ $loudness | Export-Clixml -LiteralPath (Join-Path $output 'loudness.clixml')
 $ticks = [BitConverter]::ToUInt64($result.Output,56)-[BitConverter]::ToUInt64($result.Output,48)
 $milliseconds = [double]$ticks/19200.0
 $macs = [long]$validFrames*$channels*$channels*$kernelSize
-$receipt = [pscustomobject]@{Case='dog';Layer="generator.resblocks.$ResBlockIndex.convs1.$DilationIndex";Frames=$validFrames;Channels=$channels;Kernel=$kernelSize;Dilation=$tapDilation;
+$receipt = [pscustomobject]@{Case='dog';Layer=$(if ($LockIdentity) { 'identity' } else { "generator.resblocks.$ResBlockIndex.convs1.$DilationIndex" });Frames=$validFrames;Channels=$channels;Kernel=$kernelSize;Dilation=$tapDilation;
     ConvolutionSnrDb=$convolutionMetrics[0];ConvolutionMaxError=$convolutionMetrics[1];
     OperandSnrDb=$operandMetrics[0];OperandMaxError=$operandMetrics[1];
     ConsumerSnrDb=$consumerMetrics[0];ConsumerMaxError=$consumerMetrics[1];ConsumerExact=($consumerMetrics[1] -eq 0);
     ConnectedConsumer=[bool]$ConnectedConsumer;ConsumerLayer=$(if ($ConnectedConsumer) { "generator.resblocks.$ResBlockIndex.convs2.$DilationIndex" } else { 'identity' });
     SnakeShape=$Shape;BlockFrames=$BlockFrames;
+    LockIdentity=[bool]$LockIdentity;InitialFrameOffset=$InitialFrameOffset;
     LockReferenceSnrDb=$(if ($PhaseLock) { $shapeMetrics[0] } else { $null });LockReferenceMaxError=$(if ($PhaseLock) { $shapeMetrics[1] } else { $null });
     LayerReferenceScope='Each operation reference consumes its own device input, including supplied FP16 halos';
     PcmSnrDb=$pcmMetrics[0];PcmMaxError=$pcmMetrics[1];StockPcmSnrDb=$stockPcmMetrics[0];StockPcmMaxError=$stockPcmMetrics[1];
-    ListeningScope=$(if ($generatorStage -eq 1) { 'One tested layer block, identical verified offline continuation on both sides' } else { 'Stage A layer diagnostic; no PCM continuation' });WavePaths=$wavePaths.ToArray();
+    ListeningScope=$(if ($LockIdentity) { 'Isolated lock diagnostic; no PCM continuation' } elseif ($generatorStage -eq 1) { 'One tested layer block, identical verified offline continuation on both sides' } else { 'Stage A layer diagnostic; no PCM continuation' });WavePaths=$wavePaths.ToArray();
     HmxConvolutionMs=$milliseconds;HmxTmacPerSecond=([double]$macs/($milliseconds*1e9));
     HmxTimingScope='Run 0 convolution timer only; excludes DMA, epilogue and consumer; not a warm median';
     JobMedianMs=$result.MedianMs;JobTimingScope='Median over requested invocations, including run 0';Runs=$Runs;

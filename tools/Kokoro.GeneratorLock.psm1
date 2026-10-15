@@ -7,6 +7,7 @@ class KokoroGeneratorLockTables {
     [int] $BlockFrames
     [int] $Blocks
     [int] $StrideBytes
+    [int] $StaticBytes
     [float[]] $NativeCoefficients
     [double[]] $Seats
 }
@@ -30,13 +31,13 @@ function New-KokoroGeneratorLockTables {
     $positions = if ($channels -eq 256) { 10 } else { 60 }
     if ($positions*$BlockFrames % 32 -ne 0) { throw 'Lock blocks must contain full HMX tiles.' }
     $blocks = [int][Math]::Ceiling($OutputFrames/[double]($positions*$BlockFrames))
-    $stride = $channels/32*(160+$positions/2*256)
-    $native = [float[]]::new($blocks*$stride)
+    $stride = $channels/32*($positions/2*256)
+    $native = [float[]]::new(5*$channels+$blocks*$stride)
+    [Array]::Copy($AffineCoefficients,0,$native,0,$AffineCoefficients.Length)
     # [block][channel][seat][mean, folded phase, sin^2, slope, direction].
     $seats = [double[]]::new($blocks*$channels*$positions*5)
     $realFrames = [int][Math]::Ceiling($Frames/[double]$positions)
     for ($blockIndex=0; $blockIndex -lt $blocks; $blockIndex++) {
-        [Array]::Copy($AffineCoefficients,0,$native,$blockIndex*$stride,$AffineCoefficients.Length)
         $firstFrame = $blockIndex*$BlockFrames
         $count = [Math]::Min($BlockFrames,$realFrames-$firstFrame)
         for ($channel=0; $channel -lt $channels; $channel++) {
@@ -75,6 +76,7 @@ function New-KokoroGeneratorLockTables {
     $result = [KokoroGeneratorLockTables]::new()
     $result.Channels=$channels; $result.Positions=$positions; $result.BlockFrames=$BlockFrames
     $result.Blocks=$blocks; $result.StrideBytes=4*$stride
+    $result.StaticBytes=20*$channels
     $result.NativeCoefficients=$native; $result.Seats=$seats
     $result
 }
@@ -86,24 +88,26 @@ function Invoke-KokoroGeneratorLockReference {
         [Parameter(Mandatory)][float[]] $Alpha,
         [Parameter(Mandatory)][KokoroGeneratorLockTables] $Tables,
         [Parameter(Mandatory)][int] $Frames,
-        [Parameter(Mandatory)][int] $OutputFrames
+        [Parameter(Mandatory)][int] $OutputFrames,
+        [ValidateRange(0,2147483647)][int] $FirstPosition = 0
     )
     if ($Alpha.Length -ne $Tables.Channels -or $InputValues.Length -ne $Tables.Channels*$Frames -or
-        $OutputFrames -gt $Frames -or $OutputFrames -gt $Tables.Blocks*$Tables.BlockFrames*$Tables.Positions) {
+        $OutputFrames+$FirstPosition -gt $Frames -or $OutputFrames+$FirstPosition -gt $Tables.Blocks*$Tables.BlockFrames*$Tables.Positions) {
         throw 'Invalid lock reference shape.'
     }
     $result = [float[]]::new($Tables.Channels*$OutputFrames)
     $blockPositions = $Tables.BlockFrames*$Tables.Positions
     for ($channel=0; $channel -lt $Tables.Channels; $channel++) {
         for ($t=0; $t -lt $OutputFrames; $t++) {
-            $blockIndex = ($t-$t%$blockPositions)/$blockPositions
-            $at = (($blockIndex*$Tables.Channels+$channel)*$Tables.Positions+$t%$Tables.Positions)*5
+            $position = $t+$FirstPosition
+            $blockIndex = ($position-$position%$blockPositions)/$blockPositions
+            $at = (($blockIndex*$Tables.Channels+$channel)*$Tables.Positions+$position%$Tables.Positions)*5
             $mean=$Tables.Seats[$at]; $phase=$Tables.Seats[$at+1]
-            $phi=$phase+$Tables.Seats[$at+4]*[double]$Alpha[$channel]*([double]$InputValues[$channel*$Frames+$t]-$mean)
+            $phi=$phase+$Tables.Seats[$at+4]*[double]$Alpha[$channel]*([double]$InputValues[$channel*$Frames+$position]-$mean)
             $phi -= [Math]::Floor($phi/[Math]::PI)*[Math]::PI
             $phi = [Math]::Min($phi,[Math]::PI-$phi)
             $w = [Math]::Clamp($Tables.Seats[$at+2]+$Tables.Seats[$at+3]*($phi-$phase),0.0,1.0)
-            $result[$channel*$OutputFrames+$t] = [float]([double]$InputValues[$channel*$Frames+$t]+$w/[double]$Alpha[$channel])
+            $result[$channel*$OutputFrames+$t] = [float]([double]$InputValues[$channel*$Frames+$position]+$w/[double]$Alpha[$channel])
         }
     }
     return ,$result
