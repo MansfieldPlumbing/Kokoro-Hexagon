@@ -4,6 +4,96 @@ $ErrorActionPreference='Stop'
 
 # Numeric work is lowered from these PowerShell classes. Libraries select real
 # occurrences; sums below evaluate total squared differences, never centroids.
+class KokoroStudentReplayResult {
+    [float[]] $Values
+    [uint] $Flags
+    KokoroStudentReplayResult() { $this.Flags=[uint]0 }
+}
+
+class KokoroStudentCodec {
+    static [byte[]] CopyPrograms([int[]] $candidates,[int] $k) {
+        if($k -le 0 -or $candidates.Length%$k -ne 0){throw [ArgumentException]::new('COPY candidate extent mismatch.')}
+        $count=[int]($candidates.Length/$k);$programs=[byte[]]::new(5*$count)
+        for($unit=0;$unit -lt $count;$unit++){
+            $id=$candidates[$unit*$k]
+            if($id -lt 0 -or $id -ge $count -or $id -eq $unit){throw [ArgumentException]::new('Invalid real other exemplar ID.')}
+            $at=$unit*5;$programs[$at]=[byte]1
+            for($part=0;$part -lt 4;$part++){$programs[$at+1+$part]=[byte](($id -shr (8*$part)) -band 255)}
+        }
+        return $programs
+    }
+    static [KokoroStudentReplayResult] Replay([byte[]] $program,[short[]] $library,[float[]] $key,[float[]] $directions,[float[]] $previous) {
+        if($key.Length -ne 512 -or $library.Length%512 -ne 0 -or $directions.Length%512 -ne 0 -or $program.Length -eq 0){throw [ArgumentException]::new('Invalid replay extent.')}
+        for($channel=0;$channel -lt 512;$channel++){if(-not [float]::IsFinite($key[$channel]) -or $key[$channel] -le [float]0){throw [ArgumentException]::new('Invalid voice key.')}}
+        $result=[KokoroStudentReplayResult]::new();$result.Values=[float[]]::new(512)
+        $at=0;$started=$false
+        while($at -lt $program.Length){
+            $opcode=[int]$program[$at];$at++
+            if($opcode -eq 1){
+                if($started -or $program.Length-$at -lt 4){throw [ArgumentException]::new('Invalid COPY.')}
+                $unit=[BitConverter]::ToInt32($program,$at);$at+=4
+                if($unit -eq -1){
+                    if($previous.Length -ne 512){throw [ArgumentException]::new('COPY previous requires a predecessor.')}
+                    [Array]::Copy($previous,$result.Values,512)
+                }else{
+                    if($unit -lt 0 -or $unit -ge [int]($library.Length/512)){throw [ArgumentException]::new('COPY unit outside library.')}
+                    for($channel=0;$channel -lt 512;$channel++){$result.Values[$channel]=[float]([float]$library[$unit*512+$channel]*$key[$channel])}
+                }
+                $started=$true
+            }elseif($opcode -eq 2){
+                if(-not $started -or $program.Length-$at -lt 4){throw [ArgumentException]::new('Invalid DIRECTION.')}
+                $pair=[BitConverter]::ToInt32($program,$at);$at+=4
+                if($pair -lt 0 -or $pair -ge [int]($directions.Length/512)){throw [ArgumentException]::new('DIRECTION outside library.')}
+                for($channel=0;$channel -lt 512;$channel++){$result.Values[$channel]=[float]($result.Values[$channel]+$directions[$pair*512+$channel])}
+            }elseif($opcode -eq 3){
+                if(-not $started -or $program.Length-$at -lt 3){throw [ArgumentException]::new('Invalid RESIDUAL.')}
+                $shift=[int]$program[$at];$count=[int][BitConverter]::ToUInt16($program,$at+1);$at+=3
+                if($shift -gt 30 -or $count -gt 512 -or $count*4 -gt $program.Length-$at){throw [ArgumentException]::new('Invalid RESIDUAL extent.')}
+                $factor=[float][Math]::Pow(2.0,-$shift)
+                for($entry=0;$entry -lt $count;$entry++){
+                    $channel=[int][BitConverter]::ToUInt16($program,$at);$correction=[BitConverter]::ToInt16($program,$at+2);$at+=4
+                    if($channel -ge 512){throw [ArgumentException]::new('Residual channel outside tile.')}
+                    $scale=[float]($key[$channel]*$factor)
+                    $result.Values[$channel]=[float]($result.Values[$channel]+[float]([float]$correction*$scale))
+                }
+            }elseif($opcode -eq 4){
+                if(-not $started -or $program.Length-$at -lt 4){throw [ArgumentException]::new('Invalid FLAGS.')}
+                $result.Flags=$result.Flags -bor [BitConverter]::ToUInt32($program,$at);$at+=4
+            }else{throw [ArgumentException]::new('Unknown student opcode.')}
+        }
+        if(-not $started){throw [ArgumentException]::new('Missing COPY.')}
+        for($channel=0;$channel -lt 512;$channel++){if(-not [float]::IsFinite($result.Values[$channel])){throw [ArgumentException]::new('Nonfinite replay.')}}
+        return $result
+    }
+
+    static [short[]] PackLibrary([float[]] $vectors,[float[]] $key) {
+        if($vectors.Length%512 -ne 0 -or $key.Length -ne 512){throw [ArgumentException]::new('Library extent mismatch.')}
+        $result=[short[]]::new($vectors.Length)
+        for($channel=0;$channel -lt 512;$channel++){
+            if(-not [float]::IsFinite($key[$channel]) -or $key[$channel] -le [float]0){throw [ArgumentException]::new('Invalid voice key.')}
+        }
+        for($unit=0;$unit -lt [int]($vectors.Length/512);$unit++){
+            for($channel=0;$channel -lt 512;$channel++){
+                $at=$unit*512+$channel;$value=[Math]::Round([double]$vectors[$at]/[double]$key[$channel])
+                if(-not [double]::IsFinite($value) -or $value -lt [double]-32768 -or $value -gt [double]32767){throw [ArgumentException]::new('Selected key cannot represent real exemplar.')}
+                $result[$at]=[short]$value
+            }
+        }
+        return $result
+    }
+
+    static [void] WriteLibrary([string] $path,[short[]] $values) {
+        $stream=[IO.File]::Open($path,[IO.FileMode]::CreateNew,[IO.FileAccess]::Write)
+        try{
+            $at=0
+            while($at -lt $values.Length){
+                $count=[Math]::Min(1048576,$values.Length-$at);$part=[short[]]::new($count);$raw=[byte[]]::new(2*$count)
+                [Array]::Copy($values,$at,$part,0,$count);[Buffer]::BlockCopy($part,0,$raw,0,$raw.Length);$stream.Write($raw,0,$raw.Length);$at+=$count
+            }
+        }finally{$stream.Dispose()}
+    }
+}
+
 class KokoroStudentMath {
     static [short[]] Pcm16([float[]] $samples) {
         $result=[short[]]::new($samples.Length)
@@ -501,14 +591,121 @@ function Render-KokoroStudentCopy {
     return $results.ToArray()
 }
 
+function Get-KokoroStudentCodec {
+    param($Kernel)
+    $codecType=$Kernel.Assembly.GetType('KokoroStudentCodec',$true)
+    [pscustomobject]@{
+        Replay=$codecType.GetMethod('Replay').CreateDelegate([Func[byte[],short[],float[],float[],float[],object]])
+        Pack=$codecType.GetMethod('PackLibrary').CreateDelegate([Func[float[],float[],short[]]])
+        WriteLibrary=$codecType.GetMethod('WriteLibrary').CreateDelegate([Action[string,short[]]])
+        CopyPrograms=$codecType.GetMethod('CopyPrograms').CreateDelegate([Func[int[],int,byte[]]])
+    }
+}
+
+function Test-KokoroStudentReplay {
+    param($Codec,[string]$Directory)
+    $key=[float[]]::new(512);[Array]::Fill($key,[float]0.25)
+    $library=[short[]]::new(1024);$library[0]=4;$library[1]=-8;$library[512]=12
+    $direction=[float[]]::new(512);$direction[0]=[float]0.5
+    $memory=[IO.MemoryStream]::new();$writer=[IO.BinaryWriter]::new($memory)
+    $writer.Write([byte]1);$writer.Write([int]0);$writer.Write([byte]2);$writer.Write([int]0)
+    $writer.Write([byte]3);$writer.Write([byte]0);$writer.Write([ushort]1);$writer.Write([ushort]1);$writer.Write([short]2)
+    $writer.Write([byte]4);$writer.Write([uint]9);$writer.Flush();$program=$memory.ToArray();$writer.Dispose();$memory.Dispose()
+    $actual=$Codec.Replay.Invoke($program,$library,$key,$direction,[float[]]::new(0))
+    if($actual.Values[0] -ne 1.5 -or $actual.Values[1] -ne -1.5 -or $actual.Flags -ne 9){throw 'Opcode replay fixture differs.'}
+    $again=$Codec.Replay.Invoke($program,$library,$key,$direction,[float[]]::new(0))
+    if(-not [Linq.Enumerable]::SequenceEqual[float]($actual.Values,$again.Values) -or $again.Flags -ne $actual.Flags){throw 'Opcode replay is not deterministic.'}
+    $previous=$Codec.Replay.Invoke([byte[]]@(1,255,255,255,255,2,0,0,0,0),$library,$key,$direction,$actual.Values)
+    if($previous.Values[0] -ne 2 -or $previous.Values[1] -ne -1.5){throw 'COPY previous plus DIRECTION failed.'}
+    $rejected=0
+    foreach($bad in @([byte[]]@(1,0),[byte[]]@(1,2,0,0,0),[byte[]]@(1,255,255,255,255),[byte[]]@(1,0,0,0,0,3,0,1,0,0,2,1,0),[byte[]]@(1,0,0,0,0,2,1,0,0,0),[byte[]]@(99))){
+        try{$null=$Codec.Replay.Invoke($bad,$library,$key,$direction,[float[]]::new(0))}catch{$rejected++}
+    }
+    if($rejected -ne 6){throw 'Malformed opcode admission failed.'}
+    $copies=$Codec.CopyPrograms.Invoke([int[]]@(1,0),1)
+    if(-not [Linq.Enumerable]::SequenceEqual[byte]($copies,[byte[]]@(1,1,0,0,0,1,0,0,0,0))){throw 'Native COPY program encoding differs.'}
+    if($Directory){[IO.File]::WriteAllBytes((Join-Path $Directory 'fixture-program.bin'),$program);$Codec.WriteLibrary.Invoke((Join-Path $Directory 'fixture-library.i16'),$library)}
+    [pscustomobject]@{PSTypeName='Kokoro.Student.ReplayCheck';Passed=$true;MalformedRejected=$rejected;ProgramBytes=$program.Length}
+}
+
+function Write-KokoroStudentCopyPrograms {
+    param($Codec,[string]$MeasurementDirectory,[string]$Directory)
+    $path=Join-Path $MeasurementDirectory 'nearest.i32'
+    if((Get-FileHash $path).Hash -cne '70DFD110F8B8E2A8EBDFC2507357727F04BAB0E2A974E51E340E1A9EE8D914AA'){throw 'COPY measurement identity differs.'}
+    $raw=[IO.File]::ReadAllBytes($path);$nearest=[int[]]::new($raw.Length/4);[Buffer]::BlockCopy($raw,0,$nearest,0,$raw.Length)
+    $programs=$Codec.CopyPrograms.Invoke($nearest,4);$programPath=Join-Path $Directory 'copy-programs.bin'
+    if(Test-Path $programPath){throw 'COPY program output already exists.'}
+    [IO.File]::WriteAllBytes($programPath,$programs)
+    [pscustomobject]@{PSTypeName='Kokoro.Student.CopyPrograms';Path=$programPath;Bytes=$programs.Length;Stride=5;Units=$programs.Length/5;SHA256=(Get-FileHash $programPath).Hash}
+}
+
+function New-KokoroStudentReplayLibrary {
+    [CmdletBinding()]
+    param([string]$BankPath,[Parameter(Mandatory)][string]$OutputDirectory,[string]$MeasurementDirectory,[switch]$KernelOnly)
+    $root=Split-Path -Parent $PSScriptRoot
+    if(-not $BankPath){$BankPath=Join-Path $root 'build/unit-bank'}
+    if(-not $MeasurementDirectory){$MeasurementDirectory=Join-Path $root 'build/student-20261015-full'}
+    $out=[IO.Path]::GetFullPath($OutputDirectory)
+    if(-not $out.StartsWith((Join-Path $root 'build')+[IO.Path]::DirectorySeparatorChar,[StringComparison]::OrdinalIgnoreCase) -or (Test-Path -LiteralPath $out)){throw 'Choose a fresh student directory under build/.'}
+    if(-not [BitConverter]::IsLittleEndian){throw 'Student native format requires little-endian host.'}
+    [void][IO.Directory]::CreateDirectory($out);$kernel=Get-KokoroStudentKernel $out;$codec=Get-KokoroStudentCodec $kernel
+    $script:StudentReplayKernel=[pscustomobject]@{Kernel=$kernel;Codec=$codec}
+    $null=Test-KokoroStudentKernel $kernel;$check=Test-KokoroStudentReplay $codec $out
+    if($KernelOnly){return $check}
+    $measurement=Import-Clixml (Join-Path $MeasurementDirectory 'structure.clixml')
+    if($measurement.Units -ne 2429833 -or $measurement.K -ne 4){throw 'Replay requires the complete measured bank.'}
+    $bank=Read-KokoroStudentBank -BankPath $BankPath -Kernel $kernel
+    $pins=@(Import-Clixml (Join-Path $MeasurementDirectory 'bank-provenance.clixml'))
+    if($bank.OrderSHA256 -cne $measurement.OrderSHA256 -or $bank.Provenance.Count -ne $pins.Count){throw 'Replay bank identity differs.'}
+    for($chunkIndex=0;$chunkIndex -lt $pins.Count;$chunkIndex++){if($bank.Provenance[$chunkIndex].SHA256 -cne $pins[$chunkIndex].SHA256){throw 'Replay source chunk differs.'}}
+    # Select an existing channel key, the largest of the 44 observed chunk keys.
+    # No averaging or fitting. One shared 512-channel voice key serves all tiles.
+    $key=[float[]]::new(512)
+    foreach($pin in $pins){
+        $zip=[IO.Compression.ZipFile]::OpenRead((Join-Path $BankPath ([IO.Path]::GetFileName($pin.Path))))
+        try{$scales=Read-KokoroStudentNpy $zip scale '<f4' ([float])}finally{$zip.Dispose()}
+        if($scales.Length -ne 512){throw 'Voice key extent differs.'}
+        for($channel=0;$channel -lt 512;$channel++){if($scales[$channel] -gt $key[$channel]){$key[$channel]=$scales[$channel]}}
+    }
+    Write-Host 'Student replay: packing real exemplars with the selected shared voice key'
+    $watch=[Diagnostics.Stopwatch]::StartNew();$library=$codec.Pack.Invoke($bank.Vectors,$key);$watch.Stop()
+    $libraryPath=Join-Path $out 'exemplars.i16';$codec.WriteLibrary.Invoke($libraryPath,$library)
+    if((Get-Item $libraryPath).Length -ne 1024L*$bank.Count){throw 'Native library length differs.'}
+    $directionPath=Join-Path $MeasurementDirectory 'directions.clixml'
+    if((Get-FileHash $directionPath).Hash -cne '91D3EA0A704E810539B4C762A96AB2CBAF4D45FA45F8D3AC70AF03B07E2F04A2'){throw 'Measured medoid identity differs.'}
+    $pairs=@(Import-Clixml $directionPath);$directionVectors=[float[]]::new(512*$pairs.Count)
+    $pairIds=[int[]]::new($bank.Count);[Array]::Fill($pairIds,-1)
+    for($pair=0;$pair -lt $pairs.Count;$pair++){
+        $unit=[int]$pairs[$pair].MedoidUnit
+        if($unit -lt 1 -or $bank.UnitSentences[$unit] -ne $bank.UnitSentences[$unit-1]){throw 'Medoid crosses source sentence.'}
+        for($channel=0;$channel -lt 512;$channel++){$directionVectors[$pair*512+$channel]=[float]([double]$bank.Vectors[$unit*512+$channel]-[double]$bank.Vectors[($unit-1)*512+$channel])}
+        foreach($occurrence in $bank.PairGroups[$pairs[$pair].Pair]){$pairIds[$occurrence]=$pair}
+    }
+    foreach($record in @(@('voice-key.f32',$key),@('directions.f32',$directionVectors),@('pair-ids.i32',$pairIds))){
+        $raw=[byte[]]::new([Buffer]::ByteLength($record[1]));[Buffer]::BlockCopy($record[1],0,$raw,0,$raw.Length);[IO.File]::WriteAllBytes((Join-Path $out $record[0]),$raw)
+    }
+    $copyPrograms=Write-KokoroStudentCopyPrograms $codec $MeasurementDirectory $out
+    $description=[pscustomobject]@{PSTypeName='Kokoro.Student.NativeLibrary';Version=1;ByteOrder='LittleEndian';Channels=512;Units=$bank.Count;DirectionPairs=$pairs.Count;CopyPrograms=$copyPrograms;
+        LibraryPath=$libraryPath;LibrarySHA256=(Get-FileHash $libraryPath).Hash;KeyPath=(Join-Path $out 'voice-key.f32');DirectionsPath=(Join-Path $out 'directions.f32');PairIdsPath=(Join-Path $out 'pair-ids.i32');
+        KeySHA256=(Get-FileHash (Join-Path $out 'voice-key.f32')).Hash;DirectionsSHA256=(Get-FileHash (Join-Path $out 'directions.f32')).Hash;PairIdsSHA256=(Get-FileHash (Join-Path $out 'pair-ids.i32')).Hash;
+        Copy='01 i32 exemplar ID; -1 copies the immediately previous source-unit replay';Direction='02 i32 pair ID; adds the selected observed medoid direction';
+        Residual='03 u8 shift u16 count; count*(u16 channel,i16 correction), correction*voice-key[channel]*2^-shift';Flags='04 u32 bits; OR into flags';
+        ProgramEnd='Exact byte extent, no terminator';KeySelection='Per channel, largest real observed bank chunk key';LibraryBytes=1024L*$bank.Count;
+        DirectionBytes=4L*$directionVectors.Length;KeyBytes=2048;PackingMilliseconds=$watch.Elapsed.TotalMilliseconds;KernelSHA256=$kernel.SHA256;ProgramKernelSHA256=$kernel.SHA256;OrderSHA256=$bank.OrderSHA256;Directory=$out}
+    $description | Export-Clixml -LiteralPath (Join-Path $out 'native-library.clixml')
+    $script:StudentReplayContext=[pscustomobject]@{Bank=$bank;Kernel=$kernel;Codec=$codec;Library=$library;Key=$key;Directions=$directionVectors;PairIds=$pairIds;Description=$description;MeasurementDirectory=$MeasurementDirectory}
+    return $description
+}
+
 function Invoke-KokoroStudent {
     [CmdletBinding()]
-    param([ValidateSet('Measure','Render')][string]$Step='Measure',[string]$BankPath,[Parameter(Mandatory)][string]$OutputDirectory,
+    param([ValidateSet('Measure','Render','Replay')][string]$Step='Measure',[string]$BankPath,[Parameter(Mandatory)][string]$OutputDirectory,
         [ValidateRange(1,64)][int]$Threads=4,[ValidateRange(1,16)][int]$K=4,[ValidateRange(0,1000000)][int]$SentenceLimit=0,
-        [string]$MeasurementDirectory,[ValidateSet('CopyOnly')][string]$Replay='CopyOnly',[int[]]$Targets=(1..9))
+        [string]$MeasurementDirectory,[ValidateSet('CopyOnly')][string]$Replay='CopyOnly',[int[]]$Targets=(1..9),[switch]$KernelOnly)
     switch($Step){
         'Measure'{Measure-KokoroStudentStructure -BankPath $BankPath -OutputDirectory $OutputDirectory -Threads $Threads -K $K -SentenceLimit $SentenceLimit}
         'Render'{Render-KokoroStudentCopy -BankPath $BankPath -OutputDirectory $OutputDirectory -MeasurementDirectory $MeasurementDirectory -Threads $Threads -Targets $Targets}
+        'Replay'{New-KokoroStudentReplayLibrary -BankPath $BankPath -OutputDirectory $OutputDirectory -MeasurementDirectory $MeasurementDirectory -KernelOnly:$KernelOnly}
     }
 }
 

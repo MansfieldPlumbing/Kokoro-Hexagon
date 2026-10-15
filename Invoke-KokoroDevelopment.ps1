@@ -52,6 +52,8 @@ twice, or written as a scratch script, is a missing command: add it here.
   Student -Parameters @{ Step = 'Measure' } -OutputDirectory <fresh build directory>
   Student -Parameters @{ Step = 'Render'; Replay = 'CopyOnly' } -OutputDirectory <fresh build directory>
     Renders nine held-out original/COPY-only PCM16 WAV pairs with matched offline controls and PCM SNR.
+  Student -Parameters @{ Step = 'Replay' } -OutputDirectory <fresh build directory>
+    Admits native opcode replay and packs real exemplars with one selected shared voice key.
                               Offline student opcode loop: real exemplars and direction medoids. -Path selects the bank.
                               Typed results; read-only bank; no phone. -h prints entrypoint help.
   AlbertLinear -Linear name[,name...] [-Path] [-Soc] [-Runs]
