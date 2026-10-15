@@ -24,6 +24,7 @@ $fn = [pscustomobject]@{
     SetSampleRate = & $bind 'AAudioStreamBuilder_setSampleRate' $void ([Type[]]@($ptr, $i32))
     SetChannels = & $bind 'AAudioStreamBuilder_setSamplesPerFrame' $void ([Type[]]@($ptr, $i32))
     SetFormat = & $bind 'AAudioStreamBuilder_setFormat' $void ([Type[]]@($ptr, $i32))
+    SetSharing = & $bind 'AAudioStreamBuilder_setSharingMode' $void ([Type[]]@($ptr, $i32))
     SetPerformance = & $bind 'AAudioStreamBuilder_setPerformanceMode' $void ([Type[]]@($ptr, $i32))
     OpenStream = & $bind 'AAudioStreamBuilder_openStream' $i32 ([Type[]]@($ptr, $ptr))
     DeleteBuilder = & $bind 'AAudioStreamBuilder_delete' $i32 ([Type[]]@($ptr))
@@ -34,6 +35,7 @@ $fn = [pscustomobject]@{
     GetRate = & $bind 'AAudioStream_getSampleRate' $i32 ([Type[]]@($ptr))
     GetChannels = & $bind 'AAudioStream_getSamplesPerFrame' $i32 ([Type[]]@($ptr))
     GetFormat = & $bind 'AAudioStream_getFormat' $i32 ([Type[]]@($ptr))
+    GetSharing = & $bind 'AAudioStream_getSharingMode' $i32 ([Type[]]@($ptr))
     GetCapacity = & $bind 'AAudioStream_getBufferCapacityInFrames' $i32 ([Type[]]@($ptr))
     GetBurst = & $bind 'AAudioStream_getFramesPerBurst' $i32 ([Type[]]@($ptr))
     GetFramesRead = & $bind 'AAudioStream_getFramesRead' $i64 ([Type[]]@($ptr))
@@ -41,9 +43,10 @@ $fn = [pscustomobject]@{
 }
 
 $open = {
-    param([int]$SampleRate = 24000, [int]$Channels = 1)
+    param([int]$SampleRate = 24000, [int]$Channels = 1, [int]$SharingMode = 0, [bool]$AllowFormatMismatch = $false)
     if ($SampleRate -lt 8000 -or $SampleRate -gt 192000) { throw 'AAudio sample rate is outside the accepted range.' }
     if ($Channels -ne 1) { throw 'The Kokoro AAudio path currently accepts mono only.' }
+    if ($SharingMode -notin 0, 1) { throw 'AAudio sharing mode must be exclusive (0) or shared (1).' }
 
     $builderOut = [Runtime.InteropServices.Marshal]::AllocHGlobal([IntPtr]::Size)
     $streamOut = [Runtime.InteropServices.Marshal]::AllocHGlobal([IntPtr]::Size)
@@ -60,6 +63,7 @@ $open = {
         $fn.SetSampleRate.Invoke($builder, $SampleRate)
         $fn.SetChannels.Invoke($builder, $Channels)
         $fn.SetFormat.Invoke($builder, 2)       # AAUDIO_FORMAT_PCM_FLOAT
+        $fn.SetSharing.Invoke($builder, $SharingMode)
         $fn.SetPerformance.Invoke($builder, 12) # AAUDIO_PERFORMANCE_MODE_LOW_LATENCY
         $rc = $fn.OpenStream.Invoke($builder, $streamOut)
         if ($rc -ne 0) { throw "AAudioStreamBuilder_openStream rc=$rc" }
@@ -69,16 +73,18 @@ $open = {
         $actualRate = $fn.GetRate.Invoke($stream)
         $actualChannels = $fn.GetChannels.Invoke($stream)
         $actualFormat = $fn.GetFormat.Invoke($stream)
-        if ($actualRate -ne $SampleRate -or $actualChannels -ne $Channels -or $actualFormat -ne 2) {
+        $actualSharing = $fn.GetSharing.Invoke($stream)
+        if (-not $AllowFormatMismatch -and ($actualRate -ne $SampleRate -or $actualChannels -ne $Channels -or $actualFormat -ne 2)) {
             [void]$fn.Close.Invoke($stream)
             $stream = [IntPtr]::Zero
-            throw "AAudio format mismatch rate=$actualRate channels=$actualChannels format=$actualFormat"
+            throw "AAudio format mismatch sharing=$actualSharing rate=$actualRate channels=$actualChannels format=$actualFormat"
         }
         [pscustomobject]@{
             Stream = $stream
             SampleRate = $actualRate
             Channels = $actualChannels
             Format = $actualFormat
+            SharingMode = $actualSharing
             CapacityFrames = $fn.GetCapacity.Invoke($stream)
             FramesPerBurst = $fn.GetBurst.Invoke($stream)
             Started = $false
@@ -101,6 +107,7 @@ $open = {
 $write = {
     param([object]$State, [float[]]$Samples, [object]$Clock)
     if ($State.Closed -or $State.Stream -eq [IntPtr]::Zero) { throw 'AAudio stream is closed.' }
+    if ($State.Format -ne 2) { throw 'AAudio float writer requires a granted PCM_FLOAT stream.' }
     if (-not $Samples -or $Samples.Length -eq 0) { throw 'AAudio write requires at least one frame.' }
     if (($Samples.Length % $State.Channels) -ne 0) { throw 'AAudio sample count is not frame aligned.' }
 
