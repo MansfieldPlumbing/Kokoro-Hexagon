@@ -139,6 +139,7 @@ try {
         $sw = [Diagnostics.Stopwatch]::StartNew()
         $rc = [int]$invoke.DynamicInvoke($invokeArguments)
         $sw.Stop()
+        $invokeExit = $phaseClock.ElapsedTicks
         $stage = [BitConverter]::ToInt32($out, 36); $done = [BitConverter]::ToInt32($out, 44)
         $t0 = [BitConverter]::ToUInt64($out, 0); $t1 = [BitConverter]::ToUInt64($out, 8); $dt = [long]($t1 - $t0)
         if ($resident) {
@@ -149,6 +150,9 @@ try {
         }
         $pcmBytes = [byte[]]::new(2 * $samples); [Buffer]::BlockCopy($out, $pcmOffset, $pcmBytes, 0, $pcmBytes.Length)
         $hash = [Convert]::ToHexString([Security.Cryptography.SHA256]::HashData($pcmBytes))
+        if ($kv.ContainsKey('ExpectedPcmSHA256') -and $hash -cne $kv.ExpectedPcmSHA256) {
+            throw 'Baseline PCM mismatch; stopping before playback.'
+        }
         if ($run -eq 0) {
             $pcmHash = $hash
             [IO.File]::WriteAllBytes([IO.Path]::Combine($dir, 'tail-output.bin'), $out)
@@ -157,6 +161,10 @@ try {
         }
         if ($rc -ne 0 -or $stage -ne 7 -or $done -ne 1 -or $hash -ne $pcmHash) { $allOk = $false }
         if ($rc -eq 0 -and $done -eq 1) { $ticks.Add($dt) }
+        $outputExit = $phaseClock.ElapsedTicks
+        $tickMs = 1000.0 / [Diagnostics.Stopwatch]::Frequency
+        $lines.Add("Run=$run SetupEntryTicks=$setupEntry InvokeEntryTicks=$invokeEntry InvokeExitTicks=$invokeExit OutputExitTicks=$outputExit StopwatchFrequency=$([Diagnostics.Stopwatch]::Frequency) SetupMs=$((($invokeEntry - $setupEntry) * $tickMs).ToString('F3', $inv)) OutputMs=$((($outputExit - $invokeExit) * $tickMs).ToString('F3', $inv))")
+        for ($i = 0; $i -lt $bufs.Count; $i++) { $lines.Add("Run=$run Buffer=$i Bytes=$($bufs[$i].Length) Allocation=PinnedManagedArray") }
         # Preserve the job-defined timer slots on every invocation. Their meaning
         # belongs to the emitted job; template 1 uses these for convolution only.
         $timer48 = if ($out.Length -ge 64) { [BitConverter]::ToUInt64($out, 48) } else { [uint64]0 }
