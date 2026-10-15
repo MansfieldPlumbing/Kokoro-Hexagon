@@ -54,6 +54,15 @@ twice, or written as a scratch script, is a missing command: add it here.
     Renders nine held-out original/COPY-only PCM16 WAV pairs with matched offline controls and PCM SNR.
   Student -Parameters @{ Step = 'Replay' } -OutputDirectory <fresh build directory>
     Admits native opcode replay and packs real exemplars with one selected shared voice key.
+  Student -Parameters @{ Step = 'Climb' } -OutputDirectory <fresh build directory>
+    Tests shorter programs at 46/70 dB feature SNR and journals every mutation; KernelOnly checks fixtures.
+    Threads partitions at source-sentence boundaries; ResumeDirectory preserves completed chunks.
+    Finalize compacts a completed ClimbDirectory into libraries and rewritten native programs.
+  Student -Parameters @{ Step = 'Render'; PrepareOnly = $true; Text = 'Peach.' }
+    Reuses the existing selector; SelectionSentences bounds an explicitly labelled preview. No new JSON.
+    DriverDirectory plus DriverSHA256 selects an alternative pinned phonemizer for controlled tests.
+    StudentReplay renders SelectedUnits at the 70 dB feature bar. Intensity is output gain;
+    DurationScale changes token durations and stretches F0/N without changing their values.
                               Offline student opcode loop: real exemplars and direction medoids. -Path selects the bank.
                               Typed results; read-only bank; no phone. -h prints entrypoint help.
   AlbertLinear -Linear name[,name...] [-Path] [-Soc] [-Runs]
@@ -2567,7 +2576,9 @@ switch ($Command) {
         }
     }
     'PrecomputedDecoder' {
-        $experimentParameters = @{}; if ($Parameters) { $experimentParameters = $Parameters }
+        $experimentParameters = @{}
+        if($Parameters){foreach($parameterName in $Parameters.Keys){$experimentParameters[$parameterName]=$Parameters[$parameterName]}}
+        if($OutputDirectory){$experimentParameters.OutputDirectory=[IO.Path]::GetFullPath($OutputDirectory)}
         & (Join-Path $Root 'tools/Invoke-KokoroPrecomputedDecoder.ps1') @experimentParameters
     }
     'Api' { Get-KokoroApi -Pattern $Pattern | Format-Table -AutoSize -Wrap | Out-String -Width 220 }

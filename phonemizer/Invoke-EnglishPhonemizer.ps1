@@ -10,6 +10,7 @@ param(
     [Parameter(ParameterSetName='Speak',Mandatory)][switch]$Speak,
     [Parameter(ParameterSetName='Distill',Mandatory)][switch]$Distill,
     [Parameter(ParameterSetName='BuildDriver',Mandatory)][switch]$BuildDriver,
+    [Parameter(ParameterSetName='BuildDriver')][switch]$LibraryOnly,
     [Parameter(ParameterSetName='VerifyDriver',Mandatory)][switch]$VerifyDriver,
     [Parameter(ParameterSetName='Audit',Mandatory)][switch]$Audit,
     [Parameter(ParameterSetName='Parity',Mandatory)][switch]$Parity,
@@ -743,7 +744,7 @@ class Phonology {
     $verifiedRoleSlots=0
     for($factIndex=0;$factIndex -lt $facts.Count;$factIndex++){
         for($roleIndex=0;$roleIndex -lt 5;$roleIndex++){
-            if($compiledPhones.Invoke($factIndex,$roleIndex) -cne [string]$facts[$factIndex][$roleIndex+2]){
+            if(-not [string]::Equals($compiledPhones.Invoke($factIndex,$roleIndex),[string]$facts[$factIndex][$roleIndex+2],[StringComparison]::Ordinal)){
                 throw "Compiled lexical pronunciation differs from its input fact at row $factIndex, role $roleIndex."
             }
             $verifiedRoleSlots++
@@ -2238,8 +2239,9 @@ class CoreDriver {
 
 function Import-EnglishCoreDriver {
     [CmdletBinding()]
-    param([string]$ReferencePath=$AssemblyPath)
-    if($script:EnglishCoreCache.ContainsKey($ReferencePath)){return $script:EnglishCoreCache[$ReferencePath]}
+    param([string]$ReferencePath=$AssemblyPath,[switch]$LibraryOnly)
+    $cacheKey=$ReferencePath;if($LibraryOnly){$cacheKey+='|LibraryOnly'}
+    if($script:EnglishCoreCache.ContainsKey($cacheKey)){return $script:EnglishCoreCache[$cacheKey]}
     $reference=Import-EnglishReference $ReferencePath;$lex=$reference.Assembly.GetType('Lexicon',$true)
     $literal=@((Get-Command Build-EnglishReference).ScriptBlock.Ast.FindAll({param($node) $node -is [Management.Automation.Language.StringConstantExpressionAst] -and $node.Value.StartsWith('class Lexicon {')},$true))
     if($literal.Count -ne 1){throw 'Lexical lowering template identity failure.'}
@@ -2254,22 +2256,27 @@ function Import-EnglishCoreDriver {
     foreach($key in $table.Keys){foreach($ch in $table[$key].ToCharArray()){if($reference.SymbolId.Invoke($ch) -lt 0){throw 'Correction outside Kokoro vocabulary.'}}}
     $source+="`n"+$knowledge+"`n"+(Get-EnglishCoreTemplate).Replace('[Collections.Generic.','[System.Collections.Generic.').Replace('[void]','').Replace('@REFERENCE@',$reference.Assembly.GetName().Name)
     $identity=[Convert]::ToHexString([Security.Cryptography.SHA256]::HashData([Text.Encoding]::UTF8.GetBytes($source)))
-    $directory=Join-Path $script:EnglishBuildRoot ('english\driver\'+$identity)
+    $directoryIdentity=$identity;if($LibraryOnly){$directoryIdentity+='-library-dll'}
+    $directory=Join-Path $script:EnglishBuildRoot ('english\driver\'+$directoryIdentity)
     $name='Dev.MansfieldPlumbing.English.Driver.'+$identity.Substring(0,16)
     $output=Join-Path $directory ($name+'.dll');$receiptPath=Join-Path $directory 'driver-receipt.psd1'
     if(-not(Test-Path -LiteralPath $receiptPath)){
         [void][IO.Directory]::CreateDirectory($directory);$input=Join-Path $directory 'driver.ps1'
         [IO.File]::WriteAllText($input,$source,[Text.UTF8Encoding]::new($false));Import-EnglishLowering
-        $null=Export-LoweredAssembly -SourcePath $input -ClassName CoreDriver -EntryPoint Main -OutputPath $output -Deterministic
+        $compileParameters=@{SourcePath=$input;ClassName='CoreDriver';OutputPath=$output;Deterministic=$true}
+        if(-not $LibraryOnly){$compileParameters.EntryPoint='Main'}
+        $null=Export-LoweredAssembly @compileParameters
         $inspection=Test-LoweredAssembly -AssemblyPath $output
         if($inspection.AssemblyReferences.Count -ne 1 -or $inspection.AssemblyReferences[0] -cne 'System.Private.CoreLib'){throw 'Standalone driver is not CoreLib only.'}
+        if(-not $LibraryOnly){
         $runtimes=@(& $DotnetPath --list-runtimes);if($LASTEXITCODE){throw '.NET runtime discovery failed.'}
         $versions=@($runtimes | ForEach-Object {if($_ -match '^Microsoft.NETCore.App (\S+) ' -and $Matches[1].StartsWith([string][Environment]::Version.Major+'.')){$Matches[1]}})
         if(-not $versions.Count -or $versions[-1] -cnotmatch '^\d+\.\d+\.\d+(?:-[a-zA-Z0-9.-]+)?$'){throw 'Matching .NET runtime required.'}
         # The .NET host requires this upstream configuration format; pronunciation data is typed source.
         $hostConfig='{"runtimeOptions":{"tfm":"net'+[Environment]::Version.Major+'.0","framework":{"name":"Microsoft.NETCore.App","version":"'+$versions[-1]+'"},"rollForward":"Disable"}}'
         [IO.File]::WriteAllText([IO.Path]::ChangeExtension($output,'.runtimeconfig.json'),$hostConfig,[Text.UTF8Encoding]::new($false))
-        Write-EnglishBuildReceipt $receiptPath ([ordered]@{SourceSha256=$identity;AssemblySha256=(Get-FileHash $output).Hash;ReferenceSha256=(Get-FileHash $ReferencePath).Hash;CompilerCommit='1afabe056235a570da29e268824784557d4f6cdd';AssemblyReferences=$inspection.AssemblyReferences;EntryPoint='CoreDriver.Main';Output=$output;Corrections=$table.Count})
+        }
+        Write-EnglishBuildReceipt $receiptPath ([ordered]@{SourceSha256=$identity;AssemblySha256=(Get-FileHash $output).Hash;ReferenceSha256=(Get-FileHash $ReferencePath).Hash;CompilerCommit='1afabe056235a570da29e268824784557d4f6cdd';AssemblyReferences=$inspection.AssemblyReferences;EntryPoint=$(if($LibraryOnly){''}else{'CoreDriver.Main'});Output=$output;Corrections=$table.Count})
     }
     $receipt=Import-PowerShellDataFile -LiteralPath $receiptPath
     if($receipt.SourceSha256 -cne $identity -or (Get-FileHash -LiteralPath $output).Hash -cne $receipt.AssemblySha256){throw 'Standalone driver integrity failure.'}
@@ -2277,7 +2284,7 @@ function Import-EnglishCoreDriver {
     if($dependencies.Count -ne 1 -or $dependencies[0].Name -cne 'System.Private.CoreLib'){throw 'Unexpected standalone dependency.'}
     $type=$assembly.GetType('CoreDriver',$true)
     $driver=[pscustomobject]@{Assembly=$assembly;Run=[Func[string,object]]$type.GetMethod('Run').CreateDelegate([Func[string,object]]);RunLexical=[Func[string,object]]$type.GetMethod('RunLexical').CreateDelegate([Func[string,object]]);Batch=[Func[string,int,int]]$type.GetMethod('Batch').CreateDelegate([Func[string,int,int]]);NormalizeZira=[Func[string,string]]$type.GetMethod('NormalizeZira').CreateDelegate([Func[string,string]]);ZiraTokenIds=[Func[string,int[]]]$type.GetMethod('ZiraTokenIds').CreateDelegate([Func[string,int[]]]);ZiraBatch=[Func[string,int,int]]$type.GetMethod('ZiraBatch').CreateDelegate([Func[string,int,int]]);Output=$output;Receipt=$receiptPath;SourceSha256=$identity;Corrections=$table.Count}
-    $script:EnglishCoreCache[$ReferencePath]=$driver;$driver
+    $script:EnglishCoreCache[$cacheKey]=$driver;$driver
 }
 
 function Get-EnglishCorrectionKey {
@@ -3058,7 +3065,7 @@ elseif($Zira){
 }
 elseif($LowerCorpus){Convert-EnglishZiraCorpus -Path $ObservationPath}
 elseif($Distill){Invoke-EnglishZiraDistillation}
-elseif($BuildDriver){Import-EnglishCoreDriver | Select-Object Output,Receipt,SourceSha256,Corrections}
+elseif($BuildDriver){Import-EnglishCoreDriver -LibraryOnly:$LibraryOnly | Select-Object Output,Receipt,SourceSha256,Corrections}
 elseif($VerifyDriver){Test-EnglishCoreDriver}
 elseif($GenerateCorpus){New-EnglishZiraCorpus}
 elseif($Parity){Test-EnglishZiraTokenParity}

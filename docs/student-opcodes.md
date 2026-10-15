@@ -74,3 +74,28 @@ checks also run. All kernels pass the pinned compiler's CLR-only admission.
 The nine COPY-only listening pairs were rendered first; see
 `results/student-copy-only-offline-20261015.md`. Their SNR is a PCM-domain result,
 separate from the later feature-domain quality bars.
+
+## Climbing and fresh text
+
+`Student -Parameters @{Step='Climb';Threads=12}` tries strictly shorter
+quality-passing programs at 46 and 70 dB. `ResumeDirectory` imports complete
+source chunks with their original pins; partitions are at sentence boundaries.
+`Finalize=$true;ClimbDirectory=...` writes reachable libraries and remapped
+native programs. Learning journals retain every initialization, accepted and
+rejected mutation. See `results/student-climber-offline-20261015.md` for the
+complete-bank result, including the unsuccessful compression ratio.
+
+`Student -Parameters @{Step='Render';PrepareOnly=$true;Text='Peach.'}` selects
+fresh text through the existing selector. It defaults to the corrected library
+phonemizer driver; `DriverDirectory` and `DriverSHA256` together select a pinned
+alternative for a controlled comparison. `SelectionSentences` labels a bounded
+preview; the default uses the complete bank. Historical captures remain read
+only. See `results/student-three-vowels-offline-20261015.md` for the correction.
+
+`StudentReplay=$true;SelectedUnits=...` renders native 70 dB feature replay.
+`CompareOriginal=$true` pairs it with the same selected bank features, not with
+untouched fresh-text stock synthesis. Prosody is inherited from selected units;
+the generator still uses live AdaIN in this diagnostic. `Intensity` is explicit
+output gain, `DurationScale` changes duration, and `TokenFrames` specifies even
+300-sample frame counts for individual selected tokens. These controls do not
+establish learned expression or the pending CONST control gate.
