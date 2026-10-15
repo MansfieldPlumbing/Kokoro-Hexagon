@@ -14,6 +14,8 @@ twice, or written as a scratch script, is a missing command: add it here.
   CopySynthesis -OutputDirectory [-Path receipt.clixml]  Offline copy-synthesis; -Path rescoring changes only correlation.
                               -Parameters @{Ladder=$true} -Path run2/receipt.clixml renders R1/R4c and reuses R4.
   BuildHost -OutputDirectory  Build and retain the pinned arm64 diagnostic APK; no phone access.
+  WeightAssembly -Path -OutputDirectory
+                              Package native generator weights as an uncompressed managed resource and emit its mapped loader; no phone access.
   Ratchet  [-Case]            Case-pair check, then every unblocked ratchet case on the phone; throws on regression.
   Run      -Case [-Hypothesis] [-Runs]
                               Emit the case's kernel, run it on the phone, print input hashes, receipt and result.
@@ -99,7 +101,7 @@ pwsh -NoProfile -File ./Invoke-KokoroDevelopment.ps1 Run -Case benchmark-0-sm855
 [CmdletBinding()]
 param(
     [Parameter(Position = 0)]
-    [ValidateSet('Status', 'Verify', 'BuildHost', 'Ratchet', 'Run', 'Emit', 'Check', 'Compare', 'JobInput', 'Capture', 'MeasureAudio', 'StockCapture', 'Speak', 'FrontEnd', 'PrecomputedDecoder', 'Zira', 'Albert', 'AlbertError', 'AlbertLinear', 'AlbertLayerNorm', 'AlbertGelu', 'AlbertAttention', 'AlbertEmbed', 'AlbertJob', 'Api', 'Find', 'Tools', 'StageResidency', 'CopySynthesis')]
+    [ValidateSet('Status', 'Verify', 'BuildHost', 'Ratchet', 'Run', 'Emit', 'Check', 'Compare', 'JobInput', 'Capture', 'MeasureAudio', 'StockCapture', 'Speak', 'FrontEnd', 'PrecomputedDecoder', 'Zira', 'Albert', 'AlbertError', 'AlbertLinear', 'AlbertLayerNorm', 'AlbertGelu', 'AlbertAttention', 'AlbertEmbed', 'AlbertJob', 'Api', 'Find', 'Tools', 'StageResidency', 'CopySynthesis', 'WeightAssembly')]
     [string] $Command = 'Status',
     [string] $Case,
     [string] $Kernel,
@@ -151,7 +153,9 @@ $Python = 'C:/bin/micromamba/envs/mono/python.exe'
 function Import-Evaluator { Import-Module (Join-Path $Root 'tools/Kokoro.Evaluator.psm1') -Force -Global }
 
 function Get-Adb {
-    foreach ($candidate in $env:KOKORO_QNN_ADB, (Get-Command adb -ErrorAction Ignore).Source, 'C:/backup/Android/platform-tools/adb.exe') {
+    $pathCommand = Get-Command adb -ErrorAction Ignore
+    $pathCandidate = if ($null -ne $pathCommand) { $pathCommand.Source } else { $null }
+    foreach ($candidate in $env:KOKORO_QNN_ADB, $pathCandidate, 'C:/backup/Android/platform-tools/adb.exe') {
         if ($candidate -and (Test-Path $candidate)) { return $candidate }
     }
     throw 'adb not found: set KOKORO_QNN_ADB or put adb on PATH.'
@@ -531,7 +535,7 @@ function Invoke-KokoroDeviceJob {
     $outputPath = & $field 'OutputPath'
     if (-not $outputPath -or $text -notmatch '(?m)^Passed=True\s*$' -or $text -notmatch '(?m)^StartupRestored=True\s*$') { throw "Phone run failed or startup was not restored: $(($out | Select-Object -Last 4) -join ' | ')" }
     [pscustomobject]@{ Output = [IO.File]::ReadAllBytes($outputPath); OutputPath = $outputPath; MedianMs = [double](& $field 'MedianRegionMs')
-        Lines = @($out | ForEach-Object { "$_" } | Where-Object { $_ -match '^(Run=|Median|InvokeRc|Stage|Played=|Passed=|StartupRestored=|ReceiptPath=)' }) }
+        Lines = @($text -split '\r?\n' | Where-Object { $_ -match '^(Run=|Median|InvokeRc|Stage|Played=|Passed=|StartupRestored=|ReceiptPath=)' }) }
 }
 
 function New-KokoroDecoderConstantsTables {
@@ -2106,6 +2110,11 @@ switch ($Command) {
         }elseif($Path){$copyArguments.CorrelationReceipt=$Path}
         & (Join-Path $Root 'tools/Measure-KokoroCopySynthesis.ps1') @copyArguments
     }
+    'WeightAssembly' {
+        if (-not $Path -or -not $OutputDirectory) { throw 'WeightAssembly needs -Path (native generator weights) and -OutputDirectory (under build).' }
+        Import-Module (Join-Path $Root 'tools/Kokoro.ManagedPayload.psm1')
+        New-KokoroWeightAssembly -Path $Path -OutputDirectory $OutputDirectory
+    }
     'StageResidency' {
         if ($null -eq $Parameters) { Measure-KokoroStageResidency }
         else { Measure-KokoroStageResidency @Parameters }
@@ -2236,6 +2245,12 @@ switch ($Command) {
             break
         }
         if ($Case -ceq 'device-readiness') { Get-KokoroDeviceReadiness -Soc $Soc -Package $HostPackage; break }
+        if ($Case -ceq 'generator-template1') {
+            if (-not $OutputDirectory) { throw 'Template-1 gate needs -OutputDirectory <fresh build directory>.' }
+            $templateParameters = if ($Parameters) { $Parameters } else { @{} }
+            & (Join-Path $Root 'tools/Test-KokoroGeneratorTemplate1.ps1') -OutputDirectory $OutputDirectory -Soc $Soc -Package $HostPackage -Runs $(if ($Runs) { $Runs } else { 5 }) @templateParameters
+            break
+        }
         if ($Case -ceq 'host-install') { Install-KokoroDiagnosticHost -Path $Path -Soc $Soc; break }
         if ($Case -ceq 'harmonic-source-objects') {
             if (-not $Path) { throw 'Harmonic-source object check needs -Path <existing source fixture>.' }

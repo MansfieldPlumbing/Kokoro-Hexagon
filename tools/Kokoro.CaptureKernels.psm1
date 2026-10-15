@@ -417,4 +417,129 @@ function Get-Conv1dKernel {
     $script:Kernels.Conv1d = $k; $k
 }
 
-Export-ModuleMember -Function Get-FoldConvWeightsKernel, Get-QuantizeRowsKernel, Get-SplitPlanesKernel, Get-LowLowWindowShapedKernel, Get-Conv1dKernel, Get-PackWeightPlanesShapedKernel, Get-LowLowWindowKernel, Get-QuantizeCroutons16Kernel, Get-PackWeightPlanesKernel, Get-Mean3Kernel, Get-Croutons16ErrorKernel, Get-ChannelStatsKernel, Get-ColumnPeaksKernel, Get-DecodeCroutons16Kernel, Get-InterleavePlanesKernel
+function Get-Fp16CroutonsKernel {
+    # The HMX/HVX generator handoff uses actual IEEE half values in the existing crouton order.
+    # Pack: (float[] source [c][t], int frames, int channels, int leadingRows, ushort[] destination).
+    # Decode reverses the same mapping into source. Both numeric loops execute as compiled delegates.
+    param([ValidateSet('Pack','Decode')][string] $Direction = 'Pack')
+    $cacheKey = 'Fp16Croutons' + $Direction
+    if ($script:Kernels.ContainsKey($cacheKey)) { return $script:Kernels[$cacheKey] }
+    $E = [Expression]
+    $values = $E::Parameter([float[]], 'values'); $frames = $E::Parameter([int], 'frames')
+    $channels = $E::Parameter([int], 'channels'); $leadingRows = $E::Parameter([int], 'leadingRows')
+    $halfwords = $E::Parameter([ushort[]], 'halfwords')
+    $channelIndex = $E::Variable([int], 'channelIndex'); $frameIndex = $E::Variable([int], 'frameIndex')
+    $at = Get-CroutonIndexExpression ($E::Add($frameIndex, $leadingRows)) $channelIndex $channels
+    $valueAt = $E::Add($E::Multiply($channelIndex, $frames), $frameIndex)
+    if ($Direction -ceq 'Pack') {
+        $convert = [BitConverter].GetMethod('HalfToUInt16Bits', [Type[]]@([Half]))
+        $body = $E::Assign($E::ArrayAccess($halfwords, $at), $E::Call($convert, $E::Convert($E::ArrayIndex($values, $valueAt), [Half])))
+    } else {
+        $convert = [BitConverter].GetMethod('UInt16BitsToHalf', [Type[]]@([ushort]))
+        $body = $E::Assign($E::ArrayAccess($values, $valueAt), $E::Convert($E::Call($convert, $E::ArrayIndex($halfwords, $at)), [float]))
+    }
+    $loop = $E::Block([ParameterExpression[]]@($channelIndex,$frameIndex),
+        (New-For $channelIndex (New-Int 0) $channels (New-For $frameIndex (New-Int 0) $frames $body)))
+    $kernel = $E::Lambda([Action[float[],int,int,int,ushort[]]], $loop,
+        [ParameterExpression[]]@($values,$frames,$channels,$leadingRows,$halfwords)).Compile()
+    $script:Kernels[$cacheKey] = $kernel
+    $kernel
+}
+
+function Get-PackFp16WeightsKernel {
+    # [o][i][tap] -> [output block][tap][input block][input pair][output channel][input parity].
+    if ($script:Kernels.ContainsKey('PackFp16Weights')) { return $script:Kernels.PackFp16Weights }
+    $E = [Expression]
+    $weights = $E::Parameter([float[]], 'weights'); $cin = $E::Parameter([int], 'cin')
+    $cout = $E::Parameter([int], 'cout'); $taps = $E::Parameter([int], 'taps')
+    $destination = $E::Parameter([ushort[]], 'destination')
+    $outChannel = $E::Variable([int], 'outChannel'); $inChannel = $E::Variable([int], 'inChannel'); $tap = $E::Variable([int], 'tap')
+    $block = $E::Add($E::Multiply($E::Add($E::Multiply($E::RightShift($outChannel,(New-Int 5)),$taps),$tap),$E::RightShift($cin,(New-Int 5))),$E::RightShift($inChannel,(New-Int 5)))
+    $at = $E::Add($E::Add($E::Multiply($block,(New-Int 1024)),
+        $E::Multiply($E::RightShift($E::And($inChannel,(New-Int 31)),(New-Int 1)),(New-Int 64))),
+        $E::Add($E::Multiply($E::And($outChannel,(New-Int 31)),(New-Int 2)),$E::And($inChannel,(New-Int 1))))
+    $sourceAt = $E::Add($E::Multiply($E::Add($E::Multiply($outChannel,$cin),$inChannel),$taps),$tap)
+    $convert = [BitConverter].GetMethod('HalfToUInt16Bits',[Type[]]@([Half]))
+    $store = $E::Assign($E::ArrayAccess($destination,$at),$E::Call($convert,$E::Convert($E::ArrayIndex($weights,$sourceAt),[Half])))
+    $body = $E::Block([ParameterExpression[]]@($outChannel,$inChannel,$tap),
+        (New-For $outChannel (New-Int 0) $cout (New-For $inChannel (New-Int 0) $cin (New-For $tap (New-Int 0) $taps $store))))
+    $kernel = $E::Lambda([Action[float[],int,int,int,ushort[]]],$body,[ParameterExpression[]]@($weights,$cin,$cout,$taps,$destination)).Compile()
+    $script:Kernels.PackFp16Weights = $kernel
+    $kernel
+}
+
+function Get-GeneratorCoefficientsKernel {
+    param([switch] $FixedLevels)
+    # Design section 3: offline A/B and Snake phase constants, in crouton channel order.
+    # Statistics are supplied offline. The phone never measures or regenerates them.
+    # FixedLevels consumes physical mean and inverse standard deviation from the
+    # adopted calibration; it does not measure an utterance or add runtime statistics.
+    # This calibration compatibility path is temporary scaffolding. Student-supplied
+    # controls must enter through the coefficient contract after their own admission.
+    $cacheKey = if ($FixedLevels) { 'GeneratorFixedCoefficients' } else { 'GeneratorCoefficients' }
+    if ($script:Kernels.ContainsKey($cacheKey)) { return $script:Kernels[$cacheKey] }
+    $E = [Expression]
+    $style = $E::Parameter([float[]],'style'); $fc = $E::Parameter([float[]],'fc'); $bias = $E::Parameter([float[]],'bias')
+    $normWeight = $E::Parameter([float[]],'normWeight'); $normBias = $E::Parameter([float[]],'normBias')
+    $statistics = $E::Parameter([double[]],'statistics'); $alpha = $E::Parameter([float[]],'alpha'); $destination = $E::Parameter([float[]],'destination')
+    $channel = $E::Variable([int],'channel'); $styleIndex = $E::Variable([int],'styleIndex'); $at = $E::Variable([int],'at')
+    $gamma = $E::Variable([float],'gamma'); $beta = $E::Variable([float],'beta'); $inverse = $E::Variable([float],'inverse')
+    $affineA = $E::Variable([double],'affineA'); $affineB = $E::Variable([double],'affineB')
+    $channels = $E::ArrayLength($alpha); $styles = $E::ArrayLength($style)
+    $zero = $E::Constant([float]0); $one = $E::Constant([float]1)
+    $sumStyle = $E::Block(
+        $E::Assign($gamma,$E::Add($gamma,$E::Multiply($E::ArrayIndex($fc,$E::Add($E::Multiply($channel,$styles),$styleIndex)),$E::ArrayIndex($style,$styleIndex)))),
+        $E::Assign($beta,$E::Add($beta,$E::Multiply($E::ArrayIndex($fc,$E::Add($E::Multiply($E::Add($channel,$channels),$styles),$styleIndex)),$E::ArrayIndex($style,$styleIndex)))))
+    $double = {param([Expression]$Value) $E::Convert($Value,[double])}
+    $weightValue = & $double ($E::ArrayIndex($normWeight,$channel))
+    $gammaValue = & $double $gamma
+    $meanValue = & $double ($E::Convert($E::ArrayIndex($statistics,$channel),[float]))
+    $alphaValue = & $double ($E::ArrayIndex($alpha,$channel))
+    $inverseValue = if ($FixedLevels) {
+        $E::Convert($E::ArrayIndex($statistics,$E::Add($channels,$channel)),[float])
+    } else {
+        $E::Divide($one,$E::Call([MathF].GetMethod('Sqrt',[Type[]]@([float])),
+            $E::Add($E::Convert($E::ArrayIndex($statistics,$E::Add($channels,$channel)),[float]),$E::Constant([float]0.00001))))
+    }
+    $coefficient = $E::Block(
+        $E::Assign($gamma,$zero),$E::Assign($beta,$zero),
+        (New-For $styleIndex (New-Int 0) $styles $sumStyle),
+        $E::Assign($gamma,$E::Add($one,$E::Add($gamma,$E::ArrayIndex($bias,$channel)))),
+        $E::Assign($beta,$E::Add($beta,$E::ArrayIndex($bias,$E::Add($channel,$channels)))),
+        $E::Assign($inverse,$inverseValue),
+        $E::Assign($affineA,$E::Multiply($E::Multiply($gammaValue,$weightValue),(& $double $inverse))),
+        $E::Assign($affineB,$E::Add($E::Multiply($gammaValue,
+            $E::Subtract((& $double ($E::ArrayIndex($normBias,$channel))),$E::Multiply($E::Multiply($weightValue,$meanValue),(& $double $inverse)))),(& $double $beta))),
+        $E::Assign($at,$E::Add($E::Multiply($E::RightShift($channel,(New-Int 5)),(New-Int 160)),$E::And($channel,(New-Int 31)))),
+        $E::Assign($E::ArrayAccess($destination,$at),$E::Convert($affineA,[float])),
+        $E::Assign($E::ArrayAccess($destination,$E::Add($at,(New-Int 32))),$E::Convert($affineB,[float])),
+        $E::Assign($E::ArrayAccess($destination,$E::Add($at,(New-Int 64))),$E::Convert($E::Multiply($E::Multiply($alphaValue,$affineA),$E::Constant(16777216.0/[Math]::PI)),[float])),
+        $E::Assign($E::ArrayAccess($destination,$E::Add($at,(New-Int 96))),$E::Convert($E::Multiply($E::Multiply($alphaValue,$affineB),$E::Constant(16777216.0/[Math]::PI)),[float])),
+        $E::Assign($E::ArrayAccess($destination,$E::Add($at,(New-Int 128))),
+            $E::Condition($E::Equal($alphaValue,$E::Constant(0.0)),$zero,$E::Convert($E::Divide($E::Constant(1.0),$alphaValue),[float]))))
+    $body = $E::Block([ParameterExpression[]]@($channel,$styleIndex,$at,$gamma,$beta,$inverse,$affineA,$affineB),
+        (New-For $channel (New-Int 0) $channels $coefficient))
+    $kernel = $E::Lambda([Action[float[],float[],float[],float[],float[],double[],float[],float[]]],$body,
+        [ParameterExpression[]]@($style,$fc,$bias,$normWeight,$normBias,$statistics,$alpha,$destination)).Compile()
+    $script:Kernels[$cacheKey] = $kernel
+    $kernel
+}
+
+function Get-Fp16ConversionTableKernel {
+    # bias-mxmem2: scale=FP16 one in low 16 bits, FP16 output bias in high 16 bits.
+    # Lower and upper words of each channel's 64-bit bias entry occupy separate vectors.
+    if ($script:Kernels.ContainsKey('Fp16ConversionTable')) { return $script:Kernels.Fp16ConversionTable }
+    $E = [Expression]
+    $bias = $E::Parameter([float[]],'bias'); $destination = $E::Parameter([uint[]],'destination')
+    $channel = $E::Variable([int],'channel')
+    $at = $E::Add($E::Multiply($E::RightShift($channel,(New-Int 5)),(New-Int 64)),$E::And($channel,(New-Int 31)))
+    $convert = [BitConverter].GetMethod('HalfToUInt16Bits',[Type[]]@([Half]))
+    $word = $E::Or($E::Constant([uint]0x3c00),$E::LeftShift($E::Convert($E::Call($convert,$E::Convert($E::ArrayIndex($bias,$channel),[Half])),[uint]),(New-Int 16)))
+    $body = $E::Block([ParameterExpression[]]@($channel),
+        (New-For $channel (New-Int 0) ($E::ArrayLength($bias)) ($E::Assign($E::ArrayAccess($destination,$at),$word))))
+    $kernel = $E::Lambda([Action[float[],uint[]]],$body,[ParameterExpression[]]@($bias,$destination)).Compile()
+    $script:Kernels.Fp16ConversionTable = $kernel
+    $kernel
+}
+
+Export-ModuleMember -Function Get-FoldConvWeightsKernel, Get-QuantizeRowsKernel, Get-SplitPlanesKernel, Get-LowLowWindowShapedKernel, Get-Conv1dKernel, Get-PackWeightPlanesShapedKernel, Get-LowLowWindowKernel, Get-QuantizeCroutons16Kernel, Get-PackWeightPlanesKernel, Get-Mean3Kernel, Get-Croutons16ErrorKernel, Get-ChannelStatsKernel, Get-ColumnPeaksKernel, Get-DecodeCroutons16Kernel, Get-InterleavePlanesKernel, Get-Fp16CroutonsKernel, Get-PackFp16WeightsKernel, Get-GeneratorCoefficientsKernel, Get-Fp16ConversionTableKernel

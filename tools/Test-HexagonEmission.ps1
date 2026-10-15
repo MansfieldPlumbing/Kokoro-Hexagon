@@ -4,7 +4,7 @@
 param(
     [string] $OutputDirectory = (Join-Path $PSScriptRoot '..\build\hexagon-emission\emitted'),
     [string] $ToolRoot = '/home/scott/hexagon/Hexagon_SDK/6.4.0.2/tools/HEXAGON_Tools/19.0.04/Tools/bin',
-    [ValidateSet('Probe','KokoroAffine','KokoroAdaIn','KokoroAdaInResBlock','KokoroAdaInStatistics','KokoroAdaInIntegerCoefficients','KokoroAdaInIntegerAffine','KokoroSnakeInteger','KokoroResidualInteger','KokoroAlbertSoftmax3','KokoroAlbertAttention3','KokoroAlbertAttentionOutput3','KokoroAlbertConnectedAttention3','KokoroConvTile','KokoroLinearTile','KokoroR0Sub0','KokoroHmxLock','KokoroHmxMatrix','KokoroHmxConv','KokoroHmxConvPlanes','KokoroHmxConvPlanesLoop','KokoroPlaneCombine','KokoroPlaneCombineLoop','KokoroAdaInMoments16','KokoroAdaInMoments16Loop','KokoroAdaInTurnsCoefficients','KokoroAdaInAffineCoefficientsLoop','KokoroAdaInLeaky16','KokoroDecoderPass','KokoroDecoder16Run','KokoroHmxConvRun','KokoroResBlockRun','KokoroBranchAverageInteger','KokoroGenerator60xRun','KokoroLeakyReluInteger','KokoroVtcmQuery','KokoroDmaCopy','KokoroDmaBench','KokoroAdaInSnakeInteger','KokoroAdaInSnakeTurns','KokoroGenerator60xResidentRun','KokoroGenerator60x16Run','KokoroGeneratorTailRun','KokoroGeneratorTail16Run','KokoroGeneratorStage16TailRun','KokoroResBlock16Run','KokoroGeneratorFrontStageTailRun','KokoroGeneratorFront10x16Run','KokoroGeneratorWhole16Run','KokoroHarmonicStft16Run','KokoroHarmonicSource16Run','KokoroGeneratorWholeSource16Run','KokoroDecoderGenerator16Run')][string] $Kernel='Probe',
+    [ValidateSet('KokoroGeneratorTemplate1Run','Probe','KokoroAffine','KokoroAdaIn','KokoroAdaInResBlock','KokoroAdaInStatistics','KokoroAdaInIntegerCoefficients','KokoroAdaInIntegerAffine','KokoroSnakeInteger','KokoroResidualInteger','KokoroAlbertSoftmax3','KokoroAlbertAttention3','KokoroAlbertAttentionOutput3','KokoroAlbertConnectedAttention3','KokoroConvTile','KokoroLinearTile','KokoroR0Sub0','KokoroHmxLock','KokoroHmxMatrix','KokoroHmxConv','KokoroHmxConvPlanes','KokoroHmxConvPlanesLoop','KokoroPlaneCombine','KokoroPlaneCombineLoop','KokoroAdaInMoments16','KokoroAdaInMoments16Loop','KokoroAdaInTurnsCoefficients','KokoroAdaInAffineCoefficientsLoop','KokoroAdaInLeaky16','KokoroDecoderPass','KokoroDecoder16Run','KokoroHmxConvRun','KokoroResBlockRun','KokoroBranchAverageInteger','KokoroGenerator60xRun','KokoroLeakyReluInteger','KokoroVtcmQuery','KokoroDmaCopy','KokoroDmaBench','KokoroAdaInSnakeInteger','KokoroAdaInSnakeTurns','KokoroGenerator60xResidentRun','KokoroGenerator60x16Run','KokoroGeneratorTailRun','KokoroGeneratorTail16Run','KokoroGeneratorStage16TailRun','KokoroResBlock16Run','KokoroGeneratorFrontStageTailRun','KokoroGeneratorFront10x16Run','KokoroGeneratorWhole16Run','KokoroHarmonicStft16Run','KokoroHarmonicSource16Run','KokoroGeneratorWholeSource16Run','KokoroDecoderGenerator16Run')][string] $Kernel='Probe',
     [ValidateRange(2, 32768)][int] $ResBlockFrames = 7801,
     [ValidateSet(3,7,11)][int] $ResBlockKernel = 3,
     [ValidateSet(128,256)][int] $IntegerChannels = 128,
@@ -24,6 +24,16 @@ param(
     [ValidateRange(-1, 4)][int] $DecoderStopAfterBlock = -1,
     [ValidateSet('Block','Shortcut','Conv1','Windows1','Pool','Coeff')][string] $DecoderDumpPoint = 'Block',
     [ValidateSet(1, 3, 5)][int] $ConvDilation = 1,
+    [ValidateSet(1,3)][int] $TemplateBranches = 1,
+    [switch] $TemplateAddResidual,
+    [switch] $TemplateStoreResidual,
+    [switch] $TemplateUpsample,
+    [switch] $TemplateConnectedMain,
+    [switch] $ResidentPayloads,
+    [ValidateSet('Lock','Smoothstep')][string] $TemplateShape = 'Lock',
+    [ValidateSet(0,128,256,512)][int] $TemplateInputChannels = 0,
+    [ValidateRange(16,64)][int] $TemplateBlockFrames = 16,
+    [ValidateRange(0,63)][int] $TemplateInitialFrameOffset = 0,
     [switch] $ConvOutputPlanes,
     [ValidateSet(1,2)][int] $ConvWeightPlanes = 1,
     [ValidateSet('Conv','Residual','Scale')][string] $CombineMode = 'Conv',
@@ -54,6 +64,16 @@ param(
 $ErrorActionPreference='Stop'
 $output=[IO.Path]::GetFullPath((Join-Path $OutputDirectory $Kernel))
 $pmuArgs=if($ResidentPmuEvents){@{ResidentPmuEvents=$ResidentPmuEvents}}else{@{}}
+$pmuArgs.TemplateBranches=$TemplateBranches
+$pmuArgs.TemplateAddResidual=$TemplateAddResidual.IsPresent
+$pmuArgs.TemplateStoreResidual=$TemplateStoreResidual.IsPresent
+$pmuArgs.TemplateUpsample=$TemplateUpsample.IsPresent
+$pmuArgs.TemplateConnectedMain=$TemplateConnectedMain.IsPresent
+$pmuArgs.ResidentPayloads=$ResidentPayloads.IsPresent
+$pmuArgs.TemplateShape=$TemplateShape
+$pmuArgs.TemplateInputChannels=$TemplateInputChannels
+$pmuArgs.TemplateBlockFrames=$TemplateBlockFrames
+$pmuArgs.TemplateInitialFrameOffset=$TemplateInitialFrameOffset
 $result=& (Join-Path $PSScriptRoot 'Emit-HexagonProbe.ps1') -OutputDirectory $output -ReferenceAssembly `
     -Kernel $Kernel -ResBlockFrames $ResBlockFrames -ResBlockKernel $ResBlockKernel -IntegerChannels $IntegerChannels -LinearRows $LinearRows -LinearInputChannels $LinearInputChannels `
     -LinearOutputChannels $LinearOutputChannels -LinearVectorOutputTiles:$LinearVectorOutputTiles `
@@ -109,6 +129,8 @@ $rejections=0
 $badOps = @(
     @{Op='imm';d=32;i=1},
     @{Op='imm';d=0;i=32768},
+    @{Op='loop0-r';s=32;Label='invalid'},
+    @{Op='loop1-r';s=-1;Label='invalid'},
     @{Op='load';d=0;s=1;Offset=3},
     @{Op='hi';x=0;i=65536},
     @{Op='vload';d=32;s=0;Offset=0},
@@ -144,6 +166,13 @@ foreach($bad in $badOps) {
     catch { $loweredRejections++ }
 }
 if($loweredRejections -ne $badOps.Count) { throw 'Lowered encoder accepted an invalid operand.' }
+$loopTargetRejections = 0
+foreach ($badTarget in -260L,256L,3L) {
+    $loopStep = @{Op='loop0-r';s=4;Label='invalid'}
+    try { $null=New-HexagonInstruction $loopStep 0L $badTarget } catch { $loopTargetRejections++ }
+    try { $typed=$stepType::Convert([hashtable[]]@($loopStep)); $null=$encoder.Instruction($typed[0],0L,$badTarget) } catch { $loopTargetRejections++ }
+}
+if ($loopTargetRejections -ne 6) { throw 'Encoder accepted an out-of-range or unaligned hardware loop start.' }
 $strictRejections = 0
 foreach($wrong in @([uint32]1, [double]1, [decimal]1, [Management.Automation.PSObject]::new(1), [int[]]@(1), $null)) {
     try { $null = $stepType::Convert([hashtable[]]@(@{Op='imm';d=0;i=$wrong})) }

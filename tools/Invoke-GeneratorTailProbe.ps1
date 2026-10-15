@@ -14,12 +14,17 @@ no serial is printed. Check the retrieved buffer with tools/Test-KokoroGenerator
 param(
     [Parameter(Mandatory)][string] $EmissionDirectory,
     [Parameter(Mandatory)][string] $FixtureDirectory,
-    [ValidateRange(1, 20)][int] $Runs = 3,
+    [ValidateRange(1, 121)][int] $Runs = 3,
     [ValidateSet('SM8550', 'SM8635')][string] $Soc = 'SM8550',
     [string] $Adb = 'C:\backup\Android\platform-tools\adb.exe',
     [string] $Package = 'dev.mansfieldplumbing.kokoro',
     [ValidateRange(10, 600)][int] $TimeoutSeconds = 180,
-    [pscustomobject] $EmissionArtifact
+    [pscustomobject] $EmissionArtifact,
+    [ValidatePattern('^[0-9A-F]{64}$')][string] $ExpectedPcmSHA256,
+    [switch] $AttributeBuffers,
+    [switch] $ResidentPayloads,
+    [switch] $RequestLifetime,
+    [pscustomobject] $WeightAssembly
 )
 $ErrorActionPreference = 'Stop'
 if ($Package -notmatch '^[a-zA-Z0-9_.]+$') { throw 'Invalid Android package name' }
@@ -59,6 +64,23 @@ foreach ($p in $harness, $binding, $aaudio) { $e = $null; $null = [Management.Au
 $id = [Guid]::NewGuid().ToString('N')
 $spec = Join-Path $emission "tail-spec-$id.txt"
 [IO.File]::WriteAllLines($spec, @("Tiles=$($layout.Tiles)", "Runs=$Runs", "OutputBytes=$($layout.OutputBytes)", "PcmOffset=$($layout.PcmOffset)", "Samples=$($layout.Samples)", "InputBytes=$($layout.InputBytes)"))
+if ($ExpectedPcmSHA256) { [IO.File]::AppendAllText($spec, "ExpectedPcmSHA256=$ExpectedPcmSHA256`n") }
+if ($AttributeBuffers) { [IO.File]::AppendAllText($spec, "AttributeBuffers=True`n") }
+if ($ResidentPayloads) {
+    if ($AttributeBuffers -or -not $layout.ResidentPayloads) { throw 'Resident payloads require the admitted adapter and no buffer probe.' }
+    [IO.File]::AppendAllText($spec, "ResidentPayloads=True`n")
+}
+if ($null -ne $WeightAssembly) {
+    if (-not $ResidentPayloads) { throw 'WeightAssembly requires ResidentPayloads.' }
+    if ([long]$layout.WeightBytes -lt 1 -or [long]$WeightAssembly.Bytes -ne [long]$layout.WeightBytes) { throw 'Weight assembly extent differs from the generator layout.' }
+    if ((Get-FileHash -LiteralPath $WeightAssembly.LoaderPath).Hash -cne $WeightAssembly.LoaderSHA256) { throw 'Staged managed loader hash differs.' }
+    if ((Get-Item -LiteralPath $WeightAssembly.AssemblyPath).Length -ne $WeightAssembly.AssemblyBytes) { throw 'Weight assembly length differs.' }
+    [IO.File]::AppendAllLines($spec, [string[]]@('WeightAssembly=True', "WeightOffset=$($WeightAssembly.Offset)", "WeightBytes=$($WeightAssembly.Bytes)", "WeightAssemblyBytes=$($WeightAssembly.AssemblyBytes)", "WeightIdentityOffset=$($WeightAssembly.IdentityOffset)", "WeightIdentity=$($WeightAssembly.Identity)"))
+}
+if ($RequestLifetime) {
+    if (-not $ResidentPayloads -or $Runs -ne 31) { throw 'Request lifetime measurement requires resident payloads and 31 runs (one warmup and 30 requests).' }
+    [IO.File]::AppendAllText($spec, "RequestLifetime=True`n")
+}
 $temp = "/data/local/tmp/kokoro-tail-$id"
 $backup = "files/kokoro-fl/generator-tail-backup-$id"
 $target = 'files/kokoro-fl/generator-tail'
@@ -82,20 +104,41 @@ try {
         @($aaudio, 'files/kokoro-fl/Audio.AAudio.psm1'),
         @($library, 'files/kokoro-fl/qnn/libkokoro_generator_tail_skel.so'),
         @($spec, "$target/spec.txt"))
-    foreach ($n in 'activations.bin', 'weights.bin', 'tables.bin') { $files += , @((Join-Path $fixture $n), "$target/$n") }
+    foreach ($n in 'activations.bin', 'tables.bin') { $files += , @((Join-Path $fixture $n), "$target/$n") }
+    if ($null -ne $WeightAssembly) {
+        $files += , @($WeightAssembly.AssemblyPath, "$target/Kokoro.Generator.Weights.dll")
+        $files += , @($WeightAssembly.LoaderPath, "$target/Kokoro.MappedPayload.dll")
+    } else { $files += , @((Join-Path $fixture 'weights.bin'), "$target/weights.bin") }
     foreach ($file in $files) {
         $name = Split-Path $file[1] -Leaf; $destination = $file[1]
         # Unchanged staged files (same SHA-256 already at the destination) are not pushed again: variant sweeps change
         # only the skel, not the 30-70 MB of weights.
-        $localHash = (Get-FileHash $file[0]).Hash
+        $localHash = if ($null -ne $WeightAssembly -and $name -ceq 'Kokoro.Generator.Weights.dll') { $WeightAssembly.AssemblySHA256 } else { (Get-FileHash $file[0]).Hash }
+        if ($null -ne $WeightAssembly -and $name -ceq 'Kokoro.Generator.Weights.dll') {
+            # Only activation hashes the weight file. Later launches trust the
+            # private activation record and check length here, identity in CLR.
+            $activation = ((& $run @('shell', "if run-as $Package test -f $destination.activation; then run-as $Package cat $destination.activation; fi")) -join '').Trim()
+            if ($activation -ceq $WeightAssembly.AssemblySHA256) {
+                $activeLength = ((& $run @('shell', 'run-as', $Package, 'stat', '-c', '%s', $destination)) -join '').Trim()
+                if ([long]$activeLength -ne [long]$WeightAssembly.AssemblyBytes) { throw 'Activated weight assembly length differs.' }
+                'WeightActivationReused=True PayloadHashPasses=0'
+                continue
+            }
+        }
         $present = ((& $run @('shell', "run-as $Package sha256sum $destination 2>/dev/null || true")) -join '').Split(' ')[0]
         if ($present -eq $localHash) { continue }
         $null = & $run @('push', $file[0], "$temp/$name")
         $existing = (& $run @('shell', "if run-as $Package test -f $destination; then echo yes; fi")) -join ''
         if ($existing -eq 'yes') { $null = & $run @('shell', "run-as $Package cp $destination $backup/$name"); $replaced.Add($destination) }
-        $null = & $run @('shell', "run-as $Package cp $temp/$name $destination")
-        $deviceHash = (& $run @('shell', 'run-as', $Package, 'sha256sum', $destination) -join '').Split(' ')[0]
+        $null = & $run @('shell', "run-as $Package cp $temp/$name $destination.staged")
+        $deviceHash = (& $run @('shell', 'run-as', $Package, 'sha256sum', "$destination.staged") -join '').Split(' ')[0]
         if ($deviceHash -ne $localHash) { throw "Staged artifact hash mismatch for $name" }
+        $deviceLength = ((& $run @('shell', 'run-as', $Package, 'stat', '-c', '%s', "$destination.staged")) -join '').Trim()
+        if ([long]$deviceLength -ne (Get-Item -LiteralPath $file[0]).Length) { throw "Staged artifact length mismatch for $name" }
+        $null = & $run @('shell', 'run-as', $Package, 'mv', "$destination.staged", $destination)
+        if ($null -ne $WeightAssembly -and $name -ceq 'Kokoro.Generator.Weights.dll') {
+            $null = & $run @('shell', "run-as $Package sh -c 'echo $localHash > $destination.activation.staged && mv $destination.activation.staged $destination.activation'")
+        }
     }
     $null = & $run @('shell', "run-as $Package truncate -s 0 $target/receipt.txt")
     $startupUid = ((& $run @('shell', 'run-as', $Package, 'id', '-u')) -join '').Trim()

@@ -2,7 +2,7 @@
 [CmdletBinding()]
 param(
     [string] $OutputDirectory = (Join-Path $PSScriptRoot '..\build\hexagon-emission\emitted'),
-    [ValidateSet('Probe','KokoroAlbertLinear16Run','KokoroAlbertLayerNorm16Run','KokoroAlbertGelu16Run','KokoroAlbertAttention16Run','KokoroAlbertEmbed16Run','KokoroAlbert16Run','KokoroAffine','KokoroAdaIn','KokoroAdaInResBlock','KokoroAdaInStatistics','KokoroAdaInIntegerCoefficients','KokoroAdaInIntegerAffine','KokoroSnakeInteger','KokoroResidualInteger','KokoroAlbertSoftmax3','KokoroAlbertAttention3','KokoroAlbertAttentionOutput3','KokoroAlbertConnectedAttention3','KokoroConvTile','KokoroLinearTile','KokoroR0Sub0','KokoroHmxLock','KokoroHmxMatrix','KokoroHmxConv','KokoroHmxConvPlanes','KokoroHmxConvPlanesLoop','KokoroPlaneCombine','KokoroPlaneCombineLoop','KokoroAdaInMoments16','KokoroAdaInMoments16Loop','KokoroAdaInTurnsCoefficients','KokoroAdaInAffineCoefficientsLoop','KokoroAdaInLeaky16','KokoroDecoderPass','KokoroDecoder16Run','KokoroHmxConvRun','KokoroResBlockRun','KokoroBranchAverageInteger','KokoroGenerator60xRun','KokoroLeakyReluInteger','KokoroVtcmQuery','KokoroDmaCopy','KokoroDmaBench','KokoroAdaInSnakeInteger','KokoroAdaInSnakeTurns','KokoroGenerator60xResidentRun','KokoroGenerator60x16Run','KokoroGeneratorTailRun','KokoroGeneratorTail16Run','KokoroGeneratorStage16TailRun','KokoroResBlock16Run','KokoroGeneratorFrontStageTailRun','KokoroGeneratorFront10x16Run','KokoroGeneratorWhole16Run','KokoroHarmonicStft16Run','KokoroHarmonicSource16Run','KokoroGeneratorWholeSource16Run','KokoroDecoderGenerator16Run')][string] $Kernel='Probe',
+    [ValidateSet('KokoroGeneratorTemplate1Run','Probe','KokoroAlbertLinear16Run','KokoroAlbertLayerNorm16Run','KokoroAlbertGelu16Run','KokoroAlbertAttention16Run','KokoroAlbertEmbed16Run','KokoroAlbert16Run','KokoroAffine','KokoroAdaIn','KokoroAdaInResBlock','KokoroAdaInStatistics','KokoroAdaInIntegerCoefficients','KokoroAdaInIntegerAffine','KokoroSnakeInteger','KokoroResidualInteger','KokoroAlbertSoftmax3','KokoroAlbertAttention3','KokoroAlbertAttentionOutput3','KokoroAlbertConnectedAttention3','KokoroConvTile','KokoroLinearTile','KokoroR0Sub0','KokoroHmxLock','KokoroHmxMatrix','KokoroHmxConv','KokoroHmxConvPlanes','KokoroHmxConvPlanesLoop','KokoroPlaneCombine','KokoroPlaneCombineLoop','KokoroAdaInMoments16','KokoroAdaInMoments16Loop','KokoroAdaInTurnsCoefficients','KokoroAdaInAffineCoefficientsLoop','KokoroAdaInLeaky16','KokoroDecoderPass','KokoroDecoder16Run','KokoroHmxConvRun','KokoroResBlockRun','KokoroBranchAverageInteger','KokoroGenerator60xRun','KokoroLeakyReluInteger','KokoroVtcmQuery','KokoroDmaCopy','KokoroDmaBench','KokoroAdaInSnakeInteger','KokoroAdaInSnakeTurns','KokoroGenerator60xResidentRun','KokoroGenerator60x16Run','KokoroGeneratorTailRun','KokoroGeneratorTail16Run','KokoroGeneratorStage16TailRun','KokoroResBlock16Run','KokoroGeneratorFrontStageTailRun','KokoroGeneratorFront10x16Run','KokoroGeneratorWhole16Run','KokoroHarmonicStft16Run','KokoroHarmonicSource16Run','KokoroGeneratorWholeSource16Run','KokoroDecoderGenerator16Run')][string] $Kernel='Probe',
     # KokoroAlbertLinear16Run / KokoroAlbertLayerNorm16Run / KokoroAlbertGelu16Run / KokoroAlbertAttention16Run / KokoroAlbertEmbed16Run / KokoroAlbert16Run (src/jobs/Kokoro.Albert16Run.ps1); LayerNorm and GELU channels = AlbertInputChannels.
     [ValidateRange(32, 2048)][int] $AlbertInputChannels = 768,
     [ValidateRange(64, 2048)][int] $AlbertOutputChannels = 768,
@@ -37,6 +37,15 @@ param(
     [ValidateSet('Accumulate','Export','Supplied','SuppliedExport','Corrected','Direct','Constants')][string] $DecoderMoments = 'Accumulate',
     [ValidateSet('Accumulate','Export','Constants')][string] $GeneratorMoments = 'Accumulate',
     [ValidateSet(1, 3, 5)][int] $ConvDilation = 1,
+    [ValidateSet(1,3)][int] $TemplateBranches = 1,
+    [switch] $TemplateAddResidual,
+    [switch] $TemplateStoreResidual,
+    [switch] $TemplateUpsample,
+    [switch] $TemplateConnectedMain,
+    [ValidateSet('Lock','Smoothstep')][string] $TemplateShape = 'Lock',
+    [ValidateSet(0,128,256,512)][int] $TemplateInputChannels = 0,
+    [ValidateRange(16,64)][int] $TemplateBlockFrames = 16,
+    [ValidateRange(0,63)][int] $TemplateInitialFrameOffset = 0,
     [switch] $ConvOutputPlanes,
     [ValidateSet(1,2)][int] $ConvWeightPlanes = 1,
     [ValidateSet('Conv','Residual','Scale')][string] $CombineMode = 'Conv',
@@ -65,6 +74,7 @@ param(
     [switch] $BypassAdaInCoefficients,
     [switch] $BypassStatisticsAndCoefficients,
     [switch] $BypassHmxCompute,
+    [switch] $ResidentPayloads,
     [switch] $ReferenceAssembly,
     [switch] $Force
 )
@@ -562,6 +572,11 @@ if($Kernel -eq 'KokoroR0Sub0') {
     . (Join-Path $PSScriptRoot '..' 'src' 'kernels' 'Kokoro.AdaInTurnsCoefficients.ps1')
     $steps=@(New-KokoroAdaInTurnsCoefficientsSteps -Channels $ConvChannels)
     $symbol='kokoro_adain_turns_coefficients'; $soname='libkokoro_adain_turns_coefficients.so'
+} elseif($Kernel -eq 'KokoroGeneratorTemplate1Run') {
+    . (Join-Path $PSScriptRoot '..\src\jobs\Kokoro.GeneratorTemplate1Run.ps1')
+    $run=New-KokoroGeneratorTemplate1RunSteps -Channels $ConvChannels -InputChannels $TemplateInputChannels -Upsample:$TemplateUpsample -ConnectedMain:$TemplateConnectedMain -Kernel $ConvKernel -Dilation $ConvDilation -Tiles $ConvTiles -Branches $TemplateBranches -AddResidual:$TemplateAddResidual -StoreResidual:$TemplateStoreResidual -Shape $TemplateShape -BlockFrames $TemplateBlockFrames -InitialFrameOffset $TemplateInitialFrameOffset
+    $steps=@($run.Steps)
+    $symbol='kokoro_generator_tail_skel_handle_invoke'; $soname='libkokoro_generator_tail_skel.so'
 } elseif($Kernel -eq 'KokoroHmxConvRun') {
     . (Join-Path $PSScriptRoot '..\src\jobs\Kokoro.HmxConvRun.ps1')
     $run=New-KokoroHmxConvRunSteps -Channels $ConvChannels -Kernel $ConvKernel -Dilation $ConvDilation -Tiles $ConvTiles
@@ -588,6 +603,12 @@ if($Kernel -eq 'KokoroR0Sub0') {
 } else {
     $steps=@(New-HexagonProbeSteps)
     $symbol='kqnn_emit_skel_handle_invoke'; $soname='libkqnn_emit_skel.so'
+}
+if ($ResidentPayloads) {
+    if (($Kernel -cne 'KokoroDecoderGenerator16Run' -and -not ($Kernel -ceq 'KokoroGeneratorTemplate1Run' -and $TemplateConnectedMain)) -or $ResidentPmuEvents) { throw 'Resident payload adapter requires the combined job or connected generator main without PMU telemetry.' }
+    . (Join-Path $PSScriptRoot '../src/jobs/Kokoro.ResidentPayload.ps1')
+    $steps=@(Add-KokoroResidentPayloadEntry -Steps $steps -Layout $run.Layout)
+    $run.Layout | Add-Member -NotePropertyName ResidentPayloads -NotePropertyValue $true -Force
 }
 if ($RegionBody) {
     # Close external control flow solely for independent encoding verification.
@@ -635,7 +656,7 @@ $emissionResult=[pscustomobject]@{PSTypeName='Kokoro.Hexagon.Emission';Kernel=$K
     Timings=[pscustomobject]@{SetupSeconds=$setupSeconds;StepsSeconds=$stepSeconds;ConversionSeconds=$conversionSeconds;
         LibrarySeconds=$librarySeconds;LayoutSeconds=$library.LayoutSeconds;EncodeSeconds=$library.EncodeSeconds;
         ReferenceSeconds=$referenceSeconds;CodeSeconds=$stageClock.Elapsed.TotalSeconds;TotalSeconds=$emissionClock.Elapsed.TotalSeconds}}
-if ($Kernel -cin 'KokoroHarmonicSource16Run','KokoroDecoder16Run','KokoroGeneratorWholeSource16Run','KokoroDecoderGenerator16Run') {
+if ($Kernel -cin 'KokoroGeneratorTemplate1Run','KokoroHarmonicSource16Run','KokoroDecoder16Run','KokoroGeneratorWholeSource16Run','KokoroDecoderGenerator16Run') {
     $emissionResult | Add-Member -NotePropertyMembers @{
         Layout=$run.Layout;Steps=$steps;Link=[pscustomobject]@{Entry=$library.Exports[$symbol];Got=$library.GotSlots}
         Buffers=[pscustomobject]@{Library=$library.Bytes;Code=$code}

@@ -20,10 +20,12 @@ function Write-KokoroProbeStage {
 $Marshal = [Runtime.InteropServices.Marshal]; $native = [IntPtr]::Zero; $opened = $false; $handle = [uint64]0
 $pins = [Collections.Generic.List[object]]::new(); $allocations = [Collections.Generic.List[object]]::new()
 $passed = $false; $stream = $null; $audio = $null
+$sharedPayloads = [Collections.Generic.List[object]]::new()
+$mappedWeights = $null
 try {
     $kv = @{}; foreach ($l in [IO.File]::ReadAllLines([IO.Path]::Combine($dir, 'spec.txt'))) { $p = $l.Split('=', 2); if ($p.Count -eq 2) { $kv[$p[0]] = $p[1] } }
     $tiles = [int]$kv.Tiles; $runs = [int]$kv.Runs; $outputBytes = [int]$kv.OutputBytes; $pcmOffset = [int]$kv.PcmOffset; $samples = [int]$kv.Samples
-    if ($tiles -lt 1 -or $tiles -gt 1024 -or $runs -lt 1 -or $runs -gt 20 -or $samples -lt 1 -or $pcmOffset + 2 * $samples -gt $outputBytes) { throw 'Spec out of range' }
+    if ($tiles -lt 1 -or $tiles -gt 1024 -or $runs -lt 1 -or $runs -gt 121 -or $samples -lt 1 -or $pcmOffset + 2 * $samples -gt $outputBytes) { throw 'Spec out of range' }
     $lines.Add("Tiles=$tiles Runs=$runs Samples=$samples")
     $load = { param([string]$Name, [object[]]$Arguments)
         $ast = [Management.Automation.Language.Parser]::ParseFile([IO.Path]::Combine($root, $Name), [ref]$null, [ref]$null)
@@ -79,22 +81,72 @@ try {
     $handle = [uint64]$oa[1]; $opened = $true
 
     $act = [IO.File]::ReadAllBytes([IO.Path]::Combine($dir, 'activations.bin'))
-    $wts = [IO.File]::ReadAllBytes([IO.Path]::Combine($dir, 'weights.bin'))
+    if ($kv.ContainsKey('WeightAssembly')) {
+        if (-not $kv.ContainsKey('ResidentPayloads')) { throw 'Mapped weight assembly requires resident payload transport.' }
+        $weightLoader = [Reflection.Assembly]::LoadFile([IO.Path]::Combine($dir, 'Kokoro.MappedPayload.dll'))
+        $weightType = $weightLoader.GetType('KokoroMappedPayload', $true)
+        $weightIdentity = [Guid]$kv.WeightIdentity
+        $mapClock = [Diagnostics.Stopwatch]::StartNew()
+        $mappedWeights = $weightType::new([IO.Path]::Combine($dir, 'Kokoro.Generator.Weights.dll'), [long]$kv.WeightOffset, [long]$kv.WeightBytes, [long]$kv.WeightAssemblyBytes, [long]$kv.WeightIdentityOffset, ($weightIdentity.ToByteArray()))
+        $mapClock.Stop()
+        $weightBytes = [int]$mappedWeights.Bytes
+        $wts = $null
+        $lines.Add("WeightAssembly=True LaunchMapMs=$($mapClock.Elapsed.TotalMilliseconds.ToString('F3',$inv)) LaunchHashPasses=0")
+    } else {
+        $wts = [IO.File]::ReadAllBytes([IO.Path]::Combine($dir, 'weights.bin'))
+        $weightBytes = $wts.Length
+    }
     $tbl = [IO.File]::ReadAllBytes([IO.Path]::Combine($dir, 'tables.bin'))
     $inputBytes = if ($kv.InputBytes) { [long]$kv.InputBytes } else { $tiles * 8192L }
     if ($act.Length -ne $inputBytes) { throw 'Input length' }
     $config = [BitConverter]::GetBytes([uint32]$tiles)
+    $resident = $kv.ContainsKey('ResidentPayloads')
+    $mappingMs = 0.0
+    if ($resident) {
+        $mappingClock = [Diagnostics.Stopwatch]::StartNew()
+        $sharedWeights = if ($null -ne $mappedWeights) { & $abi.NewSharedPayload $native $null ($mappedWeights.GetPointer()) $weightBytes } else { & $abi.NewSharedPayload $native $wts }
+        $sharedPayloads.Add($sharedWeights)
+        $sharedTables = & $abi.NewSharedPayload $native $tbl; $sharedPayloads.Add($sharedTables)
+        $config = [byte[]]::new(20)
+        $fields = [uint32[]]@($tiles,$sharedWeights.RemoteAddress,$weightBytes,$sharedTables.RemoteAddress,$tbl.Length)
+        [Buffer]::BlockCopy($fields,0,$config,0,20)
+        $mappingClock.Stop(); $mappingMs = $mappingClock.Elapsed.TotalMilliseconds
+        $lines.Add("ResidentPayloads=True MappingMs=$($mappingMs.ToString('F3',$inv)) WeightsBytes=$weightBytes TablesBytes=$($tbl.Length) Allocation=RpcmemSystemUncached Mapping=RemoteMemMapStatic OncePerSession=True")
+    }
     $ticks = [Collections.Generic.List[long]]::new(); $pcmHash = $null; $allOk = $true; $pcm = $null
+    $requestLifetime = $kv.ContainsKey('RequestLifetime')
+    $requestClock = [Diagnostics.Stopwatch]::StartNew()
+    $requestProcess = [Environment]::ProcessId
+    $requestThread = [Environment]::CurrentManagedThreadId
+    $requestFloats = $null
+    if ($requestLifetime) { $lines.Add('RequestLifetime=True ProcessCount=1 FastRpcOpenCount=1 PayloadMapCount=2 Warmups=1 Requests=30') }
     for ($run = 0; $run -lt $runs; $run++) {
-        $out = [byte[]]::new($outputBytes)
-        $bufs = @($config, $act, $wts, $tbl, $out)
-        $argBlock = $Marshal::AllocHGlobal(16 * $bufs.Count); $allocations.Add($argBlock)
-        for ($i = 0; $i -lt $bufs.Count; $i++) { $Marshal::WriteIntPtr($argBlock, 16 * $i, (& $pin $bufs[$i])); $Marshal::WriteInt64($argBlock, 16 * $i + 8, [long]$bufs[$i].Length) }
+        $idleSeconds = if ($requestLifetime -and $run -gt 0) { @(0,1,5)[($run-1)%3] } else { 0 }
+        if ($idleSeconds) { [Threading.Thread]::Sleep(1000*$idleSeconds) }
+        if ([Environment]::ProcessId -ne $requestProcess -or [Environment]::CurrentManagedThreadId -ne $requestThread) { throw 'Measurement process or runspace thread changed.' }
+        if ($requestLifetime) { $lines.Add("Request=$run GapSeconds=$idleSeconds ElapsedMs=$($requestClock.Elapsed.TotalMilliseconds.ToString('F3',$inv)) SameProcess=True SameSession=True") }
+        $phaseClock = [Diagnostics.Stopwatch]::StartNew()
+        $setupEntry = $phaseClock.ElapsedTicks
+        if (-not $requestLifetime -or $run -eq 0) {
+            $out = [byte[]]::new($outputBytes)
+            $bufs = if ($resident) { @($config,$act,$out) } else { @($config, $act, $wts, $tbl, $out) }
+            $argBlock = $Marshal::AllocHGlobal(16 * $bufs.Count); $allocations.Add($argBlock)
+            for ($i = 0; $i -lt $bufs.Count; $i++) { $Marshal::WriteIntPtr($argBlock, 16 * $i, (& $pin $bufs[$i])); $Marshal::WriteInt64($argBlock, 16 * $i + 8, [long]$bufs[$i].Length) }
+        }
+        $scalars = if ($resident) { [uint32]0x03020100 } else { [uint32]0x02040100 }
+        $invokeArguments = [object[]]@($handle, $scalars, $argBlock)
+        $invokeEntry = $phaseClock.ElapsedTicks
         $sw = [Diagnostics.Stopwatch]::StartNew()
-        $rc = [int]$invoke.DynamicInvoke([object[]]@($handle, [uint32]0x02040100, $argBlock))
+        $rc = [int]$invoke.DynamicInvoke($invokeArguments)
         $sw.Stop()
         $stage = [BitConverter]::ToInt32($out, 36); $done = [BitConverter]::ToInt32($out, 44)
         $t0 = [BitConverter]::ToUInt64($out, 0); $t1 = [BitConverter]::ToUInt64($out, 8); $dt = [long]($t1 - $t0)
+        if ($resident) {
+            $entryTick = [BitConverter]::ToUInt64($out,64); $returnTick = [BitConverter]::ToUInt64($out,72)
+            if ($entryTick -gt $t0 -or $returnTick -lt $t1) { throw 'Skel timing order is invalid.' }
+            $lines.Add("Run=$run SkelEntryTicks=$entryTick RegionStartTicks=$t0 RegionEndTicks=$t1 SkelReturnTicks=$returnTick EntryToRegionMs=$((($t0-$entryTick)/19200.0).ToString('F3',$inv)) RegionToReturnMs=$((($returnTick-$t1)/19200.0).ToString('F3',$inv))")
+            if ($run -eq 0) { $lines.Add("FirstCallIncludingMappingMs=$(($mappingMs+$sw.Elapsed.TotalMilliseconds+($invokeEntry-$setupEntry)*1000.0/[Diagnostics.Stopwatch]::Frequency).ToString('F3',$inv))") }
+        }
         $pcmBytes = [byte[]]::new(2 * $samples); [Buffer]::BlockCopy($out, $pcmOffset, $pcmBytes, 0, $pcmBytes.Length)
         $hash = [Convert]::ToHexString([Security.Cryptography.SHA256]::HashData($pcmBytes))
         if ($run -eq 0) {
@@ -105,14 +157,69 @@ try {
         }
         if ($rc -ne 0 -or $stage -ne 7 -or $done -ne 1 -or $hash -ne $pcmHash) { $allOk = $false }
         if ($rc -eq 0 -and $done -eq 1) { $ticks.Add($dt) }
-        $lines.Add("Run=$run InvokeRc=$rc Stage=$stage Done=$done RegionTicks=$dt InvokeMs=$($sw.Elapsed.TotalMilliseconds.ToString('F3', $inv)) PcmSHA256=$hash")
+        # Preserve the job-defined timer slots on every invocation. Their meaning
+        # belongs to the emitted job; template 1 uses these for convolution only.
+        $timer48 = if ($out.Length -ge 64) { [BitConverter]::ToUInt64($out, 48) } else { [uint64]0 }
+        $timer56 = if ($out.Length -ge 64) { [BitConverter]::ToUInt64($out, 56) } else { [uint64]0 }
+        $timer64 = if ($out.Length -ge 80) { [BitConverter]::ToUInt64($out, 64) } else { [uint64]0 }
+        $timer72 = if ($out.Length -ge 80) { [BitConverter]::ToUInt64($out, 72) } else { [uint64]0 }
+        $layerTimers = ''
+        if ($out.Length -ge 1024 -and [BitConverter]::ToUInt32($out,80) -eq 0x314e4547L) {
+            $layerTicks = [long[]]::new(36)
+            for ($layer = 0; $layer -lt 36; $layer++) {
+                $at = 96 + 16*$layer
+                $layerTicks[$layer] = [long][BitConverter]::ToUInt64($out,$at+8) - [long][BitConverter]::ToUInt64($out,$at)
+            }
+            $layerTimers = ' HmxLayerTicks=' + ($layerTicks -join ',')
+        }
+        $lines.Add("Run=$run InvokeRc=$rc Stage=$stage Done=$done RegionTicks=$dt Timer48=$timer48 Timer56=$timer56 Timer64=$timer64 Timer72=$timer72 InvokeMs=$($sw.Elapsed.TotalMilliseconds.ToString('F3', $inv)) PcmSHA256=$hash$layerTimers")
         [IO.File]::WriteAllLines($receipt, $lines)
+        if (-not $allOk) { throw 'Invocation or PCM parity failed; stopping before playback.' }
+        if ($requestLifetime) {
+            if ($null -eq $audio) {
+                $audio = & $load 'Audio.AAudio.psm1' @($abi)
+                $requestFloats = [float[]]::new($samples)
+                for ($j=0;$j -lt $samples;$j++) { $requestFloats[$j]=[float]($pcm[$j]/32768.0) }
+            }
+            $stream = & $audio.Open 24000 1
+            $playClock = [Diagnostics.Stopwatch]::StartNew()
+            $written = & $audio.Write $stream $requestFloats $playClock
+            $drain = & $audio.Drain $stream 10000
+            $lines.Add("Request=$run Played=True WrittenFrames=$written DrainComplete=$($drain.Complete) XRunCount=$($drain.XRunCount) DrainAtMs=$($requestClock.Elapsed.TotalMilliseconds.ToString('F3',$inv))")
+            $closeRc = & $audio.Close $stream; $stream=$null
+            if (-not $drain.Complete -or $drain.XRunCount -ne 0 -or $closeRc -ne 0) { throw 'Request audio drain, xrun or close gate failed.' }
+            [IO.File]::WriteAllLines($receipt,$lines)
+        }
         if ($rc -ne 0) { break }
+    }
+    if ($requestLifetime) {
+        $lines.Add("RequestsComplete=30 RequestSpanMs=$($requestClock.Elapsed.TotalMilliseconds.ToString('F3',$inv))")
+        if ($requestClock.Elapsed.TotalSeconds -lt 120) { throw 'Request measurement was shorter than two minutes.' }
+    }
+    if ($allOk -and $kv.ContainsKey('AttributeBuffers')) {
+        # The existing HmxConvRun dispatch returns AEE_EUNSUPPORTED (20) before
+        # reading buffers for method 127. Keep its four-input/one-output ABI.
+        # These calls produce no PCM and never replace the synthesis output.
+        $cases = @(
+            [pscustomobject]@{Name='Full'; Lengths=[long[]]@(4,$act.Length,$wts.Length,$tbl.Length,$out.Length)},
+            [pscustomobject]@{Name='Small'; Lengths=[long[]]@(4,4,4,4,4)},
+            [pscustomobject]@{Name='WithoutWeights'; Lengths=[long[]]@(4,$act.Length,4,$tbl.Length,$out.Length)})
+        for ($probeRun = 0; $probeRun -lt 6; $probeRun++) {
+            foreach ($case in $cases) {
+                for ($i = 0; $i -lt 5; $i++) { $Marshal::WriteInt64($argBlock, 16 * $i + 8, $case.Lengths[$i]) }
+                $probeArguments = [object[]]@($handle, [uint32]0x7F040100, $argBlock)
+                $probeClock = [Diagnostics.Stopwatch]::StartNew()
+                $probeRc = [int]$invoke.DynamicInvoke($probeArguments)
+                $probeClock.Stop()
+                $lines.Add("BufferProbe=$($case.Name) Run=$probeRun InvokeRc=$probeRc InvokeMs=$($probeClock.Elapsed.TotalMilliseconds.ToString('F3', $inv))")
+                if ($probeRc -ne 20) { throw 'Buffer attribution dispatch did not return AEE_EUNSUPPORTED.' }
+            }
+        }
     }
     if ($ticks.Count) { $sorted = $ticks.ToArray(); [Array]::Sort($sorted); $median = $sorted[[int][math]::Floor($sorted.Count / 2)]
         $lines.Add("MedianRegionTicks=$median MedianRegionMs=$(($median / 19200.0).ToString('F3', $inv)) AudioSeconds=$(($samples / 24000.0).ToString('F3', $inv))") }
     # Diagnostic jobs without PCM declare Samples=1: nothing to play.
-    if ($allOk -and $null -ne $pcm -and $samples -gt 1) {
+    if (-not $requestLifetime -and $allOk -and $null -ne $pcm -and $samples -gt 1) {
         $audio = & $load 'Audio.AAudio.psm1' @($abi)
         $stream = & $audio.Open 24000 1
         $floats = [float[]]::new($samples); for ($j = 0; $j -lt $samples; $j++) { $floats[$j] = [float]($pcm[$j] / 32768.0) }
@@ -126,6 +233,15 @@ try {
 catch { $lines.Add('Error=' + $_.Exception.Message.Replace("`r", ' ').Replace("`n", ' ')) }
 finally {
     if ($null -ne $stream -and $null -ne $audio) { try { $null = & $audio.Close $stream } catch { $lines.Add('CloseError=' + $_.Exception.Message) } }
+    foreach ($payload in $sharedPayloads) {
+        try {
+            $unmapRc = $payload.Unmap.Invoke(3,[uint64]$payload.RemoteAddress,[UIntPtr]::new([uint64]$payload.MappedBytes))
+            $lines.Add("PayloadUnmapRc=$unmapRc")
+            if ($unmapRc -eq 0) { $payload.Free.Invoke($payload.Pointer) } else { $passed=$false }
+        }
+        catch { $passed=$false; $lines.Add('PayloadCleanupError=' + $_.Exception.Message) }
+    }
+    if ($null -ne $mappedWeights) { $mappedWeights.Close() }
     if ($opened) { $null = $close.DynamicInvoke([object[]]@($handle)) }
     foreach ($g in $pins) { $g.Free() }
     foreach ($a in $allocations) { $Marshal::FreeHGlobal($a) }

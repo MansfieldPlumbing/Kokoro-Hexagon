@@ -74,6 +74,21 @@ against an uninterrupted run. Supplied decoder coefficients are already
 and reduced chunk execution from about 13.4 to 2.9 ms. Producing those coefficients
 on the phone and extending the modes to the generator remain open.
 
+The generator-template component wrappers, isolated probes and fixed calibration
+are temporary integration scaffolding. They do not establish the resident
+architecture or a requirement for runtime long-horizon normalization statistics.
+The student is intended to supply normalization controls; that producer remains
+unverified until measured through the connected generator. First admit the
+connected generator's bounded VTCM working set, input/output contract and
+whole-sentence PCM, then integrate the dynamic frontend through that boundary.
+Replace standalone diagnostic wrappers with the connected fixed loop schedule;
+preserve their receipts and reuse only the kernels needed by the connected path.
+The connected generator uses the phase lock with reversed increments as its
+Snake replacement. Only NaN/Inf automatically stops that run; PCM SNR is
+reported without a quality threshold, and listening to the WAV pairs decides
+quality. Smoothstep remains an existing parameter value, outside this build's
+candidate and gate. Reuse the existing fixed normalization constants unchanged.
+
 Compare progressively smaller and differently placed frame cuts with the same
 linguistic controls, style and randomness. Report sample ownership, boundary error,
 listening, peak memory and timing. Native STFT/iSTFT overlap-add is retained; no
