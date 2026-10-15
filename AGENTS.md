@@ -5,6 +5,10 @@ Follow [the shared agent rules](../Pwsh-Development/AGENTS.md). This file holds 
 
 ## Start here
 
+Use `C:\Dev\Kokoro-Hexagon` on branch `main`, one task at a time. Create no
+additional Kokoro-Hexagon worktree unless Scott is running two agents at once.
+Retain branches as recoverable history when consolidating checkouts.
+
     pwsh -NoProfile -File ./Invoke-KokoroDevelopment.ps1
 
 Run `Verify` before every commit; CI runs the same command on every push.
