@@ -902,6 +902,7 @@ function Render-KokoroStudentCopy {
             OriginalMs=$rendered[0].Milliseconds;CopyMs=$rendered[1].Milliseconds;OriginalMsPerAudioSecond=$rendered[0].Milliseconds/$seconds;CopyMsPerAudioSecond=$rendered[1].Milliseconds/$seconds;
             PairPath=$pairPath;PairSHA256=(Get-FileHash $pairPath).Hash;OriginalSHA256=$rendered[0].SHA256;CopySHA256=$rendered[1].SHA256;
             ReferenceSourceSHA256=$sourceHash;ReferenceKernelSHA256=$dllHash;StudentKernelSHA256=$kernel.SHA256;Threads=$Threads;Seed=$Seed;VoiceRow=25;
+            ReferenceKind='Selected-bank feature reconstruction; not untouched stock fresh-text synthesis';
             Scope=$(if($null -eq $ReplayVectors){'Windows offline FP32 whole selected target decoder plus source/generator; live AdaIN, matched original durations/F0/N/style/noise; COPY only, no RESIDUAL'}else{'Windows offline FP32 original selected features versus student native opcode replay; matched durations/F0/N/style/noise, live AdaIN, gain and duration controls'});
             TimingDifference='Single offline host runs, original first; unlike SM8550 int8 DSP generator-only timing. Historical approximate reference 40 ms/audio-second, separate preserved run 41.918118, combined 46.867294.'}
         $results.Add($result);$results.ToArray() | Export-Clixml -LiteralPath (Join-Path $out 'copy-render.clixml')
@@ -1360,19 +1361,69 @@ function New-KokoroStudentSelectedReplay {
     return $script:StudentSelectedReplay
 }
 
+function Read-KokoroStudentStoredReplay {
+    param([Parameter(Mandatory)][Collections.IDictionary]$Selection,
+        [Parameter(Mandatory)][string]$StoreDirectory,[Parameter(Mandatory)][string]$OutputDirectory)
+    $root=Split-Path -Parent $PSScriptRoot;$out=[IO.Path]::GetFullPath($OutputDirectory)
+    if(-not $out.StartsWith((Join-Path $root 'build')+[IO.Path]::DirectorySeparatorChar,[StringComparison]::OrdinalIgnoreCase) -or (Test-Path -LiteralPath $out)){throw 'Choose a fresh stored-replay directory under build/.'}
+    $store=Import-Clixml (Join-Path $StoreDirectory 'compact-store.clixml')
+    if($store.Units -ne 2429833 -or $store.Bar -ne 70 -or $store.MinimumFeatureSNR -lt 70){throw 'Listening gate requires the complete 70 dB compact store.'}
+    foreach($pin in @(@($store.LibraryPath,$store.LibrarySHA256),@($store.KeyPath,$store.KeySHA256),@($store.DirectionsPath,$store.DirectionsSHA256))){if((Get-FileHash $pin[0]).Hash -cne $pin[1]){throw 'Stored replay library differs.'}}
+    $orderPath=Join-Path $root 'build/unit-bank/order.json'
+    if((Get-FileHash $orderPath).Hash -cne '6FB62AA7037808BAF9AA17D14AB0F5D5CD64B4733419B991EB3555C6C8983E64'){throw 'Stored replay bank order differs.'}
+    $order=@(Get-Content $orderPath -Raw|ConvertFrom-Json);$prefix=[int[]]::new($order.Count+1)
+    for($sentence=0;$sentence -lt $order.Count;$sentence++){$prefix[$sentence+1]=$prefix[$sentence]+$order[$sentence].phonemes.Length+2}
+    $required=[Collections.Generic.HashSet[int]]::new();$donors=[Collections.Generic.HashSet[int]]::new()
+    foreach($pick in $Selection.picks){foreach($unit in $pick.path){[void]$required.Add($prefix[[int]$unit.s]+[int]$unit.i);[void]$donors.Add([int]$unit.s)}}
+    [void][IO.Directory]::CreateDirectory($out);$kernel=Get-KokoroStudentKernel $out
+    $null=Test-KokoroStudentReplay (Get-KokoroStudentCodec $kernel) $out
+    $codec=Get-KokoroStudentCodec $kernel
+    $read=$kernel.Assembly.GetType('KokoroStudentClimber',$true).GetMethod('ReadLibrary').CreateDelegate([Func[string,int,short[]]])
+    $library=$read.Invoke($store.LibraryPath,[int](512*$store.Exemplars))
+    $key=Read-KokoroStudentNative $store.KeyPath ([float]) 4
+    $directions=Read-KokoroStudentNative $store.DirectionsPath ([float]) 4
+    $vectors=[Collections.Generic.Dictionary[int,float[]]]::new();$records=[Collections.Generic.List[object]]::new()
+    foreach($chunk in @($store.Chunks|Sort-Object First)){
+        $sentences=@($donors|Where-Object {$prefix[$_] -ge $chunk.First -and $prefix[$_] -lt $chunk.First+$chunk.Units}|Sort-Object)
+        if(-not $sentences.Count){continue}
+        if((Get-FileHash $chunk.ProgramPath).Hash -cne $chunk.ProgramSHA256 -or (Get-FileHash $chunk.OffsetPath).Hash -cne $chunk.OffsetSHA256){throw 'Stored replay program chunk differs.'}
+        $programs=[IO.File]::ReadAllBytes($chunk.ProgramPath);$offsets=Read-KokoroStudentNative $chunk.OffsetPath ([long]) 8
+        if($offsets.Length -ne $chunk.Units+1 -or $offsets[0] -ne 0 -or $offsets[-1] -ne $programs.Length){throw 'Stored replay offsets differ.'}
+        foreach($sentence in $sentences){
+            $first=$prefix[$sentence];$end=$prefix[$sentence+1]
+            if($end -gt $chunk.First+$chunk.Units){throw 'Stored replay partition splits a source sentence.'}
+            $previous=[float[]]::new(0)
+            for($id=$first;$id -lt $end;$id++){
+                $local=$id-$chunk.First;$start=$offsets[$local];$length=$offsets[$local+1]-$start
+                if($start -lt 0 -or $length -lt 5 -or $start+$length -gt $programs.Length){throw 'Stored replay program extent differs.'}
+                $program=[byte[]]::new($length);[Array]::Copy($programs,[int]$start,$program,0,$program.Length)
+                $previous=$codec.Replay.Invoke($program,$library,$key,$directions,$previous).Values
+                if($required.Contains($id)){$vectors.Add($id,$previous)}
+            }
+            $records.Add([pscustomobject]@{Sentence=$sentence;Units=$end-$first;ProgramSHA256=$chunk.ProgramSHA256;MinimumFeatureSNR=$store.MinimumFeatureSNR;Bar=$store.Bar})
+        }
+    }
+    if($vectors.Count -ne $required.Count){throw 'Stored selected replay is incomplete.'}
+    $records.ToArray()|Export-Clixml (Join-Path $out 'stored-replay.clixml')
+    $script:StudentSelectedReplay=[pscustomobject]@{Vectors=$vectors;Records=$records.ToArray();Kernel=$kernel;Directory=$out;StoreDirectory=$StoreDirectory}
+    return $script:StudentSelectedReplay
+}
+
 function Invoke-KokoroStudent {
     [CmdletBinding()]
     param([ValidateSet('Measure','Render','Replay','Climb')][string]$Step='Measure',[string]$BankPath,[Parameter(Mandatory)][string]$OutputDirectory,
         [ValidateRange(1,64)][int]$Threads=4,[ValidateRange(1,16)][int]$K=4,[ValidateRange(0,1000000)][int]$SentenceLimit=0,
         [string]$MeasurementDirectory,[ValidateSet('CopyOnly')][string]$Replay='CopyOnly',[int[]]$Targets=(1..9),[switch]$KernelOnly,[string]$LibraryDirectory,[ValidateRange(0,44)][int]$ChunkLimit=0,[switch]$Finalize,[string]$ClimbDirectory,
-        [string]$Text,[switch]$PrepareOnly,[Collections.IDictionary]$SelectedUnits=$null,[switch]$StudentReplay,[ValidateRange(0.25,4)][float]$Intensity=1,[ValidateRange(0.5,2)][double]$DurationScale=1,[ValidateRange(100,1000000)][int]$SelectionSentences=1000000,[switch]$ReuseReplay,[string]$ResumeDirectory,[switch]$CompareOriginal,[Collections.IDictionary]$TokenFrames=$null,[string]$DriverDirectory,[string]$DriverSHA256)
+        [string]$Text,[switch]$PrepareOnly,[Collections.IDictionary]$SelectedUnits=$null,[switch]$StudentReplay,[ValidateRange(0.25,4)][float]$Intensity=1,[ValidateRange(0.5,2)][double]$DurationScale=1,[ValidateRange(100,1000000)][int]$SelectionSentences=1000000,[switch]$ReuseReplay,[string]$ResumeDirectory,[switch]$CompareOriginal,[Collections.IDictionary]$TokenFrames=$null,[string]$DriverDirectory,[string]$DriverSHA256,[string]$StoreDirectory)
     switch($Step){
         'Measure'{Measure-KokoroStudentStructure -BankPath $BankPath -OutputDirectory $OutputDirectory -Threads $Threads -K $K -SentenceLimit $SentenceLimit}
         'Render'{
             if($PrepareOnly){New-KokoroStudentTextSelection -Text $Text -OutputDirectory $OutputDirectory -SelectionSentences $SelectionSentences -DriverDirectory $DriverDirectory -DriverSHA256 $DriverSHA256}
             elseif($StudentReplay){
-                if($null -eq $SelectedUnits){throw 'Student replay render requires a typed selected-unit record.'}
-                if($ReuseReplay){$state=$script:StudentSelectedReplay}else{$state=New-KokoroStudentSelectedReplay -Selection $SelectedUnits -OutputDirectory ($OutputDirectory+'-replay') -LibraryDirectory $LibraryDirectory}
+                if($null -eq $SelectedUnits){$SelectedUnits=Import-Clixml (Join-Path (Split-Path -Parent $PSScriptRoot) 'build/precomputed-decoder-20261014/selection.clixml')}
+                if($ReuseReplay){$state=$script:StudentSelectedReplay}
+                elseif($StoreDirectory){$state=Read-KokoroStudentStoredReplay -Selection $SelectedUnits -StoreDirectory $StoreDirectory -OutputDirectory ($OutputDirectory+'-replay')}
+                else{$state=New-KokoroStudentSelectedReplay -Selection $SelectedUnits -OutputDirectory ($OutputDirectory+'-replay') -LibraryDirectory $LibraryDirectory}
                 Render-KokoroStudentCopy -BankPath $BankPath -OutputDirectory $OutputDirectory -MeasurementDirectory $MeasurementDirectory -Threads $Threads -Targets $Targets -SelectedUnits $SelectedUnits -ReplayVectors $state.Vectors -OnlyCandidate:(!$CompareOriginal) -Intensity $Intensity -DurationScale $DurationScale -TokenFrames $TokenFrames
             }
             else{Render-KokoroStudentCopy -BankPath $BankPath -OutputDirectory $OutputDirectory -MeasurementDirectory $MeasurementDirectory -Threads $Threads -Targets $Targets -SelectedUnits $SelectedUnits}

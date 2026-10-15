@@ -99,3 +99,10 @@ the generator still uses live AdaIN in this diagnostic. `Intensity` is explicit
 output gain, `DurationScale` changes duration, and `TokenFrames` specifies even
 300-sample frame counts for individual selected tokens. These controls do not
 establish learned expression or the pending CONST control gate.
+
+`StoreDirectory` selects a completed 70 dB compact store for native replay.
+Its pinned libraries, program chunks and offsets are checked before use.
+Each donor sentence is replayed from its own beginning so COPY-previous and
+DIRECTION retain their original state. Omitting `SelectedUnits` uses the nine
+preserved held-out selections. This consumes the saved programs without
+repeating the climb or persisting expanded feature tracks.

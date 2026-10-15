@@ -62,6 +62,7 @@ twice, or written as a scratch script, is a missing command: add it here.
     Reuses the existing selector; SelectionSentences bounds an explicitly labelled preview. No new JSON.
     DriverDirectory plus DriverSHA256 selects an alternative pinned phonemizer for controlled tests.
     StudentReplay renders SelectedUnits at the 70 dB feature bar. Intensity is output gain;
+    StoreDirectory replays a completed compact store; omitted SelectedUnits uses the nine held-out selections.
     DurationScale changes token durations and stretches F0/N without changing their values.
                               Offline student opcode loop: real exemplars and direction medoids. -Path selects the bank.
                               Typed results; read-only bank; no phone. -h prints entrypoint help.
