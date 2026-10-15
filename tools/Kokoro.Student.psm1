@@ -5,6 +5,20 @@ $ErrorActionPreference='Stop'
 # Numeric work is lowered from these PowerShell classes. Libraries select real
 # occurrences; sums below evaluate total squared differences, never centroids.
 class KokoroStudentMath {
+    static [short[]] Pcm16([float[]] $samples) {
+        $result=[short[]]::new($samples.Length)
+        for($i=0;$i -lt $samples.Length;$i++) {
+            if(-not [float]::IsFinite($samples[$i])) { throw [ArgumentException]::new('Nonfinite PCM.') }
+            $value=[Math]::Round([double]$samples[$i]*32768.0)
+            $result[$i]=[short][Math]::Clamp($value,-32768.0,32767.0)
+        }
+        return $result
+    }
+    static [float[]] PcmFloat([short[]] $samples) {
+        $result=[float[]]::new($samples.Length)
+        for($i=0;$i -lt $samples.Length;$i++) { $result[$i]=[float]([double]$samples[$i]/32768.0) }
+        return $result
+    }
     static [void] Expand([short[]] $quantized, [float[]] $scales, [int] $units, [float[]] $vectors, [int] $first, [double[]] $energy) {
         if ($quantized.Length -ne 512*$units -or $scales.Length -ne 512 -or $first -lt 0 -or $first+$units -gt $energy.Length -or $vectors.Length -ne 512*$energy.Length) { throw [ArgumentException]::new('Bank vector extent mismatch.') }
         for ($unit=0; $unit -lt $units; $unit++) {
@@ -92,16 +106,16 @@ class KokoroStudentDirectionWorker {
                 $score=[double]$count*$norm-[double]2*$dot
                 if ($score -lt $best -or ($score -eq $best -and ($medoid -lt 0 -or $candidate -lt $medoid))) { $best=$score;$medoid=$candidate }
             }
-            $error=[double]0;$medoidBase=$medoid*512
+            $squaredError=[double]0;$medoidBase=$medoid*512
             for ($at=$firstAt; $at -lt $lastAt; $at++) {
                 $base=$this.Order[$at]*512
                 for ($channel=0; $channel -lt 512; $channel++) {
                     $direction=[double]$this.Vectors[$base+$channel]-[double]$this.Vectors[$base-512+$channel]
                     $selected=[double]$this.Vectors[$medoidBase+$channel]-[double]$this.Vectors[$medoidBase-512+$channel]
-                    $difference=$direction-$selected;$error+=$difference*$difference
+                    $difference=$direction-$selected;$squaredError+=$difference*$difference
                 }
             }
-            $this.Medoids[$group]=$medoid;$this.Energy[$group]=$signal;$this.Errors[$group]=$error;$this.Completed=$group-$this.First+1
+            $this.Medoids[$group]=$medoid;$this.Energy[$group]=$signal;$this.Errors[$group]=$squaredError;$this.Completed=$group-$this.First+1
         }
     }
 }
@@ -286,7 +300,7 @@ function Measure-KokoroStudentStructure {
         else{$ratios[$unit]=$bank.Energy[$unit]/$errors[$unit*$K]}
     }
     $pairNames=@($bank.PairGroups.Keys | Where-Object {$bank.PairGroups[$_].Count -ge 20} | Sort-Object -CaseSensitive)
-    $selectedGroups=[Collections.Generic.List[object]]::new();foreach($name in $pairNames){$selectedGroups.Add($bank.PairGroups[$name])}
+    $selectedGroups=[Collections.Generic.List[object]]::new();foreach($pairName in $pairNames){$selectedGroups.Add($bank.PairGroups[$pairName])}
     $directions=ConvertTo-KokoroStudentGroups $selectedGroups.ToArray();$medoids=[int[]]::new($pairNames.Count);$directionEnergy=[double[]]::new($pairNames.Count);$directionErrors=[double[]]::new($pairNames.Count)
     $workers.Clear();$tasks.Clear()
     for($index=0;$index -lt $Threads;$index++){
@@ -318,11 +332,184 @@ function Measure-KokoroStudentStructure {
     return $report
 }
 
+function Write-KokoroStudentWave {
+    param([string]$Path,[short[]]$Samples)
+    $stream=[IO.File]::Open($Path,[IO.FileMode]::CreateNew,[IO.FileAccess]::Write)
+    $writer=[IO.BinaryWriter]::new($stream)
+    try {
+        $writer.Write([Text.Encoding]::ASCII.GetBytes('RIFF'));$writer.Write([int](36+2*$Samples.Length))
+        $writer.Write([Text.Encoding]::ASCII.GetBytes('WAVEfmt '));$writer.Write([int]16)
+        $writer.Write([short]1);$writer.Write([short]1);$writer.Write([int]24000);$writer.Write([int]48000)
+        $writer.Write([short]2);$writer.Write([short]16);$writer.Write([Text.Encoding]::ASCII.GetBytes('data'));$writer.Write([int](2*$Samples.Length))
+        $raw=[byte[]]::new(2*$Samples.Length);[Buffer]::BlockCopy($Samples,0,$raw,0,$raw.Length);$writer.Write($raw)
+    } finally {$writer.Dispose();$stream.Dispose()}
+    $header=[IO.File]::ReadAllBytes($Path)
+    if($header.Length -ne 44+2*$Samples.Length -or [BitConverter]::ToInt16($header,20) -ne 1 -or [BitConverter]::ToInt32($header,24) -ne 24000){throw 'PCM16 WAV verification failed.'}
+}
+
+function Render-KokoroStudentCopy {
+    [CmdletBinding()]
+    param([string]$BankPath,[Parameter(Mandatory)][string]$OutputDirectory,[string]$MeasurementDirectory,
+        [ValidateRange(2,64)][int]$Threads=4,[int[]]$Targets=(1..9))
+    $root=Split-Path -Parent $PSScriptRoot
+    if(-not $BankPath){$BankPath=Join-Path $root 'build/unit-bank'}
+    if(-not $MeasurementDirectory){$MeasurementDirectory=Join-Path $root 'build/student-20261015-full'}
+    $out=[IO.Path]::GetFullPath($OutputDirectory)
+    if(-not $out.StartsWith((Join-Path $root 'build')+[IO.Path]::DirectorySeparatorChar,[StringComparison]::OrdinalIgnoreCase) -or (Test-Path -LiteralPath $out)){throw 'Choose a fresh student directory under build/.'}
+    if($Targets.Count -eq 0 -or @($Targets | Where-Object {$_ -lt 1 -or $_ -gt 9}).Count -or @($Targets | Select-Object -Unique).Count -ne $Targets.Count){throw 'Targets must be distinct members of 1..9.'}
+    [void][IO.Directory]::CreateDirectory($out)
+    $kernel=Get-KokoroStudentKernel $out;$null=Test-KokoroStudentKernel $kernel
+    $studentMath=$kernel.Assembly.GetType('KokoroStudentMath',$true)
+    $pcm16=$studentMath.GetMethod('Pcm16').CreateDelegate([Func[float[],short[]]])
+    $pcmFloat=$studentMath.GetMethod('PcmFloat').CreateDelegate([Func[short[],float[]]])
+    $testPcm=$pcm16.Invoke([float[]]@(-2,-1,0,0.5,1,2))
+    if(-not [Linq.Enumerable]::SequenceEqual[short]($testPcm,[short[]]@(-32768,-32768,0,16384,32767,32767))){throw 'PCM16 saturation check failed.'}
+    $sourcePath=Join-Path $root 'tools/Invoke-KokoroPrecomputedDecoder.ps1'
+    $sourceHash=(Get-FileHash $sourcePath).Hash
+    if($sourceHash -cne '8DAD8231FDCBF80C024E2C9C0A4D53FC7CE0E02D3415ABBE2FE73A1AB8E07257'){throw 'Offline reference source differs.'}
+    $dll=Join-Path $root "build/precomputed-decoder-reopen-20261014/final-artifact-gate/$sourceHash/Kokoro.OfflineRender.dll"
+    $dllHash=(Get-FileHash $dll).Hash
+    if($dllHash -cne '446FD867E60D8D21F267D9B372A6736D357E84DEF7B680609E8386CBE22D1F8D'){throw 'Offline reference assembly differs.'}
+    $assembly=[Reflection.Assembly]::LoadFrom($dll);$mathType=$assembly.GetType('OfflineRenderMath',$true)
+    $workerType=$assembly.GetType('OfflineConvolutionWorker',$true)
+    $delegateTypes=@{
+        FrameIndices=[Func[int,int,int,int,int,int,bool,int[]]];PackInputs=[Func[float[],int[],int,int,int,int,System.Runtime.Intrinsics.Vector128[float][]]]
+        ActiveIndices=[Func[int[],int,bool[]]];FoldWeights=[Func[float[],float[],float[]]];Align=[Func[float[],int[],float[]]]
+        AdaIn=[Func[float[],int,int,float[],float[],float[],float[],float[],float[]]];Leaky=[Func[float[],float,float[]]]
+        Residual=[Func[float[],float[],float,float[]]];Nearest2=[Func[float[],int,int,float[]]];Snake=[Func[float[],float[],int,float[]]]
+        Average3=[Func[float[],float[],float[],float[]]];ReflectLeft=[Func[float[],int,int,float[]]];Draws=[Func[int,int,float[]]]
+        Harmonic=[Func[float[],float[],float[],float[],float[],float[],float[]]];Stft=[Func[float[],float[]]];InverseStft=[Func[float[],int,float[]]]
+        Compare=[Func[float[],float[],double[]]];MeasureLevels=[Func[float[],int,int,int[],double[]]];ScaleFrames=[Func[int[],int,int[]]]
+        ApplyLevels=[Func[float[],int,int,float[],float[],float[],float[],float[],double[],float[]]]
+    }
+    foreach($delegateName in $delegateTypes.Keys){Set-Variable -Name $delegateName -Value ($mathType.GetMethod($delegateName).CreateDelegate($delegateTypes[$delegateName]))}
+    $experiment=$assembly.GetType('OfflineExperimentMath',$true)
+    $encoderSlice=$experiment.GetMethod('EncoderSlice').CreateDelegate([Func[short[],float[],int,int,int,float[]]])
+    $halfSlice=$experiment.GetMethod('HalfSlice').CreateDelegate([Func[ushort[],int,int,float[]]])
+    $durationsSlice=$experiment.GetMethod('Durations').CreateDelegate([Func[short[],int,int,int[]]])
+    $offsetsFor=$experiment.GetMethod('Offsets').CreateDelegate([Func[int[],int[]]])
+    $tokens=$null;$parseErrors=$null
+    $referenceAst=[Management.Automation.Language.Parser]::ParseFile($sourcePath,[ref]$tokens,[ref]$parseErrors)
+    if($parseErrors.Count){throw 'Offline source parse failed.'}
+    foreach($functionName in 'Read-OfflineWeight','Get-OfflineConvolution','Invoke-OfflineConv','Invoke-OfflineAdaIn','Join-OfflineChannels','Invoke-OfflineDecoderBlock','Invoke-OfflineDecoder','Invoke-OfflineGeneratorBlock','Invoke-OfflineGenerator','New-OfflineDraws'){
+        $definition=$referenceAst.Find({param($node)$node -is [Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -ceq $functionName},$false)
+        if($null -eq $definition){throw "Missing reference function $functionName"}
+        . ([scriptblock]::Create($definition.Extent.Text))
+    }
+    function Test-OfflineNode([string]$Name,[float[]]$Values) {}
+    $Mode='Gate';$Seed=17;$levelContext=$null
+    $profile=[Collections.Generic.List[object]]::new()
+    $weightCache=[Collections.Generic.Dictionary[string,float[]]]::new([StringComparer]::Ordinal)
+    $convolutionCache=[Collections.Generic.Dictionary[string,object]]::new([StringComparer]::Ordinal)
+    $torch=Import-Module (Join-Path $root 'src/runspace/Torch.Checkpoint.psm1') -PassThru
+    $reader=$torch.Invoke({[pscustomobject]@{Read=$read;Bytes=$bytes;ReadTensor=$readTensor;TensorRow=$tensorRow}})[0]
+    $modelRoot=Join-Path $root 'build/inputs/kokoro/f3ff3571791e39611d31c381e3a41a3af07b4987'
+    $modelPath=Join-Path $modelRoot 'kokoro-v1_0.pth'
+    if((Get-FileHash $modelPath).Hash -cne '496DBA118D1A58F5F3DB2EFC88DBDC216E0483FC89FE6E47EE1F2C53F18AD1E4'){throw 'Checkpoint integrity differs.'}
+    $checkpoint=& $reader.Read $modelPath
+    $voiceArchive=& $reader.ReadTensor (Join-Path $modelRoot 'voices/af_heart.pt') '0AB5709B8FFAB19BFD849CD11D98F75B60AF7733253AD0D67B12382A102CB4FF'
+    $rowBytes=& $reader.TensorRow $voiceArchive 25;$style=[float[]]::new(128);[Buffer]::BlockCopy($rowBytes,0,$style,0,512)
+    $measurement=Import-Clixml (Join-Path $MeasurementDirectory 'structure.clixml')
+    $orderPath=Join-Path $BankPath 'order.json'
+    if((Get-FileHash $orderPath).Hash -cne $measurement.OrderSHA256 -or $measurement.Units -ne 2429833 -or $measurement.K -ne 4){throw 'Full-bank measurement identity differs.'}
+    $nearestPath=Join-Path $MeasurementDirectory 'nearest.i32'
+    if((Get-FileHash $nearestPath).Hash -cne '70DFD110F8B8E2A8EBDFC2507357727F04BAB0E2A974E51E340E1A9EE8D914AA'){throw 'Measured nearest IDs differ.'}
+    $nearestRaw=[IO.File]::ReadAllBytes($nearestPath);$nearest=[int[]]::new($nearestRaw.Length/4);[Buffer]::BlockCopy($nearestRaw,0,$nearest,0,$nearestRaw.Length)
+    $sentences=@(Get-Content -LiteralPath $orderPath -Raw | ConvertFrom-Json)
+    $prefix=[int[]]::new($sentences.Count+1)
+    for($sentence=0;$sentence -lt $sentences.Count;$sentence++){$prefix[$sentence+1]=$prefix[$sentence]+$sentences[$sentence].phonemes.Length+2}
+    if($prefix[$sentences.Count] -ne $measurement.Units){throw 'Bank unit numbering differs.'}
+    $selection=Import-Clixml (Join-Path $root 'build/precomputed-decoder-20261014/selection.clixml')
+    $needed=[Collections.Generic.HashSet[int]]::new();$chosen=[Collections.Generic.List[object]]::new()
+    foreach($target in $Targets){
+        $pick=$selection.picks[$target-1];$ids=[int[]]::new($pick.path.Count);$copyIds=[int[]]::new($ids.Length)
+        for($token=0;$token -lt $ids.Length;$token++){
+            $unit=$pick.path[$token];$ids[$token]=$prefix[[int]$unit.s]+[int]$unit.i;$copyIds[$token]=$nearest[$ids[$token]*4]
+            if($copyIds[$token] -lt 0 -or $copyIds[$token] -eq $ids[$token]){throw 'Missing other exemplar.'}
+            [void]$needed.Add($ids[$token]);[void]$needed.Add($copyIds[$token])
+        }
+        $chosen.Add([pscustomobject]@{Target=$target;Text=$pick.text;OriginalIds=$ids;CopyIds=$copyIds})
+    }
+    $byChunk=[Collections.Generic.Dictionary[int,object]]::new()
+    foreach($id in $needed){
+        $sentence=[Array]::BinarySearch($prefix,$id);if($sentence -lt 0){$sentence=-$sentence-2}
+        $chunk=[int][Math]::Floor($sentence/1000.0)
+        if(-not $byChunk.ContainsKey($chunk)){$byChunk.Add($chunk,[Collections.Generic.List[object]]::new())}
+        $byChunk[$chunk].Add([pscustomobject]@{Id=$id;Sentence=$sentence;Token=$id-$prefix[$sentence]})
+    }
+    $provenance=@(Import-Clixml (Join-Path $MeasurementDirectory 'bank-provenance.clixml'))
+    $units=[Collections.Generic.Dictionary[int,object]]::new()
+    foreach($chunk in @($byChunk.Keys | Sort-Object)){
+        $chunkPath=Join-Path $BankPath ('chunk-{0:D4}.npz' -f $chunk)
+        $pin=@($provenance | Where-Object { [IO.Path]::GetFileName($_.Path) -ceq [IO.Path]::GetFileName($chunkPath) })
+        if($pin.Count -ne 1 -or (Get-FileHash $chunkPath).Hash -cne $pin[0].SHA256){throw 'Bank chunk differs from measurement.'}
+        Write-Host "Student COPY: reading chunk $chunk"
+        $zip=[IO.Compression.ZipFile]::OpenRead($chunkPath)
+        try {
+            $encoded=Read-KokoroStudentNpy $zip t_en '<i2' ([short]);$scales=Read-KokoroStudentNpy $zip scale '<f4' ([float])
+            $tokenOffsets=Read-KokoroStudentNpy $zip tok_off '<i8' ([long]);$frameOffsets=Read-KokoroStudentNpy $zip frm_off '<i8' ([long])
+            $bankDurations=Read-KokoroStudentNpy $zip dur '<i2' ([short]);$pitchCodes=Read-KokoroStudentNpy $zip f0 '<f2' ([ushort]);$energyCodes=Read-KokoroStudentNpy $zip n '<f2' ([ushort])
+            $allTokens=[int]($encoded.Length/512)
+            foreach($record in $byChunk[$chunk]){
+                $local=$record.Sentence%1000;$first=[int]$tokenOffsets[$local];$count=$prefix[$record.Sentence+1]-$prefix[$record.Sentence]
+                $lengths=$durationsSlice.Invoke($bankDurations,$first,$count);$offsets=$offsetsFor.Invoke($lengths)
+                $duration=$lengths[$record.Token];$frameFirst=[int](2*($frameOffsets[$local]+$offsets[$record.Token]))
+                $units.Add($record.Id,[pscustomobject]@{Features=$encoderSlice.Invoke($encoded,$scales,$allTokens,$first+$record.Token,1);Duration=$duration;
+                    Pitch=$halfSlice.Invoke($pitchCodes,$frameFirst,2*$duration);Energy=$halfSlice.Invoke($energyCodes,$frameFirst,2*$duration)})
+            }
+        } finally {$zip.Dispose()}
+    }
+    $chosen.ToArray() | Export-Clixml -LiteralPath (Join-Path $out 'copy-programs.clixml')
+    $results=[Collections.Generic.List[object]]::new()
+    foreach($case in $chosen){
+        $tokenCount=$case.OriginalIds.Length;$originalEncoder=[float[]]::new(512*$tokenCount);$copyEncoder=[float[]]::new($originalEncoder.Length)
+        $tokenDurations=[int[]]::new($tokenCount);$frameCount=0
+        for($token=0;$token -lt $tokenCount;$token++){$tokenDurations[$token]=$units[$case.OriginalIds[$token]].Duration;$frameCount+=2*$tokenDurations[$token]}
+        $pitch=[float[]]::new($frameCount);$energyCurve=[float[]]::new($frameCount);$frameAt=0
+        for($token=0;$token -lt $tokenCount;$token++){
+            $originalUnit=$units[$case.OriginalIds[$token]];$copyUnit=$units[$case.CopyIds[$token]]
+            for($channel=0;$channel -lt 512;$channel++){$originalEncoder[$channel*$tokenCount+$token]=$originalUnit.Features[$channel];$copyEncoder[$channel*$tokenCount+$token]=$copyUnit.Features[$channel]}
+            [Array]::Copy($originalUnit.Pitch,0,$pitch,$frameAt,$originalUnit.Pitch.Length);[Array]::Copy($originalUnit.Energy,0,$energyCurve,$frameAt,$originalUnit.Energy.Length);$frameAt+=$originalUnit.Pitch.Length
+        }
+        $random=New-OfflineDraws ($frameCount*300);$rendered=[Collections.Generic.List[object]]::new()
+        foreach($variant in 'original','copy'){
+            Write-Host "Student COPY target $($case.Target): $variant, $frameCount frames"
+            $profile.Clear();$watch=[Diagnostics.Stopwatch]::StartNew()
+            $encoder=if($variant -ceq 'original'){$originalEncoder}else{$copyEncoder}
+            $decoded=Invoke-OfflineDecoder ($align.Invoke($encoder,$tokenDurations)) $pitch $energyCurve $style -TokenDurations $tokenDurations
+            $pcm=Invoke-OfflineGenerator $decoded.Features $style $pitch $random.Uniform $random.Harmonic $random.Extra
+            $watch.Stop();if($pcm.Length -ne $frameCount*300){throw 'Rendered PCM extent differs.'}
+            $codes=$pcm16.Invoke($pcm);$path=Join-Path $out ('{0:D2}-{1}.wav' -f $case.Target,$variant)
+            Write-KokoroStudentWave $path $codes
+            $rendered.Add([pscustomobject]@{Pcm=$pcm;Codes=$codes;Milliseconds=$watch.Elapsed.TotalMilliseconds;Path=$path;SHA256=(Get-FileHash $path).Hash})
+        }
+        $floatMetrics=$compare.Invoke($rendered[1].Pcm,$rendered[0].Pcm)
+        $pcmMetrics=$compare.Invoke($pcmFloat.Invoke($rendered[1].Codes),$pcmFloat.Invoke($rendered[0].Codes))
+        $pair=[short[]]::new(2*$rendered[0].Codes.Length+14400)
+        [Array]::Copy($rendered[0].Codes,0,$pair,0,$rendered[0].Codes.Length);[Array]::Copy($rendered[1].Codes,0,$pair,$rendered[0].Codes.Length+14400,$rendered[1].Codes.Length)
+        $pairPath=Join-Path $out ('{0:D2}-original-then-copy.wav' -f $case.Target);Write-KokoroStudentWave $pairPath $pair
+        $seconds=$frameCount/80.0
+        $result=[pscustomobject]@{Target=$case.Target;Text=$case.Text;Tokens=$tokenCount;Frames=$frameCount;AudioSeconds=$seconds;FloatPcmSNR=$floatMetrics[0];Pcm16SNR=$pcmMetrics[0];PeakError=$floatMetrics[1];
+            OriginalMs=$rendered[0].Milliseconds;CopyMs=$rendered[1].Milliseconds;OriginalMsPerAudioSecond=$rendered[0].Milliseconds/$seconds;CopyMsPerAudioSecond=$rendered[1].Milliseconds/$seconds;
+            PairPath=$pairPath;PairSHA256=(Get-FileHash $pairPath).Hash;OriginalSHA256=$rendered[0].SHA256;CopySHA256=$rendered[1].SHA256;
+            ReferenceSourceSHA256=$sourceHash;ReferenceKernelSHA256=$dllHash;StudentKernelSHA256=$kernel.SHA256;Threads=$Threads;Seed=$Seed;VoiceRow=25;
+            Scope='Windows offline FP32 whole selected target decoder plus source/generator; live AdaIN, matched original durations/F0/N/style/noise; COPY only, no RESIDUAL';
+            TimingDifference='Single offline host runs, original first; unlike SM8550 int8 DSP generator-only timing. Historical approximate reference 40 ms/audio-second, separate preserved run 41.918118, combined 46.867294.'}
+        $results.Add($result);$results.ToArray() | Export-Clixml -LiteralPath (Join-Path $out 'copy-render.clixml')
+        Write-Host "Student COPY target $($case.Target): PCM SNR $($result.Pcm16SNR) dB; $pairPath"
+    }
+    return $results.ToArray()
+}
+
 function Invoke-KokoroStudent {
     [CmdletBinding()]
-    param([ValidateSet('Measure')][string]$Step='Measure',[string]$BankPath,[Parameter(Mandatory)][string]$OutputDirectory,
-        [ValidateRange(1,64)][int]$Threads=12,[ValidateRange(1,16)][int]$K=4,[ValidateRange(0,1000000)][int]$SentenceLimit=0)
-    Measure-KokoroStudentStructure -BankPath $BankPath -OutputDirectory $OutputDirectory -Threads $Threads -K $K -SentenceLimit $SentenceLimit
+    param([ValidateSet('Measure','Render')][string]$Step='Measure',[string]$BankPath,[Parameter(Mandatory)][string]$OutputDirectory,
+        [ValidateRange(1,64)][int]$Threads=4,[ValidateRange(1,16)][int]$K=4,[ValidateRange(0,1000000)][int]$SentenceLimit=0,
+        [string]$MeasurementDirectory,[ValidateSet('CopyOnly')][string]$Replay='CopyOnly',[int[]]$Targets=(1..9))
+    switch($Step){
+        'Measure'{Measure-KokoroStudentStructure -BankPath $BankPath -OutputDirectory $OutputDirectory -Threads $Threads -K $K -SentenceLimit $SentenceLimit}
+        'Render'{Render-KokoroStudentCopy -BankPath $BankPath -OutputDirectory $OutputDirectory -MeasurementDirectory $MeasurementDirectory -Threads $Threads -Targets $Targets}
+    }
 }
 
 Export-ModuleMember -Function Invoke-KokoroStudent,Measure-KokoroStudentStructure

@@ -50,6 +50,8 @@ twice, or written as a scratch script, is a missing command: add it here.
   PrecomputedDecoder -Parameters @{ Mode = 'Gate' } (offline decoder/generator experiment)
                               Manufacture and gate the compact prosody bank on the laptop; no phone access.
   Student -Parameters @{ Step = 'Measure' } -OutputDirectory <fresh build directory>
+  Student -Parameters @{ Step = 'Render'; Replay = 'CopyOnly' } -OutputDirectory <fresh build directory>
+    Renders nine held-out original/COPY-only PCM16 WAV pairs with matched offline controls and PCM SNR.
                               Offline student opcode loop: real exemplars and direction medoids. -Path selects the bank.
                               Typed results; read-only bank; no phone. -h prints entrypoint help.
   AlbertLinear -Linear name[,name...] [-Path] [-Soc] [-Runs]
