@@ -50,6 +50,14 @@ function New-KokoroGeneratorTemplate1RunSteps {
     for ($branch=0; $branch -lt $Branches; $branch++) { $declarations.Add(@("Operand$branch",$activationBytes)) }
     $declarations.Add(@('Consumer',$resultBytes))
     foreach ($declaration in $declarations) {
+        # V73 :single activation reads must keep both addressed croutons in
+        # one 1 MiB region: docs/generator60x-resident-design.md, 2026-10-09 correction.
+        $readBytes = if ($declaration[0] -ceq 'Input') { $inputActivationBytes }
+            elseif ($declaration[0].StartsWith('Operand',[StringComparison]::Ordinal)) { $activationBytes } else { 0L }
+        if ($readBytes -gt 1048576L) { throw 'HMX activation window exceeds one 1 MiB region.' }
+        if ($readBytes -and $cursor%1048576L+$readBytes -gt 1048576L) {
+            $cursor = ($cursor+1048575L) -band -1048576L
+        }
         $regions[$declaration[0]] = [pscustomobject]@{Offset=$cursor;Bytes=[long]$declaration[1]}
         $cursor += ([long]$declaration[1]+65535L) -band -65536L
     }
@@ -102,8 +110,10 @@ function New-KokoroGeneratorTemplate1RunSteps {
         & $ptr 2 18 $regions.Consumer.Offset
         & $ptr 3 18 ($regions.Tables.Offset+$conversionBytes+$epilogueBytes)
         & $imm 4 $Tiles
+        $s.Add(@{Op='hwticks';d=8}); $s.Add(@{Op='store-d';s=23;t=8;Offset=64})
         & $call 'template1_consumer'
         & $sync
+        $s.Add(@{Op='hwticks';d=8}); $s.Add(@{Op='store-d';s=23;t=8;Offset=72})
         $outputOffset = 256L
         $outputs = [Collections.Generic.List[string]]::new(); $outputs.Add('Convolution')
         if ($keepResidual) { $outputs.Add('Residual') }

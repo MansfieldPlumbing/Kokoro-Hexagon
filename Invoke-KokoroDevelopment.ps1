@@ -526,7 +526,7 @@ function Invoke-KokoroDeviceJob {
     $outputPath = & $field 'OutputPath'
     if (-not $outputPath -or $text -notmatch '(?m)^Passed=True\s*$' -or $text -notmatch '(?m)^StartupRestored=True\s*$') { throw "Phone run failed or startup was not restored: $(($out | Select-Object -Last 4) -join ' | ')" }
     [pscustomobject]@{ Output = [IO.File]::ReadAllBytes($outputPath); OutputPath = $outputPath; MedianMs = [double](& $field 'MedianRegionMs')
-        Lines = @($out | ForEach-Object { "$_" } | Where-Object { $_ -match '^(Run=|Median|InvokeRc|Stage|Played=|Passed=|StartupRestored=|ReceiptPath=)' }) }
+        Lines = @($text -split '\r?\n' | Where-Object { $_ -match '^(Run=|Median|InvokeRc|Stage|Played=|Passed=|StartupRestored=|ReceiptPath=)' }) }
 }
 
 function New-KokoroDecoderConstantsTables {

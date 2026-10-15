@@ -400,6 +400,25 @@ $loudness | Export-Clixml -LiteralPath (Join-Path $output 'loudness.clixml')
 $ticks = [BitConverter]::ToUInt64($result.Output,56)-[BitConverter]::ToUInt64($result.Output,48)
 $milliseconds = [double]$ticks/19200.0
 $macs = [long]$validFrames*$channels*$channels*$kernelSize
+$invocationTimings = [Collections.Generic.List[object]]::new()
+foreach ($line in $result.Lines) {
+    if ($line -match '^Run=(\d+) InvokeRc=0 Stage=7 Done=1 RegionTicks=(\d+) Timer48=(\d+) Timer56=(\d+) Timer64=(\d+) Timer72=(\d+) InvokeMs=([0-9.]+) ') {
+        $startTick=[uint64]$Matches[3]; $endTick=[uint64]$Matches[4]
+        $consumerStart=[uint64]$Matches[5]; $consumerEnd=[uint64]$Matches[6]
+        if ($endTick -le $startTick -or $consumerEnd -le $consumerStart) { throw 'Invalid per-invocation convolution timer.' }
+        $convMs=($endTick-$startTick)/19200.0
+        $consumerMs=($consumerEnd-$consumerStart)/19200.0
+        $invocationTimings.Add([pscustomobject]@{Run=[int]$Matches[1];HmxConvolutionMs=$convMs;
+            HmxTmacPerSecond=([double]$macs/($convMs*1e9));JobDspMs=([double]$Matches[2]/19200.0);
+            ConsumerHmxMs=$consumerMs;ConsumerHmxTmacPerSecond=([double]$macs/($consumerMs*1e9));
+            HostInvokeMs=[double]::Parse($Matches[7],[Globalization.CultureInfo]::InvariantCulture)})
+    }
+}
+if ($invocationTimings.Count -ne $Runs) { throw 'Missing per-invocation convolution telemetry.' }
+$warmFive = @($invocationTimings | Where-Object { $_.Run -ge 1 -and $_.Run -le 5 })
+$warmHmxMs = if ($warmFive.Count -eq 5) { @($warmFive.HmxConvolutionMs | Sort-Object)[2] } else { $null }
+$warmConsumerMs = if ($warmFive.Count -eq 5) { @($warmFive.ConsumerHmxMs | Sort-Object)[2] } else { $null }
+$invocationTimings.ToArray() | Export-Clixml -LiteralPath (Join-Path $output 'invocation-timings.clixml')
 $receipt = [pscustomobject]@{Case='dog';Layer=$(if ($LockIdentity) { 'identity' } else { "generator.resblocks.$ResBlockIndex.convs1.$DilationIndex" });Frames=$validFrames;Channels=$channels;Kernel=$kernelSize;Dilation=$tapDilation;
     ConvolutionSnrDb=$convolutionMetrics[0];ConvolutionMaxError=$convolutionMetrics[1];
     OperandSnrDb=$operandMetrics[0];OperandMaxError=$operandMetrics[1];
@@ -413,6 +432,10 @@ $receipt = [pscustomobject]@{Case='dog';Layer=$(if ($LockIdentity) { 'identity' 
     ListeningScope=$(if ($LockIdentity) { 'Isolated lock diagnostic; no PCM continuation' } elseif ($generatorStage -eq 1) { 'One tested layer block, identical verified offline continuation on both sides' } else { 'Stage A layer diagnostic; no PCM continuation' });WavePaths=$wavePaths.ToArray();
     HmxConvolutionMs=$milliseconds;HmxTmacPerSecond=([double]$macs/($milliseconds*1e9));
     HmxTimingScope='Run 0 convolution timer only; excludes DMA, epilogue and consumer; not a warm median';
+    HmxWarmFiveMedianMs=$warmHmxMs;HmxWarmFiveMedianTmacPerSecond=$(if ($null -ne $warmHmxMs) { [double]$macs/($warmHmxMs*1e9) } else { $null });
+    HmxWarmTimingScope='Median of runs 1 through 5, excluding run 0; unavailable with fewer than six invocations';
+    ConsumerHmxRun0Ms=$invocationTimings[0].ConsumerHmxMs;ConsumerHmxRun0TmacPerSecond=$invocationTimings[0].ConsumerHmxTmacPerSecond;
+    ConsumerHmxWarmFiveMedianMs=$warmConsumerMs;ConsumerHmxWarmFiveMedianTmacPerSecond=$(if ($null -ne $warmConsumerMs) { [double]$macs/($warmConsumerMs*1e9) } else { $null });
     JobMedianMs=$result.MedianMs;JobTimingScope='Median over requested invocations, including run 0';Runs=$Runs;
     ReferenceAssemblySHA256=$referenceHash;ReferenceSourceSHA256=$sourceHash;LibrarySHA256=$emission.LibrarySHA256;
     ConstantsScope='Offline supplied levels for this layer diagnostic; not deployment calibration';

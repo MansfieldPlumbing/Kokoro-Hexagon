@@ -105,7 +105,13 @@ try {
         }
         if ($rc -ne 0 -or $stage -ne 7 -or $done -ne 1 -or $hash -ne $pcmHash) { $allOk = $false }
         if ($rc -eq 0 -and $done -eq 1) { $ticks.Add($dt) }
-        $lines.Add("Run=$run InvokeRc=$rc Stage=$stage Done=$done RegionTicks=$dt InvokeMs=$($sw.Elapsed.TotalMilliseconds.ToString('F3', $inv)) PcmSHA256=$hash")
+        # Preserve the job-defined timer slots on every invocation. Their meaning
+        # belongs to the emitted job; template 1 uses these for convolution only.
+        $timer48 = if ($out.Length -ge 64) { [BitConverter]::ToUInt64($out, 48) } else { [uint64]0 }
+        $timer56 = if ($out.Length -ge 64) { [BitConverter]::ToUInt64($out, 56) } else { [uint64]0 }
+        $timer64 = if ($out.Length -ge 80) { [BitConverter]::ToUInt64($out, 64) } else { [uint64]0 }
+        $timer72 = if ($out.Length -ge 80) { [BitConverter]::ToUInt64($out, 72) } else { [uint64]0 }
+        $lines.Add("Run=$run InvokeRc=$rc Stage=$stage Done=$done RegionTicks=$dt Timer48=$timer48 Timer56=$timer56 Timer64=$timer64 Timer72=$timer72 InvokeMs=$($sw.Elapsed.TotalMilliseconds.ToString('F3', $inv)) PcmSHA256=$hash")
         [IO.File]::WriteAllLines($receipt, $lines)
         if ($rc -ne 0) { break }
     }
