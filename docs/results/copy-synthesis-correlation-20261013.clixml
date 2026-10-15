@@ -1,0 +1,299 @@
+<Objs Version="1.1.0.1" xmlns="http://schemas.microsoft.com/powershell/2004/04">
+  <Obj RefId="0">
+    <TN RefId="0">
+      <T>System.Management.Automation.PSCustomObject</T>
+      <T>System.Object</T>
+    </TN>
+    <MS>
+      <S N="Status">Passed</S>
+      <S N="Operation">CorrelationOnly</S>
+      <S N="RenderingReceipt">C:\Dev\Kokoro-Hexagon-copysynth\build\copy-synthesis-20261013-run2\receipt.clixml</S>
+      <S N="RenderingReceiptSHA256">ECEF753E3B2FBD9F157FBD79A7B10FD5FAE67E1944CEDC6988D90E7355478B88</S>
+      <S N="RenderingKernelSHA256">FF42EFF1D8AED22D41294129A06A0B64F01B9F42D7320E04910FD2EB5A521206</S>
+      <S N="RenderingHarnessSHA256">E6FCD0E8E84BED8E580ECABA87465FB50A97492C9EA6597259D2F43FF4306B1D</S>
+      <S N="ScoringKernelSHA256">9BB8AFB27028700EA90E846CFA00AA5FA37F34ACF058287A0E79004213AB5841</S>
+      <S N="ScoringHarnessSHA256">432A6E197AF3D3F9A9719A2EC61743715E947B5925B04E3F271FD79CFFDFE706</S>
+      <B N="AnalysisReconstructedFromSavedWavs">true</B>
+      <B N="Resynthesized">false</B>
+      <B N="WavFilesUnchanged">true</B>
+      <S N="Correlation">sum((x-mean(x))*(y-mean(y))) / (sqrt(sum((x-mean(x))^2))*sqrt(sum((y-mean(y))^2)))</S>
+      <B N="LsdRecomputed">false</B>
+      <S N="LsdSource">Original rendering receipt, unchanged</S>
+      <I32 N="SampleRate">24000</I32>
+      <I32 N="HopSamples">120</I32>
+      <I32 N="WindowSamples">1024</I32>
+      <I32 N="EnvelopeBands">64</I32>
+      <Db N="RenderingElapsedSeconds">596.114452</Db>
+      <Db N="RescoreElapsedSeconds">60.6395892</Db>
+      <Obj N="Results" RefId="1">
+        <TN RefId="1">
+          <T>System.Object[]</T>
+          <T>System.Array</T>
+          <T>System.Object</T>
+        </TN>
+        <LST>
+          <Obj RefId="2">
+            <TNRef RefId="0" />
+            <MS>
+              <S N="Reference">corpus-consonants</S>
+              <S N="Label">ʃˌi hæd bɪn wˈATɪŋ fɔɹ nˈɪɹli ɐn ˈWəɹ. ðə bˈʌs, æz jˈuʒəwəl, wʌz lˈAt. ɐ kˈOld wˈɪnd pˈɪkt ˌʌp, ɹˈʌsᵊlɪŋ ðə lˈivz æt hɜɹ fˈit.</S>
+              <S N="Mode">copy</S>
+              <I32 N="Samples">193200</I32>
+              <I32 N="Frames">1610</I32>
+              <I32 N="ActiveFrames">1389</I32>
+              <Db N="LsdDb">7.901997654299053</Db>
+              <Db N="SpectralEnvelopeCorrelation">0.9677151672433013</Db>
+              <Db N="TemporalEnvelopeCorrelation">0.9806392013152324</Db>
+              <Db N="LevelMatchGain">0.9664361240898871</Db>
+              <S N="StockWav">C:\Dev\Kokoro-Hexagon-copysynth\build\copy-synthesis-20261013-run2\corpus-consonants-stock.wav</S>
+              <S N="Wav">C:\Dev\Kokoro-Hexagon-copysynth\build\copy-synthesis-20261013-run2\corpus-consonants-copy.wav</S>
+              <S N="PcmInput">C:\Dev\Kokoro-Hexagon\build\generator-constants-gate2b-20261012-140157\generator-corpus-2\output.f32</S>
+              <S N="PcmSHA256">197EA7E841486BF425397EC0C0E95436900C2500DCF3852E89698B500943F225</S>
+              <S N="F0Input">C:\Dev\Kokoro-Hexagon\build\generator-constants-gate2b-20261012-140157\generator-corpus-2\f0.f32</S>
+              <S N="F0SHA256">D351D166316D6D8165C35ED9F72759E615745C89B2CDC693FAF55E3E03055F1B</S>
+              <I32 N="EnvelopePairs">88896</I32>
+              <S N="SpectralFramePopulation">Paired 64-band log powers pooled over the original stock-active frames</S>
+              <S N="TemporalFramePopulation">Paired window RMS over every original frame</S>
+              <S N="WavSHA256">914301B3364983549C5EC00732F27C45393EFC6A29BE9F8F411B001DBE27BF61</S>
+              <S N="StockWavSHA256">55EBC4484703331B6B2670B166CA732D4A48FD4156B9487732DA9FEA67E612D3</S>
+            </MS>
+          </Obj>
+          <Obj RefId="3">
+            <TNRef RefId="0" />
+            <MS>
+              <S N="Reference">corpus-consonants</S>
+              <S N="Label">ʃˌi hæd bɪn wˈATɪŋ fɔɹ nˈɪɹli ɐn ˈWəɹ. ðə bˈʌs, æz jˈuʒəwəl, wʌz lˈAt. ɐ kˈOld wˈɪnd pˈɪkt ˌʌp, ɹˈʌsᵊlɪŋ ðə lˈivz æt hɜɹ fˈit.</S>
+              <S N="Mode">buzzy</S>
+              <I32 N="Samples">193200</I32>
+              <I32 N="Frames">1610</I32>
+              <I32 N="ActiveFrames">1389</I32>
+              <Db N="LsdDb">10.507760230515666</Db>
+              <Db N="SpectralEnvelopeCorrelation">0.9008520048482664</Db>
+              <Db N="TemporalEnvelopeCorrelation">0.9814132984113499</Db>
+              <Db N="LevelMatchGain">1.0436416870665546</Db>
+              <S N="StockWav">C:\Dev\Kokoro-Hexagon-copysynth\build\copy-synthesis-20261013-run2\corpus-consonants-stock.wav</S>
+              <S N="Wav">C:\Dev\Kokoro-Hexagon-copysynth\build\copy-synthesis-20261013-run2\corpus-consonants-buzzy.wav</S>
+              <S N="PcmInput">C:\Dev\Kokoro-Hexagon\build\generator-constants-gate2b-20261012-140157\generator-corpus-2\output.f32</S>
+              <S N="PcmSHA256">197EA7E841486BF425397EC0C0E95436900C2500DCF3852E89698B500943F225</S>
+              <S N="F0Input">C:\Dev\Kokoro-Hexagon\build\generator-constants-gate2b-20261012-140157\generator-corpus-2\f0.f32</S>
+              <S N="F0SHA256">D351D166316D6D8165C35ED9F72759E615745C89B2CDC693FAF55E3E03055F1B</S>
+              <I32 N="EnvelopePairs">88896</I32>
+              <S N="SpectralFramePopulation">Paired 64-band log powers pooled over the original stock-active frames</S>
+              <S N="TemporalFramePopulation">Paired window RMS over every original frame</S>
+              <S N="WavSHA256">801D47D07A19C40A89841EC33191760C7E59AD5D241F2097DA31F7411151B340</S>
+              <S N="StockWavSHA256">55EBC4484703331B6B2670B166CA732D4A48FD4156B9487732DA9FEA67E612D3</S>
+            </MS>
+          </Obj>
+          <Obj RefId="4">
+            <TNRef RefId="0" />
+            <MS>
+              <S N="Reference">corpus-high-pitch</S>
+              <S N="Label">ɪn ðə kwˈIət tˈWn ʌv mˈɪlbɹʊk, nˈuz tɹˈævəld fˈæstəɹ ðən ðə wˈɪnd. bˌI ðə tˈIm ðə ʃˈɛɹəf əɹˈIvd æt ðə sˈin, hˈæf ðə ɹˈɛzədᵊnts hæd ˌɔlɹˈɛdi ɡˈæðəɹd, wˈɪspəɹɪŋ θˈɪɹiz ænd tɹˈAdɪŋ hˌæfɹəmˈɛmbəɹd fˈækts. nˈObˌɑdi ɹˈiᵊli nˈu wˌʌt hæd hˈæpənd, bˌʌt ˈɛvɹibədi hæd ɐn əpˈɪnjᵊn.</S>
+              <S N="Mode">copy</S>
+              <I32 N="Samples">390000</I32>
+              <I32 N="Frames">3250</I32>
+              <I32 N="ActiveFrames">2930</I32>
+              <Db N="LsdDb">7.85109485278013</Db>
+              <Db N="SpectralEnvelopeCorrelation">0.9674062401933814</Db>
+              <Db N="TemporalEnvelopeCorrelation">0.9812712471867877</Db>
+              <Db N="LevelMatchGain">0.983350731885367</Db>
+              <S N="StockWav">C:\Dev\Kokoro-Hexagon-copysynth\build\copy-synthesis-20261013-run2\corpus-high-pitch-stock.wav</S>
+              <S N="Wav">C:\Dev\Kokoro-Hexagon-copysynth\build\copy-synthesis-20261013-run2\corpus-high-pitch-copy.wav</S>
+              <S N="PcmInput">C:\Dev\Kokoro-Hexagon\build\generator-constants-gate2b-20261012-140157\generator-corpus-3\output.f32</S>
+              <S N="PcmSHA256">08E839C119B343E9E841B47F8E6B625318E35040D593EA615EBBD5C1A42A3C96</S>
+              <S N="F0Input">C:\Dev\Kokoro-Hexagon\build\generator-constants-gate2b-20261012-140157\generator-corpus-3\f0.f32</S>
+              <S N="F0SHA256">BA90927201111BFDBB17A9A38A6DF1CB138136C9CFA5B77C888D9803B718E85C</S>
+              <I32 N="EnvelopePairs">187520</I32>
+              <S N="SpectralFramePopulation">Paired 64-band log powers pooled over the original stock-active frames</S>
+              <S N="TemporalFramePopulation">Paired window RMS over every original frame</S>
+              <S N="WavSHA256">6BE79BD4511B202B96040F4EC48791AA4627EA66AC70AA25D660E76E60CD4A8C</S>
+              <S N="StockWavSHA256">E06CAD26E29C13E6DC5CCF2CFB4F07893A98509F4E0543C34DDCD6C64C8E6B7E</S>
+            </MS>
+          </Obj>
+          <Obj RefId="5">
+            <TNRef RefId="0" />
+            <MS>
+              <S N="Reference">corpus-high-pitch</S>
+              <S N="Label">ɪn ðə kwˈIət tˈWn ʌv mˈɪlbɹʊk, nˈuz tɹˈævəld fˈæstəɹ ðən ðə wˈɪnd. bˌI ðə tˈIm ðə ʃˈɛɹəf əɹˈIvd æt ðə sˈin, hˈæf ðə ɹˈɛzədᵊnts hæd ˌɔlɹˈɛdi ɡˈæðəɹd, wˈɪspəɹɪŋ θˈɪɹiz ænd tɹˈAdɪŋ hˌæfɹəmˈɛmbəɹd fˈækts. nˈObˌɑdi ɹˈiᵊli nˈu wˌʌt hæd hˈæpənd, bˌʌt ˈɛvɹibədi hæd ɐn əpˈɪnjᵊn.</S>
+              <S N="Mode">buzzy</S>
+              <I32 N="Samples">390000</I32>
+              <I32 N="Frames">3250</I32>
+              <I32 N="ActiveFrames">2930</I32>
+              <Db N="LsdDb">9.357384145037154</Db>
+              <Db N="SpectralEnvelopeCorrelation">0.9354867138916956</Db>
+              <Db N="TemporalEnvelopeCorrelation">0.9834567171177819</Db>
+              <Db N="LevelMatchGain">1.045476626733988</Db>
+              <S N="StockWav">C:\Dev\Kokoro-Hexagon-copysynth\build\copy-synthesis-20261013-run2\corpus-high-pitch-stock.wav</S>
+              <S N="Wav">C:\Dev\Kokoro-Hexagon-copysynth\build\copy-synthesis-20261013-run2\corpus-high-pitch-buzzy.wav</S>
+              <S N="PcmInput">C:\Dev\Kokoro-Hexagon\build\generator-constants-gate2b-20261012-140157\generator-corpus-3\output.f32</S>
+              <S N="PcmSHA256">08E839C119B343E9E841B47F8E6B625318E35040D593EA615EBBD5C1A42A3C96</S>
+              <S N="F0Input">C:\Dev\Kokoro-Hexagon\build\generator-constants-gate2b-20261012-140157\generator-corpus-3\f0.f32</S>
+              <S N="F0SHA256">BA90927201111BFDBB17A9A38A6DF1CB138136C9CFA5B77C888D9803B718E85C</S>
+              <I32 N="EnvelopePairs">187520</I32>
+              <S N="SpectralFramePopulation">Paired 64-band log powers pooled over the original stock-active frames</S>
+              <S N="TemporalFramePopulation">Paired window RMS over every original frame</S>
+              <S N="WavSHA256">E18F5F369D8428DE3A8CF77561921C6332125394DFD09692E0DD93A88C582F8B</S>
+              <S N="StockWavSHA256">E06CAD26E29C13E6DC5CCF2CFB4F07893A98509F4E0543C34DDCD6C64C8E6B7E</S>
+            </MS>
+          </Obj>
+          <Obj RefId="6">
+            <TNRef RefId="0" />
+            <MS>
+              <S N="Reference">corpus-question</S>
+              <S N="Label">hˌW ɑɹ ju tədˈA? ˌI ɐm dˈuɪŋ ɹˈizənəbli wˈɛl, θˈæŋk ju fɔɹ ˈæskɪŋ</S>
+              <S N="Mode">copy</S>
+              <I32 N="Samples">99000</I32>
+              <I32 N="Frames">825</I32>
+              <I32 N="ActiveFrames">685</I32>
+              <Db N="LsdDb">7.913876103278749</Db>
+              <Db N="SpectralEnvelopeCorrelation">0.9693394745836115</Db>
+              <Db N="TemporalEnvelopeCorrelation">0.9811002453893891</Db>
+              <Db N="LevelMatchGain">0.9604381323037507</Db>
+              <S N="StockWav">C:\Dev\Kokoro-Hexagon-copysynth\build\copy-synthesis-20261013-run2\corpus-question-stock.wav</S>
+              <S N="Wav">C:\Dev\Kokoro-Hexagon-copysynth\build\copy-synthesis-20261013-run2\corpus-question-copy.wav</S>
+              <S N="PcmInput">C:\Dev\Kokoro-Hexagon\build\generator-constants-gate2b-20261012-140157\generator-corpus-6\output.f32</S>
+              <S N="PcmSHA256">DE680E26C4A073A0AFB1A105B4ECD3B9F580F5D4C87D4F8F08B55206D58550D6</S>
+              <S N="F0Input">C:\Dev\Kokoro-Hexagon\build\generator-constants-gate2b-20261012-140157\generator-corpus-6\f0.f32</S>
+              <S N="F0SHA256">E277B21337F6602FDF4ED10C2207684E06359A170BC47B4E4A44F0664ABE59E6</S>
+              <I32 N="EnvelopePairs">43840</I32>
+              <S N="SpectralFramePopulation">Paired 64-band log powers pooled over the original stock-active frames</S>
+              <S N="TemporalFramePopulation">Paired window RMS over every original frame</S>
+              <S N="WavSHA256">F786386D28707A4B8A28BA147F6746CAEFDB27D1E299027D1540354E8B411C85</S>
+              <S N="StockWavSHA256">AEBF45810494EBF184202B8D9D50C22FA04E28ECCC02AF725DE1ACF68A43639D</S>
+            </MS>
+          </Obj>
+          <Obj RefId="7">
+            <TNRef RefId="0" />
+            <MS>
+              <S N="Reference">corpus-question</S>
+              <S N="Label">hˌW ɑɹ ju tədˈA? ˌI ɐm dˈuɪŋ ɹˈizənəbli wˈɛl, θˈæŋk ju fɔɹ ˈæskɪŋ</S>
+              <S N="Mode">buzzy</S>
+              <I32 N="Samples">99000</I32>
+              <I32 N="Frames">825</I32>
+              <I32 N="ActiveFrames">685</I32>
+              <Db N="LsdDb">9.527544238205495</Db>
+              <Db N="SpectralEnvelopeCorrelation">0.9378962971614176</Db>
+              <Db N="TemporalEnvelopeCorrelation">0.9851825383367285</Db>
+              <Db N="LevelMatchGain">1.058687319570114</Db>
+              <S N="StockWav">C:\Dev\Kokoro-Hexagon-copysynth\build\copy-synthesis-20261013-run2\corpus-question-stock.wav</S>
+              <S N="Wav">C:\Dev\Kokoro-Hexagon-copysynth\build\copy-synthesis-20261013-run2\corpus-question-buzzy.wav</S>
+              <S N="PcmInput">C:\Dev\Kokoro-Hexagon\build\generator-constants-gate2b-20261012-140157\generator-corpus-6\output.f32</S>
+              <S N="PcmSHA256">DE680E26C4A073A0AFB1A105B4ECD3B9F580F5D4C87D4F8F08B55206D58550D6</S>
+              <S N="F0Input">C:\Dev\Kokoro-Hexagon\build\generator-constants-gate2b-20261012-140157\generator-corpus-6\f0.f32</S>
+              <S N="F0SHA256">E277B21337F6602FDF4ED10C2207684E06359A170BC47B4E4A44F0664ABE59E6</S>
+              <I32 N="EnvelopePairs">43840</I32>
+              <S N="SpectralFramePopulation">Paired 64-band log powers pooled over the original stock-active frames</S>
+              <S N="TemporalFramePopulation">Paired window RMS over every original frame</S>
+              <S N="WavSHA256">579B03D8937DEFC2C8C467D100E465D38A6F266F40BBC4E2ADD480F62CA6F0DF</S>
+              <S N="StockWavSHA256">AEBF45810494EBF184202B8D9D50C22FA04E28ECCC02AF725DE1ACF68A43639D</S>
+            </MS>
+          </Obj>
+          <Obj RefId="8">
+            <TNRef RefId="0" />
+            <MS>
+              <S N="Reference">peach-fixture</S>
+              <S N="Label">stock synthesis of the network-free peach fixture</S>
+              <S N="Mode">copy</S>
+              <I32 N="Samples">51000</I32>
+              <I32 N="Frames">425</I32>
+              <I32 N="ActiveFrames">289</I32>
+              <Db N="LsdDb">7.669550236469391</Db>
+              <Db N="SpectralEnvelopeCorrelation">0.9650445191001022</Db>
+              <Db N="TemporalEnvelopeCorrelation">0.9796787637103653</Db>
+              <Db N="LevelMatchGain">0.9726637481970628</Db>
+              <S N="StockWav">C:\Dev\Kokoro-Hexagon-copysynth\build\copy-synthesis-20261013-run2\peach-fixture-stock.wav</S>
+              <S N="Wav">C:\Dev\Kokoro-Hexagon-copysynth\build\copy-synthesis-20261013-run2\peach-fixture-copy.wav</S>
+              <S N="PcmInput">C:\Dev\Kokoro-Hexagon\build\speak-20261010-h0-fast\job-input\decoder-generator-fixture-20261009\expected-pcm-f32.bin</S>
+              <S N="PcmSHA256">32FC0E2975A4FD14EFABF3F190B03A0A48BB4182469B71B0648BB44EA3495099</S>
+              <S N="F0Input">C:\Dev\Kokoro-Hexagon\build\speak-20261010-h0-fast\generator\f0.f32</S>
+              <S N="F0SHA256">79CB5AA47247A09DBE885DA6F8ABB440613B77C0431CDEE3DBEF0E5728E1D79E</S>
+              <I32 N="EnvelopePairs">18496</I32>
+              <S N="SpectralFramePopulation">Paired 64-band log powers pooled over the original stock-active frames</S>
+              <S N="TemporalFramePopulation">Paired window RMS over every original frame</S>
+              <S N="WavSHA256">B8B7F6ED6AC7602E69AB0ADCD7859D294A2B047996A2E2FF2A0D204BEC51386B</S>
+              <S N="StockWavSHA256">25C05343CFC33748AF1EB24631BC60B5E05B88EEB0BA3D3B65E687F1633AD489</S>
+            </MS>
+          </Obj>
+          <Obj RefId="9">
+            <TNRef RefId="0" />
+            <MS>
+              <S N="Reference">peach-fixture</S>
+              <S N="Label">stock synthesis of the network-free peach fixture</S>
+              <S N="Mode">buzzy</S>
+              <I32 N="Samples">51000</I32>
+              <I32 N="Frames">425</I32>
+              <I32 N="ActiveFrames">289</I32>
+              <Db N="LsdDb">12.00144502941574</Db>
+              <Db N="SpectralEnvelopeCorrelation">0.8750809455339145</Db>
+              <Db N="TemporalEnvelopeCorrelation">0.9888730828715773</Db>
+              <Db N="LevelMatchGain">1.0259164283820708</Db>
+              <S N="StockWav">C:\Dev\Kokoro-Hexagon-copysynth\build\copy-synthesis-20261013-run2\peach-fixture-stock.wav</S>
+              <S N="Wav">C:\Dev\Kokoro-Hexagon-copysynth\build\copy-synthesis-20261013-run2\peach-fixture-buzzy.wav</S>
+              <S N="PcmInput">C:\Dev\Kokoro-Hexagon\build\speak-20261010-h0-fast\job-input\decoder-generator-fixture-20261009\expected-pcm-f32.bin</S>
+              <S N="PcmSHA256">32FC0E2975A4FD14EFABF3F190B03A0A48BB4182469B71B0648BB44EA3495099</S>
+              <S N="F0Input">C:\Dev\Kokoro-Hexagon\build\speak-20261010-h0-fast\generator\f0.f32</S>
+              <S N="F0SHA256">79CB5AA47247A09DBE885DA6F8ABB440613B77C0431CDEE3DBEF0E5728E1D79E</S>
+              <I32 N="EnvelopePairs">18496</I32>
+              <S N="SpectralFramePopulation">Paired 64-band log powers pooled over the original stock-active frames</S>
+              <S N="TemporalFramePopulation">Paired window RMS over every original frame</S>
+              <S N="WavSHA256">6B7AB5E06C2499090F53EA1586911979797977456C25C3FC7DE06B30829D4D78</S>
+              <S N="StockWavSHA256">25C05343CFC33748AF1EB24631BC60B5E05B88EEB0BA3D3B65E687F1633AD489</S>
+            </MS>
+          </Obj>
+          <Obj RefId="10">
+            <TNRef RefId="0" />
+            <MS>
+              <S N="Reference">peach-original</S>
+              <S N="Label">stock end-to-end peach, existing 16-bit reference</S>
+              <S N="Mode">copy</S>
+              <I32 N="Samples">49200</I32>
+              <I32 N="Frames">410</I32>
+              <I32 N="ActiveFrames">284</I32>
+              <Db N="LsdDb">7.597703776975149</Db>
+              <Db N="SpectralEnvelopeCorrelation">0.9662329195546442</Db>
+              <Db N="TemporalEnvelopeCorrelation">0.9769866849527662</Db>
+              <Db N="LevelMatchGain">0.9475456672212511</Db>
+              <S N="StockWav">C:\Dev\Kokoro-Hexagon-copysynth\build\copy-synthesis-20261013-run2\peach-original-stock.wav</S>
+              <S N="Wav">C:\Dev\Kokoro-Hexagon-copysynth\build\copy-synthesis-20261013-run2\peach-original-copy.wav</S>
+              <S N="PcmInput">C:\Dev\Kokoro-Hexagon\build\unit-selection-20261010\target-stock.wav</S>
+              <S N="PcmSHA256">90AB999962D56D48F80345BC96FD38FB39D1D3ED39F1A26A4F0FA66CA5DE1608</S>
+              <S N="F0Input">C:\Dev\Kokoro-Hexagon\build\unit-selection-20261010\target-eval.npz</S>
+              <S N="F0SHA256">D3BB55C02330A032C4F58857D3227944B8AFCB34D79FBB36A78274A679DAEF22</S>
+              <I32 N="EnvelopePairs">18176</I32>
+              <S N="SpectralFramePopulation">Paired 64-band log powers pooled over the original stock-active frames</S>
+              <S N="TemporalFramePopulation">Paired window RMS over every original frame</S>
+              <S N="WavSHA256">44043786DA37D2844599250C219F03F6C5030F78FEA399D41CFF83DA087AB593</S>
+              <S N="StockWavSHA256">423A63BD9346209E394807E088FB676BAD971C2D5A95E9EABBFE7C84322FFD26</S>
+            </MS>
+          </Obj>
+          <Obj RefId="11">
+            <TNRef RefId="0" />
+            <MS>
+              <S N="Reference">peach-original</S>
+              <S N="Label">stock end-to-end peach, existing 16-bit reference</S>
+              <S N="Mode">buzzy</S>
+              <I32 N="Samples">49200</I32>
+              <I32 N="Frames">410</I32>
+              <I32 N="ActiveFrames">284</I32>
+              <Db N="LsdDb">12.133530037381714</Db>
+              <Db N="SpectralEnvelopeCorrelation">0.7991075221717351</Db>
+              <Db N="TemporalEnvelopeCorrelation">0.9793428864090982</Db>
+              <Db N="LevelMatchGain">1.0093451383638619</Db>
+              <S N="StockWav">C:\Dev\Kokoro-Hexagon-copysynth\build\copy-synthesis-20261013-run2\peach-original-stock.wav</S>
+              <S N="Wav">C:\Dev\Kokoro-Hexagon-copysynth\build\copy-synthesis-20261013-run2\peach-original-buzzy.wav</S>
+              <S N="PcmInput">C:\Dev\Kokoro-Hexagon\build\unit-selection-20261010\target-stock.wav</S>
+              <S N="PcmSHA256">90AB999962D56D48F80345BC96FD38FB39D1D3ED39F1A26A4F0FA66CA5DE1608</S>
+              <S N="F0Input">C:\Dev\Kokoro-Hexagon\build\unit-selection-20261010\target-eval.npz</S>
+              <S N="F0SHA256">D3BB55C02330A032C4F58857D3227944B8AFCB34D79FBB36A78274A679DAEF22</S>
+              <I32 N="EnvelopePairs">18176</I32>
+              <S N="SpectralFramePopulation">Paired 64-band log powers pooled over the original stock-active frames</S>
+              <S N="TemporalFramePopulation">Paired window RMS over every original frame</S>
+              <S N="WavSHA256">DF2452F18D4E6CA1D55A3845B24F990C3644323D8B5D6624FAAECE8E6007FA16</S>
+              <S N="StockWavSHA256">423A63BD9346209E394807E088FB676BAD971C2D5A95E9EABBFE7C84322FFD26</S>
+            </MS>
+          </Obj>
+        </LST>
+      </Obj>
+    </MS>
+  </Obj>
+</Objs>
