@@ -1,0 +1,30 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Configuration>
+  <ViewDefinitions>
+    <View>
+      <Name>KokoroAudioMeasurement</Name>
+      <ViewSelectedBy><TypeName>KokoroAudioMeasurement</TypeName></ViewSelectedBy>
+      <TableControl>
+        <AutoSize />
+        <TableHeaders>
+          <TableColumnHeader><Label>File</Label></TableColumnHeader>
+          <TableColumnHeader><Label>DurationMs</Label><Alignment>Right</Alignment></TableColumnHeader>
+          <TableColumnHeader><Label>IntegratedLufs</Label><Alignment>Right</Alignment></TableColumnHeader>
+          <TableColumnHeader><Label>MomentaryMaxLufs</Label><Alignment>Right</Alignment></TableColumnHeader>
+          <TableColumnHeader><Label>ShortTermMaxLufs</Label><Alignment>Right</Alignment></TableColumnHeader>
+          <TableColumnHeader><Label>TruePeakDbtp</Label><Alignment>Right</Alignment></TableColumnHeader>
+          <TableColumnHeader><Label>RmsDbfs</Label><Alignment>Right</Alignment></TableColumnHeader>
+        </TableHeaders>
+        <TableRowEntries><TableRowEntry><TableColumnItems>
+          <TableColumnItem><PropertyName>File</PropertyName></TableColumnItem>
+          <TableColumnItem><PropertyName>DurationMs</PropertyName><FormatString>F2</FormatString></TableColumnItem>
+          <TableColumnItem><PropertyName>IntegratedLufs</PropertyName><FormatString>F2</FormatString></TableColumnItem>
+          <TableColumnItem><PropertyName>MomentaryMaxLufs</PropertyName><FormatString>F2</FormatString></TableColumnItem>
+          <TableColumnItem><PropertyName>ShortTermMaxLufs</PropertyName><FormatString>F2</FormatString></TableColumnItem>
+          <TableColumnItem><PropertyName>TruePeakDbtp</PropertyName><FormatString>F2</FormatString></TableColumnItem>
+          <TableColumnItem><PropertyName>RmsDbfs</PropertyName><FormatString>F2</FormatString></TableColumnItem>
+        </TableColumnItems></TableRowEntry></TableRowEntries>
+      </TableControl>
+    </View>
+  </ViewDefinitions>
+</Configuration>
