@@ -41,6 +41,7 @@ param(
     [switch] $TemplateAddResidual,
     [switch] $TemplateStoreResidual,
     [switch] $TemplateUpsample,
+    [switch] $TemplateConnectedMain,
     [ValidateSet('Lock','Smoothstep')][string] $TemplateShape = 'Lock',
     [ValidateSet(0,128,256,512)][int] $TemplateInputChannels = 0,
     [ValidateRange(16,64)][int] $TemplateBlockFrames = 16,
@@ -573,7 +574,7 @@ if($Kernel -eq 'KokoroR0Sub0') {
     $symbol='kokoro_adain_turns_coefficients'; $soname='libkokoro_adain_turns_coefficients.so'
 } elseif($Kernel -eq 'KokoroGeneratorTemplate1Run') {
     . (Join-Path $PSScriptRoot '..\src\jobs\Kokoro.GeneratorTemplate1Run.ps1')
-    $run=New-KokoroGeneratorTemplate1RunSteps -Channels $ConvChannels -InputChannels $TemplateInputChannels -Upsample:$TemplateUpsample -Kernel $ConvKernel -Dilation $ConvDilation -Tiles $ConvTiles -Branches $TemplateBranches -AddResidual:$TemplateAddResidual -StoreResidual:$TemplateStoreResidual -Shape $TemplateShape -BlockFrames $TemplateBlockFrames -InitialFrameOffset $TemplateInitialFrameOffset
+    $run=New-KokoroGeneratorTemplate1RunSteps -Channels $ConvChannels -InputChannels $TemplateInputChannels -Upsample:$TemplateUpsample -ConnectedMain:$TemplateConnectedMain -Kernel $ConvKernel -Dilation $ConvDilation -Tiles $ConvTiles -Branches $TemplateBranches -AddResidual:$TemplateAddResidual -StoreResidual:$TemplateStoreResidual -Shape $TemplateShape -BlockFrames $TemplateBlockFrames -InitialFrameOffset $TemplateInitialFrameOffset
     $steps=@($run.Steps)
     $symbol='kokoro_generator_tail_skel_handle_invoke'; $soname='libkokoro_generator_tail_skel.so'
 } elseif($Kernel -eq 'KokoroHmxConvRun') {
@@ -604,10 +605,10 @@ if($Kernel -eq 'KokoroR0Sub0') {
     $symbol='kqnn_emit_skel_handle_invoke'; $soname='libkqnn_emit_skel.so'
 }
 if ($ResidentPayloads) {
-    if ($Kernel -cne 'KokoroDecoderGenerator16Run' -or $ResidentPmuEvents) { throw 'Resident payload adapter requires the combined job without PMU telemetry.' }
+    if (($Kernel -cne 'KokoroDecoderGenerator16Run' -and -not ($Kernel -ceq 'KokoroGeneratorTemplate1Run' -and $TemplateConnectedMain)) -or $ResidentPmuEvents) { throw 'Resident payload adapter requires the combined job or connected generator main without PMU telemetry.' }
     . (Join-Path $PSScriptRoot '../src/jobs/Kokoro.ResidentPayload.ps1')
     $steps=@(Add-KokoroResidentPayloadEntry -Steps $steps -Layout $run.Layout)
-    $run.Layout.ResidentPayloads=$true
+    $run.Layout | Add-Member -NotePropertyName ResidentPayloads -NotePropertyValue $true -Force
 }
 if ($RegionBody) {
     # Close external control flow solely for independent encoding verification.

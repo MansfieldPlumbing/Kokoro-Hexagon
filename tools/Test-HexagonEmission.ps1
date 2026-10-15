@@ -28,6 +28,8 @@ param(
     [switch] $TemplateAddResidual,
     [switch] $TemplateStoreResidual,
     [switch] $TemplateUpsample,
+    [switch] $TemplateConnectedMain,
+    [switch] $ResidentPayloads,
     [ValidateSet('Lock','Smoothstep')][string] $TemplateShape = 'Lock',
     [ValidateSet(0,128,256,512)][int] $TemplateInputChannels = 0,
     [ValidateRange(16,64)][int] $TemplateBlockFrames = 16,
@@ -66,6 +68,8 @@ $pmuArgs.TemplateBranches=$TemplateBranches
 $pmuArgs.TemplateAddResidual=$TemplateAddResidual.IsPresent
 $pmuArgs.TemplateStoreResidual=$TemplateStoreResidual.IsPresent
 $pmuArgs.TemplateUpsample=$TemplateUpsample.IsPresent
+$pmuArgs.TemplateConnectedMain=$TemplateConnectedMain.IsPresent
+$pmuArgs.ResidentPayloads=$ResidentPayloads.IsPresent
 $pmuArgs.TemplateShape=$TemplateShape
 $pmuArgs.TemplateInputChannels=$TemplateInputChannels
 $pmuArgs.TemplateBlockFrames=$TemplateBlockFrames

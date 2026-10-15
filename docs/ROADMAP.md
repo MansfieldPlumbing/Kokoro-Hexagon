@@ -83,6 +83,11 @@ connected generator's bounded VTCM working set, input/output contract and
 whole-sentence PCM, then integrate the dynamic frontend through that boundary.
 Replace standalone diagnostic wrappers with the connected fixed loop schedule;
 preserve their receipts and reuse only the kernels needed by the connected path.
+The connected generator uses the phase lock with reversed increments as its
+Snake replacement. Only NaN/Inf automatically stops that run; PCM SNR is
+reported without a quality threshold, and listening to the WAV pairs decides
+quality. Smoothstep remains an existing parameter value, outside this build's
+candidate and gate. Reuse the existing fixed normalization constants unchanged.
 
 Compare progressively smaller and differently placed frame cuts with the same
 linguistic controls, style and randomness. Report sample ownership, boundary error,

@@ -12,6 +12,8 @@ twice, or written as a scratch script, is a missing command: add it here.
                               no adb, no phone, no network. Phone access is only in Run, Ratchet and Compare.
   Verify                      Check tracked source, repository hygiene, handoff, Status, tests and optional case pairs.
   BuildHost -OutputDirectory  Build and retain the pinned arm64 diagnostic APK; no phone access.
+  WeightAssembly -Path -OutputDirectory
+                              Package native generator weights as an uncompressed managed resource and emit its mapped loader; no phone access.
   Ratchet  [-Case]            Case-pair check, then every unblocked ratchet case on the phone; throws on regression.
   Run      -Case [-Hypothesis] [-Runs]
                               Emit the case's kernel, run it on the phone, print input hashes, receipt and result.
@@ -92,7 +94,7 @@ pwsh -NoProfile -File ./Invoke-KokoroDevelopment.ps1 Run -Case benchmark-0-sm855
 [CmdletBinding()]
 param(
     [Parameter(Position = 0)]
-    [ValidateSet('Status', 'Verify', 'BuildHost', 'Ratchet', 'Run', 'Emit', 'Check', 'Compare', 'JobInput', 'Capture', 'StockCapture', 'Speak', 'Zira', 'Albert', 'AlbertError', 'AlbertLinear', 'AlbertLayerNorm', 'AlbertGelu', 'AlbertAttention', 'AlbertEmbed', 'AlbertJob', 'Api', 'Find', 'Tools', 'StageResidency')]
+    [ValidateSet('Status', 'Verify', 'BuildHost', 'Ratchet', 'Run', 'Emit', 'Check', 'Compare', 'JobInput', 'Capture', 'StockCapture', 'Speak', 'Zira', 'Albert', 'AlbertError', 'AlbertLinear', 'AlbertLayerNorm', 'AlbertGelu', 'AlbertAttention', 'AlbertEmbed', 'AlbertJob', 'Api', 'Find', 'Tools', 'StageResidency', 'WeightAssembly')]
     [string] $Command = 'Status',
     [string] $Case,
     [string] $Kernel,
@@ -2087,6 +2089,11 @@ function New-KokoroDiagnosticHost {
 if ($MyInvocation.InvocationName -eq '.') { return }
 
 switch ($Command) {
+    'WeightAssembly' {
+        if (-not $Path -or -not $OutputDirectory) { throw 'WeightAssembly needs -Path (native generator weights) and -OutputDirectory (under build).' }
+        Import-Module (Join-Path $Root 'tools/Kokoro.ManagedPayload.psm1')
+        New-KokoroWeightAssembly -Path $Path -OutputDirectory $OutputDirectory
+    }
     'StageResidency' {
         if ($null -eq $Parameters) { Measure-KokoroStageResidency }
         else { Measure-KokoroStageResidency @Parameters }

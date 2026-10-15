@@ -21,6 +21,7 @@ $Marshal = [Runtime.InteropServices.Marshal]; $native = [IntPtr]::Zero; $opened 
 $pins = [Collections.Generic.List[object]]::new(); $allocations = [Collections.Generic.List[object]]::new()
 $passed = $false; $stream = $null; $audio = $null
 $sharedPayloads = [Collections.Generic.List[object]]::new()
+$mappedWeights = $null
 try {
     $kv = @{}; foreach ($l in [IO.File]::ReadAllLines([IO.Path]::Combine($dir, 'spec.txt'))) { $p = $l.Split('=', 2); if ($p.Count -eq 2) { $kv[$p[0]] = $p[1] } }
     $tiles = [int]$kv.Tiles; $runs = [int]$kv.Runs; $outputBytes = [int]$kv.OutputBytes; $pcmOffset = [int]$kv.PcmOffset; $samples = [int]$kv.Samples
@@ -80,7 +81,21 @@ try {
     $handle = [uint64]$oa[1]; $opened = $true
 
     $act = [IO.File]::ReadAllBytes([IO.Path]::Combine($dir, 'activations.bin'))
-    $wts = [IO.File]::ReadAllBytes([IO.Path]::Combine($dir, 'weights.bin'))
+    if ($kv.ContainsKey('WeightAssembly')) {
+        if (-not $kv.ContainsKey('ResidentPayloads')) { throw 'Mapped weight assembly requires resident payload transport.' }
+        $weightLoader = [Reflection.Assembly]::LoadFile([IO.Path]::Combine($dir, 'Kokoro.MappedPayload.dll'))
+        $weightType = $weightLoader.GetType('KokoroMappedPayload', $true)
+        $weightIdentity = [Guid]$kv.WeightIdentity
+        $mapClock = [Diagnostics.Stopwatch]::StartNew()
+        $mappedWeights = $weightType::new([IO.Path]::Combine($dir, 'Kokoro.Generator.Weights.dll'), [long]$kv.WeightOffset, [long]$kv.WeightBytes, [long]$kv.WeightAssemblyBytes, [long]$kv.WeightIdentityOffset, ($weightIdentity.ToByteArray()))
+        $mapClock.Stop()
+        $weightBytes = [int]$mappedWeights.Bytes
+        $wts = $null
+        $lines.Add("WeightAssembly=True LaunchMapMs=$($mapClock.Elapsed.TotalMilliseconds.ToString('F3',$inv)) LaunchHashPasses=0")
+    } else {
+        $wts = [IO.File]::ReadAllBytes([IO.Path]::Combine($dir, 'weights.bin'))
+        $weightBytes = $wts.Length
+    }
     $tbl = [IO.File]::ReadAllBytes([IO.Path]::Combine($dir, 'tables.bin'))
     $inputBytes = if ($kv.InputBytes) { [long]$kv.InputBytes } else { $tiles * 8192L }
     if ($act.Length -ne $inputBytes) { throw 'Input length' }
@@ -89,13 +104,14 @@ try {
     $mappingMs = 0.0
     if ($resident) {
         $mappingClock = [Diagnostics.Stopwatch]::StartNew()
-        $sharedWeights = & $abi.NewSharedPayload $native $wts; $sharedPayloads.Add($sharedWeights)
+        $sharedWeights = if ($null -ne $mappedWeights) { & $abi.NewSharedPayload $native $null ($mappedWeights.GetPointer()) $weightBytes } else { & $abi.NewSharedPayload $native $wts }
+        $sharedPayloads.Add($sharedWeights)
         $sharedTables = & $abi.NewSharedPayload $native $tbl; $sharedPayloads.Add($sharedTables)
         $config = [byte[]]::new(20)
-        $fields = [uint32[]]@($tiles,$sharedWeights.RemoteAddress,$wts.Length,$sharedTables.RemoteAddress,$tbl.Length)
+        $fields = [uint32[]]@($tiles,$sharedWeights.RemoteAddress,$weightBytes,$sharedTables.RemoteAddress,$tbl.Length)
         [Buffer]::BlockCopy($fields,0,$config,0,20)
         $mappingClock.Stop(); $mappingMs = $mappingClock.Elapsed.TotalMilliseconds
-        $lines.Add("ResidentPayloads=True MappingMs=$($mappingMs.ToString('F3',$inv)) WeightsBytes=$($wts.Length) TablesBytes=$($tbl.Length) Allocation=RpcmemSystemUncached Mapping=RemoteMemMapStatic OncePerSession=True")
+        $lines.Add("ResidentPayloads=True MappingMs=$($mappingMs.ToString('F3',$inv)) WeightsBytes=$weightBytes TablesBytes=$($tbl.Length) Allocation=RpcmemSystemUncached Mapping=RemoteMemMapStatic OncePerSession=True")
     }
     $ticks = [Collections.Generic.List[long]]::new(); $pcmHash = $null; $allOk = $true; $pcm = $null
     $requestLifetime = $kv.ContainsKey('RequestLifetime')
@@ -147,7 +163,16 @@ try {
         $timer56 = if ($out.Length -ge 64) { [BitConverter]::ToUInt64($out, 56) } else { [uint64]0 }
         $timer64 = if ($out.Length -ge 80) { [BitConverter]::ToUInt64($out, 64) } else { [uint64]0 }
         $timer72 = if ($out.Length -ge 80) { [BitConverter]::ToUInt64($out, 72) } else { [uint64]0 }
-        $lines.Add("Run=$run InvokeRc=$rc Stage=$stage Done=$done RegionTicks=$dt Timer48=$timer48 Timer56=$timer56 Timer64=$timer64 Timer72=$timer72 InvokeMs=$($sw.Elapsed.TotalMilliseconds.ToString('F3', $inv)) PcmSHA256=$hash")
+        $layerTimers = ''
+        if ($out.Length -ge 1024 -and [BitConverter]::ToUInt32($out,80) -eq 0x314e4547L) {
+            $layerTicks = [long[]]::new(36)
+            for ($layer = 0; $layer -lt 36; $layer++) {
+                $at = 96 + 16*$layer
+                $layerTicks[$layer] = [long][BitConverter]::ToUInt64($out,$at+8) - [long][BitConverter]::ToUInt64($out,$at)
+            }
+            $layerTimers = ' HmxLayerTicks=' + ($layerTicks -join ',')
+        }
+        $lines.Add("Run=$run InvokeRc=$rc Stage=$stage Done=$done RegionTicks=$dt Timer48=$timer48 Timer56=$timer56 Timer64=$timer64 Timer72=$timer72 InvokeMs=$($sw.Elapsed.TotalMilliseconds.ToString('F3', $inv)) PcmSHA256=$hash$layerTimers")
         [IO.File]::WriteAllLines($receipt, $lines)
         if (-not $allOk) { throw 'Invocation or PCM parity failed; stopping before playback.' }
         if ($requestLifetime) {
@@ -216,6 +241,7 @@ finally {
         }
         catch { $passed=$false; $lines.Add('PayloadCleanupError=' + $_.Exception.Message) }
     }
+    if ($null -ne $mappedWeights) { $mappedWeights.Close() }
     if ($opened) { $null = $close.DynamicInvoke([object[]]@($handle)) }
     foreach ($g in $pins) { $g.Free() }
     foreach ($a in $allocations) { $Marshal::FreeHGlobal($a) }

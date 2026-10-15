@@ -104,8 +104,9 @@ function Invoke-KokoroGeneratorLockReference {
             $at = (($blockIndex*$Tables.Channels+$channel)*$Tables.Positions+$position%$Tables.Positions)*5
             $mean=$Tables.Seats[$at]; $phase=$Tables.Seats[$at+1]
             $phi=$phase+$Tables.Seats[$at+4]*[double]$Alpha[$channel]*([double]$InputValues[$channel*$Frames+$position]-$mean)
-            $phi -= [Math]::Floor($phi/[Math]::PI)*[Math]::PI
-            $phi = [Math]::Min($phi,[Math]::PI-$phi)
+            if ($phi -lt 0.0) { $phi = -$phi }
+            if ($phi -gt [Math]::PI/2) { $phi = [Math]::PI-$phi }
+            $phi = [Math]::Clamp($phi,0.0,[Math]::PI/2)
             $w = [Math]::Clamp($Tables.Seats[$at+2]+$Tables.Seats[$at+3]*($phi-$phase),0.0,1.0)
             $result[$channel*$OutputFrames+$t] = [float]([double]$InputValues[$channel*$Frames+$position]+$w/[double]$Alpha[$channel])
         }

@@ -11,6 +11,7 @@ function New-KokoroGeneratorTemplate1RunSteps {
         [ValidateSet(128,256)][int] $Channels = 128,
         [ValidateSet(0,128,256,512)][int] $InputChannels = 0,
         [switch] $Upsample,
+        [switch] $ConnectedMain,
         [ValidateSet(3,7,11)][int] $Kernel = 3,
         [ValidateSet(1,3,5)][int] $Dilation = 1,
         [ValidateRange(1,60)][int] $Tiles = 60,
@@ -21,6 +22,10 @@ function New-KokoroGeneratorTemplate1RunSteps {
         [ValidateRange(16,64)][int] $BlockFrames = 16,
         [ValidateRange(0,63)][int] $InitialFrameOffset = 0
     )
+    if ($ConnectedMain) {
+        . (Join-Path $PSScriptRoot 'Kokoro.GeneratorMainRun.ps1')
+        return New-KokoroGeneratorMainRunSteps -BlockFrames $BlockFrames
+    }
     if ($Upsample) {
         . (Join-Path $PSScriptRoot 'Kokoro.GeneratorUpsampleRun.ps1')
         return New-KokoroGeneratorUpsampleRunSteps -Channels $Channels

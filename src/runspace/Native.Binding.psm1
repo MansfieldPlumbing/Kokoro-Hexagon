@@ -93,8 +93,14 @@ $bindExport = {
 }.GetNewClosure()
 
 $newSharedPayload = {
-    param([IntPtr]$Library, [byte[]]$Bytes)
-    if ($null -eq $Bytes -or $Bytes.Length -lt 1) { throw 'Shared payload is empty.' }
+    param([IntPtr]$Library, [byte[]]$Bytes, [IntPtr]$Source = [IntPtr]::Zero, [int]$Length = 0)
+    $payloadBytes = if ($null -ne $Bytes -and $Bytes.Length -gt 0) {
+        if ($Source -ne [IntPtr]::Zero -or $Length -ne 0) { throw 'Choose bytes or an owned native source, not both.' }
+        $Bytes.Length
+    } else {
+        if ($Source -eq [IntPtr]::Zero -or $Length -lt 1) { throw 'Shared payload is empty.' }
+        $Length
+    }
     # FastRPC d2475196 inc/rpcmem.h and inc/remote.h: system heap 25,
     # uncached CPU allocation, static CDSP mapping. Payload is immutable after map.
     $allocate = & $bindExport $Library 'rpcmem_alloc' ([IntPtr]) ([Type[]]@([int],[uint32],[int]))
@@ -102,24 +108,35 @@ $newSharedPayload = {
     $toFd = & $bindExport $Library 'rpcmem_to_fd' ([int]) ([Type[]]@([IntPtr]))
     $map = & $bindExport $Library 'remote_mem_map' ([int]) ([Type[]]@([int],[int],[int],[uint64],[UIntPtr],([uint64]).MakeByRefType()))
     $unmap = & $bindExport $Library 'remote_mem_unmap' ([int]) ([Type[]]@([int],[uint64],[UIntPtr]))
-    $size = [int64]([math]::Ceiling($Bytes.Length / 4096.0) * 4096)
+    $size = [int64]([math]::Ceiling($payloadBytes / 4096.0) * 4096)
     if ($size -gt [int]::MaxValue) { throw 'Shared payload exceeds rpcmem_alloc bounds.' }
     $pointer = $allocate.Invoke(25, [uint32]0, [int]$size)
     if ($pointer -eq [IntPtr]::Zero) { throw 'rpcmem_alloc failed.' }
     $remoteAddress = [uint64]0
     $mapped = $false
     try {
-        [Runtime.InteropServices.Marshal]::Copy($Bytes, 0, $pointer, $Bytes.Length)
+        if ($Source -eq [IntPtr]::Zero) {
+            [Runtime.InteropServices.Marshal]::Copy($Bytes, 0, $pointer, $payloadBytes)
+        } else {
+            # Bionic string.h: void* memcpy(void*, const void*, size_t). The
+            # caller retains its mapped owner through this one startup copy.
+            $libc = [Runtime.InteropServices.NativeLibrary]::Load('libc.so')
+            try {
+                $copy = & $bindExport $libc 'memcpy' ([IntPtr]) ([Type[]]@([IntPtr],[IntPtr],[UIntPtr]))
+                $null = $copy.Invoke($pointer, $Source, [UIntPtr]::new([uint64]$payloadBytes))
+            }
+            finally { [Runtime.InteropServices.NativeLibrary]::Free($libc) }
+        }
         $fd = $toFd.Invoke($pointer)
         if ($fd -lt 0) { throw 'rpcmem_to_fd failed.' }
         $mapArguments = [object[]]@([int]3,[int]$fd,[int]0,[uint64]$pointer.ToInt64(),[UIntPtr]::new([uint64]$size),[uint64]0)
         $rc = [int]$map.DynamicInvoke($mapArguments)
         if ($rc -ne 0) { throw "remote_mem_map failed rc=$rc" }
         $remoteAddress = [uint64]$mapArguments[5]; $mapped = $true
-        if ($remoteAddress -eq 0 -or $remoteAddress + $Bytes.Length -gt [uint32]::MaxValue) {
+        if ($remoteAddress -eq 0 -or $remoteAddress + $payloadBytes -gt [uint32]::MaxValue) {
             throw 'Shared payload is outside the DSP address range.'
         }
-        [pscustomobject]@{Pointer=$pointer;RemoteAddress=$remoteAddress;Bytes=$Bytes.Length;MappedBytes=$size;Free=$free;Unmap=$unmap}
+        [pscustomobject]@{Pointer=$pointer;RemoteAddress=$remoteAddress;Bytes=$payloadBytes;MappedBytes=$size;Free=$free;Unmap=$unmap}
     }
     catch {
         if ($mapped) {

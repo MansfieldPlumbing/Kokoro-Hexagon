@@ -469,9 +469,15 @@ function Get-PackFp16WeightsKernel {
 }
 
 function Get-GeneratorCoefficientsKernel {
+    param([switch] $FixedLevels)
     # Design section 3: offline A/B and Snake phase constants, in crouton channel order.
     # Statistics are supplied offline. The phone never measures or regenerates them.
-    if ($script:Kernels.ContainsKey('GeneratorCoefficients')) { return $script:Kernels.GeneratorCoefficients }
+    # FixedLevels consumes physical mean and inverse standard deviation from the
+    # adopted calibration; it does not measure an utterance or add runtime statistics.
+    # This calibration compatibility path is temporary scaffolding. Student-supplied
+    # controls must enter through the coefficient contract after their own admission.
+    $cacheKey = if ($FixedLevels) { 'GeneratorFixedCoefficients' } else { 'GeneratorCoefficients' }
+    if ($script:Kernels.ContainsKey($cacheKey)) { return $script:Kernels[$cacheKey] }
     $E = [Expression]
     $style = $E::Parameter([float[]],'style'); $fc = $E::Parameter([float[]],'fc'); $bias = $E::Parameter([float[]],'bias')
     $normWeight = $E::Parameter([float[]],'normWeight'); $normBias = $E::Parameter([float[]],'normBias')
@@ -489,13 +495,18 @@ function Get-GeneratorCoefficientsKernel {
     $gammaValue = & $double $gamma
     $meanValue = & $double ($E::Convert($E::ArrayIndex($statistics,$channel),[float]))
     $alphaValue = & $double ($E::ArrayIndex($alpha,$channel))
+    $inverseValue = if ($FixedLevels) {
+        $E::Convert($E::ArrayIndex($statistics,$E::Add($channels,$channel)),[float])
+    } else {
+        $E::Divide($one,$E::Call([MathF].GetMethod('Sqrt',[Type[]]@([float])),
+            $E::Add($E::Convert($E::ArrayIndex($statistics,$E::Add($channels,$channel)),[float]),$E::Constant([float]0.00001))))
+    }
     $coefficient = $E::Block(
         $E::Assign($gamma,$zero),$E::Assign($beta,$zero),
         (New-For $styleIndex (New-Int 0) $styles $sumStyle),
         $E::Assign($gamma,$E::Add($one,$E::Add($gamma,$E::ArrayIndex($bias,$channel)))),
         $E::Assign($beta,$E::Add($beta,$E::ArrayIndex($bias,$E::Add($channel,$channels)))),
-        $E::Assign($inverse,$E::Divide($one,$E::Call([MathF].GetMethod('Sqrt',[Type[]]@([float])),
-            $E::Add($E::Convert($E::ArrayIndex($statistics,$E::Add($channels,$channel)),[float]),$E::Constant([float]0.00001))))),
+        $E::Assign($inverse,$inverseValue),
         $E::Assign($affineA,$E::Multiply($E::Multiply($gammaValue,$weightValue),(& $double $inverse))),
         $E::Assign($affineB,$E::Add($E::Multiply($gammaValue,
             $E::Subtract((& $double ($E::ArrayIndex($normBias,$channel))),$E::Multiply($E::Multiply($weightValue,$meanValue),(& $double $inverse)))),(& $double $beta))),
@@ -510,7 +521,7 @@ function Get-GeneratorCoefficientsKernel {
         (New-For $channel (New-Int 0) $channels $coefficient))
     $kernel = $E::Lambda([Action[float[],float[],float[],float[],float[],double[],float[],float[]]],$body,
         [ParameterExpression[]]@($style,$fc,$bias,$normWeight,$normBias,$statistics,$alpha,$destination)).Compile()
-    $script:Kernels.GeneratorCoefficients = $kernel
+    $script:Kernels[$cacheKey] = $kernel
     $kernel
 }
 

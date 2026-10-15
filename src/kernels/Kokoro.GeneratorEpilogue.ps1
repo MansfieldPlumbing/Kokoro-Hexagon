@@ -20,6 +20,8 @@ function New-KokoroGeneratorEpilogueSteps {
         [switch] $AddResidual,
         [switch] $StoreResidual,
         [switch] $AddThird,
+        [switch] $ResidualOnly,
+        [ValidateRange(0.0,1.0)][double] $ResidualScale = 1.0,
         [ValidateRange(0.0,1.0)][double] $LeakySlope = 1.0,
         [ValidateSet('Lock','Smoothstep')][string] $Shape = 'Lock',
         [ValidateRange(16,64)][int] $BlockFrames = 16,
@@ -27,7 +29,7 @@ function New-KokoroGeneratorEpilogueSteps {
         [string] $LabelPrefix = 'generator_epilogue'
     )
     $Smoothstep = $Shape -ceq 'Smoothstep'
-    $PhaseLock = $Shape -ceq 'Lock'
+    $PhaseLock = $Shape -ceq 'Lock' -and -not $ResidualOnly
     if ($InitialFrameOffset -ge $BlockFrames) { throw 'Initial lock frame offset must be inside its block.' }
     if ($AddThird -and (-not $AddResidual -or $Branches -ne 1)) { throw 'The third mean input requires one residual branch.' }
     $positions = if ($Channels -eq 256) { 10 } else { 60 }
@@ -61,12 +63,16 @@ function New-KokoroGeneratorEpilogueSteps {
         $s.Add(@{Op='vmpy-sf-qf32';d=($Source+1);s=($Source+1);t=3})
         $s.Add(@{Op='vconv-qf32-hf';d=$Destination;s=$Source})
     }
+    if ($PhaseLock) {
+        & $splat 20 ([BitConverter]::SingleToInt32Bits([float]([Math]::PI/16777216.0)))
+    } else {
     foreach ($constant in @(
         @(30,0x007fffffL),@(29,0x00800000L),@(28,255L),@(27,150L),
         @(26,31L),@(25,-31L),@(24,0x00ffffffL),@(23,0x01000000L),
         @(22,0x4b000000L),@(21,0xcb000000L),
         @(20,[BitConverter]::SingleToInt32Bits([float]($(if ($Smoothstep) { 2.0 } else { [Math]::PI })/16777216.0)))
     )) { & $splat $constant[0] $constant[1] }
+    }
     $s.Add(@{Op='imm';d=4;i=0})
     if (-not $PhaseLock) { $s.Add(@{Op='imm';d=5;i=1}) }
     if ($PhaseLock) { $s.Add(@{Op='imm';d=11;i=($InitialFrameOffset*$positions)}) }
@@ -84,6 +90,7 @@ function New-KokoroGeneratorEpilogueSteps {
             $s.Add(@{Op='label';Name="${LabelPrefix}_b${block}_seat_ready"})
         }
         $s.Add(@{Op='imm';d=14;i=16})
+        if ($PhaseLock) { $s.Add(@{Op='loop0-r';s=14;Label="${LabelPrefix}_b${block}_pair"}) }
         $s.Add(@{Op='label';Name="${LabelPrefix}_b${block}_pair"})
         $s.Add(@{Op='vload-post';d=2;s=0;i=1})
         & $fromHalf 2 0
@@ -109,12 +116,17 @@ function New-KokoroGeneratorEpilogueSteps {
                 & $fp32 'vadd-sf-qf32' $row 3 2
             }
         }
+        if ($ResidualScale -ne 1.0) {
+            & $splat 14 ([BitConverter]::SingleToInt32Bits([float]$ResidualScale))
+            & $fp32 'vmpy-sf-qf32' 0 0 14
+            & $fp32 'vmpy-sf-qf32' 1 1 14
+        }
         if ($StoreResidual) {
             & $toHalf 0 2
             $s.Add(@{Op='vstore-post';s=2;t=2;i=1})
             & $fromHalf 2 0
         }
-        for ($branch = 0; $branch -lt $Branches; $branch++) {
+        for ($branch = 0; -not $ResidualOnly -and $branch -lt $Branches; $branch++) {
             $offset = ($block*$Branches+$branch)*640
             $s.Add(@{Op='addi';d=8;s=12;i=$offset})
             for ($coefficient = 0; $coefficient -lt 5; $coefficient++) {
@@ -154,6 +166,8 @@ function New-KokoroGeneratorEpilogueSteps {
                 & $fp32 'vmpy-sf-qf32' (2+$row) $row 16
                 & $fp32 'vadd-sf-qf32' (2+$row) (2+$row) 17
             }
+            # Smoothstep retains its original IEEE phase wrap and polynomial.
+            if (-not $PhaseLock) {
             # Convert the phase's IEEE significand/exponent to low integer bits. Clamping the
             # shift to [-31,31] preserves all low 24 bits, including negative phases, without
             # an input-magnitude-dependent range reduction or a sine call.
@@ -173,14 +187,34 @@ function New-KokoroGeneratorEpilogueSteps {
                 $s.Add(@{Op='vsub-w';d=$phase;s=5;t=6})
             }
             & $splat 14 0x3f800000L
+            }
             foreach ($row in 0,1) {
                 $phase = 2+$row
+                if ($PhaseLock) {
+                    # Scott's hardware bounce: abs below zero, pi-phase above
+                    # pi/2, then clamp. H-abs(H-abs(phi)) performs both reflections
+                    # with add and sign bits; it does not wrap another cycle.
+                    & $fp32 'vmpy-sf-qf32' 4 $phase 20
+                    & $splat 14 0x7fffffffL
+                    & $splat 15 0x80000000L
+                    & $splat 5 ([BitConverter]::SingleToInt32Bits([float]([Math]::PI/2)))
+                    $s.Add(@{Op='vand';d=4;s=4;t=14})
+                    $s.Add(@{Op='vxor';d=4;s=4;t=15})
+                    & $fp32 'vadd-sf-qf32' 4 5 4
+                    $s.Add(@{Op='vand';d=4;s=4;t=14})
+                    $s.Add(@{Op='vxor';d=4;s=4;t=15})
+                    & $fp32 'vadd-sf-qf32' 4 5 4
+                    & $splat 6 0
+                    $s.Add(@{Op='vmax-w';d=4;s=4;t=6})
+                    $s.Add(@{Op='vmin-w';d=4;s=4;t=5})
+                } else {
                 $s.Add(@{Op='vand';d=4;s=$phase;t=24})
                 $s.Add(@{Op='vsub-w';d=5;s=23;t=4})
                 $s.Add(@{Op='vmin-w';d=4;s=4;t=5})
                 $s.Add(@{Op='vadd-w';d=4;s=4;t=22})
                 & $fp32 'vadd-sf-qf32' 4 4 21
                 & $fp32 'vmpy-sf-qf32' 4 4 20
+                }
                 if ($PhaseLock) {
                     $s.Add(@{Op='vload';d=5;s=8;Offset=(512+$row*128)})
                     $s.Add(@{Op='vload';d=6;s=8;Offset=(768+$row*128)})
@@ -217,8 +251,12 @@ function New-KokoroGeneratorEpilogueSteps {
             $s.Add(@{Op='label';Name="${LabelPrefix}_b${block}_seat_next"})
         }
         $s.Add(@{Op='addi';d=14;s=14;i=-1})
-        $s.Add(@{Op='gtu';d=0;s=14;t=4})
-        $s.Add(@{Op='jump-p';u=0;Label="${LabelPrefix}_b${block}_pair"})
+        if ($PhaseLock) {
+            $s.Add(@{Op='endloop0'})
+        } else {
+            $s.Add(@{Op='gtu';d=0;s=14;t=4})
+            $s.Add(@{Op='jump-p';u=0;Label="${LabelPrefix}_b${block}_pair"})
+        }
     }
     if ($PhaseLock) {
         $s.Add(@{Op='addi';d=11;s=11;i=32})
@@ -244,7 +282,7 @@ function New-KokoroGeneratorUpsampleInterleaveSteps {
     param(
         [ValidateSet(128,256)][int] $Channels = 256,
         [ValidateSet(6,10)][int] $Stride = 10,
-        [ValidateRange(1,5)][int] $PhaseTiles = 1,
+        [ValidateRange(1,32)][int] $PhaseTiles = 1,
         [string] $LabelPrefix = 'generator_ups_interleave'
     )
     if (($Channels -eq 256 -and $Stride -ne 10) -or ($Channels -eq 128 -and $Stride -ne 6)) {
