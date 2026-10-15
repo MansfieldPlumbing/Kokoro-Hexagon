@@ -736,7 +736,20 @@ class Phonology {
     $result=Export-LoweredAssembly -SourcePath $sourceFile -ClassName Lexicon -OutputPath $OutputPath -Deterministic
     $inspection=Test-LoweredAssembly -AssemblyPath $OutputPath
     if($inspection.AssemblyReferences.Count -ne 1 -or $inspection.AssemblyReferences[0] -cne 'System.Private.CoreLib'){throw 'Unexpected compiled reference dependency.'}
-    $receipt=[pscustomobject]@{Assembly=$inspection;LexicalIdentities=$facts.Count;SourceSha256=$authorSourceSha;CompilerCommit='1afabe056235a570da29e268824784557d4f6cdd';DataOrigin=$Source;DataStatistics=if($Source -ceq 'Moby'){$script:EnglishLexicalBuildStatistics}else{$null};TargetVocabularySha256=(Get-FileHash -LiteralPath $configPath).Hash;Types=$result.Classes;Methods=$result.EmittedMethods;LanguageMode=[string]$ExecutionContext.SessionState.LanguageMode;Runtime=[Runtime.InteropServices.RuntimeInformation]::FrameworkDescription}
+    # Check the emitted consumer, including case-sensitive vowel identities.
+    # Integrity hashes alone cannot establish that the compiled lexicon kept its facts.
+    $compiledLexicon=[Reflection.Assembly]::LoadFile($OutputPath).GetType('Lexicon',$true)
+    $compiledPhones=[Func[int,int,string]]$compiledLexicon.GetMethod('Phones').CreateDelegate([Func[int,int,string]])
+    $verifiedRoleSlots=0
+    for($factIndex=0;$factIndex -lt $facts.Count;$factIndex++){
+        for($roleIndex=0;$roleIndex -lt 5;$roleIndex++){
+            if($compiledPhones.Invoke($factIndex,$roleIndex) -cne [string]$facts[$factIndex][$roleIndex+2]){
+                throw "Compiled lexical pronunciation differs from its input fact at row $factIndex, role $roleIndex."
+            }
+            $verifiedRoleSlots++
+        }
+    }
+    $receipt=[pscustomobject]@{Assembly=$inspection;LexicalIdentities=$facts.Count;VerifiedRoleSlots=$verifiedRoleSlots;SourceSha256=$authorSourceSha;CompilerCommit='1afabe056235a570da29e268824784557d4f6cdd';DataOrigin=$Source;DataStatistics=if($Source -ceq 'Moby'){$script:EnglishLexicalBuildStatistics}else{$null};TargetVocabularySha256=(Get-FileHash -LiteralPath $configPath).Hash;Types=$result.Classes;Methods=$result.EmittedMethods;LanguageMode=[string]$ExecutionContext.SessionState.LanguageMode;Runtime=[Runtime.InteropServices.RuntimeInformation]::FrameworkDescription}
     $receipt | Export-Clixml -LiteralPath (Join-Path $directory 'build-receipt.clixml')
     $receipt
 }
