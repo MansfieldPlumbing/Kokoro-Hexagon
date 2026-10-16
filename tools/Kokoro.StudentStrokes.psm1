@@ -80,16 +80,16 @@ class KokoroStrokeMath {
         # Then signal/error/peak for every frame. No nonfinite SNR sentinels.
         $result=[double[]]::new(3072+3*$frames)
         for($c=0;$c -lt 512;$c++){
-            $errors=[double[]]::new($frames);$signal=[double]0;$error=[double]0;$peak=[double]0
+            $errors=[double[]]::new($frames);$signal=[double]0;$squaredError=[double]0;$peak=[double]0
             for($f=0;$f -lt $frames;$f++){
                 $x=[double]$truth[($truthFirst+$f)*512+$c];$y=[double]$candidate[($candidateFirst+$f)*512+$c]
                 if(-not [double]::IsFinite($x) -or -not [double]::IsFinite($y)){throw [ArithmeticException]::new('Nonfinite acoustic feature')}
                 $difference=$x-$y;$square=$difference*$difference;$absolute=[Math]::Abs($difference)
-                $signal+=$x*$x;$error+=$square;$peak=[Math]::Max($peak,$absolute);$errors[$f]=$absolute
+                $signal+=$x*$x;$squaredError+=$square;$peak=[Math]::Max($peak,$absolute);$errors[$f]=$absolute
                 $at=3072+3*$f;$result[$at]+=$x*$x;$result[$at+1]+=$square;$result[$at+2]=[Math]::Max($result[$at+2],$absolute)
             }
             [Array]::Sort($errors);$at=6*$c
-            $result[$at]=$signal;$result[$at+1]=$error;$result[$at+2]=$peak
+            $result[$at]=$signal;$result[$at+1]=$squaredError;$result[$at+2]=$peak
             $result[$at+3]=$errors[[int][Math]::Floor([double]($frames-1)*0.1)];$result[$at+4]=$errors[[int][Math]::Floor([double]($frames-1)*0.5)];$result[$at+5]=$errors[[int][Math]::Floor([double]($frames-1)*0.9)]
         }
         return $result
@@ -120,8 +120,8 @@ class KokoroStrokeGreedyWorker {
         $frames=[int]($this.Truth.Length/512)
         for($f=$this.First;$f -lt $this.First+$this.Count;$f++){
             $current=[float[]]::new(512);$residual=[float[]]::new(512);$candidate=[float[]]::new(512)
-            $error=[double]0;$signal=[double]0
-            for($c=0;$c -lt 512;$c++){$x=$this.Truth[$f*512+$c];$current[$c]=$this.BaseState[$c];$residual[$c]=[float]($x-$current[$c]);$d=[double]$x-[double]$current[$c];$error+=$d*$d;$signal+=[double]$x*[double]$x}
+            $squaredError=[double]0;$signal=[double]0
+            for($c=0;$c -lt 512;$c++){$x=$this.Truth[$f*512+$c];$current[$c]=$this.BaseState[$c];$residual[$c]=[float]($x-$current[$c]);$d=[double]$x-[double]$current[$c];$squaredError+=$d*$d;$signal+=[double]$x*[double]$x}
             $activeIds=[int[]]::new(16);$activeCoefficients=[float[]]::new(16)
             $this.Signals[$f]=$signal;$usedCount=0;$finished=$false
             for($step=0;$step -lt 16;$step++){
@@ -139,8 +139,8 @@ class KokoroStrokeGreedyWorker {
                         if(-not [float]::IsFinite($coefficient)){throw [ArithmeticException]::new('Nonfinite stroke coefficient')}
                         $nextError=[double]0
                         for($c=0;$c -lt 512;$c++){$product=[float]($coefficient*$this.Dictionary[$winner*512+$c]);$candidate[$c]=[float]($current[$c]+$product);if(-not [float]::IsFinite($candidate[$c])){throw [ArithmeticException]::new('Nonfinite stroke output')};$d=[double]$this.Truth[$f*512+$c]-[double]$candidate[$c];$nextError+=$d*$d}
-                        if($nextError -ge $error){$finished=$true}else{
-                            [Array]::Copy($candidate,$current,512);$error=$nextError
+                        if($nextError -ge $squaredError){$finished=$true}else{
+                            [Array]::Copy($candidate,$current,512);$squaredError=$nextError
                             for($c=0;$c -lt 512;$c++){$residual[$c]=[float]($this.Truth[$f*512+$c]-$current[$c])}
                             $activeIds[$usedCount]=$winner;$activeCoefficients[$usedCount]=$coefficient;$this.Ids[$f*16+$usedCount]=$winner;$usedCount++;$this.Applications+=1L
                             # Ordered greedy one-scalar updates; no joint solve or fitted matrix.
@@ -162,8 +162,8 @@ class KokoroStrokeGreedyWorker {
                                         if(-not [float]::IsFinite($value)){throw [ArithmeticException]::new('Nonfinite refined output')}
                                         $candidate[$c]=$value;$d=[double]$this.Truth[$f*512+$c]-[double]$value;$refinedError+=$d*$d
                                     }
-                                    if($refinedError -lt $error){
-                                        [Array]::Copy($candidate,$current,512);$error=$refinedError;$accepted=$true;$this.RefinementAccepted+=1L
+                                    if($refinedError -lt $squaredError){
+                                        [Array]::Copy($candidate,$current,512);$squaredError=$refinedError;$accepted=$true;$this.RefinementAccepted+=1L
                                         for($c=0;$c -lt 512;$c++){$residual[$c]=[float]($this.Truth[$f*512+$c]-$current[$c])}
                                     }else{$activeCoefficients[$slot]=$oldCoefficient}
                                 }
@@ -173,7 +173,7 @@ class KokoroStrokeGreedyWorker {
                     }
                 }
                 $group=-1;if($step -eq 3){$group=0};if($step -eq 7){$group=1};if($step -eq 15){$group=2}
-                if($group -ge 0){[Array]::Copy($current,0,$this.Snapshots,($group*$frames+$f)*512,512);[Array]::Copy($activeCoefficients,0,$this.Coefficients,($group*$frames+$f)*16,$usedCount);$this.Used[$group*$frames+$f]=$usedCount;$this.Errors[$group*$frames+$f]=$error}
+                if($group -ge 0){[Array]::Copy($current,0,$this.Snapshots,($group*$frames+$f)*512,512);[Array]::Copy($activeCoefficients,0,$this.Coefficients,($group*$frames+$f)*16,$usedCount);$this.Used[$group*$frames+$f]=$usedCount;$this.Errors[$group*$frames+$f]=$squaredError}
             }
         }
     }
@@ -271,15 +271,15 @@ function Invoke-KokoroStrokeCeiling {
             $caseUsed=[Collections.Generic.HashSet[int]]::new();$snrs=[Collections.Generic.List[double]]::new();$normalized=[double[]]::new($r.Frames);$squared=[double[]]::new($r.Frames);$actual=[double[]]::new($r.Frames)
             $signalTotal=0.0;$errorTotal=0.0;$peak=0.0;$boundaryError=0.0;$boundarySignal=0.0;$boundaryCount=0;$joinError=0.0;$joinSignal=0.0;$joinCount=0
             for($f=0;$f -lt $r.Frames;$f++){
-                $j=3072+3*$f;$signal=$stats[$j];$error=$stats[$j+1];$signalTotal+=$signal;$errorTotal+=$error;$peak=[Math]::Max($peak,$stats[$j+2]);$squared[$f]=$error
-                $normalized[$f]=if($signal -gt 0){[Math]::Sqrt($error/$signal)}else{[Math]::Sqrt($error/512)}
-                $snr=$null;if($signal -gt 0 -and $error -gt 0){$snr=10*[Math]::Log10($signal/$error);$snrs.Add($snr)}
+                $j=3072+3*$f;$signal=$stats[$j];$squaredError=$stats[$j+1];$signalTotal+=$signal;$errorTotal+=$squaredError;$peak=[Math]::Max($peak,$stats[$j+2]);$squared[$f]=$squaredError
+                $normalized[$f]=if($signal -gt 0){[Math]::Sqrt($squaredError/$signal)}else{[Math]::Sqrt($squaredError/512)}
+                $snr=$null;if($signal -gt 0 -and $squaredError -gt 0){$snr=10*[Math]::Log10($signal/$squaredError);$snrs.Add($snr)}
                 $n=$used[$group*$frames+$first+$f];$actual[$f]=$n
                 $frameIds=[Collections.Generic.HashSet[int]]::new()
                 for($slot=0;$slot -lt $n;$slot++){$id=$ids[($first+$f)*16+$slot];$globalCounts[$id]++;[void]$caseUsed.Add($id);[void]$frameIds.Add($id)}
-                if($context.Boundary[$f]){$boundaryCount++;$boundaryError+=$error;$boundarySignal+=$signal}
-                if($context.Joins[$f]){$joinCount++;$joinError+=$error;$joinSignal+=$signal}
-                $allFrames.Add([pscustomobject]@{Case=$r.Name;Budget=$budget;Frame=$f;Token=$context.Tokens[$f];WithinToken=$context.Positions[$f];SNR=$snr;SquaredError=$error;NormalizedRmsError=$normalized[$f];PeakError=$stats[$j+2];Strokes=$n;UniqueStrokes=$frameIds.Count;TokenBoundary=$context.Boundary[$f];UnitJoin=$context.Joins[$f]})
+                if($context.Boundary[$f]){$boundaryCount++;$boundaryError+=$squaredError;$boundarySignal+=$signal}
+                if($context.Joins[$f]){$joinCount++;$joinError+=$squaredError;$joinSignal+=$signal}
+                $allFrames.Add([pscustomobject]@{Case=$r.Name;Budget=$budget;Frame=$f;Token=$context.Tokens[$f];WithinToken=$context.Positions[$f];SNR=$snr;SquaredError=$squaredError;NormalizedRmsError=$normalized[$f];PeakError=$stats[$j+2];Strokes=$n;UniqueStrokes=$frameIds.Count;TokenBoundary=$context.Boundary[$f];UnitJoin=$context.Joins[$f]})
             }
             foreach($id in $caseUsed){$sentenceCounts[$id]++}
             for($c=0;$c -lt 512;$c++){$j=6*$c;$allChannels.Add([pscustomobject]@{Case=$r.Name;Budget=$budget;Channel=$c;SignalEnergy=$stats[$j];SquaredError=$stats[$j+1];PeakError=$stats[$j+2];AbsP10=$stats[$j+3];AbsMedian=$stats[$j+4];AbsP90=$stats[$j+5];SNR=$(if($stats[$j] -gt 0 -and $stats[$j+1] -gt 0){10*[Math]::Log10($stats[$j]/$stats[$j+1])}else{$null})})}
