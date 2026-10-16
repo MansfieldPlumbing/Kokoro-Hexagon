@@ -50,6 +50,11 @@ twice, or written as a scratch script, is a missing command: add it here.
   PrecomputedDecoder -Parameters @{ Mode = 'Gate' } (offline decoder/generator experiment)
                               Manufacture and gate the compact prosody bank on the laptop; no phone access.
   Student -Parameters @{ Step = 'Measure' } -OutputDirectory <fresh build directory>
+  Student -Parameters @{ Step = 'StrokeBoundary'; TrainingSentences = 32 } -OutputDirectory <fresh build directory>
+    Captures the actual 512-channel decoder handoff and checks existing dog/peach/nine references, offline.
+  Student -Parameters @{ Step = 'Strokes'; Stage = 'Library'; ExperimentDirectory = '<boundary directory>' }
+    Offline shared-stroke experiment. Admit checks kernels; Library selects training-only directions.
+    Ceiling tests distinct 4/8/16-stroke budgets; Render writes reference-then-reconstruction listening pairs.
   Student -Parameters @{ Step = 'Render'; Replay = 'CopyOnly' } -OutputDirectory <fresh build directory>
     Renders nine held-out original/COPY-only PCM16 WAV pairs with matched offline controls and PCM SNR.
   Student -Parameters @{ Step = 'Replay' } -OutputDirectory <fresh build directory>

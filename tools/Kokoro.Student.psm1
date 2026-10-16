@@ -1409,13 +1409,150 @@ function Read-KokoroStudentStoredReplay {
     return $script:StudentSelectedReplay
 }
 
+function Invoke-KokoroStudentStrokeBoundary {
+    [CmdletBinding()]
+    param([Parameter(Mandatory)][string]$OutputDirectory,[ValidateRange(2,64)][int]$Threads=4,
+        [ValidateRange(1,128)][int]$TrainingSentences=32)
+    $root=Split-Path -Parent $PSScriptRoot;$out=[IO.Path]::GetFullPath($OutputDirectory)
+    if(-not $out.StartsWith((Join-Path $root 'build')+[IO.Path]::DirectorySeparatorChar,[StringComparison]::OrdinalIgnoreCase) -or (Test-Path $out)){throw 'Choose a fresh stroke experiment directory under build/.'}
+    [void][IO.Directory]::CreateDirectory($out)
+    # Reuse the existing renderer's reference bootstrap, not another model implementation.
+    $bootstrap=(Get-Command Render-KokoroStudentCopy).ScriptBlock.Ast.Body.EndBlock.Statements
+    $inside=$false;$executed=0
+    foreach($statement in $bootstrap){
+        $assignment=$statement -is [Management.Automation.Language.AssignmentStatementAst] -and $statement.Left -is [Management.Automation.Language.VariableExpressionAst]
+        if($assignment -and $statement.Left.VariablePath.UserPath -ceq 'sourcePath'){$inside=$true}
+        if($assignment -and $statement.Left.VariablePath.UserPath -ceq 'measurement'){break}
+        if($inside){. ([scriptblock]::Create($statement.Extent.Text));$executed++}
+    }
+    if($executed -lt 20 -or $sourceHash -cne '8DAD8231FDCBF80C024E2C9C0A4D53FC7CE0E02D3415ABBE2FE73A1AB8E07257'){throw 'Reference bootstrap contract differs.'}
+    function Test-OfflineNode([string]$Name,[float[]]$Values) {}
+    $definition=$referenceAst.Find({param($node)$node -is [Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -ceq 'Read-OfflineReference'},$false)
+    . ([scriptblock]::Create($definition.Extent.Text));$InputRepository=$root
+    $studentDll=Join-Path $root 'build/student-replay-nine-a-20261015/Kokoro.Student.dll'
+    if((Get-FileHash $studentDll).Hash -cne 'EE4DD6FB9A55CDEFC1B781BA07E19AC9D91307CA911B620AA7D72D90ADB3B017'){throw 'Preserved PCM helpers differ.'}
+    $studentType=[Reflection.Assembly]::LoadFrom($studentDll).GetType('KokoroStudentMath',$true)
+    $pcm16=$studentType.GetMethod('Pcm16').CreateDelegate([Func[float[],short[]]])
+    $finite=$studentType.GetMethod('PcmStats').CreateDelegate([Func[float[],double[]]])
+    function Write-StrokeReferenceArray([string]$Name,[Array]$Values){
+        $path=Join-Path $out $Name;if(Test-Path $path){throw 'Stroke reference artifact already exists.'}
+        $raw=[byte[]]::new([Buffer]::ByteLength($Values));[Buffer]::BlockCopy($Values,0,$raw,0,$raw.Length)
+        [IO.File]::WriteAllBytes($path,$raw)
+        [pscustomobject]@{Path=$path;Bytes=$raw.Length;SHA256=(Get-FileHash $path).Hash}
+    }
+    $inputs=[Collections.Generic.List[object]]::new()
+    $captures=Import-PowerShellDataFile (Join-Path $root 'build/score-capture-20261014/capture.psd1')
+    foreach($capture in $captures.Cases){
+        $inputs.Add([pscustomobject]@{Name=$capture.Name;Kind='IntactStockCapture';Training=$false;Text=$capture.Name;Phonemes=$capture.Phonemes;
+            Encoded=(Read-OfflineReference $capture 'text-encoder');Durations=(Read-OfflineReference $capture 'durations');
+            F0=(Read-OfflineReference $capture 'f0');N=(Read-OfflineReference $capture 'n');Style=(Read-OfflineReference $capture 'acoustic');VoiceRow=$capture.Row;
+            Uniform=(Read-OfflineReference $capture 'draw0-rand');Harmonic=(Read-OfflineReference $capture 'draw1-randn_like');Extra=(Read-OfflineReference $capture 'draw2-randn_like');
+            ExpectedPcm=(Read-OfflineReference $capture 'pcm');ExpectedWave=$null;SourceSentence=-1})
+    }
+    $selection=Import-Clixml (Join-Path $root 'build/precomputed-decoder-20261014/selection.clixml')
+    $held=@(Get-Content (Join-Path $root 'build/precomputed-decoder-20261014/selection/heldout.json') -Raw|ConvertFrom-Json)
+    $orderPath=Join-Path $root 'build/unit-bank/order.json'
+    if((Get-FileHash $orderPath).Hash -cne '6FB62AA7037808BAF9AA17D14AB0F5D5CD64B4733419B991EB3555C6C8983E64'){throw 'Bank order differs.'}
+    $order=@(Get-Content $orderPath -Raw|ConvertFrom-Json)
+    $heldTexts=[Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
+    foreach($target in $held){[void]$heldTexts.Add($target.text)}
+    $needed=[Collections.Generic.Dictionary[int,Collections.Generic.HashSet[int]]]::new()
+    foreach($pick in $selection.picks){foreach($unit in $pick.path){
+        $s=[int]$unit.s;if(-not $needed.ContainsKey($s)){$needed.Add($s,[Collections.Generic.HashSet[int]]::new())};[void]$needed[$s].Add([int]$unit.i)
+    }}
+    for($s=0;$s -lt $TrainingSentences;$s++){
+        if($heldTexts.Contains($order[$s].text)){throw 'Training text overlaps a held-out sentence.'}
+        if(-not $needed.ContainsKey($s)){$needed.Add($s,[Collections.Generic.HashSet[int]]::new())}
+    }
+    $provenance=@(Import-Clixml (Join-Path $root 'build/student-20261015-full/bank-provenance.clixml'))
+    $units=[Collections.Generic.Dictionary[string,object]]::new([StringComparer]::Ordinal)
+    foreach($chunk in @($needed.Keys|ForEach-Object {[int][Math]::Floor($_/1000.0)}|Sort-Object -Unique)){
+        $path=Join-Path $root ('build/unit-bank/chunk-{0:D4}.npz' -f $chunk)
+        if((Get-FileHash $path).Hash -cne $provenance[$chunk].SHA256){throw 'Source bank chunk differs.'}
+        $zip=[IO.Compression.ZipFile]::OpenRead($path)
+        try{
+            $packed=Read-KokoroStudentNpy $zip t_en '<i2' ([short]);$scales=Read-KokoroStudentNpy $zip scale '<f4' ([float])
+            $tokenOffsets=Read-KokoroStudentNpy $zip tok_off '<i8' ([long]);$frameOffsets=Read-KokoroStudentNpy $zip frm_off '<i8' ([long])
+            $dur=Read-KokoroStudentNpy $zip dur '<i2' ([short]);$f0=Read-KokoroStudentNpy $zip f0 '<f2' ([ushort]);$noise=Read-KokoroStudentNpy $zip n '<f2' ([ushort])
+            foreach($s in @($needed.Keys|Where-Object {[int][Math]::Floor($_/1000.0) -eq $chunk}|Sort-Object)){
+                $local=$s%1000;$first=[int]$tokenOffsets[$local];$count=[int]($tokenOffsets[$local+1]-$tokenOffsets[$local])
+                $lengths=$durationsSlice.Invoke($dur,$first,$count);$offsets=$offsetsFor.Invoke($lengths);$frames=2*$offsets[-1]
+                if($s -lt $TrainingSentences){
+                    $inputs.Add([pscustomobject]@{Name=('train-{0:D4}' -f $s);Kind='FixedIndependentTrainingSentence';Training=$true;Text=$order[$s].text;Phonemes=$order[$s].phonemes;
+                        Encoded=$encoderSlice.Invoke($packed,$scales,[int]($packed.Length/512),$first,$count);Durations=$lengths;
+                        F0=$halfSlice.Invoke($f0,[int](2*$frameOffsets[$local]),$frames);N=$halfSlice.Invoke($noise,[int](2*$frameOffsets[$local]),$frames);
+                        Style=$style;VoiceRow=25;Uniform=$null;Harmonic=$null;Extra=$null;ExpectedPcm=$null;ExpectedWave=$null;SourceSentence=$s})
+                }
+                foreach($i in $needed[$s]){
+                    $n=2*$lengths[$i];$f=[int](2*($frameOffsets[$local]+$offsets[$i]))
+                    $units.Add("$s/$i",[pscustomobject]@{Feature=$encoderSlice.Invoke($packed,$scales,[int]($packed.Length/512),$first+$i,1);Duration=$lengths[$i];F0=$halfSlice.Invoke($f0,$f,$n);N=$halfSlice.Invoke($noise,$f,$n)})
+                }
+            }
+        }finally{$zip.Dispose()}
+        Write-Host "Stroke boundary: read source chunk $chunk"
+    }
+    $oldWaves=@(Import-Clixml (Join-Path $root 'build/student-copy-nine-20261015-r2/copy-render.clixml'))
+    for($target=0;$target -lt 9;$target++){
+        $pick=$selection.picks[$target];$count=$pick.path.Count
+        if($count -ne $held[$target].phonemes.Length+2){throw 'Held-out alignment differs.'}
+        $encoded=[float[]]::new(512*$count);$lengths=[int[]]::new($count);$f0List=[Collections.Generic.List[float]]::new();$nList=[Collections.Generic.List[float]]::new()
+        for($i=0;$i -lt $count;$i++){
+            $unit=$units[('{0}/{1}' -f $pick.path[$i].s,$pick.path[$i].i)];$lengths[$i]=$unit.Duration
+            for($channel=0;$channel -lt 512;$channel++){$encoded[$channel*$count+$i]=$unit.Feature[$channel]}
+            $f0List.AddRange($unit.F0);$nList.AddRange($unit.N)
+        }
+        $pitch=$f0List.ToArray();$random=New-OfflineDraws ($pitch.Length*300)
+        $expected=Join-Path $root ('build/student-copy-nine-20261015-r2/{0:D2}-original.wav' -f ($target+1))
+        if((Get-FileHash $expected).Hash -cne $oldWaves[$target].OriginalSHA256){throw 'Held-out reference WAV differs.'}
+        $inputs.Add([pscustomobject]@{Name=('{0:D2}' -f ($target+1));Kind='ExistingSelectedBankReference';Training=$false;Text=$pick.text;Phonemes=$held[$target].phonemes;
+            Encoded=$encoded;Durations=$lengths;F0=$pitch;N=$nList.ToArray();Style=$style;VoiceRow=25;
+            Uniform=$random.Uniform;Harmonic=$random.Harmonic;Extra=$random.Extra;ExpectedPcm=$null;ExpectedWave=$expected;SourceSentence=-1})
+    }
+    $records=[Collections.Generic.List[object]]::new()
+    foreach($inputCase in $inputs){
+        foreach($array in @($inputCase.Encoded,$inputCase.F0,$inputCase.N,$inputCase.Style)){$null=$finite.Invoke($array)}
+        $watch=[Diagnostics.Stopwatch]::StartNew();$decoded=Invoke-OfflineDecoder ($align.Invoke($inputCase.Encoded,$inputCase.Durations)) $inputCase.F0 $inputCase.N $inputCase.Style -TokenDurations $inputCase.Durations;$watch.Stop()
+        $x=$decoded.Features;$null=$finite.Invoke($x);$frames=$inputCase.F0.Length
+        if($x.Length -ne 512*$frames){throw 'Decoder/generator boundary shape differs.'}
+        $record=[pscustomobject]@{Name=$inputCase.Name;Kind=$inputCase.Kind;Training=$inputCase.Training;Text=$inputCase.Text;Phonemes=$inputCase.Phonemes;SourceSentence=$inputCase.SourceSentence;
+            Channels=512;Frames=$frames;Shape=[int[]]@(1,512,$frames);Precision='Float32';Ordering='ChannelMajor';FrameSamples=300;SampleRate=24000;Voice='af_heart';VoiceRow=$inputCase.VoiceRow;
+            Features=(Write-StrokeReferenceArray ($inputCase.Name+'.features.f32') $x);F0=(Write-StrokeReferenceArray ($inputCase.Name+'.f0.f32') $inputCase.F0);
+            Style=(Write-StrokeReferenceArray ($inputCase.Name+'.style.f32') $inputCase.Style);Durations=(Write-StrokeReferenceArray ($inputCase.Name+'.durations.i32') $inputCase.Durations);
+            Uniform=$null;Harmonic=$null;Extra=$null;Pcm=$null;Wave=$null;DecoderMs=$watch.Elapsed.TotalMilliseconds;GeneratorMs=$null;ReferenceSNR=$null;ReferencePeakError=$null;BitExactPcm16=$null;
+            ReferenceSourceSHA256=$sourceHash;ReferenceKernelSHA256=$dllHash;Controls='Frozen stock offline generator: internal live AdaIN and mathematical Snake; external F0/style/source draws matched'}
+        if(-not $inputCase.Training){
+            foreach($array in @($inputCase.Uniform,$inputCase.Harmonic,$inputCase.Extra)){$null=$finite.Invoke($array)}
+            $record.Uniform=Write-StrokeReferenceArray ($inputCase.Name+'.uniform.f32') $inputCase.Uniform
+            $record.Harmonic=Write-StrokeReferenceArray ($inputCase.Name+'.harmonic.f32') $inputCase.Harmonic
+            $record.Extra=Write-StrokeReferenceArray ($inputCase.Name+'.extra.f32') $inputCase.Extra
+            $watch.Restart();$pcm=Invoke-OfflineGenerator $x $inputCase.Style $inputCase.F0 $inputCase.Uniform $inputCase.Harmonic $inputCase.Extra;$watch.Stop();$record.GeneratorMs=$watch.Elapsed.TotalMilliseconds
+            $null=$finite.Invoke($pcm);$codes=$pcm16.Invoke($pcm)
+            if($null -ne $inputCase.ExpectedPcm){
+                $metrics=$compare.Invoke($pcm,$inputCase.ExpectedPcm);$record.ReferenceSNR=$metrics[0];$record.ReferencePeakError=$metrics[1]
+                if($metrics[0] -lt 80 -or $metrics[1] -gt 0.0001){throw 'STOP: required stock reference reproduction failed.'}
+            }else{
+                $raw=[IO.File]::ReadAllBytes($inputCase.ExpectedWave);$expectedCodes=[short[]]::new(($raw.Length-44)/2);[Buffer]::BlockCopy($raw,44,$expectedCodes,0,$raw.Length-44)
+                $record.BitExactPcm16=[Linq.Enumerable]::SequenceEqual[short]($codes,$expectedCodes)
+                if(-not $record.BitExactPcm16){throw 'STOP: required held-out reference reproduction failed.'}
+            }
+            $record.Pcm=Write-StrokeReferenceArray ($inputCase.Name+'.pcm.f32') $pcm
+            $wave=Join-Path $out ($inputCase.Name+'.reference.wav');Write-KokoroStudentWave $wave $codes;$record.Wave=[pscustomobject]@{Path=$wave;SHA256=(Get-FileHash $wave).Hash;Bytes=(Get-Item $wave).Length}
+        }
+        $records.Add($record);$records.ToArray()|Export-Clixml (Join-Path $out 'boundary.clixml')
+        Write-Host "Stroke boundary: $($record.Name), $frames frames, reference checked=$(!$record.Training)"
+    }
+    return $records.ToArray()
+}
+
 function Invoke-KokoroStudent {
     [CmdletBinding()]
-    param([ValidateSet('Measure','Render','Replay','Climb')][string]$Step='Measure',[string]$BankPath,[Parameter(Mandatory)][string]$OutputDirectory,
+    param([ValidateSet('Measure','Render','Replay','Climb','StrokeBoundary','Strokes')][string]$Step='Measure',[string]$BankPath,[Parameter(Mandatory)][string]$OutputDirectory,
         [ValidateRange(1,64)][int]$Threads=4,[ValidateRange(1,16)][int]$K=4,[ValidateRange(0,1000000)][int]$SentenceLimit=0,
         [string]$MeasurementDirectory,[ValidateSet('CopyOnly')][string]$Replay='CopyOnly',[int[]]$Targets=(1..9),[switch]$KernelOnly,[string]$LibraryDirectory,[ValidateRange(0,44)][int]$ChunkLimit=0,[switch]$Finalize,[string]$ClimbDirectory,
-        [string]$Text,[switch]$PrepareOnly,[Collections.IDictionary]$SelectedUnits=$null,[switch]$StudentReplay,[ValidateRange(0.25,4)][float]$Intensity=1,[ValidateRange(0.5,2)][double]$DurationScale=1,[ValidateRange(100,1000000)][int]$SelectionSentences=1000000,[switch]$ReuseReplay,[string]$ResumeDirectory,[switch]$CompareOriginal,[Collections.IDictionary]$TokenFrames=$null,[string]$DriverDirectory,[string]$DriverSHA256,[string]$StoreDirectory)
+        [string]$Text,[switch]$PrepareOnly,[Collections.IDictionary]$SelectedUnits=$null,[switch]$StudentReplay,[ValidateRange(0.25,4)][float]$Intensity=1,[ValidateRange(0.5,2)][double]$DurationScale=1,[ValidateRange(100,1000000)][int]$SelectionSentences=1000000,[switch]$ReuseReplay,[string]$ResumeDirectory,[switch]$CompareOriginal,[Collections.IDictionary]$TokenFrames=$null,[string]$DriverDirectory,[string]$DriverSHA256,[string]$StoreDirectory,[ValidateRange(1,128)][int]$TrainingSentences=32,[string]$Stage='Admit',[string]$ExperimentDirectory,[ValidateRange(16,4096)][int]$LibrarySize=1024,[string]$ReconstructionDirectory,[string[]]$CaseNames=@())
     switch($Step){
+        'StrokeBoundary'{Invoke-KokoroStudentStrokeBoundary -OutputDirectory $OutputDirectory -Threads $Threads -TrainingSentences $TrainingSentences}
+        'Strokes'{Import-Module (Join-Path $PSScriptRoot 'Kokoro.StudentStrokes.psm1');Invoke-KokoroStudentStrokes -Stage $Stage -ExperimentDirectory $ExperimentDirectory -OutputDirectory $OutputDirectory -LibrarySize $LibrarySize -Threads $Threads -LibraryDirectory $LibraryDirectory -ReconstructionDirectory $ReconstructionDirectory -CaseNames $CaseNames}
         'Measure'{Measure-KokoroStudentStructure -BankPath $BankPath -OutputDirectory $OutputDirectory -Threads $Threads -K $K -SentenceLimit $SentenceLimit}
         'Render'{
             if($PrepareOnly){New-KokoroStudentTextSelection -Text $Text -OutputDirectory $OutputDirectory -SelectionSentences $SelectionSentences -DriverDirectory $DriverDirectory -DriverSHA256 $DriverSHA256}
