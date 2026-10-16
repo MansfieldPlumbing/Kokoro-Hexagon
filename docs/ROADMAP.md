@@ -7,7 +7,17 @@ this file records delivery priorities and open engineering questions. Device
 receipts live in `docs/results/`. Published comparisons belong in the
 [README comparison chart](../README.md#published-comparisons).
 
-## First priority: phone-resident speech
+## Active priority: Student-driven phase generator
+
+The [active contract](student-generator-contract.md) supersedes the earlier
+bank/decoder integration order below. One 300-sample clock; Student-generated
+512-channel features and affine/phase controls; existing hardware Lock/bounce;
+frozen generator as the only neural runtime. No runtime normalization reductions,
+trig Snake, decoder or acoustic lookup bank. Stock paths remain offline evidence.
+The dog/peach16-stroke listening verdict clears those cases for the context-driven
+Student experiment; generalization and economics remain separate questions.
+
+## Earlier bank/decoder integration track (reference only)
 
 The accepted network-free system is good enough for integration. Previously
 unprepared text entered on SM8550 must produce audible speech through the installed
@@ -94,8 +104,9 @@ linguistic controls, style and randomness. Report sample ownership, boundary err
 listening, peak memory and timing. Native STFT/iSTFT overlap-add is retained; no
 arbitrary PCM crossfade, duplicated samples or inserted pause is allowed. Exact
 tiling error and learned-control approximation error are measured separately.
-See [AdaIN control](adain-control-stream-design.md) and the deferred
-[general graph tiler](vtcm-aware-graph-tiling-design.md).
+See the [active frame/control contract](student-generator-contract.md).
+The earlier general graph-tiler proposal was deferred and has no current document
+or implementation prerequisite.
 
 ## VTCM: measured workaround and planning limits
 

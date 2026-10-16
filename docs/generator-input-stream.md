@@ -1,5 +1,12 @@
 # Generator input stream
 
+The [active Student/phase contract](student-generator-contract.md) governs new
+runtime work. The concrete layout and byte rates below describe the existing
+unwired diagnostic packet, including supplied source tiles and explicit lock
+arrays. They do not prescribe a product bank, lock-table stream or stored source
+branch. A new bridge must consume the agreed Student controls and phase state;
+do not rebuild AdaIN/Snake to accommodate this older diagnostic API.
+
 The front end supplies the generator's controls with each 300-sample frame.
 At 24,000 samples/s that is 80 frames/s. Transport may batch 16 or 64 frames;
 the generator still consumes one frame at a time. Weights and demonstrated

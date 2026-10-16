@@ -1,7 +1,13 @@
-# AdaIN control stream: chunked decoding with one-pass coherence
+# AdaIN control stream
 
-Decided 2026-10-10. This is the direction for chunked synthesis; later work extends it rather than replacing it with a
-different mechanism. If an experiment shows a part of it does not work, report the measurement and keep the rest.
+Current direction: [Student-driven phase generator](student-generator-contract.md).
+The front end supplies per-channel scale/bias on the 300-sample clock. Reuse the
+existing affine application; do not implement runtime instance-statistic reductions
+or a new AdaIN network. Fixed constants remain unchanged CONST scaffolding.
+
+The 2026-10-10 scalar correction proposal below is retired as runtime guidance.
+Its bank/decoder, local-moment and fitted-sensitivity requirements describe that
+earlier experiment only. They are not prerequisites for the active Student path.
 
 ## Goal
 
@@ -130,8 +136,9 @@ object, "for" opens a complement) and persist across time tiles.
 Benchmark progressively smaller frame chunks and shifted cut points against one uninterrupted pass.
 Hold linguistic context, acoustic controls, utterance style and randomness fixed. Exact parity is the target for
 deterministic operators; quantify approximation error separately. Report sample ownership and error near joins,
-listening, peak memory, DSP time and first-audio latency. See the deferred shared
-[graph tiling design](vtcm-aware-graph-tiling-design.md). These are acceptance targets, not demonstrated results.
+listening, peak memory, DSP time and first-audio latency. The earlier general
+graph-tiler proposal was deferred; it is not an implementation prerequisite.
+These are historical experiment targets, not demonstrated results.
 
 ## Order
 

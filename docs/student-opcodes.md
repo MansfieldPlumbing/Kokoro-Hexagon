@@ -1,5 +1,11 @@
 # Student native replay v0
 
+Current architecture: [Student-driven phase generator](student-generator-contract.md).
+The unit-bank codec described below is a completed offline experiment, not the
+runtime acoustic store to extend. New Student work generates the actual 512-channel
+generator boundary and coordinated controls through globally reusable programs.
+Do not repeat the completed bank climb or introduce a per-phoneme/frame lookup bank.
+
 The owning application is `Invoke-KokoroDevelopment.ps1 Student`; implementation
 and compiled kernels are in `tools/Kokoro.Student.psm1`. `-h` lists commands.
 The existing bank is evidence, read only. Learning selects real exemplars and

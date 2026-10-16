@@ -1,8 +1,9 @@
 # End-to-end audio campaign
 
-Goal: stock Kokoro-82M phonemes to PCM on the phone speaker, whole graph on Hexagon
-(`AGENTS.md`). Input is a phoneme token sequence, the voice pack and speed; the text front
-end (track 3) meets this campaign at that interface and is not on its critical path.
+Historical stock whole-graph reference campaign. It does not govern the active
+[Student-driven phase generator](student-generator-contract.md), whose frozen
+generator is the only neural runtime. The stock stage list below is retained
+for reference evidence, not a request to restore eliminated runtime networks.
 
 Stock order, hexgrad/kokoro `dfb907a02bba8152ca444717ca5d78747ccb4bec`
 (`model.py` `KModel.forward_with_tokens`, `modules.py`, `istftnet.py`):

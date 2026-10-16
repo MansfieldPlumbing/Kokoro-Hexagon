@@ -5,6 +5,13 @@ Follow [the shared agent rules](../Pwsh-Development/AGENTS.md). This file holds 
 
 ## Start here
 
+Read [the Student-driven phase generator contract](docs/student-generator-contract.md)
+before planning or interpreting stock-model references. It owns the active
+architecture: one 300-sample clock, Student-generated input/control programs,
+streamed AdaIN affines and the existing hardware Lock/bounce primitive. Stock
+Kokoro is an offline teacher/reference. Do not rebuild AdaIN or trig Snake or
+restore a runtime decoder/bank because an older skill or handoff assumes them.
+
 Use `C:\Dev\Kokoro-Hexagon` on branch `main`, one task at a time. Create no
 additional Kokoro-Hexagon worktree unless Scott is running two agents at once.
 Retain branches as recoverable history when consolidating checkouts.
@@ -36,20 +43,22 @@ The fastest, most efficient Kokoro-82M text-to-speech on Android, authored in
 PowerShell, with the model math running on the Hexagon DSP (HMX and HVX)
 through machine code this project emits itself.
 
-The priority is end to end with publishable benchmarks: stock Kokoro from
-phonemes to PCM on the phone, end-to-end real-time factor and time to first
-audio on the SM8550 and SM8635 phones, against the best other Kokoro build on
-the same phone, with receipts anyone can check. After that is published, the
-model itself is open to change (see "Model changes").
+The priority is the agreed Student-driven phase generator with publishable
+end-to-end timing and listening evidence. Preserve stock as the offline teacher
+and benchmark reference; stock whole-model publication does not gate the active
+architecture. Compare matched artifacts/conditions on each phone when device
+work is authorized. The current task determines the next bounded experiment.
 
-Active path (decided 2026-10-10; the newest `docs/handoff-*.md` Next sets the order): speech end to end on the phone
-through the network-free front end, in which the phonemizer, the unit bank and PowerShell-learned tables replace ALBERT,
-the text encoder and the predictors at playback and drive the DSP decoder and generator, chunked, with AdaIN steered by
-the front end (`docs/adain-control-stream-design.md`). Its benchmarks are labeled as the network-free Kokoro variant.
-The stock whole-model-on-DSP path below remains the reference track for the stock phase-1 benchmark rows; it does not
-block the active path.
+Active path: the Student generates the frozen generator's 512-channel features,
+F0/voicing and affine/phase controls on one 300-sample timeline. No runtime text
+encoder, neural decoder or per-unit acoustic lookup bank. The existing bank and
+stock whole-model path are read-only offline evidence. Current user tasks set
+work order; historical handoffs cannot override the active contract.
 
 ## Where we stand (2026-10-09)
+
+Historical stock-port snapshot; missing stock stages below are not an active
+runtime work queue. Follow the current Student/phase contract for new work.
 
 Kokoro-Hexagon is notable for how it is made: the model path is
 authored only in PowerShell, which emits the Hexagon machine code and ELF itself. No C, C++, LLVM or QNN produces any of it.
@@ -95,53 +104,29 @@ audio; audio longer than about 2.3 s (decoder and generator keep the whole seque
   C# product code; no LLVM, QNN, ONNX Runtime or Python in the build or on the
   phone. The one exception is the minimal native bootstrap that starts CoreCLR
   on Android.
-- The whole model runs on Hexagon, from phonemes to PCM: ALBERT, the duration
-  and prosody predictors, the decoder, the generator, the harmonic source and
-  iSTFT. The graph is not split between CPU and DSP. The ARM CPU only turns
-  text into phonemes, drives the DSP, and plays PCM through AAudio.
+- The compiled Student is the runtime front end. The frozen generator is the
+  only neural execution component. The source branch is computed, never stored.
 - PowerShell does not run the model at inference time; the compiled model DLL
   and a small host do.
-- HMX runs convolutions and matrix multiplies. HVX runs the rest: AdaIN,
-  Snake, residuals, the harmonic source, iSTFT.
-- Integer from the start: W8A8, and W4A8 per layer where the error allows,
-  with per-channel scales. There is no FP32 or FP16 DSP stage to quantize later.
+- HMX runs the frozen convolutions. Supplied AdaIN affines and the existing
+  hardware phase/bounce operation replace runtime normalization and trig Snake.
+  Reuse emitted residual, source and inverse-transform mechanisms.
+- Keep the frozen FP16 reference. Quantized variants are separate measured
+  experiments; the old integer-only constraint belongs to the historical port.
 - Dispatch: one FastRPC setup, then dspqueue for every job.
-- Activations keep one HMX-native layout from the decoder through the iSTFT.
-  HVX work (AdaIN, Snake, residuals, source, STFT/iSTFT) reads and writes that
+- Activations keep one HMX-native layout through the generator and iSTFT.
+  Elementwise phase/affine, residual, source and spectral work reads and writes that
   layout, so no stage spends time converting layouts between operators.
-- Model changes, in two phases:
-  1. Now, until the end-to-end benchmarks are published: the model is stock
-     Kokoro (stock weights and architecture, every stage), so the comparison
-     with other builds is like for like. How each stage is computed is ours:
-     better math is encouraged when its error against stock is measured
-     (Snake by phase turns, gelu_new by a table, softmax by an exp2
-     polynomial), as are fused operators and jobs, scales and affines folded
-     into weights and tables, layouts, operator order and precision plans.
-     Pruning or cutting part of the model without retraining is allowed when it
-     removes an obstacle to end to end: measure its error against stock and
-     label any benchmark that uses it (as quantization already is).
-  2. After that: Kokoro itself may change (a "Kokoro 2.0"): reshaping the
-     graph and its weights, narrowing or pruning the
-     ALBERT FFN, distilling ALBERT, replacing AdaIN, retraining for the integer
-     path. Ship it as a named variant beside stock and measure it against the
-     stock baseline (`d_en`, durations, PCM and listening on held-out text);
-     the stock receipts stay.
+- The generator weights remain frozen. The Student/phase-controlled runtime
+  is the agreed variant now; stock end-to-end publication is not a prerequisite.
+  Preserve stock receipts and label comparison conditions accurately.
 
 ## Order of work
 
-1. Speech before speed. Make every stage correct on the DSP, get audible
-   speech on both phones, then optimize.
-2. Render one breath group at a time, and render the next one while the
-   current one plays. Stock Kokoro already runs each text chunk independently
-   (`KPipeline` splits at punctuation, at most 510 phonemes, voice style
-   `pack[len(ps)-1]`), so AdaIN statistics computed over each group are stock
-   behavior at stock's own split points. Splitting shorter text earlier (for
-   time to first audio) changes ALBERT context, AdaIN statistics and the style
-   row: label it an approximation in any comparison with stock. Phonemize the
-   whole text once (`CoreDriver.Run`, as `KPipeline` runs g2p on the whole
-   segment) and split its tokens. Fold AdaIN's style terms into per-channel scale and offset when a
-   voice loads. Accumulate each group's mean and variance in the epilogue of
-   the conv that produces it, and apply them as one fused multiply-add.
+1. Follow the current user task and the active contract; speech/listening evidence
+   precedes optimization. Do not impose stock normalization as an integration gate.
+2. Carry Student and generator state across transport blocks on the 300-sample
+   clock. Linguistic context does not define a new normalization or DSP clock.
 
 ## Use what already exists
 
@@ -182,16 +167,11 @@ audio; audio longer than about 2.3 s (decoder and generator keep the whole seque
    SM8635 evidence separate. Advance to the next connected region once the
    current correctness gate passes; do not optimize an isolated throughput
    result while real-model correctness remains unproved.
-6. Continue in this order: real generator resblocks.3 with per-channel W8A8
-   HMX convolution and HVX AdaIN/Snake in the same native layout; the complete
-   generator in one DSP job with DMA ping-pong; ALBERT, predictors, and decoder;
-   then stock phoneme-to-PCM speech played through AAudio on both phones.
+6. Implement the current Student/frame/phase task using existing mechanisms.
+   Do not restart completed stock porting milestones or restore eliminated networks.
 
-Render independent stock breath groups with exact full-group AdaIN statistics,
-retaining chunk-length voice-style selection. Render the next group while the
-current one plays. Until the end-to-end benchmarks are published, keep stock
-weights and architecture (any math that computes them, with its error measured
-against stock) and the integer whole-DSP contract.
+Stock reference reproduction retains its own group/style/statistics semantics
+offline. Those semantics are comparison conditions, not active runtime requirements.
 Performance targets and competitor results guide investigation; only matched
 phone measurements establish achieved speed and time to first audio.
 
