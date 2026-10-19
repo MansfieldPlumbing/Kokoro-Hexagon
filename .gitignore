@@ -3,13 +3,8 @@
 *.dll
 *.apk
 *.elf
-*.onnx
-*.onnx.data
 *.bin
-*.qnn
-*.QNN
 *.so
-*.whl
 *.pth
 *.pt
 *.f32
@@ -17,14 +12,8 @@
 *.npz
 *.wav
 *.log
-__pycache__/
-**/*.csproj.nuget.*
-**/project.assets.json
-**/project.nuget.cache
 
-# Preserved training data, kept outside build/ so build cleanup cannot remove it; verify against
-# tools/reference/unit-bank/bank-manifest.json. Backed up off-machine, not in git.
+# Preserved training data, kept outside build/ so build cleanup cannot remove it; verify against the unit-bank
+# manifest in the project notes reference folder. Backed up off-machine, not in git.
 /data/
 
-# Qualcomm-header-derived reference data: kept local pending license review
-lib/qairt-2.46/

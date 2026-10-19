@@ -191,7 +191,7 @@ function New-KokoroGeneratorEpilogueSteps {
             foreach ($row in 0,1) {
                 $phase = 2+$row
                 if ($PhaseLock) {
-                    # Scott's hardware bounce: abs below zero, pi-phase above
+                    # Hardware bounce: abs below zero, pi-phase above
                     # pi/2, then clamp. H-abs(H-abs(phi)) performs both reflections
                     # with add and sign bits; it does not wrap another cycle.
                     & $fp32 'vmpy-sf-qf32' 4 $phase 20

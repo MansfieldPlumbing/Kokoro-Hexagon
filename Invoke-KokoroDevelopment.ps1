@@ -173,7 +173,7 @@ $Shared = if ($SharedRoot) { [IO.Path]::GetFullPath($SharedRoot) } else { [IO.Pa
 $StockSource = if ($env:KOKORO_STOCK_SOURCE) { $env:KOKORO_STOCK_SOURCE } else { Join-Path (Split-Path $Root) '.vendor/kokoro' }
 
 $StockCommit = 'dfb907a02bba8152ca444717ca5d78747ccb4bec'   # lib/manifest.json kokoroSource.commit
-# Python runs only stock PyTorch Kokoro, to record reference tensors (AGENTS.md).
+# StockCapture runs stock PyTorch Kokoro from the reference folder to record teacher tensors; nothing else uses Python.
 # KOKORO_PYTHON names the interpreter with stock PyTorch Kokoro installed.
 $Python = $env:KOKORO_PYTHON
 
