@@ -27,7 +27,7 @@
           <Obj RefId="2">
             <TNRef RefId="0" />
             <MS>
-              <S N="Root">C:\Dev\Kokoro-Hexagon\build\capture-iphone-bench\0-generator</S>
+              <S N="Root">C:\Dev\Kokoro-Hexagon\build\capture-timing-passages\0-generator</S>
               <S N="Phonemes">həlˈO ðˈɛɹ.</S>
               <Db N="P95">255.8899688720703</Db>
             </MS>

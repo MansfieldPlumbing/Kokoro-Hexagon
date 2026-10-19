@@ -18,8 +18,8 @@ function New-KokoroLinearTileSteps {
     }
     $steps = [Collections.Generic.List[hashtable]]::new()
     $imm = { param([int] $Register, [uint32] $Value)
-        $steps.Add(@{Op='lo';x=$Register;i=($Value -band 65535)})
-        $steps.Add(@{Op='hi';x=$Register;i=($Value -shr 16)})
+        $steps.Add(@{Op='lo';x=$Register;i=[long]($Value -band 65535)})
+        $steps.Add(@{Op='hi';x=$Register;i=[long]($Value -shr 16)})
     }
     foreach ($dispatch in @(@(0x00020001,'open'),@(0x01000010,'success'),
             @(0x02030100,'linear'))) {
