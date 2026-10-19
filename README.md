@@ -5,7 +5,7 @@ every DSP instruction emitted by PowerShell. PowerShell reads the checkpoint, pa
 the weights, and writes the HMX/HVX machine code and ELF itself. No C or C++, LLVM,
 QNN or ONNX Runtime is involved in the product path.
 
-## Measured on SM8550 (Galaxy S23), October 12, 2026
+## Measured on SM8550, October 12, 2026
 
 **"I can eat a peach for hours." 2.125 seconds of speech, 51,000 samples at 24 kHz**
 
@@ -78,7 +78,7 @@ matched ranking.
 
 | Build | Device | Timed scope | Speed |
 |---|---|---|---:|
-| Kokoro-Hexagon | S23 / SM8550 | Decoder, harmonic source and generator; DSP only; 2.125 s audio | **18.7×** |
+| Kokoro-Hexagon | SM8550 | Decoder, harmonic source and generator; DSP only; 2.125 s audio | **18.7×** |
 | [laishere/kokoro-coreml](https://github.com/laishere/kokoro-coreml#ios), comparison `484907d` | iPhone 16 Pro | Warm phonemes-to-PCM chain; six passages; G2P and load excluded | 16.9× mean |
 | [Soniqo speech-swift](https://github.com/soniqo/speech-swift/blob/main/docs/benchmarks/ios-coreml.md) | iPhone 16 Pro | Core ML Kokoro, warm release benchmark | 12.5× |
 | [kokoro-offline-tts-android](https://github.com/cedgeremek/kokoro-offline-tts-android#real-device-demo) | S24 Ultra / SM8650 | QNN HTP generator; separately reports 306 ms warm request-to-first-audio | 3.78× |
