@@ -23,6 +23,11 @@
         "path": "voices\\am_michael.pt",
         "bytes": 523435,
         "sha256": "9A443B79A4B22489A5B0AB7C651A0BCD1A30BEF675C28333F06971ABBD47BD37"
+      },
+      {
+        "path": "voices\\bm_daniel.pt",
+        "bytes": 523430,
+        "sha256": "FC3FCE4E9C12ED4DBC8FA9680CFE51EE190A96444CE7C3AD647549A30823FC5D"
       }
     ]
   },

@@ -4,7 +4,7 @@
 # frame loop will carry the admitted convolution history between blocks.
 # No source synthesis, decoder, random generator or normalization statistics.
 function New-KokoroGeneratorMainRunSteps {
-    param([ValidateSet(16)][int]$BlockFrames=16)
+    param([ValidateSet(16)][int]$BlockFrames=16,[switch]$Profile)
     . (Join-Path $PSScriptRoot '../kernels/Kokoro.HmxConv.ps1')
     . (Join-Path $PSScriptRoot '../kernels/Kokoro.GeneratorEpilogue.ps1')
     . (Join-Path $PSScriptRoot 'Kokoro.WrappedJob.ps1')
@@ -26,7 +26,9 @@ function New-KokoroGeneratorMainRunSteps {
     if($cursor -gt 8388608L){throw 'Connected first-block working set exceeds the admitted SM8550 grant.'}
     $weightAt=0L;$tableAt=0L;$inputAt=131072L
     $layers=[Collections.Generic.List[object]]::new()
+    $profileLayers=[Collections.Generic.List[object]]::new()
     foreach($stage in $stages){
+        $profileLayers.Add([pscustomobject]@{Index=20*$stage.Index;Name="generator.ups.$($stage.Index)";Kind='Upsample'})
         $c=$stage.Channels;$tileBytes=64L*$c
         $phaseBytes=$stage.PhaseTiles*$tileBytes
         $upsWeights=[Collections.Generic.List[long]]::new()
@@ -39,37 +41,84 @@ function New-KokoroGeneratorMainRunSteps {
             for($layer=0;$layer -lt 6;$layer++){
                 $normBlocks=[int][Math]::Ceiling($stage.RootRows/[double]($BlockFrames*$stage.Positions))
                 $normBytes=20L*$c+$normBlocks*($c/32)*($stage.Positions/2)*1024L
-                $record=[pscustomobject]@{Index=$layers.Count;Stage=$stage.Index;Block=$block;Branch=$branch;
+                $record=[pscustomobject]@{Index=$layers.Count;ProfileIndex=(20*$stage.Index+1+6*$branch+$layer);Stage=$stage.Index;Block=$block;Branch=$branch;
                     Layer=$layer;Kernel=$k;Dilation=$(if($layer%2){1}else{1+2*[int][Math]::Floor($layer/2)});
                     InputRows=($stage.RootRows-32*$layer);OutputRows=($stage.RootRows-32*($layer+1));
                     WeightOffset=$weightAt;WeightBytes=(2L*$c*$c*$k);ConversionOffset=$tableAt;
                     NormOffset=($tableAt+8L*$c);NormBytes=$normBytes;
                     NormName="generator.resblocks.$block.adain$(1+$layer%2).$([int][Math]::Floor($layer/2))"}
                 $layers.Add($record);$weightAt+=$record.WeightBytes;$tableAt+=8L*$c+$normBytes
+                $profileLayers.Add([pscustomobject]@{Index=$record.ProfileIndex;Name="generator.resblocks.$block.convs$(1+$layer%2).$([int][Math]::Floor($layer/2))";Kind='Residual'})
             }
         }
+        $profileLayers.Add([pscustomobject]@{Index=(20*$stage.Index+19);Name="generator.mean.$($stage.Index)";Kind='Mean'})
     }
+    $telemetryBytes=if($Profile){4096L}else{1024L}
     $layout=[pscustomobject]@{PSTypeName='Kokoro.GeneratorMain.Layout';BlockFrames=$BlockFrames;Shape='Lock';
         FirstBlock=$true;Stages=$stages;Layers=$layers.ToArray();Regions=$regions;VtcmBytes=$cursor;
-        InputBytes=$inputAt;WeightBytes=$weightAt;TableBytes=$tableAt;OutputBytes=(1024L+262144L);
-        Samples=1;PcmOffset=1024;MeanOffset=1024;MeanRows=1024;Tiles=30}
+        InputBytes=$inputAt;WeightBytes=$weightAt;TableBytes=$tableAt;OutputBytes=($telemetryBytes+262144L);
+        Samples=1;PcmOffset=$telemetryBytes;MeanOffset=$telemetryBytes;MeanRows=1024;Tiles=30;
+        Profile=[bool]$Profile;ProfileOffset=1024;ProfileStride=32;ProfileLayers=$profileLayers.ToArray()}
     $job={
+        # Counters use the low timer word; the host rejects jobs lasting a full
+        # 32-bit timer period. DMA counts bracket dmwait, excluding descriptor setup.
+        $profileState=@{Index=0;InsideEpilogue=$false}
+        $profileBegin={param([string]$Kind)
+            if(-not $Profile){return}
+            $profileState.InsideEpilogue=$Kind -ceq 'Epilogue'
+            $s.Add(@{Op='hwticks';d=8});$s.Add(@{Op='store-d';s=23;t=8;Offset=(1024+32*$profileState.Index+16)})
+        }
+        $profileEnd={param([string]$Kind)
+            if(-not $Profile){return}
+            $at=1024+32*$profileState.Index
+            $counterAt=$at+$(if($Kind -ceq 'Epilogue'){12}else{8})
+            $s.Add(@{Op='hwticks';d=10});$s.Add(@{Op='load-d';d=8;s=23;Offset=($at+16)})
+            $s.Add(@{Op='sub';d=8;s=10;t=8});$s.Add(@{Op='load';d=10;s=23;Offset=$counterAt})
+            $s.Add(@{Op='add';d=8;s=8;t=10});$s.Add(@{Op='store';s=23;t=8;Offset=$counterAt})
+            $profileState.InsideEpilogue=$false
+        }
+        $timedDma={param([int]$destBase,[long]$destOff,[int]$srcBase,[long]$srcOff,[long]$length)
+            if(-not $Profile){& $dma $destBase $destOff $srcBase $srcOff $length;return}
+            if($length -lt 2 -or $length -ge 2*16777215){throw 'DMA length out of range'}
+            & $ptr 1 $srcBase $srcOff;& $ptr 2 $destBase $destOff;& $imm 3 $length;$s.Add(@{Op='addi';d=0;s=24;i=0})
+            foreach($step in @(New-KokoroDmaCopySteps -NoReturn)){
+                if($step.Op -ceq 'dmwait'){$s.Add(@{Op='hwticks';d=8})}
+                $s.Add($step)
+                if($step.Op -ceq 'dmwait'){
+                    $at=1024+32*$profileState.Index
+                    $s.Add(@{Op='hwticks';d=10});$s.Add(@{Op='sub';d=8;s=10;t=8})
+                    foreach($counterAt in @($at)+$(if($profileState.InsideEpilogue){@($at+4)}else{@()})){
+                        $s.Add(@{Op='load';d=10;s=23;Offset=$counterAt});$s.Add(@{Op='add';d=10;s=8;t=10})
+                        $s.Add(@{Op='store';s=23;t=10;Offset=$counterAt})
+                    }
+                }
+            }
+        }
         & $imm 8 0x314e4547L
         $s.Add(@{Op='store';s=23;t=8;Offset=80})
-        & $dma 18 $regions.Decoder.Offset 20 0 131072
+        if($Profile){
+            foreach($entry in @(@(84,1),@(88,$profileLayers.Count),@(92,1024))){& $imm 8 $entry[1];$s.Add(@{Op='store';s=23;t=8;Offset=$entry[0]})}
+            & $imm 8 0
+            foreach($entry in $profileLayers){foreach($fieldAt in 0,4,8,12){$s.Add(@{Op='store';s=23;t=8;Offset=(1024+32*$entry.Index+$fieldAt)})}}
+        }
+        & $timedDma 18 $regions.Decoder.Offset 20 0 131072
         foreach($stage in $stages){
+            $profileState.Index=20*$stage.Index
             $c=$stage.Channels;$tileBytes=$stage.TileBytes
             $upsInput=if($stage.Index -eq 0){$regions.Decoder.Offset+32768L}else{$regions.MeanA.Offset+$tileBytes*2}
-            & $dma 18 $regions.Conversion.Offset 22 $stage.UpsConversion (8L*$c)
+            & $timedDma 18 $regions.Conversion.Offset 22 $stage.UpsConversion (8L*$c)
             # Phase calls are in program order; LC0 belongs to each convolution.
             # LC1 remains available for the final frame loop.
             for($phase=0;$phase -lt $stage.Stride;$phase++){
-                & $dma 18 $regions.Weights.Offset 21 $stage.UpsWeights[$phase] (12L*$c*$c)
+                & $timedDma 18 $regions.Weights.Offset 21 $stage.UpsWeights[$phase] (12L*$c*$c)
                 & $ptr 0 18 $upsInput;& $ptr 1 18 $regions.Weights.Offset
                 & $ptr 2 18 ($regions.Phases.Offset+$phase*$stage.PhaseBytes)
                 & $ptr 3 18 $regions.Conversion.Offset;& $imm 4 $stage.UpsTiles
+                & $profileBegin 'Hmx'
                 & $call "main_ups_$($stage.Index)";& $sync
+                & $profileEnd 'Hmx'
             }
+            & $profileBegin 'Epilogue'
             for($tile=0;$tile -lt $stage.PhaseTiles;$tile++){
                 & $ptr 0 18 ($regions.Phases.Offset+$tile*$tileBytes)
                 & $ptr 1 18 ($regions.UpsOutput.Offset+$tile*$stage.Stride*$tileBytes)
@@ -79,36 +128,44 @@ function New-KokoroGeneratorMainRunSteps {
                 & $ptr 0 18 $regions.UpsOutput.Offset
                 foreach($step in @(New-KokoroGeneratorLeadingReflectionSteps)){$s.Add($step)}
             }
-            & $dma 18 $regions.Source.Offset 20 $stage.SourceOffset $stage.SourceBytes
+            & $timedDma 18 $regions.Source.Offset 20 $stage.SourceOffset $stage.SourceBytes
             & $ptr 0 18 $regions.UpsOutput.Offset;& $ptr 1 18 $regions.Source.Offset
             & $ptr 2 18 $regions.Root.Offset;& $imm 13 ($stage.RootRows/32)
             & $call "main_add_$($stage.Index)"
+            & $profileEnd 'Epilogue'
             foreach($branch in 0,1,2){
-                & $dma 18 $regions.Residual.Offset 18 $regions.Root.Offset $stage.SourceBytes
+                $profileState.Index=20*$stage.Index+1+6*$branch
+                & $profileBegin 'Epilogue'
+                & $timedDma 18 $regions.Residual.Offset 18 $regions.Root.Offset $stage.SourceBytes
                 $branchLayers=@($layers | Where-Object {$_.Stage -eq $stage.Index -and $_.Branch -eq $branch})
                 $first=$branchLayers[0]
-                & $dma 18 $regions.Norm.Offset 22 $first.NormOffset $first.NormBytes
+                & $timedDma 18 $regions.Norm.Offset 22 $first.NormOffset $first.NormBytes
                 & $ptr 0 18 $regions.Operand.Offset;& $imm 4 ($tileBytes/128);& $call 'main_zero'
                 & $ptr 0 18 $regions.Residual.Offset;& $ptr 3 18 ($regions.Operand.Offset+$tileBytes)
                 & $ptr 12 18 $regions.Norm.Offset;& $ptr 5 18 ($regions.Norm.Offset+20L*$c)
                 & $imm 13 ($stage.RootRows/32);& $call "main_norm_$($stage.Index)"
+                & $profileEnd 'Epilogue'
                 foreach($layer in $branchLayers){
-                    & $dma 18 $regions.Weights.Offset 21 $layer.WeightOffset $layer.WeightBytes
-                    & $dma 18 $regions.Conversion.Offset 22 $layer.ConversionOffset (8L*$c)
+                    $profileState.Index=$layer.ProfileIndex
+                    & $timedDma 18 $regions.Weights.Offset 21 $layer.WeightOffset $layer.WeightBytes
+                    & $timedDma 18 $regions.Conversion.Offset 22 $layer.ConversionOffset (8L*$c)
                     & $ptr 0 18 ($regions.Operand.Offset+$tileBytes);& $ptr 1 18 $regions.Weights.Offset
                     & $ptr 2 18 $regions.Convolution.Offset;& $ptr 3 18 $regions.Conversion.Offset
                     & $imm 4 ($layer.OutputRows/32)
                     $clockOffset=96+16*$layer.Index
+                    & $profileBegin 'Hmx'
                     $s.Add(@{Op='hwticks';d=8});$s.Add(@{Op='store-d';s=23;t=8;Offset=$clockOffset})
                     & $call "main_c${c}_k$($layer.Kernel)_d$($layer.Dilation)";& $sync
                     $s.Add(@{Op='hwticks';d=8});$s.Add(@{Op='store-d';s=23;t=8;Offset=($clockOffset+8)})
+                    & $profileEnd 'Hmx'
+                    & $profileBegin 'Epilogue'
                     if($layer.Layer -eq 5){
                         & $ptr 0 18 $regions.Convolution.Offset;& $ptr 1 18 $regions.Residual.Offset
                         & $ptr 2 18 $regions["Branch$branch"].Offset;& $imm 13 ($stage.FinalRows/32)
                         & $call "main_add_$($stage.Index)"
                     }else{
                         $next=$branchLayers[$layer.Layer+1]
-                        & $dma 18 $regions.Norm.Offset 22 $next.NormOffset $next.NormBytes
+                        & $timedDma 18 $regions.Norm.Offset 22 $next.NormOffset $next.NormBytes
                         & $ptr 0 18 $regions.Operand.Offset;& $imm 4 ($tileBytes/128);& $call 'main_zero'
                         & $ptr 0 18 $regions.Convolution.Offset;& $ptr 1 18 $regions.Residual.Offset
                         & $ptr 2 18 $regions.Residual.Offset;& $ptr 3 18 ($regions.Operand.Offset+$tileBytes)
@@ -116,15 +173,19 @@ function New-KokoroGeneratorMainRunSteps {
                         & $imm 13 ($layer.OutputRows/32)
                         & $call $(if($layer.Layer%2){"main_resnorm_$($stage.Index)"}else{"main_norm_$($stage.Index)"})
                     }
+                    & $profileEnd 'Epilogue'
                 }
             }
+            $profileState.Index=20*$stage.Index+19
+            & $profileBegin 'Epilogue'
             & $ptr 0 18 $regions.Branch0.Offset;& $ptr 1 18 $regions.Branch1.Offset;& $ptr 6 18 $regions.Branch2.Offset
             $meanOffset=if($stage.Index -eq 0){$regions.MeanA.Offset+$tileBytes}else{$regions.MeanB.Offset}
             & $ptr 2 18 $meanOffset;& $imm 13 ($stage.FinalRows/32)
             & $call "main_mean_$($stage.Index)"
             if($stage.Index -eq 0){& $ptr 0 18 $regions.MeanA.Offset;& $imm 4 ($tileBytes/128);& $call 'main_zero'}
+            & $profileEnd 'Epilogue'
         }
-        & $dma 23 1024 18 $regions.MeanB.Offset 262144
+        & $timedDma 23 $telemetryBytes 18 $regions.MeanB.Offset 262144
     }
     $bodies=[Collections.Generic.List[object]]::new()
     $zero=@(@{Op='vxor';d=0;s=0;t=0},@{Op='loop0-r';s=4;Label='main_zero_loop'},
