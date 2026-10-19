@@ -1284,7 +1284,8 @@ function New-KokoroStudentTextSelection {
     if(-not $pronunciation.Complete -or -not $pronunciation.KokoroPhones){throw 'Phonemizer could not complete the requested line.'}
     $held=@([pscustomobject]@{text=$Text;phonemes=$pronunciation.KokoroPhones})
     $Sizes=[int[]]@($SelectionSentences);$K=40
-    $minePath=Join-Path $root 'tools/reference/unit-bank/mine.ps1'
+    if(-not $env:KOKORO_NOTES){throw 'Set KOKORO_NOTES to the project notes folder (Invoke-KokoroDevelopment.ps1 sets it).'}
+    $minePath=Join-Path $env:KOKORO_NOTES 'reference/unit-bank/mine.ps1'
     if((Get-FileHash $minePath).Hash -cne '293DA2E73F207595B2368F224FAC681157AC22BE28EB0913B1674F1093A274FA'){throw 'Existing selector source differs.'}
     $tokens=$null;$parseErrors=$null;$ast=[Management.Automation.Language.Parser]::ParseFile($minePath,[ref]$tokens,[ref]$parseErrors)
     if($parseErrors.Count){throw 'Existing selector parse failed.'}

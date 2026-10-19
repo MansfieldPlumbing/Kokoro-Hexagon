@@ -2,7 +2,7 @@
 <# .SYNOPSIS
 Per-layer output error of the stock decoder's convs with 8-bit and 4-bit per-output-channel weights, on the captured inputs.
 .DESCRIPTION
-For each Conv1d / ConvTranspose1d of the stock decoder (tools/reference/capture_stock_decoder.py capture), the captured input
+For each Conv1d / ConvTranspose1d of the stock decoder (stock decoder capture), the captured input
 goes through the conv with the stock weights and with quantized weights (activations unquantized), and the output SNR is
 reported: W8 (symmetric, absmax / 127 per output channel), W4 (absmax / 7) and W4c (per channel, the clip c * absmax / 7,
 c in 0.70 .. 1.00, with the least weight squared error). Decides which decoder layers can take 4-bit weights (W4A8 per layer

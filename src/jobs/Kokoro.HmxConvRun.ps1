@@ -1,7 +1,7 @@
 #requires -Version 7.4
 # FastRPC skel entry that runs one emitted HMX conv (Kokoro.HmxConv.ps1) on the cDSP with its own
 # HMX power vote, VTCM and HMX context; no other DSP library of ours is loaded.
-# Struct layouts from SDK 6.4.0.2 headers (tools/reference/hmx-sim/power_layout.c):
+# Struct layouts from SDK 6.4.0.2 headers (power_layout.c reference):
 #   HAP_power_request_t 120 B: type @0 (HVX=2, DCVS_v2=7, HMX=13); hvx/hmx.power_up @8 (u8);
 #   dcvs_v2: dcvs_enable @8, dcvs_option @9 (PERFORMANCE_MODE=16), set_dcvs_params @16,
 #   target/min/max corner @20/21/22 (TURBO=6).  compute_res_attr_t 160 B.

@@ -16,7 +16,7 @@ param(
     [Parameter(Mandatory)][string] $FixtureDirectory,
     [ValidateRange(1, 121)][int] $Runs = 3,
     [ValidateSet('SM8550', 'SM8635')][string] $Soc = 'SM8550',
-    [string] $Adb = 'C:\backup\Android\platform-tools\adb.exe',
+    [string] $Adb = $env:KOKORO_ADB,
     [string] $Package = 'dev.mansfieldplumbing.kokoro',
     [ValidateRange(10, 600)][int] $TimeoutSeconds = 180,
     [pscustomobject] $EmissionArtifact,
@@ -49,6 +49,8 @@ if ([long]$layout.Tiles -lt 1 -or [long]$layout.Tiles -gt 1024 -or
     [long]$layout.PcmOffset + 2L * [long]$layout.Samples -gt [long]$layout.OutputBytes) {
     throw 'Runner layout is out of range.'
 }
+if (-not $Adb) { $adbCommand = Get-Command adb -ErrorAction Ignore; if ($adbCommand) { $Adb = $adbCommand.Source } }
+if (-not $Adb) { throw 'adb not found: pass -Adb, set KOKORO_ADB, or put adb on PATH.' }
 $serials = @(& $Adb devices | ForEach-Object { $p = $_.Split("`t"); if ($p.Count -eq 2 -and $p[1] -eq 'device') { $p[0] } } |
     Where-Object { (& $Adb -s $_ shell getprop ro.soc.model).Trim() -eq $Soc })
 if ($serials.Count -ne 1) { throw "Expected exactly one attached $Soc device, found $($serials.Count)." }

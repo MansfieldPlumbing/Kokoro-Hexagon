@@ -170,20 +170,25 @@ if($h){Get-Help $PSCommandPath -Detailed;return}
 $Root = $PSScriptRoot
 $Build = Join-Path $Root 'build'
 $Shared = if ($SharedRoot) { [IO.Path]::GetFullPath($SharedRoot) } else { [IO.Path]::GetFullPath((Join-Path $Root '../Pwsh-Development')) }
-$StockSource = 'C:/Dev/.vendor/kokoro'
+$StockSource = if ($env:KOKORO_STOCK_SOURCE) { $env:KOKORO_STOCK_SOURCE } else { Join-Path (Split-Path $Root) '.vendor/kokoro' }
+
 $StockCommit = 'dfb907a02bba8152ca444717ca5d78747ccb4bec'   # lib/manifest.json kokoroSource.commit
 # Python runs only stock PyTorch Kokoro, to record reference tensors (AGENTS.md).
-$Python = 'C:/bin/micromamba/envs/mono/python.exe'
+# KOKORO_PYTHON names the interpreter with stock PyTorch Kokoro installed.
+$Python = $env:KOKORO_PYTHON
+
 
 function Import-Evaluator { Import-Module (Join-Path $Root 'tools/Kokoro.Evaluator.psm1') -Force -Global }
 
 function Get-Adb {
     $pathCommand = Get-Command adb -ErrorAction Ignore
     $pathCandidate = if ($null -ne $pathCommand) { $pathCommand.Source } else { $null }
-    foreach ($candidate in $env:KOKORO_QNN_ADB, $pathCandidate, 'C:/backup/Android/platform-tools/adb.exe') {
+    foreach ($candidate in $env:KOKORO_ADB, $pathCandidate) {
+
         if ($candidate -and (Test-Path $candidate)) { return $candidate }
     }
-    throw 'adb not found: set KOKORO_QNN_ADB or put adb on PATH.'
+    throw 'adb not found: set KOKORO_ADB or put adb on PATH.'
+
 }
 
 # Phone facts by SoC only; serials never leave this function.
@@ -316,8 +321,18 @@ function Test-KokoroCasePairs {
     "PASS case-pairs: $($findings.Count) known, 0 new"
 }
 
-# Project notes (handoffs, designs, results) live outside the repository, beside the shared agent rules.
-$script:NotesRoot = Join-Path (Split-Path $Root) 'Pwsh-Development/docs/kokoro-hexagon'
+# Project notes (handoffs, designs, results) and reference material live outside the repository. KOKORO_NOTES names
+# that folder; by default it sits beside this checkout with the shared agent rules. Modules read the same variable.
+if (-not $env:KOKORO_NOTES) { $env:KOKORO_NOTES = Join-Path (Split-Path $Root) 'Pwsh-Development/docs/kokoro-hexagon' }
+$script:NotesRoot = $env:KOKORO_NOTES
+
+
+function Get-KokoroReferencePath {
+    param([Parameter(Mandatory)][string]$RelativePath)
+    $path = Join-Path $script:NotesRoot "reference/$RelativePath"
+    if (-not (Test-Path -LiteralPath $path)) { throw "Reference file '$RelativePath' is missing under $script:NotesRoot/reference. Set KOKORO_NOTES to the project notes folder." }
+    $path
+}
 
 function Get-NextStep {
     $handoff = if (Test-Path $script:NotesRoot) { Get-ChildItem $script:NotesRoot -Filter 'handoff-*.md' | Sort-Object Name | Select-Object -Last 1 }
@@ -1829,7 +1844,8 @@ function Get-KokoroApi {
 function Test-KokoroWorkingBank {
     # This is deliberately separate from Verify. data/unit-bank is frozen evidence.
     $bankRoot = Join-Path $Build 'unit-bank'
-    $manifestPath = Join-Path $Root 'tools/reference/unit-bank/bank-manifest.json'
+    $manifestPath = Get-KokoroReferencePath 'unit-bank/bank-manifest.json'
+
     $manifest = Get-Content -LiteralPath $manifestPath -Raw | ConvertFrom-Json
     if (-not (Test-Path -LiteralPath $bankRoot)) {
         $preserved = Join-Path $Root 'data/unit-bank'
@@ -1850,10 +1866,12 @@ function New-KokoroBankDecoderInput {
     <# .SYNOPSIS Assembles the existing all-features table baseline in PowerShell, without a reference model call.
     N shape: first 10,000 bank sentences, 8 samples per token, triphone/right-biphone/phone backoff (count >= 5).
     N/F0/duration levels: Measure-ProsodyFeatures.ps1 level 8. Voicing and t_en: mine.ps1's selected units.
-    Equations and interpolation match tools/reference/unit-bank/render_pred.py and contour_ceiling.py.
+    Equations and interpolation match the unit-bank reference renderer (render_pred, contour_ceiling).
+
     #>
     param([Parameter(Mandatory)] $Bank, [Parameter(Mandatory)][string] $Directory, [int] $Index = 0)
-    $held = @(Get-Content (Join-Path $Root 'tools/reference/unit-bank/heldout.json') -Raw | ConvertFrom-Json)[$Index]
+    $held = @(Get-Content (Get-KokoroReferencePath 'unit-bank/heldout.json') -Raw | ConvertFrom-Json)[$Index]
+
     $pred = @(Get-Content (Join-Path $Bank.Directory 'prosody-predictions.json') -Raw | ConvertFrom-Json)[$Index]
     if (-not $pred.aligned -or $pred.text -cne $held.text) { throw 'Held-out prediction alignment mismatch.' }
     $levels = $pred.levels[8]; $count = $held.phonemes.Length + 2
@@ -1870,7 +1888,8 @@ function New-KokoroBankDecoderInput {
     $previousWeights = $env:KOKORO_TARGETW
     try {
         $env:KOKORO_TARGETW = '4,1,0.5,4,8,2'
-        & (Join-Path $Root 'tools/reference/unit-bank/mine.ps1') -Dir $selectionDir -Sizes @(1000000) | ForEach-Object { Write-Host $_ }
+        & (Get-KokoroReferencePath 'unit-bank/mine.ps1') -Dir $selectionDir -Sizes @(1000000) | ForEach-Object { Write-Host $_ }
+
     } finally { $env:KOKORO_TARGETW = $previousWeights }
     $selectionPath = Join-Path $selectionDir 'big-selections.json'
     $selection = Get-Content -LiteralPath $selectionPath -Raw | ConvertFrom-Json
@@ -1995,7 +2014,8 @@ function New-KokoroBankDecoderInput {
         provenance = @{ bankManifestSHA256 = $Bank.ManifestSHA256; selectionSHA256 = (Get-FileHash $selectionPath).Hash
             predictionsSHA256 = (Get-FileHash (Join-Path $Bank.Directory 'prosody-predictions.json')).Hash; heldOutIndex = $Index
             bankSentences = $selected.sentences; prosodyLevel = 8; nShapeTrainingSentences = 10000; targetWeights = '4,1,0.5,4,8,2'
-            assemblyToolSHA256 = (Get-FileHash $PSCommandPath).Hash; selectionToolSHA256 = (Get-FileHash (Join-Path $Root 'tools/reference/unit-bank/mine.ps1')).Hash } }
+            assemblyToolSHA256 = (Get-FileHash $PSCommandPath).Hash; selectionToolSHA256 = (Get-FileHash (Get-KokoroReferencePath 'unit-bank/mine.ps1')).Hash } }
+
     # Files bridge to the pinned Python reference only; PowerShell callers keep the typed object.
     $frontData | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath $descriptor -Encoding utf8NoBOM
     Write-Host "Front end: '$($held.text)', $frames decoder frames."
@@ -2423,11 +2443,14 @@ switch ($Command) {
             seed = $Seed; block = @{ albert = 'albert'; decoder = 'decoder'; generator = 'decoder.generator' }[$Block]; output = $out; exportToolSha256 = (Get-FileHash $PSCommandPath).Hash }
         if ($DecoderInput) {
             $spec.decoderInput = @{ path = $DecoderInput; sha256 = (Get-FileHash -LiteralPath $DecoderInput).Hash }
-            $spec.decoderInputToolSha256 = (Get-FileHash -LiteralPath (Join-Path $Root 'tools/reference/capture_decoder_input.py')).Hash
+            $spec.decoderInputToolSha256 = (Get-FileHash -LiteralPath (Get-KokoroReferencePath 'capture_decoder_input.py')).Hash
+
         }
         $specPath = Join-Path $out 'capture-spec.json'
         $spec | ConvertTo-Json -Depth 8 | Set-Content $specPath -Encoding utf8NoBOM
-        & $Python -I (Join-Path $Root "tools/reference/$script") --spec $specPath
+        if (-not $Python) { throw 'StockCapture needs KOKORO_PYTHON (an interpreter with stock PyTorch Kokoro).' }
+        & $Python -I (Get-KokoroReferencePath $script) --spec $specPath
+
         if ($LASTEXITCODE -or -not (Test-Path (Join-Path $out 'capture.json'))) { throw "Stock $Block capture failed." }
         "capture: $out"
     }
@@ -2436,7 +2459,8 @@ switch ($Command) {
         $ziraDirectory = if ($OutputDirectory) { [IO.Path]::GetFullPath($OutputDirectory) } else { Join-Path $Build ("zira-{0:yyyyMMddTHHmmssZ}" -f [DateTime]::UtcNow) }
         if (-not $ziraDirectory.StartsWith($Build + [IO.Path]::DirectorySeparatorChar, [StringComparison]::OrdinalIgnoreCase) -or (Test-Path -LiteralPath $ziraDirectory)) { throw 'Zira requires a new output directory under build/.' }
         [void][IO.Directory]::CreateDirectory($ziraDirectory)
-        & (Join-Path $Root 'tools/reference/unit-bank/zira.ps1') -Text $Text -OutPrefix (Join-Path $ziraDirectory 'speech')
+        & (Get-KokoroReferencePath 'unit-bank/zira.ps1') -Text $Text -OutPrefix (Join-Path $ziraDirectory 'speech')
+
     }
     'Speak' {
         if ($Soc -cne 'SM8550') { throw 'First Speak is the SM8550 gate; SM8635 follows chunked Speak (Next item 4).' }

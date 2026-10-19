@@ -8,6 +8,7 @@ Follow [the shared agent rules](../Pwsh-Development/AGENTS.md).
 - Entrypoint: `pwsh -NoProfile -File ./Invoke-KokoroDevelopment.ps1`. Run `Verify` before every commit.
 - Project notes (the Student contract, designs, handoffs and result records) live outside this repository in [../Pwsh-Development/docs/kokoro-hexagon](../Pwsh-Development/docs/kokoro-hexagon). Read [the Student contract](../Pwsh-Development/docs/kokoro-hexagon/student-generator-contract.md) before Student work. Write new notes there, never under this repository.
 - New work extends an owning module under `tools/` or `src/` and is reached through an entrypoint command. No standalone one-off scripts, copies of existing files, or work outside this repository.
+- No hard-coded machine paths (drive letters, user profiles, home directories, other checkouts or worktrees) in code, data or docs. Resolve from `$PSScriptRoot`, a parameter, or an environment variable, and fail with a message naming what's missing.
 - Names state what the thing is or measures. No nicknames, metaphors, version tags or experiment code names in files, identifiers, docs or commits.
 
 ## No sprawl

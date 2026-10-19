@@ -90,7 +90,7 @@ if ($RegionBody -and $Kernel -notin @('KokoroAlbertAttention3','KokoroAlbertAtte
 # Fetch source from an immutable upstream GitHub revision; never use or write
 # the protected local Pwsh checkout. No model text is executed by this adapter.
 $script:PwshBaseUrl = 'https://raw.githubusercontent.com/MansfieldPlumbing/Pwsh/e215a963295eda290599840366b51cbd99bb6d57/'
-$protectedRoot = [IO.Path]::GetFullPath('C:\Dev\Pwsh').TrimEnd([IO.Path]::DirectorySeparatorChar)
+$protectedRoot = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '../../Pwsh')).TrimEnd([IO.Path]::DirectorySeparatorChar)
 $outputFullPath = [IO.Path]::GetFullPath($OutputDirectory)
 if ($outputFullPath.Equals($protectedRoot, [StringComparison]::OrdinalIgnoreCase) -or
     $outputFullPath.StartsWith($protectedRoot + [IO.Path]::DirectorySeparatorChar, [StringComparison]::OrdinalIgnoreCase)) {

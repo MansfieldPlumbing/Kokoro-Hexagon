@@ -4,8 +4,8 @@ using namespace System.Runtime.Intrinsics
 [CmdletBinding()]
 param(
     [Parameter(Mandatory)][string] $OutputDirectory,
-    [string] $InputRepository = 'C:\Dev\Kokoro-Hexagon',
-    [string] $ReferenceRepository = 'C:\Dev\Kokoro-Hexagon-v15-front-end',
+    [string] $InputRepository = (Split-Path $PSScriptRoot -Parent),
+    [Parameter(Mandatory)][string] $ReferenceRepository,
     [ValidateRange(0,60)][int] $Tiles = 0,
     [ValidateRange(0,5)][int] $ResBlockIndex = 3,
     [ValidateRange(0,2)][int] $DilationIndex = 0,
@@ -367,7 +367,8 @@ $stockPcmMetrics = $compare.Invoke($candidatePcm,$stockPcm)
 if ([Array]::Exists[float]($candidatePcm,$nonfinite)) { throw 'STOP: NaN/Inf in diagnostic continuation PCM.' }
 
 # Reuse the compiled PCM writer from the requested MeasureAudio commit 93a6d82.
-$audioRoot = 'C:\Users\Scott\.codex\worktrees\measure-audio\Kokoro-Hexagon'
+$audioRoot = $env:KOKORO_MEASURE_AUDIO_REPOSITORY
+if (-not $audioRoot) { throw 'Set KOKORO_MEASURE_AUDIO_REPOSITORY to a checkout of MeasureAudio commit 93a6d82.' }
 $audioRelative = 'tools/Kokoro.AudioMeasurement.psm1'
 $audioPath = Join-Path $audioRoot $audioRelative
 $pinnedAudioBlob = git -C $audioRoot rev-parse "93a6d82:$audioRelative"

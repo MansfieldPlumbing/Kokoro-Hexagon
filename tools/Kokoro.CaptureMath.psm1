@@ -21,7 +21,7 @@ function Read-KokoroResBlockCapture {
     # One generator AdaINResBlock1 in the per-block naming (input, style, output, stage<s>.input/.adain/.snake/
     # .conv/.weight/.bias/.alpha/.adain.fc.*/.adain.norm.*; stage s = 2p + half: adain1/convs1 then adain2/convs2
     # of dilation p). Directory is a per-block capture of that block, or a whole-generator capture
-    # (tools/reference/capture_stock_generator.py names), whose tensors are mapped without copying.
+    # (stock generator capture names), whose tensors are mapped without copying.
     # -Module noise_res reads generator.noise_res.<Block> (whole-generator captures only).
     param([Parameter(Mandatory)][string] $Directory, [Parameter(Mandatory)][ValidateRange(0,5)][int] $Block, [ValidateSet('resblocks','noise_res')][string] $Module = 'resblocks')
     $cap = Read-KokoroCapture -Directory $Directory

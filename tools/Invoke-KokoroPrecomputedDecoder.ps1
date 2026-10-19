@@ -44,7 +44,7 @@ param(
     [ValidateRange(2,64)][int] $Threads = 4,
     [ValidateRange(1,10)][int] $Runs = 10,
     [ValidateSet('','dog','peach')][string] $CaseName = '',
-    [string] $InputRepository = 'C:\Dev\Kokoro-Hexagon',
+    [string] $InputRepository = (Split-Path $PSScriptRoot -Parent),
     [string] $OutputDirectory = '',
     [int] $Seed = 17,
     [Collections.IDictionary] $SelectedUnits = $null,
@@ -985,7 +985,8 @@ function Invoke-OfflineBankSelection {
         # in-process objects; this experiment neither parses nor produces JSON.
         $requestedSizes = [int[]]@(1000000)
         if ($null -ne $SelectedUnits) { $requestedSizes = [int[]]::new(0) }
-        . (Join-Path $root 'tools/reference/unit-bank/mine.ps1') -Dir $selectionDirectory -Sizes $requestedSizes -K 40 | Out-Host
+        if(-not $env:KOKORO_NOTES){throw 'Set KOKORO_NOTES to the project notes folder (Invoke-KokoroDevelopment.ps1 sets it).'}
+        . (Join-Path $env:KOKORO_NOTES 'reference/unit-bank/mine.ps1') -Dir $selectionDirectory -Sizes $requestedSizes -K 40 | Out-Host
         $selection = $SelectedUnits
         if ($null -eq $selection) {
             $selection = $results["$sent"]
@@ -1005,7 +1006,9 @@ function Read-OfflineBankArray([IO.Compression.ZipArchive] $Archive, [string] $A
 }
 function Invoke-OfflineJoinExperiment {
     if (@(Get-ChildItem -LiteralPath $output -Filter '*.wav' -File).Count -and $DonorRecords.Count -eq 0) { throw 'Existing WAVs require their recorded donor inputs.' }
-    $measurementRoot = 'C:\Users\Scott\.codex\worktrees\measure-audio\Kokoro-Hexagon'
+    # KOKORO_MEASURE_AUDIO_REPOSITORY names a checkout of the pinned MeasureAudio commit.
+    $measurementRoot = $env:KOKORO_MEASURE_AUDIO_REPOSITORY
+    if (-not $measurementRoot) { throw 'Set KOKORO_MEASURE_AUDIO_REPOSITORY to a checkout of MeasureAudio commit 93a6d82.' }
     if ((& git -C $measurementRoot rev-parse HEAD) -cne '93a6d8220ed20734b0f5a943ef95b03c922d5be1') { throw 'MeasureAudio revision differs from requested commit.' }
     $experimentType = $assembly.GetType('OfflineExperimentMath', $true)
     $bankDurations = $experimentType.GetMethod('Durations').CreateDelegate([Func[short[],int,int,int[]]])

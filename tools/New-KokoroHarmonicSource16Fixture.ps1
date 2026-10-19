@@ -4,7 +4,7 @@ Packs the 16-bit harmonic source and STFT (frame-rate f0 -> har) for Kokoro.Harm
 .DESCRIPTION
 Stock Kokoro dfb907a02bba8152ca444717ca5d78747ccb4bec istftnet.py SineGen / SourceModuleHnNSF (closed form in
 src/kernels/Kokoro.HarmonicSource16.ps1) and TorchSTFT.transform. The capture must record SineGen's random draws
-(tools/reference/capture_stock_generator.py, generator.m_source.l_sin_gen.randn.0).
+(stock generator capture, generator.m_source.l_sin_gen.randn.0).
   f0     the captured frame-rate f0 as int32 Q16 Hz
   z      sum_h w_h g_h from the captured standard normal draws g (l_linear weights w), Q12 halfwords; the job scales it by
          0.003 (voiced) or 0.1 / 3, so z carries stock's noise exactly up to rounding

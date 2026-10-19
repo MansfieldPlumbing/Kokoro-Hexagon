@@ -23,7 +23,7 @@ param(
     [Parameter(ParameterSetName='Speak')][switch]$UseZira,
     [string]$SpeechAssemblyPath=(Join-Path $PSHOME 'System.Speech.dll'),
     [string]$KokoroDirectory=(Join-Path $PSScriptRoot '..\build\inputs\kokoro'),
-    [string]$PythonPath='C:\bin\micromamba\envs\mono\python.exe',
+    [string]$PythonPath=$env:KOKORO_PYTHON,
     [string]$DotnetPath='dotnet',
     [string]$CorpusPath='',
     [string]$ObservationPath=(Join-Path $PSScriptRoot '..\build\phonemizer\english\zira-corpus.psd1'),
@@ -2510,7 +2510,7 @@ function Initialize-EnglishKokoro {
     }
     $commit='dfb907a02bba8152ca444717ca5d78747ccb4bec'
     $source=Join-Path $Directory $commit
-    $vendor='C:\Dev\.vendor\kokoro'
+    $vendor=if($env:KOKORO_STOCK_SOURCE){$env:KOKORO_STOCK_SOURCE}else{Join-Path $PSScriptRoot '../../.vendor/kokoro'}
     if(-not(Test-Path -LiteralPath $source)){
         $archive=Join-Path $Directory 'stock-source.zip'
         & git -C $vendor archive --format=zip "--output=$archive" $commit kokoro
@@ -2616,6 +2616,7 @@ print('Stock Kokoro WAV created: samples=' + str(len(audio)) + '; sample_rate=24
     $adapterPath=Join-Path $run 'stock-reference.py'
     [IO.File]::WriteAllText($adapterPath,$adapter,[Text.UTF8Encoding]::new($false))
     $arguments=@($adapterPath,$assets.SourceRoot,$assets.Inputs['kokoro-v1_0.pth'].Path,$assets.Inputs['config.json'].Path,$assets.Inputs['voices/'+$Voice+'.pt'].Path,$result.KokoroPhones,($result.SymbolIds -join ','),$Speed.ToString([Globalization.CultureInfo]::InvariantCulture),$run,$Voice)+@($assets.SourceFiles | ForEach-Object {$_.Path+'|'+$_.Sha256})
+    if(-not $PythonPath){throw 'Set KOKORO_PYTHON (or pass -PythonPath) to an interpreter with stock PyTorch Kokoro.'}
     $messages=@(& $PythonPath @arguments)
     if($LASTEXITCODE){throw 'Stock Kokoro reference synthesis failed.'}
     $sampleMessages=@($messages | Where-Object {$_ -match '^Stock Kokoro WAV created: samples=([0-9]+); sample_rate=24000$'})

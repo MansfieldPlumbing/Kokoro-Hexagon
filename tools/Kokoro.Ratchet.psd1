@@ -18,7 +18,7 @@
         @{
             Name = 'network-free-peach-sm8550'
             Audio = '2.125 s, 85 decoder frames; bank front end, af_heart'
-            BaselineManifest = 'tools/baselines/bank-front-end-sm8550-20261010.manifest.psd1'
+            BaselineManifest = 'baselines/bank-front-end-sm8550-20261010.manifest.psd1'
             Kernel = 'KokoroDecoderGenerator16Run'
             Parameters = @{ ResBlockFrames = 10201; ResidentHvxThreads = 4; ResidentBatchTiles = 14 }
             Input = 'data/baselines/network-free-peach-sm8550-20261010/input'

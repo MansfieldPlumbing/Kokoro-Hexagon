@@ -3,7 +3,7 @@ param([Parameter(Mandatory)][string]$OutputDirectory,[string]$CorrelationReceipt
 $ErrorActionPreference='Stop'
 Set-StrictMode -Version Latest
 $root=Split-Path $PSScriptRoot -Parent
-$inputRoot='C:/Dev/Kokoro-Hexagon/build'
+$inputRoot=Join-Path $root 'build'
 $out=[IO.Path]::GetFullPath($OutputDirectory)
 $build=[IO.Path]::GetFullPath((Join-Path $root 'build'))+[IO.Path]::DirectorySeparatorChar
 if(-not $out.StartsWith($build,[StringComparison]::OrdinalIgnoreCase) -or (Test-Path -LiteralPath $out)){throw 'Use a fresh output directory in this worktree build/.'}
@@ -207,7 +207,8 @@ if($LadderReceipt){
     $ladderSource=[IO.Path]::GetFullPath($LadderReceipt)
     if(-not $ladderSource.StartsWith($build,[StringComparison]::OrdinalIgnoreCase)){throw 'Use the original run2 receipt in this worktree build/.'}
     $baseline=Import-Clixml -LiteralPath $ladderSource
-    $baselineMetrics=Import-Clixml (Join-Path $root 'tools/baselines/copy-synthesis-correlation-20261013.clixml')
+    if(-not $env:KOKORO_NOTES){throw 'Set KOKORO_NOTES to the project notes folder (Invoke-KokoroDevelopment.ps1 sets it).'}
+    $baselineMetrics=Import-Clixml (Join-Path $env:KOKORO_NOTES 'reference/baselines/copy-synthesis-correlation-20261013.clixml')
     if($baselineMetrics.RenderingReceiptSHA256 -cne (Get-FileHash $ladderSource).Hash){throw 'Corrected baseline metrics do not match run2.'}
     if($baseline.SampleRate -ne $sampleRate -or $baseline.WindowSamples -ne $length -or $baseline.HopSamples -ne $hop -or $baseline.EnvelopeBands -ne 64){throw 'Run2 settings differ.'}
     $baselineHashes=[Collections.Generic.Dictionary[string,string]]::new([StringComparer]::OrdinalIgnoreCase)

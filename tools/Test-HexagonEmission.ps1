@@ -3,7 +3,8 @@
 [CmdletBinding()]
 param(
     [string] $OutputDirectory = (Join-Path $PSScriptRoot '..\build\hexagon-emission\emitted'),
-    [string] $ToolRoot = '/home/scott/hexagon/Hexagon_SDK/6.4.0.2/tools/HEXAGON_Tools/19.0.04/Tools/bin',
+    # HEXAGON_SDK_TOOLS: the Hexagon SDK 6.4.0.2 HEXAGON_Tools/19.0.04/Tools/bin directory, as seen from WSL.
+    [string] $ToolRoot = $env:HEXAGON_SDK_TOOLS,
     [ValidateSet('KokoroGeneratorTemplate1Run','Probe','KokoroAffine','KokoroAdaIn','KokoroAdaInResBlock','KokoroAdaInStatistics','KokoroAdaInIntegerCoefficients','KokoroAdaInIntegerAffine','KokoroSnakeInteger','KokoroResidualInteger','KokoroAlbertSoftmax3','KokoroAlbertAttention3','KokoroAlbertAttentionOutput3','KokoroAlbertConnectedAttention3','KokoroConvTile','KokoroLinearTile','KokoroR0Sub0','KokoroHmxLock','KokoroHmxMatrix','KokoroHmxConv','KokoroHmxConvPlanes','KokoroHmxConvPlanesLoop','KokoroPlaneCombine','KokoroPlaneCombineLoop','KokoroAdaInMoments16','KokoroAdaInMoments16Loop','KokoroAdaInTurnsCoefficients','KokoroAdaInAffineCoefficientsLoop','KokoroAdaInLeaky16','KokoroDecoderPass','KokoroDecoder16Run','KokoroHmxConvRun','KokoroResBlockRun','KokoroBranchAverageInteger','KokoroGenerator60xRun','KokoroLeakyReluInteger','KokoroVtcmQuery','KokoroDmaCopy','KokoroDmaBench','KokoroAdaInSnakeInteger','KokoroAdaInSnakeTurns','KokoroGenerator60xResidentRun','KokoroGenerator60x16Run','KokoroGeneratorTailRun','KokoroGeneratorTail16Run','KokoroGeneratorStage16TailRun','KokoroResBlock16Run','KokoroGeneratorFrontStageTailRun','KokoroGeneratorFront10x16Run','KokoroGeneratorWhole16Run','KokoroHarmonicStft16Run','KokoroHarmonicSource16Run','KokoroGeneratorWholeSource16Run','KokoroDecoderGenerator16Run')][string] $Kernel='Probe',
     [ValidateRange(2, 32768)][int] $ResBlockFrames = 7801,
     [ValidateSet(3,7,11)][int] $ResBlockKernel = 3,
@@ -83,6 +84,7 @@ $result=& (Join-Path $PSScriptRoot 'Emit-HexagonProbe.ps1') -OutputDirectory $ou
     -ProfileBreakdown:$ProfileBreakdown -BypassAdaInCoefficients:$BypassAdaInCoefficients -BypassStatisticsAndCoefficients:$BypassStatisticsAndCoefficients -BypassHmxCompute:$BypassHmxCompute -Force:$Force -ResidentHvxThreads $ResidentHvxThreads -ResidentBatchTiles $ResidentBatchTiles -ResidentCompactOutput:$ResidentCompactOutput -Stage16StopAfter $Stage16StopAfter -Stage16Kernels $Stage16Kernels -Stage16Channels $Stage16Channels @pmuArgs
 $wslOutput=(& wsl.exe --exec wslpath -a $output 2>$null | Select-Object -Last 1).Trim()
 if($LASTEXITCODE -ne 0 -or -not $wslOutput.StartsWith('/')) { throw 'Cannot resolve output directory in WSL' }
+if(-not $ToolRoot){throw 'Set HEXAGON_SDK_TOOLS (or pass -ToolRoot) to the Hexagon SDK tools bin directory as seen from WSL.'}
 $assembler="$ToolRoot/hexagon-llvm-mc"
 $hash=(& wsl.exe --exec sha256sum $assembler 2>$null | Select-Object -Last 1) -split '\s+'
 if($LASTEXITCODE -ne 0 -or $hash[0] -ne 'fc64c65aca06186106a73ba93e65ddf7c906bf4905b786dc748d3f034401ea27') { throw 'SDK assembler pin mismatch' }

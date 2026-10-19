@@ -7,7 +7,7 @@ Kokoro evaluator: runs a DSP job candidate on a phone, scores it against stock, 
 One candidate = an emitter kernel with its parameters, run on an input (a capture-derived fixture directory). The
 evaluator emits it (cached by a hash of the parameters and every file in src/hexagon, src/kernels and src/jobs), runs it on the attached phone of
 the SoC (tools/Invoke-GeneratorTailProbe.ps1; unchanged staged files are not pushed again), scores PCM against the stock
-PCM in the input (tools/Measure-KokoroPcmSnr.ps1), writes the WAV, and appends one row to the experiment log (C:/Dev/Pwsh-Development/kokoro-hexagon/experiments.tsv).
+PCM in the input (tools/Measure-KokoroPcmSnr.ps1), writes the WAV, and appends one row to the experiment log (experiments.tsv beside the shared agent rules).
 Correctness gates timing: a candidate below its PCM floor is 'discard' whatever its speed.
 
 The ratchet (tools/Kokoro.Ratchet.psd1, committed) lists cases with accepted values: PCM SNR floor, median DSP ms
@@ -24,7 +24,7 @@ $script:Root = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..'))
 $script:Pwsh = (Get-Process -Id $PID).Path
 $script:RatchetPath = Join-Path $PSScriptRoot 'Kokoro.Ratchet.psd1'
 $script:TypedEmissions = [Collections.Generic.Dictionary[string,object]]::new([StringComparer]::Ordinal)
-# The experiment log is committed evidence in the shared PowerShell library (C:/Dev/Pwsh-Development/kokoro-hexagon).
+# The experiment log is kept with the shared project notes, outside this repository.
 $script:LogPath = [IO.Path]::GetFullPath((Join-Path $script:Root '../Pwsh-Development/kokoro-hexagon/experiments.tsv'))
 $script:Standards = @{
     Pass = 'Ratchet: put the score line in the commit message; Update-KokoroRatchet moves an accepted value only after a measured gain.'
@@ -47,7 +47,9 @@ function Get-KokoroRatchetCase {
 
 function Test-KokoroBaselineManifest {
     param([Parameter(Mandatory)][string]$Path)
-    $manifest = Import-PowerShellDataFile -LiteralPath (Join-Path $script:Root $Path)
+    # Path is relative to the reference folder in the project notes (KOKORO_NOTES).
+    if (-not $env:KOKORO_NOTES) { throw 'Set KOKORO_NOTES to the project notes folder (Invoke-KokoroDevelopment.ps1 sets it).' }
+    $manifest = Import-PowerShellDataFile -LiteralPath (Join-Path $env:KOKORO_NOTES "reference/$Path")
     if ($manifest.Schema -ne 1 -or -not $manifest.Files.Count) { throw 'Invalid baseline manifest.' }
     $bundle = [IO.Path]::GetFullPath((Join-Path $script:Root $manifest.Bundle))
     $prefix = $bundle + [IO.Path]::DirectorySeparatorChar
