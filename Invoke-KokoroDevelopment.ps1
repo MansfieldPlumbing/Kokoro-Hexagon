@@ -42,7 +42,7 @@ twice, or written as a scratch script, is a missing command: add it here.
                               and bert_encoder): output SNR against the stock capture with int8 per-output-channel
                               weights (W8), 16-bit per-tensor activations (A16), both, and A8W8 for contrast.
   Speak [-HeldOutIndex 0] [-Soc SM8550] [-Runs 3] [-OutputDirectory]
-                              First network-free variant sentence (at most 96 decoder frames): verify/restore the working
+                              First bank-input sentence (at most 96 decoder frames): verify/restore the working
                               bank, select units in PowerShell, assemble table prosody, capture the stock teacher on those
                               inputs, pack the existing job, run and play through AAudio. Generated files stay under build/.
   Zira -Text <sentence> [-OutputDirectory]  Windows speech API reference; returns typed phoneme/word events and a WAV.
@@ -886,7 +886,7 @@ function Test-KokoroGeneratorPmu {
         Import-Evaluator
         $prior=Import-Clixml -LiteralPath $PriorReceipt
         if($prior.Gate.Status -cne 'Passed'){throw 'Prior generator constants gate did not pass.'}
-        $peach=Join-Path $Root 'data/baselines/network-free-peach-sm8550-20261010/input'
+        $peach=Join-Path $Root 'data/baselines/decoder-generator-bank-input-sm8550-20261010/input'
         $cases=@(
             @{Name='P1';Kernel='KokoroDecoderGenerator16Run';Parameters=@{ResBlockFrames=10201;ResidentHvxThreads=4;ResidentBatchTiles=14};Input=$peach;Hash='FEFF54DF8340F184FA909C35CFEE48D3F0010F8B37E7C7F0967759403F9672A5';Pcm='E6456751BDBCCE0D5CB38DA8226B4EEC8B1C514E16626755C5BD975699374054'},
             @{Name='P2';Kernel='KokoroGeneratorWholeSource16Run';Parameters=@{ResBlockFrames=10201;ResidentHvxThreads=4;ResidentBatchTiles=14};Input=(Join-Path $prior.OutputDirectory 'A/generator');Hash='13D75D38B0B5BC8695BCAFF49378F860B5E923C80D8F14872321B14854301428';Pcm='E6456751BDBCCE0D5CB38DA8226B4EEC8B1C514E16626755C5BD975699374054'},
@@ -1111,7 +1111,7 @@ function Test-KokoroDecoderConstantsCorpus {
         $settings+=@(@{Name='F';Description='Decoder constants; generator constants';Tables=$corpus.Tables;Emission=$constants;GeneratorEmission=$constantGenerator;GeneratorTables=$generatorCorpus.Tables},
             @{Name='G';Description='Decoder statistics; generator constants';Tables=$tables;Emission=$statistics;GeneratorEmission=$constantGenerator;GeneratorTables=$generatorCorpus.Tables})
         $settings=@($settings | Where-Object {$_.Name -cin @('A','B','F','G')})
-        $accepted=Get-KokoroRatchetCase -Name network-free-peach-sm8550
+        $accepted=Get-KokoroRatchetCase -Name decoder-generator-bank-input-sm8550
         foreach($variant in $settings){
             $variantGenerator=$variant.GeneratorEmission
             $report.Stage="$($variant.Name)-Decoder"
@@ -2515,7 +2515,7 @@ switch ($Command) {
         $phone = Invoke-KokoroDeviceJob -EmissionDirectory $emission.Directory -InputDirectory $inputDir -Soc $Soc -Runs $(if ($Runs) { $Runs } else { 3 })
         $wav = Join-Path $out 'dsp.wav'
         $metrics = & (Join-Path $Root 'tools/Measure-KokoroPcmSnr.ps1') -OutputPath $phone.OutputPath -FixtureDirectory $inputDir -WavPath $wav
-        $result = [ordered]@{ Variant = 'network-free Kokoro'; Text = $front.text; Soc = $Soc; DecoderFrames = $front.frames; Samples = $metrics.Samples
+        $result = [ordered]@{ Variant = 'unit-bank front end'; Text = $front.text; Soc = $Soc; DecoderFrames = $front.frames; Samples = $metrics.Samples
             PcmSnrDb = $metrics.PcmSnrDb; Clipped = $metrics.ClippedSamples; PcmSHA256 = $metrics.PcmSHA256; MedianDspMs = $phone.MedianMs
             DspRtf = $phone.MedianMs / 1000 / ($metrics.Samples / 24000.0); LibrarySHA256 = $emission.LibrarySHA256; Emission = $emission.Directory
             DecoderInput = $frontInput; DecoderInputSHA256 = (Get-FileHash $frontInput).Hash; JobInput = $inputDir; Output = $phone.OutputPath; Wav = $wav

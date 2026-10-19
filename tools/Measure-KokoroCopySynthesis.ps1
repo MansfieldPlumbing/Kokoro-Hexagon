@@ -259,7 +259,7 @@ $references=[Collections.Generic.List[object]]::new()
 $peachPcm=Join-Path $inputRoot 'speak-20261010-h0-fast/job-input/decoder-generator-fixture-20261009/expected-pcm-f32.bin'
 $peachPitch=Join-Path $inputRoot 'speak-20261010-h0-fast/generator/f0.f32'
 if((Get-FileHash $peachPitch).Hash -cne (Get-FileHash (Join-Path $inputRoot 'speak-20261010-h0-fast/front-end/F0.f32')).Hash){throw 'Peach fixture input and generator F0 differ.'}
-$references.Add([pscustomobject]@{Name='peach-fixture';Label='stock synthesis of the network-free peach fixture';Pcm=(Read-CopyFloat $peachPcm);Pitch=(Read-CopyFloat $peachPitch)})
+$references.Add([pscustomobject]@{Name='peach-fixture';Label='stock synthesis of the bank-input fixture';Pcm=(Read-CopyFloat $peachPcm);Pitch=(Read-CopyFloat $peachPitch)})
 foreach($selection in @(@('corpus-high-pitch',$high),@('corpus-consonants',$fricatives),@('corpus-question',$question))){
     $references.Add([pscustomobject]@{Name=$selection[0];Label=$selection[1].Phonemes;Pcm=(Read-CopyFloat (Join-Path $selection[1].Root 'output.f32'));Pitch=(Read-CopyFloat (Join-Path $selection[1].Root 'f0.f32'))})
 }

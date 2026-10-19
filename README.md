@@ -18,7 +18,7 @@ QNN or ONNX Runtime is involved in the product path.
 
 Median of three warm runs on one FastRPC handle; the output was played through the
 phone speaker with AAudio. Inputs are captured decoder inputs for the sentence, so
-text processing is not included. The ratchet case `network-free-peach-sm8550`
+text processing is not included. The ratchet case `decoder-generator-bank-input-sm8550`
 runs this job on the phone and accepts only this PCM (SHA-256 `E6456751…74054`).
 
 ## How it works

@@ -16,8 +16,8 @@ the commit message. Only a measured improvement moves an accepted value (Update-
 
   Import-Module ./tools/Kokoro.Evaluator.psm1
   Test-KokoroRatchet                                   # every case; one line
-  Invoke-KokoroExperiment -Case decoder-generator-hello-sm8550 -Parameters @{ ResidentBatchTiles = 16 }
-  Invoke-KokoroSweep -Case decoder-generator-hello-sm8550 -Grid @{ ResidentHvxThreads = 2, 3, 4 }
+  Invoke-KokoroExperiment -Case decoder-generator-stock-input-sm8550 -Parameters @{ ResidentBatchTiles = 16 }
+  Invoke-KokoroSweep -Case decoder-generator-stock-input-sm8550 -Grid @{ ResidentHvxThreads = 2, 3, 4 }
 #>
 
 $script:Root = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..'))
