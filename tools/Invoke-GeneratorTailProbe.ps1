@@ -84,9 +84,9 @@ if ($RequestLifetime) {
     [IO.File]::AppendAllText($spec, "RequestLifetime=True`n")
 }
 $temp = "/data/local/tmp/kokoro-tail-$id"
-$backup = "files/kokoro-fl/generator-tail-backup-$id"
-$target = 'files/kokoro-fl/generator-tail'
-$null = & $run @('shell', "run-as $Package mkdir -p $backup $target files/kokoro-fl/qnn && mkdir -p $temp")
+$backup = "files/kokoro/generator-tail-backup-$id"
+$target = 'files/kokoro/generator-tail'
+$null = & $run @('shell', "run-as $Package mkdir -p $backup $target files/kokoro/dsp && mkdir -p $temp")
 $startupFiles = @('files/Start.ps1', 'files/PROFILE.PS1')
 $startupState = @{}
 foreach ($startupFile in $startupFiles) {
@@ -102,9 +102,9 @@ $replaced = [Collections.Generic.List[string]]::new(); $changed = $false
 try {
     $files = @(
         @($harness, "$target/KokoroGeneratorTailProbe.ps1"),
-        @($binding, 'files/kokoro-fl/Native.Binding.psm1'),
-        @($aaudio, 'files/kokoro-fl/Audio.AAudio.psm1'),
-        @($library, 'files/kokoro-fl/qnn/libkokoro_generator_tail_skel.so'),
+        @($binding, 'files/kokoro/Native.Binding.psm1'),
+        @($aaudio, 'files/kokoro/Audio.AAudio.psm1'),
+        @($library, 'files/kokoro/dsp/libkokoro_generator_tail_skel.so'),
         @($spec, "$target/spec.txt"))
     foreach ($n in 'activations.bin', 'tables.bin') { $files += , @((Join-Path $fixture $n), "$target/$n") }
     if ($null -ne $WeightAssembly) {

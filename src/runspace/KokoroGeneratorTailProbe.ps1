@@ -5,7 +5,7 @@
 # The PCM is then played once through AAudio at 24 kHz mono.
 $activityHost = Get-Variable -Name Activity -ValueOnly -ErrorAction Ignore
 $hostFiles = if ($null -ne $activityHost) { $activityHost.FilesDir.AbsolutePath } else { $PSScriptRoot }
-$root = [IO.Path]::Combine($hostFiles, 'kokoro-fl')
+$root = [IO.Path]::Combine($hostFiles, 'kokoro')
 $dir = [IO.Path]::Combine($root, 'generator-tail')
 $receipt = [IO.Path]::Combine($dir, 'receipt.txt')
 $lines = [Collections.Generic.List[string]]::new()
@@ -33,9 +33,9 @@ try {
     Write-KokoroProbeStage 'BindingsBegin'
     $abi = & $load 'Native.Binding.psm1' @()
     Write-KokoroProbeStage 'BindingsReady'
-    $so = [IO.Path]::Combine($root, 'qnn', 'libkokoro_generator_tail_skel.so')
+    $so = [IO.Path]::Combine($root, 'dsp', 'libkokoro_generator_tail_skel.so')
     $lines.Add('LibrarySHA256=' + [Convert]::ToHexString([Security.Cryptography.SHA256]::HashData([IO.File]::ReadAllBytes($so))))
-    $search = [IO.Path]::Combine($root, 'qnn') + ';/vendor/lib/rfsa/adsp;/vendor/dsp/cdsp;/dsp'
+    $search = [IO.Path]::Combine($root, 'dsp') + ';/vendor/lib/rfsa/adsp;/vendor/dsp/cdsp;/dsp'
     # Bionic stdlib.h: int setenv(const char*, const char*, int). UTF-8 buffers
     # live through each call; the native binding also works in the NativeActivity host.
     # https://android.googlesource.com/platform/bionic/+/3a5441c3474f2f4f5893504293aa33746f8847cb/libc/include/stdlib.h

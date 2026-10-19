@@ -236,7 +236,7 @@ function Get-KokoroDeviceReadiness {
     $profile = & $probe -Arguments @('-s', $selectedId, 'shell', 'run-as', $Package, 'test', '-f', 'files/PROFILE.PS1')
     $consoleStartup = & $probe -Arguments @('-s', $selectedId, 'shell', 'run-as', $Package, 'test', '-f', 'files/app-scripts/Start-Console.ps1')
     $process = & $probe -Arguments @('-s', $selectedId, 'shell', 'pidof', $Package)
-    $diagnosticReceipt = & $probe -Arguments @('-s', $selectedId, 'shell', 'run-as', $Package, 'cat', 'files/kokoro-fl/generator-tail/receipt.txt')
+    $diagnosticReceipt = & $probe -Arguments @('-s', $selectedId, 'shell', 'run-as', $Package, 'cat', 'files/kokoro/generator-tail/receipt.txt')
     $startedText = [regex]::Match($diagnosticReceipt.Text, '(?m)^Started=([0-9TZ:.+-]+)').Groups[1].Value
     $hostStages = [Collections.Generic.List[string]]::new()
     $fatalSignal = ''
