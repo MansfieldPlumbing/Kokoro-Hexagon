@@ -84,8 +84,6 @@ internal `PlaybackStartMs`, but the existing harness does not report it; no new
 playback instrumentation was added.
 
 PCM RMS is 0.0228606512, peak 0.2852172852, with zero clipped samples.
-No new listening verdict was assigned. The matching F variant's listening
-observation remains in the [corpus constants receipt](decoder-corpus-constants-sm8550-20261012.md).
 
 WAV: `build/peach-combined-constants-20261012/combined-constants.wav`.
 

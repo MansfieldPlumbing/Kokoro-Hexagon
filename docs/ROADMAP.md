@@ -12,10 +12,13 @@ receipts live in `docs/results/`. Published comparisons belong in the
 The [active contract](student-generator-contract.md) supersedes the earlier
 bank/decoder integration order below. One 300-sample clock; Student-generated
 512-channel features and affine/phase controls; existing hardware Lock/bounce;
-frozen generator as the only neural runtime. No runtime normalization reductions,
-trig Snake, decoder or acoustic lookup bank. Stock paths remain offline evidence.
-The dog/peach16-stroke listening verdict clears those cases for the context-driven
-Student experiment; generalization and economics remain separate questions.
+frozen generator as the neural runtime. No runtime normalization reductions,
+trig Snake or acoustic lookup bank. Stock paths remain offline evidence.
+
+The architecture is flexible: it runs with or without the decoder. The front end
+has been replaced by a custom phonemizer that runs on CoreCLR.
+The Student is accepted only by held-out dB: 40 dB is the absolute floor and it
+must ratchet to at least 70 dB ([contract](student-generator-contract.md)).
 
 ## Earlier bank/decoder integration track (reference only)
 

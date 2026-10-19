@@ -38,7 +38,7 @@ Convolution-only FP16 HMX rates were 2.954249–4.183410 TMAC/s on run 0 and 3.5
 
 VTCM requested by the fixed main job is 5,570,560 bytes. Inputs are 671,744 bytes, weights 29,687,808 bytes, tables 6,832,128 bytes, and diagnostic output 263,168 bytes including its 1,024-byte header. The tables still contain utterance-specific Lock streams in this temporary first-block protocol. They are not yet a permanent resident deployment-table contract.
 
-Scott's requested bounce replaces only the Lock phase wrap. From the existing dog tile at `resblocks.3.adain2.0`, 423/122,880 values (0.34423828125%) lay beyond `-pi/2` or `pi`: 194 below and 229 above. This is that saved tile's count, not a whole-dog aggregate. The device and offline Lock reference use absolute value below zero, reflection above `pi/2`, then clamp. Smoothstep's unused polynomial and existing fixed normalization values remain unchanged. Fixed normalization and one-layer diagnostic wrappers remain temporary scaffolding.
+The bounce replaces only the Lock phase wrap. From the existing dog tile at `resblocks.3.adain2.0`, 423/122,880 values (0.34423828125%) lay beyond `-pi/2` or `pi`: 194 below and 229 above. This is that saved tile's count, not a whole-dog aggregate. The device and offline Lock reference use absolute value below zero, reflection above `pi/2`, then clamp. Smoothstep's unused polynomial and existing fixed normalization values remain unchanged. Fixed normalization and one-layer diagnostic wrappers remain temporary scaffolding.
 
 ## Reproduction and remaining work
 

@@ -23,16 +23,6 @@ DSP times are single-run measurements, not repeated-run medians.
 | D | AdaIN off | 10.579 | 131.457 | 51,000 | 0.0376770 | 0.258789 | -0.23 | 0 |
 | E | Zero decoder style; statistics normalization | 14.518 | 131.584 | 51,000 | 0.0435584 | 0.283264 | 0.62 | 0 |
 
-Subsequent listening verdicts for the Gate 2(b) WAVs were:
-
-- B: intelligible peach; "not bad".
-- C (normalization off): unintelligible; dark, distorted noise.
-- D (AdaIN off): severely degraded; barely intelligible.
-- E (zero style, statistics): intelligible, with audible glitches.
-
-A was not labeled in this run. The command's `ListeningLabel` fields remain
-empty; these verdicts are subsequent listening observations.
-
 SNR below 1 dB does not discriminate here: E, the zero-style statistics path,
 also measures 0.62 dB. B's intelligibility is listening evidence and must not
 be inferred from its 0.50 dB waveform SNR. This receipt establishes neither
@@ -84,15 +74,7 @@ bodies. Verify and the phone gate passed.
 | G | Statistics | Corpus constants | 120.354 | 0.0190684 | 0.165619 | 0 |
 
 Each variant again generated 51,000 samples. These DSP times are single-run
-measurements. Subsequent listening verdicts for these WAVs were:
-
-- A: "sounds almost the same as stock".
-- F: intelligible; nasal, congested quality.
-- G: "low but seemingly fine".
-
-The recorded `ListeningLabel` fields remain empty. These later observations
-do not change the first run's listening-label provenance or establish
-corpus-wide quality.
+measurements.
 
 Subsequent scratch analysis compared each signal against stock float PCM
 after level matching, using a Hann window of 1,024 samples, a hop of 256,

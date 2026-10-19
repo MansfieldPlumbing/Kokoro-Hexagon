@@ -47,9 +47,12 @@ streaming synthesis at any text length.
 ## How it works
 
 ```text
-Text → front end (ARM, managed) → decoder inputs
-     → Hexagon: decoder → harmonic source + generator → PCM → AAudio
+Text → custom CoreCLR phonemizer (ARM) → typed phonemes and prosody
+     → Hexagon: [decoder] → harmonic source + generator → PCM → AAudio
 ```
+
+The architecture is flexible: it runs with or without the decoder. The front end
+has been replaced by a custom phonemizer that runs on CoreCLR.
 
 - **Emission.** PowerShell job builders describe each DSP job as an instruction
   stream. Our encoder, lowered to IL through PSLowering, encodes the complete
@@ -58,17 +61,16 @@ Text → front end (ARM, managed) → decoder inputs
   int8 planes, W8 weights, per-channel scales. HMX runs the convolutions; HVX runs
   AdaIN, Snake, the harmonic source and the transforms, using up to four hardware
   threads.
-- **Front end.** The compiled phonemizer runs in 57.8 µs per sentence on the
-  phone. The learned front end that turns typed linguistic structure into decoder
-  inputs is in development.
+- **Front end.** A custom phonemizer running on CoreCLR replaces Kokoro's front
+  end. Compiled, it runs in 57.8 µs per sentence on the phone.
 
 ## Status
 
 | | |
 |---|---|
 | DSP synthesis, decoder through PCM | Measured on SM8550 |
-| Phonemizer on the phone | Measured |
-| Learned front end for arbitrary text | In development |
+| Custom CoreCLR phonemizer front end, on the phone | Measured |
+| Running with or without the decoder | Supported |
 | Streaming at any length (time-major schedule) | Next |
 | Time to first audio, end to end | Not yet measured |
 | SM8635 | Not yet run |

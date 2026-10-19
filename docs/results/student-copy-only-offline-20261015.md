@@ -35,7 +35,7 @@ the original's energy; float PCM is compared before conversion and PCM16 after.
 | 8 | Our train was late, so we missed the meeting. | 3.100 | 13.94702 | 13.94704 |
 | 9 | There is a bakery on the corner of my street. | 2.825 | 15.56427 | 15.56434 |
 
-No listening verdict is inferred from SNR. These PCM measurements do not set
+These PCM measurements do not set
 the climber's feature-domain 46/70 dB acceptance bars.
 
 ## Timing conditions

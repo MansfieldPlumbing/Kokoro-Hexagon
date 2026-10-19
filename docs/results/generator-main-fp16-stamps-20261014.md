@@ -97,7 +97,7 @@ The default-lock diagnostic has 1,920 positions, so it differs from the
 70.94160 dB and 72.16323 dB versus their own-input float convolution references.
 The lock operand agrees with the offline lock equations at 73.71908 dB,
 peak error 0.00366306305. Its partial offline continuation is 40.00125 dB
-against stock; this is not a whole-generator admission or a listening verdict.
+against stock; this is not a whole-generator admission.
 Library SHA256:
 `C67BC173889540B90F524A940F8C5591057E48B56D86D0FD65245BC13D95290B`.
 Run-0 HMX time is 0.0267708333 ms, 3.52517379 TMAC/s. The WAV pair is

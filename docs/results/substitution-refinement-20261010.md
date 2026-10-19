@@ -48,7 +48,7 @@ Case-sensitive symbol matching. Mean log-mel DTW distance to stock (floor 0.64):
 | Symmetric | 5.74 | 1.88 | 3.32 | 5.08 | 5.36 |
 | Right-weighted | 5.50 | 1.64 | 2.98 | 4.76 | 4.95 |
 
-The right-weighted cost helps every decomposition, each held-out measure, and the sentence that said "yeet".
+The right-weighted cost helps every decomposition and each held-out measure.
 
 ## Lowered
 

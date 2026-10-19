@@ -69,9 +69,8 @@ predicted token level on the units' voicing):
 | + L1, R1, R2 | 4.53 | 5.14 |
 | All features | 4.06 | 4.68 |
 
-Listening (one listener, h0 "I can eat a peach for hours." and h5 "The children laughed at the funny little dog.",
-all-features prediction with predicted durations, against stock): "sounds different, but not worse". The distance
-to stock counts a different but natural intonation as error, so it overstates the quality loss of this path.
+The distance to stock counts any intonation that differs from stock as error, including intonation that is
+natural but different.
 
 Independent recognition: the four WAVs (stock and table-driven, h0 and h5) were played through a speaker into
 ChatGPT's voice input, with no reference text. It transcribed 30 of 30 words correctly, for both versions of both

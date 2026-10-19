@@ -34,7 +34,7 @@ All decoded diagnostic outputs were finite.
 
 The partial offline continuation measures 55.86035888 dB against stock, peak error
 0.001637995243. This replaces one tested operand block in the offline continuation;
-it is not a whole-phone generator result or an ear verdict. The older 1,920-position
+it is not a whole-phone generator result. The older 1,920-position
 lock receipt has different conditions and is not a before/after comparison.
 
 Artifact SHA256:

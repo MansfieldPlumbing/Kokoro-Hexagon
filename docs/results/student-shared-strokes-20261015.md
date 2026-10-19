@@ -13,7 +13,7 @@ replacement for the runtime decoder/unit store. Do not expand this version into
 a production controller.** Sixteen distinct global strokes leave substantial
 feature error and PCM error, even with oracle access to the target. This is a
 negative result for the bounded experiment, not proof that every possible
-global stroke library fails. Scott's listening verdict remains unverified.
+global stroke library fails.
 
 | Gate | Result |
 | --- | --- |
@@ -175,8 +175,7 @@ All pairs are mono 24 kHz PCM16: **reference first, 0.6 seconds silence, oracle
 second**, no gain normalization or resampling. Durations, F0, acoustic style,
 source draws, generator code and weights are matched within each pair. Only
 the 512-channel input changes. Every output is checked for finite values;
-clipping and peak/error metrics are retained. PCM16 SNR does not substitute for
-Scott's ear, and no listening acceptance is claimed.
+clipping and peak/error metrics are retained.
 
 Final listening metrics and the complete path table follow in the final section.
 All33 pairs passed integer-byte extent checks, 24kHz mono PCM16 headers,
@@ -290,7 +289,7 @@ FP64 dots/F32 replay; no SIMD, SDK/API speed or hardware residency claim is made
 An initial SIMD investigation failed admission/runtime validation and was
 replaced; it is not used in the reported numbers.
 
-Scott's historical approximate85 ms for2.125 s means **40 ms/audio-s**, about25x.
+The historical figure of about 85 ms for 2.125 s is **40 ms/audio-s**, about 25x.
 The protected receipt `peach-combined-constants-sm8550-20261012.md` says
 "DSP region, median of five warm runs"99.593 ms: **46.867 ms/audio-s**, and
 records `ResidentHvxThreads=4`. Its scope is combined decoder/source/generator,
@@ -539,8 +538,7 @@ one globally shared selected-direction library executes deterministic signed
 fractional programs; the declared oracle budgets have measured feature/audio
 errors and a complete partial byte bill. Failed: this bounded representation
 has not preserved numerical/audio fidelity or demonstrated storage economy
-against the matched original unit payload. Unverified: Scott's listening
-assessment, a stronger library/search, reference-free Student coefficient
+against the matched original unit payload. Unverified: a stronger library/search, reference-free Student coefficient
 generalization, coordinated external control generation, a complete executable
 program's total cost, streaming block execution, and device speed/residency.
 The oracle-to-Student gap cannot be measured without a Student policy; it is

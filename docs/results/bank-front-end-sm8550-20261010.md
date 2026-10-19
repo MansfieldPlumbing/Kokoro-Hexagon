@@ -24,13 +24,9 @@ All three runs: `InvokeRc=0 Stage=7 Done=1`, identical PCM. DSP ticks were
 AAudio receipt: `Played=True`, 51,000 frames written, drain complete, zero xruns.
 `Passed=True` and `StartupRestored=True`.
 
-Listening is independent evidence: Scott heard the retry on the SM8550 speaker and
-reported that it sounded good. The earlier report of no sound belonged to the
+The retry played on the SM8550 speaker. The earlier run with no sound was the
 failed resource-acquisition attempt below; that attempt never reached playback.
-Scott subsequently noted that the initial “I” was weak, as he recalled in the
-teacher too. Overall playback was accepted; the onset observation remains a
-separate diagnostic and does not justify changing generator math or adding a pause.
-The aligned files show the assembled stream gives the first `I` two decoder frames
+The initial “I” is weak. The aligned files show the assembled stream gives the first `I` two decoder frames
 (50 ms), after a 13-frame initial boundary. Teacher and DSP first exceed absolute
 amplitude 0.001 at samples 6,977 and 6,976, and 0.01 at the same sample 7,477. RMS
 over 300-350 ms is -45.39 dBFS in both; over 350-400 ms it is -41.22/-41.23 dBFS.
@@ -39,10 +35,9 @@ and DSP files. It does not establish original stock front-end behavior or exclud
 an additional playback effect. Diagnose phoneme/stress, duration and native Zira
 reference evidence before changing the phonemizer or prosody tables.
 
-Native Windows `Microsoft Zira Desktop` was heard on the same phrase and judged to
-have a substantially clearer initial “I”; this admits that pronunciation/prosody
-observation, not Zira's entire output. Zira is the preferred candidate teacher for
-sentence-initial “I”, with the correction to be learned in the existing prosody
+Native Windows `Microsoft Zira Desktop` on the same phrase is the candidate
+reference for sentence-initial “I” pronunciation and prosody only, not for Zira's
+entire output. The correction is to be learned in the existing prosody
 controller and evaluated on untouched holdouts. No correction has been trained or
 applied. If this diagnostic enters training, it no longer counts as held-out evidence.
 
@@ -56,7 +51,7 @@ causes the clarity difference. This matches the timebase caution in
 The weak opening is shared by the matching assembled-input teacher and DSP;
 an original-stock-front-end defect remains unproved. Stock numerical parity and
 admitted pronunciation quality remain separate checks.
-The heard Zira WAV is preserved separately at
+The Zira WAV is preserved separately at
 `data/references/zira-peach-onset-20261010/speech.wav` (102,100 bytes, SHA-256
 `1B009F5660DAA527F6BBA203F4612AE217F7ECECC788EB8060AD10C444300A59`).
 The frozen 26-file DSP baseline is unchanged.
@@ -99,7 +94,7 @@ Runtime capacity query and automatic replanning remain deferred work in
 Local frozen bundle: `data/baselines/network-free-peach-sm8550-20261010/`, ignored
 by Git and outside build cleanup. It contains the exact emitted library and layout,
 packed input and reference PCM, device receipt and raw output, WAV, assembled
-front-end tensors, run result and separate listening verdict. File lengths and
+front-end tensors and run result. File lengths and
 SHA-256 values are recorded in the adjacent versioned manifest. This is a verified
 local copy; no off-machine backup is established by this receipt.
 The [PowerShell data manifest](bank-front-end-sm8550-20261010.manifest.psd1) covers

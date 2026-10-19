@@ -129,7 +129,7 @@ PCM span. Job boundaries must not introduce pauses. Whole-utterance style select
 and randomness must remain consistent as execution granularity changes.
 
 Extend the existing aligned linguistic stream's word/group features and breath-group code for prosody and context;
-do not add an audio segmentation heuristic. Scott's example, "I can" | "eat a peach" | "for hours", describes useful
+do not add an audio segmentation heuristic. For example, "I can" | "eat a peach" | "for hours" describes useful
 spoken groups, not mandatory DSP job sizes. Grammatical expectations can develop incrementally ("eat" opens an
 object, "for" opens a complement) and persist across time tiles.
 

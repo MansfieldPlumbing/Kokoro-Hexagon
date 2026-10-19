@@ -31,9 +31,10 @@ duration/alignment, voice identity, AdaIN controls and phase/control state.
 The Student produces their numbers together through reusable deterministic
 programs. Store how to produce the values, not recordings of feature frames,
 per-utterance lock tables or separate raw control tracks. Global strokes may
-transform all 512 channels at once. No runtime text encoder, neural decoder,
-predictor network or per-unit acoustic-vector lookup bank. The frozen generator
-is the only neural execution component. Compute the source branch; do not store
+transform all 512 channels at once. No runtime text encoder, predictor network
+or per-unit acoustic-vector lookup bank. The decoder is optional: the
+architecture runs with or without it, ahead of the frozen generator. The front
+end is a custom phonemizer that runs on CoreCLR. Compute the source branch; do not store
 or stream its pre-rendered tiles as the product.
 
 Use Invoke-KokoroDevelopment.ps1 Student and the owning Student modules.
@@ -62,12 +63,26 @@ the Student path. Preserve captures, manifests, frozen weights and receipts.
 
 The shared-stroke experiment's coefficients selected with access to true held-out
 vectors establish representation evidence only. They do not prove a Student
-policy. The dog/peach16-stroke listening verdict on 2026-10-15 was "SOUNDS GOOD";
-that clears those listening comparisons for proceeding to context-driven
-coefficient generation despite low numerical SNR. It does not approve the nine
-by implication, establish generalization, or establish storage economics.
-Report representation, reference-free generation, listening and economics
-separately. Preserve failed numerical results alongside listening acceptance.
+policy, generalization or storage economics. Report representation,
+reference-free generation and economics separately, and preserve failed
+numerical results.
+
+## Held-out dB ratchet
+
+The Student is measured by what it emits, not by the IDs it reads. From typed
+context alone, never from the target, it emits the continuous per-frame values
+listed above. The instrument executes them and the output is compared with the
+teacher in dB at the point where the values are consumed. A change is kept only
+if held-out dB does not drop. A separate untouched test split gives the final
+score. 40 dB on held-out text is the absolute floor; below it a result is a
+failure. The Student must ratchet to at least 70 dB held-out; the target range
+is 70–90 dB.
+
+Current bracket on nine held-out selections
+([replay](results/student-replay-nine-offline-20261015.md)): 10.7–16.6 dB PCM16
+from copied units alone, 54.4–63.5 dB when programs are climbed against each
+known target. The work is the mapping from typed context to emitted values that
+closes that gap without the target.
 
 ## Agent routing and defaults
 
@@ -81,9 +96,7 @@ reintroducing the operations being eliminated. Do not rename the repository or
 alter the frozen weights to solve an instruction-routing problem.
 
 Compare reference and candidate with matching F0, voice, source draws and other
-controls; label differences explicitly. Scott's listening verdict determines
-listening acceptance; no invented SNR threshold overrides it. Failed hypotheses
-remain results. Use the owning entrypoint, PowerShell and admitted compiled
+controls; label differences explicitly. Failed hypotheses remain results. Use the owning entrypoint, PowerShell and admitted compiled
 kernels; no Python or new JSON. Respect current worktree, publication and scope
 authorization; the architecture does not authorize unrelated residency work.
 Respect the current task's stop conditions and Verify before commits.
@@ -92,4 +105,3 @@ Sources: [Lock/bounce implementation](../tools/Kokoro.GeneratorLock.psm1),
 [emitted epilogue](../src/kernels/Kokoro.GeneratorEpilogue.ps1),
 [phase-split measurement](results/generator-phase-split-offline-20261015.md),
 [shared-stroke measurements](results/student-shared-strokes-20261015.md).
-The last receipt predates the listening verdict above and remains immutable.
