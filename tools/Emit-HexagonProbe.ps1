@@ -178,7 +178,7 @@ $definitions=foreach($name in $names) {
 $layouts = @{}
     $layoutClock = [Diagnostics.Stopwatch]::StartNew()
     foreach ($name in $Functions.PSBase.Keys) {
-        $layout = $script:HexagonEncoderType::Layout($Functions[$name], 0L)
+        $layout = $script:HexagonEncoder.Layout($Functions[$name], 0L)
         $layouts[$name] = $layout
         foreach ($import in $layout.Imports) { if (-not $imports.Contains($import)) { $imports.Add($import) } }
     }
@@ -220,7 +220,7 @@ $null=[Management.Automation.Language.Parser]::ParseInput($text,[ref]$tokens,[re
 if($errors.Count) { throw 'Writer adapter does not parse' }
 Write-NewOrIdenticalFile $adapter ([Text.Encoding]::UTF8.GetBytes($text)) -AllowOverwrite:$Force
 . $adapter
-. (Join-Path $PSScriptRoot '..\src\hexagon\Hexagon.ps1')
+. (Join-Path $PSScriptRoot '..\Invoke-HexagonDevelopment.ps1')
 # The compiler is a pinned, self-contained PowerShell source file. A verified
 # sibling checkout can supply an unpublished local revision; otherwise fetch
 # the immutable revision. Neither path executes an unverified working copy.
@@ -241,7 +241,7 @@ if (-not [IO.File]::Exists($loweringCache)) {
     [void][IO.Directory]::CreateDirectory([IO.Path]::GetDirectoryName($loweringCache))
     [IO.File]::WriteAllBytes($loweringCache, $loweringBytes)
 }
-$encoderSource = Join-Path $PSScriptRoot '../src/hexagon/Hexagon.ps1'
+$encoderSource = Join-Path $PSScriptRoot '../Invoke-HexagonDevelopment.ps1'
 $encoderHash = (Get-FileHash $encoderSource).Hash
 $encoderDirectory = Join-Path $PSScriptRoot "../build/lowered-hexagon/$loweringCommit/$encoderHash"
 $encoderPath = Join-Path $encoderDirectory 'HexagonEncoder.dll'
@@ -256,9 +256,7 @@ $encoderAssembly = [Reflection.Assembly]::LoadFile([IO.Path]::GetFullPath($encod
 if (@($encoderAssembly.GetReferencedAssemblies() | Where-Object Name -EQ 'System.Management.Automation').Count) { throw 'Hexagon encoder must be ClrOnly.' }
 $script:HexagonStepType = $encoderAssembly.GetType('HexagonStep', $true)
 $script:HexagonEncoderType = $encoderAssembly.GetType('HexagonEncoder', $true)
-[string[]]$formNames = @($script:HexagonForms.Keys)
-[string[]]$formPatterns = @(foreach ($formName in $formNames) { $script:HexagonForms[$formName] })
-$script:HexagonEncoder = $script:HexagonEncoderType::new($formNames, $formPatterns)
+$script:HexagonEncoder = New-HexagonEncoder -Type $script:HexagonEncoderType
 $script:ElfConstants=$null
 $elf=Get-ElfConstants
 $header=Import-LibSourceText 'ELF.h'

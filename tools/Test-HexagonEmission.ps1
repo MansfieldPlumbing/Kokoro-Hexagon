@@ -128,8 +128,7 @@ if($emitted.Length -ne $textBytes.Length) { throw 'Reference code size mismatch'
 for($index=0;$index -lt $emitted.Length;$index++) {
     if($emitted[$index] -ne $textBytes[$index]) { throw "Reference instruction mismatch at byte $index" }
 }
-. (Join-Path $PSScriptRoot '..\src\hexagon\Hexagon.ps1')
-$rejections=0
+. (Join-Path $PSScriptRoot '..\Invoke-HexagonDevelopment.ps1')
 $badOps = @(
     @{Op='imm';d=32;i=1},
     @{Op='imm';d=0;i=32768},
@@ -154,16 +153,10 @@ $badOps = @(
         @{Op='vadd-sf-qf32';d=0;s=32;t=1},
         @{Op='vconv-qf32-sf';d=0;s=32}
 )
-foreach($bad in $badOps) {
-    try { $null=New-HexagonInstruction $bad 0 0 } catch { $rejections++ }
-}
-if($rejections -ne $badOps.Count) { throw "Encoder accepted an invalid operand: got $rejections expected $($badOps.Count)" }
 $encoderAssembly = [Reflection.Assembly]::LoadFile([IO.Path]::GetFullPath($result.EncoderPath))
 $stepType = $encoderAssembly.GetType('HexagonStep', $true)
 $encoderType = $encoderAssembly.GetType('HexagonEncoder', $true)
-[string[]]$formNames = @($script:HexagonForms.Keys)
-[string[]]$formPatterns = @(foreach($formName in $formNames) { $script:HexagonForms[$formName] })
-$encoder = $encoderType::new($formNames, $formPatterns)
+$encoder = New-HexagonEncoder -Type $encoderType
 $loweredRejections = 0
 foreach($bad in $badOps) {
     try { $typed = $stepType::Convert([hashtable[]]@($bad)); $null = $encoder.Instruction($typed[0], 0L, 0L) }
@@ -173,10 +166,9 @@ if($loweredRejections -ne $badOps.Count) { throw 'Lowered encoder accepted an in
 $loopTargetRejections = 0
 foreach ($badTarget in -260L,256L,3L) {
     $loopStep = @{Op='loop0-r';s=4;Label='invalid'}
-    try { $null=New-HexagonInstruction $loopStep 0L $badTarget } catch { $loopTargetRejections++ }
     try { $typed=$stepType::Convert([hashtable[]]@($loopStep)); $null=$encoder.Instruction($typed[0],0L,$badTarget) } catch { $loopTargetRejections++ }
 }
-if ($loopTargetRejections -ne 6) { throw 'Encoder accepted an out-of-range or unaligned hardware loop start.' }
+if ($loopTargetRejections -ne 3) { throw 'Encoder accepted an out-of-range or unaligned hardware loop start.' }
 $strictRejections = 0
 foreach($wrong in @([uint32]1, [double]1, [decimal]1, [Management.Automation.PSObject]::new(1), [int[]]@(1), $null)) {
     try { $null = $stepType::Convert([hashtable[]]@(@{Op='imm';d=0;i=$wrong})) }
@@ -188,6 +180,6 @@ foreach($wrong in @([uint32]1, [double]1, [decimal]1, [Management.Automation.PSO
 if($strictRejections -ne 6) { throw 'The typed boundary accepted a non-admitted immediate type.' }
 $widened = $stepType::Convert([hashtable[]]@(@{Op='imm';d=0;i=1}))
 if($widened[0].i.GetType() -ne [long] -or $widened[0].i -ne 1L) { throw 'The typed boundary did not widen Int32 to Int64 exactly.' }
-$summary=[ordered]@{LibrarySHA256=$result.SHA256;LibraryBytes=$result.Bytes;CodeBytes=$emitted.Length;AssemblerSHA256=$hash[0];InstructionBytesMatch=$true;InvalidOperandsRejected=$rejections;Imports=$result.Imports;Relocations=$result.Relocations;RegionBodyEncodingOnly=$result.RegionBodyEncodingOnly}
+$summary=[ordered]@{LibrarySHA256=$result.SHA256;LibraryBytes=$result.Bytes;CodeBytes=$emitted.Length;AssemblerSHA256=$hash[0];InstructionBytesMatch=$true;InvalidOperandsRejected=$loweredRejections;Imports=$result.Imports;Relocations=$result.Relocations;RegionBodyEncodingOnly=$result.RegionBodyEncodingOnly}
 $summary | ConvertTo-Json | Set-Content (Join-Path $check 'verification.json')
 [pscustomobject]$summary
