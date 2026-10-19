@@ -13,9 +13,19 @@ Follow [the shared agent rules](../Pwsh-Development/AGENTS.md).
 
 ## No sprawl
 
-- Each subsystem has one owning file, laid out like Pwsh's `setup.ps1`: declared records (`$script:...` tables), one shared context, and steps that check their own output. New capability is a new record or step in that file.
-- Never copy a file to change one branch, put a second definition of the same thing somewhere else, or add a probe or measurement script beside the owner. If the owner can't express something yet, extend the owner.
-- Hardware facts (instruction forms, operands, register effects, semantics, manual references) live as records in the owning file, so they're looked up there, not re-derived from the manual.
+We improve a few single-file tools iteratively. Each subsystem has one owning file, laid out like Pwsh's `setup.ps1`: declared records (`$script:...` tables), one shared context, and steps that check their own output. The Hexagon builder is one file: instruction records, reusable fragments, kernel records, encoder, emitter, simulator and phone run. A new capability is a new record, fragment or step in the owner.
+
+This repository grew to 131 files across 14 folders because agents did the following. Each is now prohibited:
+
+- **A new file per task.** Every kernel, job, fixture builder, probe and test became its own file. Do not create a tracked file or folder without the team lead's approval in chat. The default answer is to extend the owner.
+- **Generations side by side.** 16-bit kernels were added next to 8-bit ones, and `...Run16` next to `...Run`, with both kept alive. A new variant is a parameter or record of the existing definition, never a sibling file. What an old version does that the new one doesn't is decomposed into fragments, not discarded and not duplicated.
+- **Whole-kernel copies.** Kernels were written from scratch, or by copying another kernel and editing it, so nothing was shared and every build started over. Compose kernels from fragments. When the same instruction sequence appears in two places, it becomes one fragment.
+- **A switchboard instead of records.** The emitter grew one `if` branch per kernel. Add records, not branches.
+- **One-off probes and measurement scripts.** A question about hardware or numerics gets an option on an existing command, and its answer becomes a record or a note.
+- **Re-deriving hardware facts.** Agents re-read the V73 manual for every task. Instruction forms, operands, register effects, semantics and manual references live as records in the builder; look them up there, and add a missing one there.
+- **Forks and parallel copies.** Separate repositories, worktrees and copied files for one experiment (Kodeko, the drum worktree, a forked emitter) left work stranded. Work happens in this checkout, in the owners.
+- **Results, receipts and handoffs in the repository.** They go to the project notes.
+- **Finishing a task without consolidating.** Every change leaves the repository with no more files than before, unless the team lead approved a new one, and leaves behavior byte-identical where it claims to (see `Verify` and the recipe gate).
 
 ## PowerShell is not bash
 
