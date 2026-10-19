@@ -89,8 +89,7 @@ matched ranking.
 | [kokoro-offline-tts-android](https://github.com/cedgeremek/kokoro-offline-tts-android#real-device-demo) | S24 Ultra / SM8650 | QNN HTP generator; separately reports 306 ms warm request-to-first-audio | 3.78× |
 
 The kokoro-coreml figures cover phonemes to PCM, including the text encoder and
-predictors; ours do not yet. A leadership claim requires matched inputs and stage
-coverage.
+predictors; ours do not yet.
 
 ## Development
 

@@ -1,7 +1,7 @@
 #requires -Version 7.4
 # Stock generator resblocks.3/4/5 and their three-way mean with the activations resident
 # in VTCM. Source: hexgrad/kokoro dfb907a02bba8152ca444717ca5d78747ccb4bec, istftnet.py
-# AdaINResBlock1.forward and Generator.forward. Design: docs/generator60x-resident-design.md.
+# AdaINResBlock1.forward and Generator.forward.
 #
 # Same method-2 contract and output layout as Kokoro.Generator60xRun.ps1, so the frozen
 # fixture, simulator runner and device harness apply unchanged. DDR is touched only by

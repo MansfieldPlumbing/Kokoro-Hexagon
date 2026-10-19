@@ -1,6 +1,6 @@
 #requires -Version 7.4
 # HMX int8 dilated Conv1d (same padding), one 32-row output tile per loop iteration.
-# Algorithm and layouts proven bit-exact in hexagon-sim: docs/results/hmx-dilated-conv-sim-20261006.md.
+# Algorithm and layouts proven bit-exact in hexagon-sim (2026-10-06).
 #
 # Calling convention (plain function, caller-saved registers only):
 #   r0 = activation tile 0 (VTCM): crouton (tp, cb) at (tp*CB + cb)*2048, tp counted from the first

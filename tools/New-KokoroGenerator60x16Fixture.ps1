@@ -2,7 +2,7 @@
 <# .SYNOPSIS
 Packs the 16-bit generator 60x stage (resblocks.3-5 and their mean) from verified stock captures.
 .DESCRIPTION
-Design: docs/generator60x-16bit-design.md. Build-time arithmetic only; all model math at run time is
+Build-time arithmetic only; all model math at run time is
 emitted DSP code. Scales (residual, conv input, conv output) come from -CalibrationDirectory captures, the
 evaluated sentence's captures when none are given; the stage input, voice style, frame count and expected
 output come from -CaptureDirectory. Either is three per-block captures (resblocks.3, .4, .5) or one

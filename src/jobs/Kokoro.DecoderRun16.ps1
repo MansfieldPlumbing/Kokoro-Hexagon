@@ -1,5 +1,5 @@
 #requires -Version 7.4
-# Stock Kokoro decoder front on the DSP at 16 bits (docs/decoder-design.md): captured asr, F0_curve, N_curve -> the decoder
+# Stock Kokoro decoder front on the DSP at 16 bits: captured asr, F0_curve, N_curve -> the decoder
 # output x (512 channels, 2F frames) that the generator takes. Source: hexgrad/kokoro
 # dfb907a02bba8152ca444717ca5d78747ccb4bec istftnet.py AdaIN1d, AdainResBlk1d, Decoder.forward.
 #
@@ -18,7 +18,7 @@ function Get-KokoroDecoder16Layout {
     $al={param([long]$v) [long]([math]::Ceiling($v/65536)*65536)}
     $planeStride=[long]([math]::Max($T*32,$T2*16))*2048
     # HMX activation reads span a crouton plus the next tile; an extent that straddles a 2 MiB VTCM boundary faults in the
-    # V73 simulator (exception 0x26; docs/generator60x-resident-design.md). Regions HMX reads (windows, block inputs) keep
+    # V73 simulator (exception 0x26). Regions HMX reads (windows, block inputs) keep
     # their bytes plus one 1120-wide tile and a crouton inside one 1 MiB page (faults seen crossing 0x100000 and 0x200000).
     # Regions HMX does not read fill the gaps.
     $small=[ordered]@{Moments=0L;Km=18432L;RatioA=27648L;RatioB=31744L;Tables=35840L;Records=68608L;Pool=104448L;Stride=122368L;Curves=122880L}
@@ -59,7 +59,7 @@ function Get-KokoroDecoder16Layout {
         if($b.Up){ $q['Pool']=$pAt; $pAt+=512L*$b.Cin/32; $q['Convert']=$pAt; $pAt+=384L*$ob }
         $blockParams.Add($q)
     }
-    # Direction (2026-10-11, docs/expanded-student-campaign.md "Normalization direction"): runtime synthesis computes and
+    # Normalization direction (2026-10-11): runtime synthesis computes and
     # supplies no AdaIN statistics. The front end emits scalar streams; each site's K and M are expanded from them through
     # the existing style projections and arrive through the direct-coefficient input. The
     # moments records below remain for stock-reference comparison and teacher observation, staged for removal from the

@@ -1,13 +1,13 @@
 #requires -Version 7.4
 # HMX int8 dilated Conv1d (same padding) over a two-plane input, two accumulator groups per output
-# tile, each stored as two exact byte planes. Design: docs/generator60x-16bit-design.md ("Conv").
+# tile, each stored as two exact byte planes.
 #   A1 = sum (h - 128) * Wh                      high window x high weights
 #   A2 = sum l * Wh  [+ sum (h - 128) * Wl]      low window x high weights [+ high window x low weights]
 #   A3 = sum l * Wl                              (-WeightPlanes 2 only) low window x low weights
 # The conv value is A1 * 256 + A2 [+ A3 / 256]. The low x low product is kept: with absmax scales the
 # low planes are only 18-27 dB (inputs) and 35-40 dB (weights) below their signals, and omitting it cost
-# 1.1-1.3 dB PCM on the frozen 42 dB plan (docs/results/generator60x-16bit-kernels-sim-20261007.md). Each group leaves through a retained saturating store and a
-# wrapping store (docs/results/hmx-two-plane-output-sim-20261007.md), so with power-of-two table
+# 1.1-1.3 dB PCM on the frozen 42 dB plan (2026-10-07 simulation). Each group leaves through a retained saturating store and a
+# wrapping store, so with power-of-two table
 # scales the four byte planes are exact bytes of a 16-bit window of each group.
 #
 # Calling convention (plain function, caller-saved registers only):
@@ -93,7 +93,7 @@ function New-KokoroHmxConvPlanesSteps {
     $s.ToArray()
 }
 
-# The same conv for the decoder's shapes (docs/decoder-design.md): any whole number of 32-channel input blocks and 64-channel
+# The same conv for the decoder's shapes: any whole number of 32-channel input blocks and 64-channel
 # output groups, kernel 1 or 3. Output groups are a loop (code size independent of the channel count) and each tap walks
 # its activation pointer by register, so offsets are not bound by addi's range. Calling convention, weight order, table
 # layout and plane output as New-KokoroHmxConvPlanesSteps; also uses r6, r7 and r28 (caller-saved).

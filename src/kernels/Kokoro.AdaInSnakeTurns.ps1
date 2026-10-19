@@ -6,7 +6,7 @@
 #     s = (pi/alpha) * (P + (1 - cos(2*pi*P)) / (2*pi)).
 # The fractional turn of P is the cos argument (wraparound is the range reduction); 1 - cos is
 # 1 + sin(pi/2*u), u = 4g - 1 on the half turn |g|, a five-term odd Q14 polynomial in Q15 halfword
-# arithmetic. Reference and precision: docs/results/snake-turns-reference-20261007.md.
+# arithmetic.
 #
 # Layout: native croutons; each 128-byte vector holds a row pair x 32 channels as halfwords, the even
 # halfword of word lane j is row 2r and the odd halfword row 2r+1 of channel j.

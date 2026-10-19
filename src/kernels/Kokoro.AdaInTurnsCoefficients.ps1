@@ -1,6 +1,6 @@
 #requires -Version 7.4
 # Per-channel constants of the phase-turns AdaIN+Snake body (Kokoro.AdaInSnakeTurns.ps1) from 16-bit
-# group moments (Kokoro.AdaInMoments16.ps1). Design: docs/generator60x-16bit-design.md ("Coefficients").
+# group moments (Kokoro.AdaInMoments16.ps1).
 # Stock AdaIN1d (Kokoro dfb907a02bba8152ca444717ca5d78747ccb4bec istftnet.py:20-31) normalizes with the
 # biased group variance; its style affine and Snake alpha are folded per channel at voice load into
 #   Ka = A * alpha * 2^39 / pi      (A = style gain per input LSB, signed 64-bit)
@@ -131,7 +131,7 @@ function New-KokoroAdaInTurnsCoefficientsSteps {
     $s.ToArray()
 }
 
-# The same per-channel affine for the decoder's AdaIN + LeakyReLU body (docs/decoder-design.md): any whole number of
+# The same per-channel affine for the decoder's AdaIN + LeakyReLU body: any whole number of
 # 32-channel blocks in a loop, output per block 256 B: K[32] at 0, M[32] at 128 (S is not used). The parameter record is
 # the same 32 B per channel; for the decoder Ka = A * 2^(15+F) / sX and Mb = B * 2^F / sX fold the style affine, so
 # K x / 2^15 + M is the AdaIN output in units of 2^-F output LSB. r0..r3 as New-KokoroAdaInTurnsCoefficientsSteps;

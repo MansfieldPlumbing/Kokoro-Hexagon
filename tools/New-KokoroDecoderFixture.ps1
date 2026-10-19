@@ -1,6 +1,6 @@
 #requires -Version 7.4
 <# .SYNOPSIS
-Packs the stock decoder front for src/jobs/Kokoro.DecoderRun16.ps1 (docs/decoder-design.md) from a stock decoder capture.
+Packs the stock decoder front for src/jobs/Kokoro.DecoderRun16.ps1 from a stock decoder capture.
 .DESCRIPTION
 Stock Kokoro dfb907a02bba8152ca444717ca5d78747ccb4bec istftnet.py Decoder.forward up to the generator. Weights W8 per output
 channel (one plane, absmax / 127) of the folded checkpoint tensors, per input LSB of the tensor each conv reads: conv1 and

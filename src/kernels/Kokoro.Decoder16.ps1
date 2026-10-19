@@ -1,5 +1,5 @@
 #requires -Version 7.4
-# Small passes of the decoder (docs/decoder-design.md) over 16-bit native croutons: tile stride 64 * Channels bytes, each
+# Small passes of the decoder over 16-bit native croutons: tile stride 64 * Channels bytes, each
 # 128-byte vector a row pair x 32 channels (even halfword of word lane j row 2r, odd halfword row 2r+1 of channel j).
 # Source: hexgrad/kokoro dfb907a02bba8152ca444717ca5d78747ccb4bec, istftnet.py AdainResBlk1d (pool, upsample) and
 # Decoder.forward (F0_conv, N_conv).

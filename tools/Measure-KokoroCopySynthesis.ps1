@@ -207,7 +207,7 @@ if($LadderReceipt){
     $ladderSource=[IO.Path]::GetFullPath($LadderReceipt)
     if(-not $ladderSource.StartsWith($build,[StringComparison]::OrdinalIgnoreCase)){throw 'Use the original run2 receipt in this worktree build/.'}
     $baseline=Import-Clixml -LiteralPath $ladderSource
-    $baselineMetrics=Import-Clixml (Join-Path $root 'docs/results/copy-synthesis-correlation-20261013.clixml')
+    $baselineMetrics=Import-Clixml (Join-Path $root 'tools/baselines/copy-synthesis-correlation-20261013.clixml')
     if($baselineMetrics.RenderingReceiptSHA256 -cne (Get-FileHash $ladderSource).Hash){throw 'Corrected baseline metrics do not match run2.'}
     if($baseline.SampleRate -ne $sampleRate -or $baseline.WindowSamples -ne $length -or $baseline.HopSamples -ne $hop -or $baseline.EnvelopeBands -ne 64){throw 'Run2 settings differ.'}
     $baselineHashes=[Collections.Generic.Dictionary[string,string]]::new([StringComparer]::OrdinalIgnoreCase)

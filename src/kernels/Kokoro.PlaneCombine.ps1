@@ -1,6 +1,6 @@
 #requires -Version 7.4
 # Combine the four byte planes of a two-group HMX conv (Kokoro.HmxConvPlanes.ps1) into 16-bit values.
-# Design: docs/generator60x-16bit-design.md ("Combine"). Groups 1 and 2 rebuild their biased 16-bit
+# Groups 1 and 2 rebuild their biased 16-bit
 # window w = high << 8 | low (bias 32768); the value is the sum of the signed windows, saturated to int16.
 # -Groups 3 adds the low x low group of -WeightPlanes 2, whose window (shift L + 8, |w| < 128) is its low
 # plane alone, sign-extended (tools/New-KokoroGenerator60x16Fixture.ps1 tables). With -Group3Shifts that window
@@ -99,7 +99,7 @@ function New-KokoroPlaneCombineSteps {
     $s.ToArray()
 }
 
-# Two-group combine for the decoder's channel counts (docs/decoder-design.md): any whole number of 32-channel blocks, a
+# Two-group combine for the decoder's channel counts: any whole number of 32-channel blocks, a
 # loop over blocks, per-block ratios read from memory. Modes as New-KokoroPlaneCombineSteps, plus
 #   -Mode Scale: R = sat(v * ratio_c), stored biased (no R input): the first term of a sum that a Residual pass completes,
 #                as the decoder block's shortcut before (conv2 + conv1x1) / sqrt(2).

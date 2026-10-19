@@ -65,7 +65,7 @@ function New-KokoroGeneratorTemplate1RunSteps {
     $declarations.Add(@('Consumer',$resultBytes))
     foreach ($declaration in $declarations) {
         # V73 :single activation reads must keep both addressed croutons in
-        # one 1 MiB region: docs/generator60x-resident-design.md, 2026-10-09 correction.
+        # one 1 MiB region (2026-10-09 correction).
         $readBytes = if ($declaration[0] -ceq 'Input') { $inputActivationBytes }
             elseif ($declaration[0].StartsWith('Operand',[StringComparison]::Ordinal)) { $activationBytes } else { 0L }
         if ($readBytes -gt 1048576L) { throw 'HMX activation window exceeds one 1 MiB region.' }

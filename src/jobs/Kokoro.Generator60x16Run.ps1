@@ -1,8 +1,8 @@
 #requires -Version 7.4
 # Stock generator resblocks.3/4/5 and their three-way mean at 16 bits, activations resident in VTCM.
 # Source: hexgrad/kokoro dfb907a02bba8152ca444717ca5d78747ccb4bec, istftnet.py AdaINResBlock1.forward and
-# Generator.forward. Numeric design: docs/generator60x-16bit-design.md; pass order as the 8-bit resident
-# stage (docs/generator60x-resident-design.md, Kokoro.Generator60xResidentRun.ps1).
+# Generator.forward. Pass order as the 8-bit resident
+# stage (Kokoro.Generator60xResidentRun.ps1).
 #
 # Per branch (kernel 3, 7, 11), per dilation pair (1, 3, 5):
 #   first half:  K/M/S from R moments; per batch phase-turns AdaIN+Snake R -> high/low windows,

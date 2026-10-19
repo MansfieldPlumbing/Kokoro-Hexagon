@@ -117,7 +117,8 @@ ANATOMY OF A DSP JOB (read these, in this order, instead of exploring)
 pwsh -NoProfile -File ./Invoke-KokoroDevelopment.ps1
 pwsh -NoProfile -File ./Invoke-KokoroDevelopment.ps1 AlbertLinear -Linear query.0
 pwsh -NoProfile -File ./Invoke-KokoroDevelopment.ps1 Api -Pattern 'Conv|Croutons'
-pwsh -NoProfile -File ./Invoke-KokoroDevelopment.ps1 Run -Case benchmark-0-sm8550 -Hypothesis 'layout slack'
+pwsh -NoProfile -File ./Invoke-KokoroDevelopment.ps1 Run -Case timing-passage-0-sm8550 -Hypothesis 'layout slack'
+
 #>
 #requires -Version 7.4
 [CmdletBinding()]
@@ -315,8 +316,13 @@ function Test-KokoroCasePairs {
     "PASS case-pairs: $($findings.Count) known, 0 new"
 }
 
+# Project notes (handoffs, designs, results) live outside the repository, beside the shared agent rules.
+$script:NotesRoot = Join-Path (Split-Path $Root) 'Pwsh-Development/docs/kokoro-hexagon'
+
 function Get-NextStep {
-    $handoff = Get-ChildItem (Join-Path $Root 'docs') -Filter 'handoff-*.md' | Sort-Object Name | Select-Object -Last 1
+    $handoff = if (Test-Path $script:NotesRoot) { Get-ChildItem $script:NotesRoot -Filter 'handoff-*.md' | Sort-Object Name | Select-Object -Last 1 }
+    if (-not $handoff) { return [pscustomobject]@{ Handoff = $null; Steps = @() } }
+
     $lines = Get-Content $handoff.FullName
     $start = ($lines | Select-String -Pattern '^## Next' | Select-Object -First 1).LineNumber
     # A numbered item runs on over indented continuation lines; join them so no step is cut mid-sentence.
@@ -451,7 +457,8 @@ function ConvertTo-KokoroConvPack {
     [pscustomobject]@{ Weights = $wl; Tables = $tables; Units = $units; L = "$(($Ls | Measure-Object -Minimum).Minimum)..$(($Ls | Measure-Object -Maximum).Maximum)"; CoarsenedRows = $coarse }
 }
 
-# The two HMX accumulator-group windows of a W8 linear as the conv stores them (docs/generator60x-16bit-design.md "Conv":
+# The two HMX accumulator-group windows of a W8 linear as the conv stores them (
+
 # x = (h - 128) 256 + l in the conv-input LSB; win(A1) = 256 sum (h - 128) Wq / 2^L, win(A2) = (sum l Wq + bq) / 2^L,
 # each through a 16-bit window), for given inputs: how many values leave int16 (the high plane saturates). Weight [o][i],
 # Values token-major [T][Cin] (real units), WindowLsb the conv-input LSB, Units the deployed output LSB per channel.
@@ -1858,7 +1865,8 @@ function New-KokoroBankDecoderInput {
     $selectionDir = Join-Path $Directory 'selection'; [void][IO.Directory]::CreateDirectory($selectionDir)
     ConvertTo-Json -InputObject @($held) -Depth 5 | Set-Content (Join-Path $selectionDir 'heldout.json') -Encoding utf8NoBOM
     # Regenerate selections, never teacher captures. Match the full-bank baseline's measured right-weighted cost
-    # (docs/results/unit-bank-curve-20261010.md); restore the caller's experiment setting afterward.
+    # (unit-bank curve, 2026-10-10); restore the caller's experiment setting afterward.
+
     $previousWeights = $env:KOKORO_TARGETW
     try {
         $env:KOKORO_TARGETW = '4,1,0.5,4,8,2'
@@ -2157,7 +2165,8 @@ switch ($Command) {
         "Kokoro-Hexagon  $head"
         "                $dirty uncommitted"
         $next = Get-NextStep
-        "Next            ($($next.Handoff))"
+        "Next            ($(if ($next.Handoff) { $next.Handoff } else { 'no project notes' }))"
+
         $next.Steps | ForEach-Object { Format-Wrapped $_ -Hang 3 }
         'Ratchet cases'
         (Import-PowerShellDataFile (Join-Path $Root 'tools/Kokoro.Ratchet.psd1')).Cases | ForEach-Object {
@@ -2206,8 +2215,11 @@ switch ($Command) {
                 if ($oversized) { throw ($oversized -join '; ') }
             }
             'handoff' = {
+                # A clone without the project notes has no handoff to check.
+                if (-not (Test-Path $script:NotesRoot)) { return }
                 $next = Get-NextStep
-                $newest = Get-ChildItem (Join-Path $Root 'docs') -Filter 'handoff-*.md' |
+                $newest = Get-ChildItem $script:NotesRoot -Filter 'handoff-*.md' |
+
                     Sort-Object Name | Select-Object -Last 1
                 if (-not $newest -or $next.Handoff -cne $newest.Name) { throw 'Get-NextStep did not return the newest handoff.' }
                 if (-not $next.Steps.Count) { throw "$($next.Handoff) has no next steps." }

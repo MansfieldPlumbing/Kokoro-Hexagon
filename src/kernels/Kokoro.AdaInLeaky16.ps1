@@ -1,5 +1,5 @@
 #requires -Version 7.4
-# Fused stock AdaIN1d then LeakyReLU(0.2) over 16-bit activations, for the decoder's AdainResBlk1d (docs/decoder-design.md).
+# Fused stock AdaIN1d then LeakyReLU(0.2) over 16-bit activations, for the decoder's AdainResBlk1d.
 # Kokoro dfb907a02bba8152ca444717ca5d78747ccb4bec istftnet.py:20-31 (AdaIN1d) and AdainResBlk1d._residual (actv =
 # LeakyReLU(0.2)). AdaIN folds to a per-channel affine of x (Kokoro.AdaInTurnsCoefficients.ps1,
 # New-KokoroAdaInAffineCoefficientsLoopSteps): y = K * x * 2^16 >> 31 + M in output LSB, then

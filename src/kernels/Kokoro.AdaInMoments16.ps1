@@ -1,6 +1,6 @@
 #requires -Version 7.4
 # AdaIN group moments over 16-bit activations (biased u16 in native croutons), accumulated onto a
-# per-channel record. Design: docs/generator60x-16bit-design.md ("Moments").
+# per-channel record.
 # x = 256 a + b with a = x >> 8 (signed) and b = x & 255; per channel the record holds
 #   S1 = sum x,  A2 = sum a^2,  AB = sum a*b,  B2 = sum b^2   (int32 each)
 # so sum x^2 = 65536 A2 + 512 AB + B2 exactly. Each partial stays below 2^31 for 7,801 frames.
@@ -53,7 +53,7 @@ function New-KokoroAdaInMoments16Steps {
     $s.ToArray()
 }
 
-# The same moments for the decoder's channel counts (docs/decoder-design.md): any whole number of 32-channel blocks, a loop
+# The same moments for the decoder's channel counts: any whole number of 32-channel blocks, a loop
 # over blocks with register strides (tile stride 64 * Channels bytes). Same record and contract; also uses r3, r4, r6, r9.
 function New-KokoroAdaInMoments16LoopSteps {
     param([ValidateRange(32,2048)][int]$Channels=1120,[string]$LabelPrefix='adainmoments16loop',[switch]$NoReturn)

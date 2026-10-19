@@ -17,7 +17,7 @@ param(
     [ValidateRange(1, 64)][int] $ConvTiles = 8,
     [ValidateSet(128, 256)][int] $ConvChannels = 128,
     [ValidateSet(1, 3, 7, 11)][int] $ConvKernel = 3,
-    # KokoroHmxConvPlanesLoop: decoder shapes (docs/decoder-design.md).
+    # KokoroHmxConvPlanesLoop: decoder shapes.
     [ValidateRange(32, 2048)][int] $ConvInputChannels = 1120,
     [ValidateRange(64, 2048)][int] $ConvOutputChannels = 1024,
     [ValidateSet('Windows','Tensor')][string] $LeakyOutput = 'Windows',
