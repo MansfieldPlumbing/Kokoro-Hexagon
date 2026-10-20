@@ -19,7 +19,11 @@ Speaking rate for Render.
 .PARAMETER Threads
 Worker threads for the teacher's kernels.
 .EXAMPLE
-pwsh -NoProfile -File ./Invoke-KokoroDevelopment.ps1 Student -Parameters @{ Step = 'Console' }
+./student/Invoke-Student.ps1 -Step Console
+.EXAMPLE
+./Invoke-KokoroDevelopment.ps1 Student -Parameters @{ Step = 'Render'; Text = 'Text to render.' }
+Run from a PowerShell prompt: pwsh -File passes every argument as a string, so a
+-Parameters hashtable only works in process.
 #>
 #requires -Version 7.7
 [CmdletBinding()]
