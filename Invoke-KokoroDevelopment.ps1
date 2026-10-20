@@ -1144,6 +1144,106 @@ function Test-KokoroDecoderConstantsCorpus {
     $result=[pscustomobject]$report; $result | Export-Clixml -LiteralPath (Join-Path $out 'acceptance-b.clixml') -Depth 12; $result
 }
 
+# Propagation of boundary error to PCM on the phone: Gaussian noise of a known level in x (decoder output), f0 (white per
+# tick, or a constant relative offset) or the AdaIN constants (each channel's 1/std and mean) of the accepted peach input to
+# the constants generator. The unperturbed run must reproduce the accepted PCM. Each row reports the boundary SNR measured
+# after requantization, PCM SNR against the unperturbed run (propagation) and against stock PCM.
+function Test-KokoroGeneratorPropagation {
+    param([Parameter(Mandatory)][string]$OutputDirectory,[string]$Soc='SM8550',[string]$Package='dev.mansfieldplumbing.kokoro',
+        [double[]]$LevelsDb=@(20,30,40,50,60),[ValidateSet('X','F0','F0Offset','AdaIn')][string[]]$Inputs=@('X','F0','F0Offset','AdaIn'),[int]$Seed=17,
+        [string]$PriorReceipt=(Join-Path $Build 'generator-constants-full-corpus-20261012-143702-run.clixml'))
+    $out=[IO.Path]::GetFullPath($OutputDirectory)
+    if(-not $out.StartsWith($Build+[IO.Path]::DirectorySeparatorChar,[StringComparison]::OrdinalIgnoreCase) -or (Test-Path -LiteralPath $out)){throw 'Choose a fresh propagation directory under build/.'}
+    [void][IO.Directory]::CreateDirectory($out)
+    Import-Evaluator
+    Import-Module (Join-Path $Root 'tools/Kokoro.CaptureKernels.psm1')
+    $prior=Import-Clixml -LiteralPath $PriorReceipt
+    if($prior.Gate.Status -cne 'Passed'){throw 'Prior generator constants gate did not pass.'}
+    $peach=Join-Path $Root 'data/baselines/decoder-generator-bank-input-sm8550-20261010/input'
+    $whole=Get-Content -LiteralPath (Join-Path $peach 'fixture.json') -Raw | ConvertFrom-Json
+    $source=Join-Path $prior.OutputDirectory 'A/generator-exact-constants'
+    $generator=Invoke-KokoroEmission -Kernel KokoroGeneratorWholeSource16Run -Parameters @{ResBlockFrames=[int]$whole.Frames;ResidentHvxThreads=4;ResidentBatchTiles=14;GeneratorMoments='Constants'}
+    $activations=[IO.File]::ReadAllBytes((Join-Path $source 'activations.bin')); $tables=[IO.File]::ReadAllBytes((Join-Path $source 'tables.bin'))
+    $ticks=[int](($whole.Frames-1)/60); $xBytes=[int]([math]::Ceiling($ticks/32)*64*512); $f0Bytes=[int]([math]::Ceiling(4*$ticks/128)*128)
+    if($generator.Layout.InputBytes -ne $activations.Length -or $activations.Length -ne $xBytes+$f0Bytes+128*[math]::Ceiling($whole.Samples/64)){throw 'Generator input layout differs from x, f0 and source draws.'}
+    $packing=$generator.Layout.ConstantPacking
+    $stockBytes=[IO.File]::ReadAllBytes((Join-Path $peach 'expected-pcm-f32.bin')); $stock=[float[]]::new($whole.Samples); [Buffer]::BlockCopy($stockBytes,0,$stock,0,$stockBytes.Length)
+    $snr={param([double[]]$Reference,[double[]]$Candidate) $s=0.0;$e=0.0; for($i=0;$i -lt $Reference.Length;$i++){$d=$Reference[$i]-$Candidate[$i];$s+=$Reference[$i]*$Reference[$i];$e+=$d*$d}; if($e -eq 0){[double]::PositiveInfinity}else{10*[math]::Log10($s/$e)}}
+    $random=[Random]::new($Seed)
+    $gauss={ $u=1.0-$random.NextDouble(); [math]::Sqrt(-2*[math]::Log($u))*[math]::Cos(2*[math]::PI*$random.NextDouble()) }
+    $runConstants={param([string]$Name,[byte[]]$Activation,[byte[]]$Table)
+        $directory=Join-Path $out $Name; [void][IO.Directory]::CreateDirectory($directory)
+        [IO.File]::WriteAllBytes((Join-Path $directory 'activations.bin'),$Activation); [IO.File]::WriteAllBytes((Join-Path $directory 'tables.bin'),$Table)
+        [IO.File]::Copy((Join-Path $source 'weights.bin'),(Join-Path $directory 'weights.bin'))
+        $job=Invoke-KokoroDeviceJob -EmissionDirectory $generator.Directory -EmissionArtifact $generator -InputDirectory $directory -Soc $Soc -Runs 1 -Package $Package
+        [IO.File]::Delete((Join-Path $directory 'weights.bin'))
+        $pcm=[int16[]]::new($whole.Samples); [Buffer]::BlockCopy($job.Output,$generator.Layout.PcmOffset,$pcm,0,2*$whole.Samples)
+        $samples=[double[]]::new($pcm.Length); for($i=0;$i -lt $pcm.Length;$i++){$samples[$i]=$pcm[$i]/32768.0}
+        [pscustomobject]@{Samples=$samples;PcmSHA256=[Convert]::ToHexString([Security.Cryptography.SHA256]::HashData([byte[]]$job.Output[$generator.Layout.PcmOffset..($generator.Layout.PcmOffset+2*$whole.Samples-1)]));DspMs=$job.MedianMs}}
+    $stockSamples=[double[]]$stock
+    $accepted=Get-KokoroRatchetCase -Name decoder-generator-bank-input-sm8550
+    $base=& $runConstants 'unperturbed' $activations $tables
+    if($base.PcmSHA256 -cne $accepted.PcmSHA256){throw 'Unperturbed constants generator PCM differs from the accepted peach PCM.'}
+    $rows=[Collections.Generic.List[object]]::new()
+    $rows.Add([pscustomobject]@{Input='None';RequestedDb=$null;BoundarySnrDb=$null;PcmSnrDb=[double]::PositiveInfinity;StockSnrDb=(& $snr $stockSamples $base.Samples);DspMs=$base.DspMs})
+    $ones=[double[]]::new(512); [Array]::Fill($ones,1.0)
+    $x=ConvertFrom-KokoroCroutons16 -Bytes ([byte[]]$activations[0..($xBytes-1)]) -Frames $ticks -Units $ones
+    $roundTrip=ConvertTo-KokoroCroutons16 -Values $x -Frames $ticks -Scales $ones
+    # The encoder clamps to +-32767; a stored -32768 (biased 0) comes back as -32767 and is the only difference allowed.
+    for($i=0;$i -lt $xBytes;$i+=2){
+        $stored=[BitConverter]::ToUInt16($activations,$i); $again=[BitConverter]::ToUInt16($roundTrip,$i)
+        if($stored -ne $again -and -not ($stored -eq 0 -and $again -eq 1)){throw 'Decoder output croutons do not round-trip.'}
+    }
+    $f0=[int[]]::new($ticks); [Buffer]::BlockCopy($activations,$xBytes,$f0,0,4*$ticks)
+    foreach($boundary in $Inputs){
+        foreach($level in $LevelsDb){
+            $r=[math]::Pow(10,-$level/20); $activation=[byte[]]$activations.Clone(); $table=[byte[]]$tables.Clone(); $signal=0.0; $noise=0.0
+            switch($boundary){
+                'X' {
+                    $noisy=[float[]]::new($x.Length)
+                    for($c=0;$c -lt 512;$c++){
+                        $power=0.0; for($t=0;$t -lt $ticks;$t++){$power+=[double]$x[$c*$ticks+$t]*$x[$c*$ticks+$t]}; $rms=[math]::Sqrt($power/$ticks)
+                        for($t=0;$t -lt $ticks;$t++){$noisy[$c*$ticks+$t]=[float][math]::Round($x[$c*$ticks+$t]+$rms*$r*(& $gauss))}
+                    }
+                    $encoded=ConvertTo-KokoroCroutons16 -Values $noisy -Frames $ticks -Scales $ones; [Array]::Copy($encoded,$activation,$xBytes)
+                    $decoded=ConvertFrom-KokoroCroutons16 -Bytes $encoded -Frames $ticks -Units $ones
+                    for($i=0;$i -lt $x.Length;$i++){$d=[double]$decoded[$i]-$x[$i];$signal+=[double]$x[$i]*$x[$i];$noise+=$d*$d}
+                }
+                {$_ -in 'F0','F0Offset'} {
+                    for($t=0;$t -lt $ticks;$t++){
+                        if($f0[$t] -le 0){continue}
+                        $g=if($boundary -ceq 'F0Offset'){1.0}else{& $gauss}
+                        $value=[int][math]::Round($f0[$t]*(1+$r*$g)); $d=[double]$value-$f0[$t]; $signal+=[double]$f0[$t]*$f0[$t]; $noise+=$d*$d
+                        [Array]::Copy([BitConverter]::GetBytes($value),0,$activation,$xBytes+4*$t,4)
+                    }
+                }
+                'AdaIn' {
+                    foreach($site in $packing.MomentSites){
+                        for($channel=0;$channel -lt $site.Width;$channel++){
+                            $at=[int]($packing.ConstantsTableOffset+$site.Offset+16L*$channel)
+                            $deviation=[BitConverter]::ToUInt32($table,$at+4); $sum=[BitConverter]::ToInt32($table,$at+8)
+                            if($deviation -eq 0){continue}
+                            $g1=& $gauss; $g2=& $gauss
+                            $newDeviation=[uint32][math]::Max(1,[math]::Round($deviation/(1+$r*$g1))); $newSum=[int][math]::Round($sum+$r*$g2*$deviation)
+                            # Relative error of the scale (1/std) and of the mean in units of the channel's std.
+                            $scaleError=[double]$deviation/$newDeviation-1; $meanError=([double]$newSum-$sum)/$deviation
+                            $signal+=2; $noise+=$scaleError*$scaleError+$meanError*$meanError
+                            [Array]::Copy([BitConverter]::GetBytes($newDeviation),0,$table,$at+4,4); [Array]::Copy([BitConverter]::GetBytes($newSum),0,$table,$at+8,4)
+                        }
+                    }
+                }
+            }
+            $result=& $runConstants ('{0}-{1}dB' -f $boundary,$level) $activation $table
+            $row=[pscustomobject]@{Input=$boundary;RequestedDb=$level;BoundarySnrDb=[math]::Round(10*[math]::Log10($signal/[math]::Max($noise,1e-300)),2)
+                PcmSnrDb=[math]::Round((& $snr $base.Samples $result.Samples),2);StockSnrDb=[math]::Round((& $snr $stockSamples $result.Samples),2);DspMs=$result.DspMs}
+            $rows.Add($row); Write-Host ("Propagation {0} requested={1} boundary={2} pcm={3} stock={4}" -f $row.Input,$row.RequestedDb,$row.BoundarySnrDb,$row.PcmSnrDb,$row.StockSnrDb)
+        }
+    }
+    $report=[pscustomobject]@{Soc=$Soc;Seed=$Seed;Fixture=$peach;Ticks=$ticks;Samples=$whole.Samples;GeneratorLibrarySHA256=$generator.LibrarySHA256;BasePcmSHA256=$base.PcmSHA256;Rows=$rows.ToArray()}
+    $report | Export-Clixml -LiteralPath (Join-Path $out 'propagation.clixml') -Depth 6
+    $report
+}
+
 # Emits a diagnostic tensor job, runs it on the phone with a job input directory, and returns the output tensor bytes
 # (from runner-layout.json OutputOffset), the count of halfwords at the int16 limits, DSP time and the skel identity.
 function Invoke-KokoroTensorJob {
@@ -2279,6 +2379,11 @@ switch ($Command) {
         if($Case -ceq 'generator-pmu'){
             $profileParameters=if($Parameters){$Parameters}else{@{}}
             Test-KokoroGeneratorPmu -OutputDirectory $OutputDirectory -Soc $Soc -Package $HostPackage @profileParameters
+            break
+        }
+        if($Case -ceq 'generator-propagation'){
+            $propagationParameters=if($Parameters){$Parameters}else{@{}}
+            Test-KokoroGeneratorPropagation -OutputDirectory $OutputDirectory -Soc $Soc -Package $HostPackage @propagationParameters
             break
         }
         if($Case -ceq 'decoder-constants-corpus'){
