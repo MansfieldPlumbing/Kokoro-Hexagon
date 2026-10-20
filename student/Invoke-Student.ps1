@@ -8,6 +8,10 @@ Steps:
             WAV under build/ and play it. Keys: Enter speak, F2 voice, F3/F4 speed, F5 replay,
             F6 toggle playback, Esc quit.
   Render    Render -Text with the lowered teacher to a WAV under build/ and return a typed result.
+  Corpus    Pack the pinned Project Gutenberg text into continuous windows of at most 510 phonemes,
+            flag counter-example sections, and write pronunciation-audit inputs.
+  Pronunciation  Aggregate Zira pronunciation audits (-AuditDetails words.psd1 paths): agreement,
+            disagreements by word and recurring symbol substitutions.
 .PARAMETER Step
 The step to run.
 .PARAMETER Text
@@ -28,11 +32,12 @@ Run from a PowerShell prompt: pwsh -File passes every argument as a string, so a
 #requires -Version 7.7
 [CmdletBinding()]
 param(
-    [ValidateSet('Console', 'Render')][string] $Step = 'Console',
+    [ValidateSet('Console', 'Render', 'Corpus', 'Pronunciation')][string] $Step = 'Console',
     [ValidateRange(2, 64)][int] $Threads = [Math]::Max(2, [Environment]::ProcessorCount),
     [string] $Text = '',
     [string] $Voice = 'af_heart',
-    [ValidateRange(0.5, 2)][double] $Speed = 1
+    [ValidateRange(0.5, 2)][double] $Speed = 1,
+    [string[]] $AuditDetails = @()
 )
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
@@ -55,6 +60,19 @@ $script:StudentInputs = [ordered]@{
     }
     Teacher = 'tools/Invoke-KokoroPrecomputedDecoder.ps1'
     Manifest = 'lib/manifest.json'
+    Text = 'build/grammar-corpus/raw'
+    Pronunciation = 'phonemizer/Invoke-EnglishPhonemizer.ps1'
+}
+
+# Text corpus records. Headings are uppercase paragraphs; a counter-example section starts
+# at a heading matching this pattern and runs to the next heading that does not.
+$script:StudentText = [ordered]@{
+    # Word sequences that open a counter-example section when they occur in a heading.
+    CounterExampleHeadings = @(@('FALSE', 'SYNTAX'), @('IMPROPRIETIES', 'FOR', 'CORRECTION'), @('EXAMPLES', 'OF', 'ERROR'), @('ERRORS', 'CONCERNING'), @('ERROR', 'CONCERNING'))
+    MaximumPhonemes = 510         # stock KModel input limit (512 tokens with the two pads)
+    AuditFileBytes = 1000000      # Test-EnglishPronunciationCorpus bounds: 1 MiB and 4096 lines
+    AuditFileLines = 4000
+    AuditLineCharacters = 8192    # Get-EnglishZiraReference text bound
 }
 
 function New-StudentOutputDirectory([string] $Name) {
@@ -215,6 +233,296 @@ function Show-StudentConsole {
     }
 }
 
+class StudentTextTokenizer {
+    # One pass over a paragraph's characters, compiled through PSLowering. Each token is four
+    # integers: kind, start, length, flags. Kinds: 1 word, 2 number, 3 ordinal or format word
+    # (2d, 12mo), 4 punctuation, 5 quotation mark, 6 symbol, 7 transcriber note. Flags: 1 emphasis
+    # (_..._ in Project Gutenberg text), 2 editorial insertion ([...]). Markup characters
+    # themselves produce no token; nothing is removed from the source text.
+    static [bool] IsWordChar([char[]] $c, [int] $at, [int] $start) {
+        if ([char]::IsLetter($c[$at])) { return $true }
+        $code = [int]$c[$at]
+        if ($at -gt $start -and $at + 1 -lt $c.Length) {
+            if (($code -eq 39 -or $code -eq 8217 -or $code -eq 45) -and [char]::IsLetter($c[$at - 1]) -and [char]::IsLetter($c[$at + 1])) { return $true }
+        }
+        return $false
+    }
+    static [bool] NoteAt([char[]] $c, [int] $at) {
+        # Transcriber tags: [sic...], [Fist], [Footnote...], [Illustration...], [Transcriber...]
+        $tags = [string[]]@('sic', 'Fist', 'Footnote', 'Illustration', 'Transcriber')
+        for ($k = 0; $k -lt $tags.Length; $k++) {
+            $tag = $tags[$k].ToCharArray()
+            if ($at + $tag.Length -gt $c.Length) { continue }
+            $same = $true
+            for ($j = 0; $j -lt $tag.Length; $j++) { if ([int]$c[$at + $j] -ne [int]$tag[$j]) { $same = $false } }
+            if ($same) { return $true }
+        }
+        return $false
+    }
+    static [int[]] Tokenize([string] $text) {
+        $c = $text.ToCharArray(); $n = $c.Length
+        $out = [int[]]::new(4 * $n + 4); $count = 0; $flags = 0; $i = 0
+        while ($i -lt $n) {
+            $code = [int]$c[$i]
+            if ([char]::IsWhiteSpace($c[$i])) { $i++; continue }
+            if ($code -eq 95) { $flags = $flags -bxor 1; $i++; continue }
+            if ($code -eq 91) {
+                $close = -1
+                for ($j = $i + 1; $j -lt $n -and $j -le $i + 80; $j++) { if ($close -lt 0 -and [int]$c[$j] -eq 93) { $close = $j } }
+                if ($close -gt 0 -and [StudentTextTokenizer]::NoteAt($c, $i + 1)) {
+                    $out[4 * $count] = 7; $out[4 * $count + 1] = $i; $out[4 * $count + 2] = $close - $i + 1; $out[4 * $count + 3] = $flags; $count++
+                    $i = $close + 1; continue
+                }
+                if ($close -gt 0) { $flags = $flags -bor 2; $i++; continue }
+            }
+            if ($code -eq 93) { $flags = $flags -band 1; $i++; continue }
+            $kind = 6; $j = $i + 1
+            if ([char]::IsLetter($c[$i])) {
+                $kind = 1
+                while ($j -lt $n -and [StudentTextTokenizer]::IsWordChar($c, $j, $i)) { $j++ }
+            }
+            elseif ([char]::IsDigit($c[$i])) {
+                $kind = 2
+                $more = $true
+                while ($more -and $j -lt $n) {
+                    $more = $false
+                    if ([char]::IsDigit($c[$j])) { $more = $true }
+                    elseif (([int]$c[$j] -eq 44 -or [int]$c[$j] -eq 46 -or [int]$c[$j] -eq 58) -and $j + 1 -lt $n -and [char]::IsDigit($c[$j + 1])) { $more = $true }
+                    if ($more) { $j++ }
+                }
+                if ($j -lt $n -and [char]::IsLetter($c[$j])) { $kind = 3; while ($j -lt $n -and [char]::IsLetter($c[$j])) { $j++ } }
+            }
+            elseif ($code -eq 45 -and $i + 1 -lt $n -and [int]$c[$i + 1] -eq 45) { $kind = 4; while ($j -lt $n -and [int]$c[$j] -eq 45) { $j++ } }
+            elseif ($code -eq 34 -or $code -eq 39 -or $code -eq 8216 -or $code -eq 8217 -or $code -eq 8220 -or $code -eq 8221) { $kind = 5 }
+            elseif ($code -eq 46 -or $code -eq 44 -or $code -eq 59 -or $code -eq 58 -or $code -eq 33 -or $code -eq 63 -or $code -eq 40 -or $code -eq 41 -or $code -eq 8212 -or $code -eq 8211 -or $code -eq 45 -or $code -eq 8230) { $kind = 4 }
+            $out[4 * $count] = $kind; $out[4 * $count + 1] = $i; $out[4 * $count + 2] = $j - $i; $out[4 * $count + 3] = $flags; $count++
+            $i = $j
+        }
+        $result = [int[]]::new(4 * $count)
+        for ($k = 0; $k -lt 4 * $count; $k++) { $result[$k] = $out[$k] }
+        return $result
+    }
+}
+
+$script:StudentTokenKinds = @{ 1 = 'Word'; 2 = 'Number'; 3 = 'Ordinal'; 4 = 'Punctuation'; 5 = 'Quote'; 6 = 'Symbol'; 7 = 'Note' }
+Update-TypeData -TypeName 'Kokoro.StudentToken' -MemberType ScriptProperty -MemberName Spoken -Value { $this.Kind -in 'Word', 'Number', 'Ordinal', 'Punctuation', 'Quote' } -Force
+Update-TypeData -TypeName 'Kokoro.StudentToken' -MemberType ScriptProperty -MemberName Projection -Value {
+    # The text the phonemizer receives for this token: dashes become an em dash, quotation marks a double quote.
+    switch ($this.Kind) { 'Quote' { '"' } 'Punctuation' { if ($this.Text.StartsWith('--')) { '—' } else { $this.Text } } default { $this.Text } }
+} -Force
+
+function Import-StudentKernels {
+    # Compiles this file's lowered classes once per source hash with the pinned PSLowering.
+    if ($script:StudentContext.Contains('Kernels') -and $script:StudentContext.Kernels) { return $script:StudentContext.Kernels }
+    $pin = '1afabe056235a570da29e268824784557d4f6cdd'
+    $compiler = Join-Path $script:StudentBuild "phonemizer/inputs/pslowering-$pin"
+    $pins = @(Import-Csv -LiteralPath (Join-Path $compiler 'verified-source.tsv') -Delimiter "`t")
+    foreach ($item in $pins) { if ($item.Commit -cne $pin -or (Get-FileHash -LiteralPath (Join-Path $compiler $item.Path)).Hash -cne $item.Sha256) { throw 'Pinned compiler integrity mismatch.' } }
+    Import-Module (Join-Path $compiler 'src/Dev.MansfieldPlumbing.PowerShell.Lowering.psd1')
+    $directory = Join-Path $script:StudentBuild ('student/kernels/' + (Get-FileHash -LiteralPath $PSCommandPath).Hash)
+    [void][IO.Directory]::CreateDirectory($directory)
+    $dll = Join-Path $directory 'Kokoro.Student.dll'
+    if (-not (Test-Path -LiteralPath $dll)) { $null = Export-LoweredAssembly -SourcePath $PSCommandPath -ClassName StudentTextTokenizer -OutputPath $dll -Deterministic }
+    $admission = Test-LoweredAssembly -AssemblyPath $dll
+    if (-not $admission.ClrOnlyAdmitted) { throw 'Student kernels reference SMA.' }
+    $assembly = [Reflection.Assembly]::LoadFrom($dll)
+    $script:StudentContext.Kernels = [pscustomobject]@{ Tokenize = $assembly.GetType('StudentTextTokenizer', $true).GetMethod('Tokenize').CreateDelegate([Func[string,int[]]]); SHA256 = $admission.SHA256 }
+    $script:StudentContext.Kernels
+}
+
+function ConvertTo-StudentTokens([string] $Text) {
+    $packed = $script:StudentContext.Kernels.Tokenize.Invoke($Text)
+    for ($k = 0; $k -lt $packed.Length; $k += 4) {
+        [pscustomobject]@{ PSTypeName = 'Kokoro.StudentToken'; Kind = $script:StudentTokenKinds[$packed[$k]]; Text = $Text.Substring($packed[$k + 1], $packed[$k + 2])
+            Start = $packed[$k + 1]; Length = $packed[$k + 2]; Emphasis = ($packed[$k + 3] -band 1) -ne 0; Editorial = ($packed[$k + 3] -band 2) -ne 0 }
+    }
+}
+
+function ConvertTo-StudentProjection([object[]] $Tokens) {
+    # The string the phonemizer receives, generated from spoken tokens: words separated by spaces,
+    # punctuation attached to the preceding token, quotation marks alternating open and close.
+    $builder = [Text.StringBuilder]::new(); $open = $false; $attachNext = $true
+    foreach ($token in $Tokens) {
+        if (-not $token.Spoken) { continue }
+        $piece = $token.Projection
+        if ($token.Kind -ceq 'Quote') { $open = -not $open; if ($open) { if (-not $attachNext) { [void]$builder.Append(' ') }; [void]$builder.Append($piece); $attachNext = $true } else { [void]$builder.Append($piece); $attachNext = $false }; continue }
+        $attach = $attachNext -or ($token.Kind -ceq 'Punctuation' -and $piece -notin '(', '—')
+        if (-not $attach) { [void]$builder.Append(' ') }
+        [void]$builder.Append($piece); $attachNext = $piece -ceq '('
+    }
+    $builder.ToString()
+}
+
+function Test-StudentCounterExampleHeading([object[]] $Words) {
+    # True when the heading's words contain one of the counter-example word sequences.
+    $texts = @($Words | ForEach-Object { $_.Text.ToUpperInvariant() })
+    foreach ($sequence in $script:StudentText.CounterExampleHeadings) {
+        for ($at = 0; $at + $sequence.Count -le $texts.Count; $at++) {
+            $match = $true
+            for ($k = 0; $k -lt $sequence.Count; $k++) { if ($texts[$at + $k] -cne $sequence[$k]) { $match = $false; break } }
+            if ($match) { return $true }
+        }
+    }
+    $false
+}
+
+function Get-StudentParagraphs {    # The full text of each pinned Project Gutenberg book in order, without its header and footer,
+    # as paragraphs of typed tokens with heading and counter-example flags.
+    $null = Import-StudentKernels
+    $directory = Join-Path $script:StudentRoot $script:StudentInputs.Text
+    foreach ($file in @(Get-ChildItem -LiteralPath $directory -Filter 'pg*.txt' | Sort-Object Name)) {
+        $lines = [IO.File]::ReadAllLines($file.FullName)
+        $first = -1; $last = $lines.Length
+        for ($i = 0; $i -lt $lines.Length; $i++) {
+            if ($first -lt 0 -and $lines[$i].StartsWith('*** START OF', [StringComparison]::Ordinal)) { $first = $i + 1 }
+            elseif ($lines[$i].StartsWith('*** END OF', [StringComparison]::Ordinal)) { $last = $i; break }
+        }
+        if ($first -lt 0) { throw "No Project Gutenberg start marker in $($file.Name)." }
+        $paragraph = [Collections.Generic.List[string]]::new(); $counterExample = $false; $index = 0
+        for ($i = $first; $i -le $last; $i++) {
+            $line = if ($i -lt $last) { $lines[$i].Trim() } else { '' }
+            if ($line) { $paragraph.Add($line); continue }
+            if ($paragraph.Count -eq 0) { continue }
+            $text = $paragraph -join ' '; $paragraph.Clear()
+            $tokens = @(ConvertTo-StudentTokens $text)
+            $words = @($tokens | Where-Object Kind -ceq 'Word')
+            if ($words.Count -eq 0) { continue }
+            $heading = $text.Length -le 120 -and -not @($words | Where-Object { $_.Text -cne $_.Text.ToUpperInvariant() }).Count
+            if ($heading) { $counterExample = Test-StudentCounterExampleHeading $words }
+            [pscustomobject]@{ PSTypeName = 'Kokoro.StudentParagraph'; Book = $file.BaseName; Index = $index; Text = $text; Tokens = $tokens; Heading = $heading; CounterExample = $counterExample }
+            $index++
+        }
+    }
+}
+
+function Get-StudentSentences([object] $Paragraph) {
+    # Sentence spans over typed tokens: a sentence ends at . ! or ? (with any closing quotation
+    # marks) when the next spoken token starts with a capital letter or a digit, or at the paragraph end.
+    $tokens = $Paragraph.Tokens; $start = 0
+    for ($k = 0; $k -lt $tokens.Count; $k++) {
+        if ($tokens[$k].Kind -cne 'Punctuation' -or $tokens[$k].Text -notin '.', '!', '?') { continue }
+        $end = $k; while ($end + 1 -lt $tokens.Count -and $tokens[$end + 1].Kind -ceq 'Quote') { $end++ }
+        $next = $end + 1; while ($next -lt $tokens.Count -and -not $tokens[$next].Spoken) { $next++ }
+        if ($next -lt $tokens.Count -and -not ([char]::IsUpper($tokens[$next].Text[0]) -or [char]::IsDigit($tokens[$next].Text[0]))) { continue }
+        [pscustomobject]@{ PSTypeName = 'Kokoro.StudentSentence'; Book = $Paragraph.Book; Paragraph = $Paragraph.Index; CounterExample = $Paragraph.CounterExample; Tokens = @($tokens[$start..$end]) }
+        $start = $end + 1; $k = $end
+    }
+    if ($start -lt $tokens.Count) { [pscustomobject]@{ PSTypeName = 'Kokoro.StudentSentence'; Book = $Paragraph.Book; Paragraph = $Paragraph.Index; CounterExample = $Paragraph.CounterExample; Tokens = @($tokens[$start..($tokens.Count - 1)]) } }
+}
+function Invoke-StudentPhonemize([Func[string,object]] $Phonemize, [string] $Text) {
+    # The compiled driver throws on input beyond its internal bounds; that text is unresolved.
+    try { $Phonemize.Invoke($Text) } catch { $null }
+}
+
+function New-StudentWindows {    # Continuous windows of whole sentences, packed in reading order across sentence and paragraph
+    # boundaries (never across books), each at most MaximumPhonemes long after phonemization of the
+    # whole window. Window budgets vary over 1..MaximumPhonemes so every voice-pack row is used.
+    param([Parameter(Mandatory)][Func[string,object]] $Phonemize, [int] $Seed = 17)
+    $random = [Random]::new($Seed)
+    $windows = [Collections.Generic.List[object]]::new(); $unresolved = [Collections.Generic.List[object]]::new()
+    $pending = [Collections.Generic.List[object]]::new()
+    function Close-Window {
+        while ($pending.Count -gt 0) {
+            $text = ($pending | ForEach-Object Text) -join ' '
+            $pronunciation = Invoke-StudentPhonemize $Phonemize $text
+            if ($null -ne $pronunciation -and $pronunciation.Complete -and $pronunciation.KokoroPhones -and $pronunciation.KokoroPhones.Length -le $script:StudentText.MaximumPhonemes) {
+                $windows.Add([pscustomobject]@{ PSTypeName = 'Kokoro.StudentWindow'; Index = $windows.Count; Book = $pending[0].Book
+                    FirstParagraph = $pending[0].Paragraph; LastParagraph = $pending[$pending.Count - 1].Paragraph; Text = $text
+                    Phonemes = $pronunciation.KokoroPhones; PhonemeCount = $pronunciation.KokoroPhones.Length; Sentences = $pending.Count
+                    CounterExampleSentences = @($pending | Where-Object CounterExample).Count })
+                $pending.Clear(); return
+            }
+            if ($pending.Count -eq 1) { $unresolved.Add($pending[0]); $pending.Clear(); return }
+            # The joined window exceeded the limit: close it without its last sentence, carry that one on.
+            $carry = $pending[$pending.Count - 1]; $pending.RemoveAt($pending.Count - 1)
+            Close-Window; $pending.Add($carry)
+        }
+    }
+    $budget = $random.Next(1, $script:StudentText.MaximumPhonemes + 1); $estimate = 0; $book = ''
+    foreach ($paragraph in Get-StudentParagraphs) {
+        if ($paragraph.Book -cne $book) { Close-Window; $book = $paragraph.Book; $estimate = 0 }
+        foreach ($typed in Get-StudentSentences $paragraph) {
+            $sentence = ConvertTo-StudentProjection $typed.Tokens
+            if (-not $sentence) { continue }
+            $pronunciation = Invoke-StudentPhonemize $Phonemize $sentence
+            if ($null -eq $pronunciation -or -not $pronunciation.Complete -or -not $pronunciation.KokoroPhones) {
+                Close-Window; $estimate = 0
+                $unresolved.Add([pscustomobject]@{ Book = $paragraph.Book; Paragraph = $paragraph.Index; Text = $sentence; CounterExample = $paragraph.CounterExample })
+                continue
+            }
+            $length = $pronunciation.KokoroPhones.Length
+            if ($pending.Count -gt 0 -and $estimate + 1 + $length -gt $budget) { Close-Window; $estimate = 0; $budget = $random.Next(1, $script:StudentText.MaximumPhonemes + 1) }
+            $pending.Add([pscustomobject]@{ Book = $paragraph.Book; Paragraph = $paragraph.Index; Text = $sentence; CounterExample = $paragraph.CounterExample })
+            $estimate += $length + 1
+        }
+    }
+    Close-Window
+    [pscustomobject]@{ Windows = $windows.ToArray(); Unresolved = $unresolved.ToArray() }
+}
+
+function Invoke-StudentCorpus {
+    $output = New-StudentOutputDirectory 'corpus'
+    $watch = [Diagnostics.Stopwatch]::StartNew()
+    $result = New-StudentWindows -Phonemize (Import-StudentPhonemizer)
+    $result.Windows | Export-Clixml -LiteralPath (Join-Path $output 'windows.clixml')
+    $result.Unresolved | Export-Clixml -LiteralPath (Join-Path $output 'unresolved.clixml')
+    # Pronunciation-audit inputs: one window per line, files within the audit's size bounds.
+    $files = [Collections.Generic.List[string]]::new(); $lines = [Collections.Generic.List[string]]::new(); $bytes = 0
+    $flush = { if ($lines.Count) { $path = Join-Path $output ('audit-{0:D3}.txt' -f $files.Count); [IO.File]::WriteAllLines($path, [string[]]$lines, [Text.UTF8Encoding]::new($false)); $files.Add($path); $lines.Clear(); $script:auditBytes = 0 } }
+    $script:auditBytes = 0
+    foreach ($window in $result.Windows) {
+        if ($window.Text.Length -gt $script:StudentText.AuditLineCharacters) { continue }
+        $size = [Text.Encoding]::UTF8.GetByteCount($window.Text) + 2
+        if ($lines.Count -ge $script:StudentText.AuditFileLines -or $script:auditBytes + $size -gt $script:StudentText.AuditFileBytes) { & $flush }
+        $lines.Add($window.Text); $script:auditBytes += $size
+    }
+    & $flush
+    [pscustomobject]@{ PSTypeName = 'Kokoro.StudentCorpus'; Directory = $output; Windows = $result.Windows.Count; Phonemes = ($result.Windows | Measure-Object PhonemeCount -Sum).Sum
+        CounterExampleWindows = @($result.Windows | Where-Object { $_.CounterExampleSentences -gt 0 }).Count; UnresolvedSentences = $result.Unresolved.Count
+        AuditFiles = $files.ToArray(); Seconds = $watch.Elapsed.TotalSeconds }
+}
+
+function Get-StudentSymbolSubstitutions([string] $Teacher, [string] $Student) {
+    # Edit-distance alignment of two symbol strings; returns the substituted, inserted and deleted
+    # symbol pairs ('teacher>student', '>student' for insertions, 'teacher>' for deletions).
+    $a = $Teacher.ToCharArray(); $b = $Student.ToCharArray()
+    $cost = [int[,]]::new($a.Length + 1, $b.Length + 1)
+    for ($i = 0; $i -le $a.Length; $i++) { $cost[$i, 0] = $i }
+    for ($j = 0; $j -le $b.Length; $j++) { $cost[0, $j] = $j }
+    for ($i = 1; $i -le $a.Length; $i++) {
+        for ($j = 1; $j -le $b.Length; $j++) {
+            $same = if ($a[$i - 1] -ceq $b[$j - 1]) { 0 } else { 1 }
+            $cost[$i, $j] = [Math]::Min([Math]::Min($cost[($i - 1), $j] + 1, $cost[$i, ($j - 1)] + 1), $cost[($i - 1), ($j - 1)] + $same)
+        }
+    }
+    $i = $a.Length; $j = $b.Length
+    while ($i -gt 0 -or $j -gt 0) {
+        if ($i -gt 0 -and $j -gt 0 -and $cost[$i, $j] -eq $cost[($i - 1), ($j - 1)] + $(if ($a[$i - 1] -ceq $b[$j - 1]) { 0 } else { 1 })) {
+            if ($a[$i - 1] -cne $b[$j - 1]) { "$($a[$i - 1])>$($b[$j - 1])" }
+            $i--; $j--
+        }
+        elseif ($i -gt 0 -and $cost[$i, $j] -eq $cost[($i - 1), $j] + 1) { "$($a[$i - 1])>"; $i-- }
+        else { ">$($b[$j - 1])"; $j-- }
+    }
+}
+
+function Invoke-StudentPronunciation {
+    # Aggregates Zira pronunciation audits (phonemizer -Audit words.psd1 records): agreement,
+    # disagreements by word, and symbol substitutions that recur across words.
+    param([Parameter(Mandatory)][string[]] $AuditDetails)
+    $rows = foreach ($path in $AuditDetails) { (Import-PowerShellDataFile -LiteralPath $path).r }
+    $compared = @($rows | Where-Object { $null -ne $_[8] })
+    $disagreements = @($compared | Where-Object { -not $_[8] })
+    $byWord = $disagreements | Group-Object { '{0}|{1}|{2}' -f $_[1].ToLowerInvariant(), $_[7], ($_[6] -creplace '[ˈˌ]', '') } |
+        Sort-Object Count -Descending | ForEach-Object { $w, $zira, $ours = $_.Name.Split('|'); [pscustomobject]@{ Word = $w; Count = $_.Count; Zira = $zira; Ours = $ours } }
+    $substitutions = @{}
+    foreach ($entry in $byWord) { foreach ($pair in @(Get-StudentSymbolSubstitutions $entry.Zira $entry.Ours)) { $substitutions[$pair] = [int]$substitutions[$pair] + $entry.Count } }
+    [pscustomobject]@{ PSTypeName = 'Kokoro.StudentPronunciation'; Words = @($rows).Count; Compared = $compared.Count
+        Agreement = if ($compared.Count) { ($compared.Count - $disagreements.Count) / $compared.Count } else { $null }
+        DisagreeingOccurrences = $disagreements.Count; DistinctDisagreements = @($byWord).Count; ByWord = @($byWord)
+        Substitutions = @($substitutions.GetEnumerator() | Sort-Object Value -Descending | ForEach-Object { [pscustomobject]@{ Pair = $_.Key; Occurrences = $_.Value } }) }
+}
+
 function Invoke-StudentRender {
     if (-not $Text.Trim()) { throw 'Render needs -Text.' }
     $output = New-StudentOutputDirectory 'render'
@@ -240,5 +548,7 @@ function Invoke-StudentRender {
 $script:StudentSteps = [ordered]@{
     Console = { Show-StudentConsole }
     Render = { Invoke-StudentRender }
+    Corpus = { Invoke-StudentCorpus }
+    Pronunciation = { Invoke-StudentPronunciation -AuditDetails $AuditDetails }
 }
 & $script:StudentSteps[$Step]

@@ -64,6 +64,29 @@ or of evaluation, and no special or hand-picked sentences are used.
   one. Prosody reads the open-closure state (an unapplied expectation means a
   continuing contour; a satisfied one makes closure available; terminal
   punctuation closes it).
+- Closures are not limited to the teacher's window. Stock Kokoro sees at most
+  510 phonemes; an open closure (an enumeration, a quotation or parenthesis,
+  a contrast, a counter-example section, an unresolved heteronym, a name and
+  its pronunciation) carries typed state across any distance. Its behaviour
+  is learned from teacher windows that contain both ends and applied at any
+  span, so prosody and pronunciation can use context the teacher never sees.
+- Each closure type also learns its lifetime: how far it usually stays open
+  and which boundaries end it (paragraph, section, heading). An expectation
+  never satisfied within that lifetime is closed by the Student with the
+  type's learned default resolution (contour reset, more probable heteronym
+  reading, quotation ended at the paragraph) and marked as closed by expiry,
+  so its frequency and correctness are measured. An expired closure keeps
+  its references: when a later token matches it, it reopens and binds. If
+  the affected tokens have not been spoken yet, their resolution is revised;
+  if they have, later mentions use the corrected resolution and the reopening
+  is recorded as evidence against that type's lifetime or default.
+- No data structure caps the horizon. Every token has a global identity
+  (book, paragraph, token index, source offset); windows and sentences are
+  references to token ranges, not copies of text; closures reference their
+  opening and closing tokens by identity, at any distance. This holds before
+  long-horizon behaviours are implemented.
+- Emphasis is a typed member of a word: author italics from the source text
+  now, contrast and focus closures later.
 - Expectations are induced by type from the whole corpus. A specific word gets
   its own entry only when held-out evidence supports the split.
 - Held-out evidence is held out by type occurrence.
@@ -96,6 +119,20 @@ Measure before building: the fraction of the difference in `x` between voices
 explained by a per-channel scale and bias, and how smoothly each voice's
 `s` rows vary with phoneme count.
 
+### Teachers are adapters
+
+The Student's core is teacher-neutral: typed layers, closures, pronunciation,
+and prosody behaviours in physical units (durations in seconds, pitch in hertz,
+energy, emphasis). Nothing in the core refers to a teacher's frames, token IDs
+or channels. Each teacher has an adapter that converts its evidence into those
+units and binds the Student's neutral output to its renderer's input (for
+Kokoro: `x`, `f0` and the style row). Only the renderer binding is
+teacher-specific and is retrained per teacher. Evidence records which teacher
+produced it, so evidence from several teachers for the same typed objects
+coexists. A later teacher (for example Chatterbox Turbo) is added as a lowered
+port and an adapter, specified from its source at a pinned commit, without
+changing the core.
+
 ### Teacher data
 
 Teacher data comes from our own port of stock Kokoro in lowered PowerShell,
@@ -111,6 +148,51 @@ on Hexagon. Its purpose is that this project never needs Python again.
   `StockCapture` is retired.
 - Training and evaluation use arbitrary content only: no curated, named or
   hand-picked sentences or captures, in training, evaluation or checks.
+- The teacher's input unit is a window of continuous text, never a sentence.
+  Stock Kokoro's PL-BERT attends across its whole input (up to 510 phonemes),
+  so prosody depends on neighbouring sentences. Windows run through the
+  source text in order across sentence and paragraph boundaries, overlap so
+  that each typed occurrence's evidence is taken where it has context on both
+  sides, and vary in length over 1 to 510 phonemes so that every voice-pack
+  row (`pack[len(phonemes) - 1]`) is exercised. Zira receives the same spans.
+- The window bounds only the evidence stock Kokoro can supply; it does not
+  bound the Student. Long-horizon behaviour learns from sources without that
+  limit: Zira's timing, pauses and emphasis over whole paragraphs and
+  sections; the text's own structure (sections, headings, lists, quotations,
+  counter-example sections); and measured context sensitivity, obtained by
+  rendering the same span inside windows with different preceding context
+  and carrying the measured effect beyond 510 phonemes. Kokoro remains the
+  reference for local sound (`x` and voice).
+- Text source: the full text of the Project Gutenberg books in
+  `build/grammar-corpus/raw`, read in order, not the extracted example lists.
+  Sections headed "IMPROPRIETIES FOR CORRECTION." and "FALSE SYNTAX ..." run
+  to the next heading; occurrences from them carry a counter-example flag.
+  Acoustic behaviours learn from them normally; phrasing and closure
+  behaviours use them as negative evidence.
+- The corpus is typed tokens from a lowered tokenizer (no regular
+  expressions): words, numbers, ordinals, punctuation, quotation marks,
+  symbols and transcriber notes, with source spans. Project Gutenberg markup
+  becomes token flags (emphasis from `_..._`, editorial insertion from
+  `[...]`), never deletions. Numbers, dates, times and currency become typed
+  values through .NET conversions, and their spoken forms come from the value.
+- Zira (Windows speech API, `Microsoft Zira Desktop`) reads the whole text,
+  including sentences our phonemizer rejects. Every word token carries both
+  pronunciations as typed members, joined by source span: ours and Zira's
+  (mapped to Kokoro symbols, with her emphasis and timing). Where they agree,
+  ours is used (it carries Kokoro's stress marks); where our phonemizer does
+  not know the word, Zira's is used with primary stress before her emphasized
+  vowel; where they disagree, both are kept and the phonemizer's existing
+  admission rules decide, with Zira authoritative for segments by default.
+  Windows are assembled from the tokens' resolved phonemes and passed to the
+  teacher as phonemes.
+- Teacher evidence passes validity gates before the Student learns from it:
+  complete, aligned with Zira by source span, and agreeing with the resolved
+  pronunciation. Where the resolved pronunciation differs from what stock
+  Kokoro's front end would produce, the teacher is run on the resolved
+  phonemes, so the Student learns Kokoro's sound for the corrected
+  pronunciation. Zira's word and phone events
+  (timing, emphasis, source character spans) supply the typed linguistic
+  structure; Kokoro supplies the acoustics.
 - The teacher decodes each stored utterance with its own voice row,
   `pack[len(phonemes) - 1]`, as the stock captures did, then splits the result
   into typed occurrences. Utterances stay inside the teacher; the Student
@@ -264,6 +346,20 @@ complete.
   dual-analog controller (16 button bits, two 8-bit triggers, four 16-bit stick
   axes). A person can drive it from a physical controller as a manual check
   that every required sound is reachable through the controls.
+- Listening mode: the Student also maps audio back to the same symbolic event
+  stream it plays, not to stored units: phone onsets and offsets, pitch as a
+  continuous pitch-bend control, emphasis as velocity, and the other controls
+  as controller changes. Speaking turns events into audio; listening turns
+  audio into events. Teacher renders are labelled audio (Kokoro's per-token
+  durations, Zira's per-phone timing), so listening trains on the same
+  evidence. Uses: resolving pronunciation disagreements by what was actually
+  spoken, and checking the Student's own output against the events it
+  intended.
+- The event stream is the MIDI 2.0 Universal MIDI Packet format with
+  speech-specific extensions: phones as per-note events, F0 as per-note
+  pitch bend, emphasis as velocity, other controls as per-note controllers.
+  It is not specific to speech, so the same Student may later produce a
+  procedural first pass for music tracks.
 - Generator replacement: a fixed acoustic instrument with no learned values
   (excitation, resonances on the resident loop, built-in stop, fricative and
   nasal techniques, prosody-driven timing), played by the Student. Phase
