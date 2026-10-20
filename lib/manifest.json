@@ -59,6 +59,18 @@
       }
     ]
   },
+  "pwshAdb": {
+    "repo": "https://github.com/MansfieldPlumbing/Pwsh",
+    "commit": "f996ac4eda8fa5469023e71342eac3b49398245f",
+    "role": "Pinned PowerShell ADB client over WinUSB for every device operation; no adb.exe or adb server",
+    "files": [
+      {
+        "path": "scripts/adb.ps1",
+        "bytes": 71170,
+        "sha256": "06F92C32E31892F77A9F52981F974DEFE4D44C9965A544254AB6373C9F66DD79"
+      }
+    ]
+  },
   "psLowering": {
     "repo": "https://github.com/MansfieldPlumbing/PSLowering",
     "commit": "1afabe056235a570da29e268824784557d4f6cdd",

@@ -160,25 +160,18 @@ $Python = $env:KOKORO_PYTHON
 
 function Import-Evaluator { Import-Module (Join-Path $Root 'tools/Kokoro.Evaluator.psm1') -Force -Global }
 
-function Get-Adb {
-    $pathCommand = Get-Command adb -ErrorAction Ignore
-    $pathCandidate = if ($null -ne $pathCommand) { $pathCommand.Source } else { $null }
-    foreach ($candidate in $env:KOKORO_ADB, $pathCandidate) {
+# Every device operation goes through the pinned PowerShell ADB client (lib/manifest.json pwshAdb) with -Api.
+function Get-Adb { Import-Evaluator; Get-KokoroAdbClient }
 
-        if ($candidate -and (Test-Path $candidate)) { return $candidate }
-    }
-    throw 'adb not found: set KOKORO_ADB or put adb on PATH.'
-
-}
-
-# Phone facts by SoC only; serials never leave this function.
+# Phone facts by SoC only; a phone is its adb.ps1 device index, and identifiers never leave adb.ps1.
 function Get-Phone {
     $adb = Get-Adb
-    $serials = @(& $adb devices | Select-Object -Skip 1 | Where-Object { $_ -match '\tdevice$' } | ForEach-Object { ($_ -split '\t')[0] })
-    foreach ($s in $serials) { [pscustomobject]@{ Soc = (& $adb -s $s shell getprop ro.soc.model).Trim(); Serial = $s } }
+    foreach ($d in @(& $adb devices -Api | Where-Object { $_.IsAccessible -or $_.Connected })) {
+        [pscustomobject]@{ Soc = ([string](& $adb shell -Api -Device ([string]$d.Index) 'getprop ro.soc.model').Stdout).Trim(); Device = [string]$d.Index }
+    }
 }
 
-function Resume-Phone { $adb = Get-Adb; foreach ($p in Get-Phone) { & $adb -s $p.Serial shell input keyevent KEYCODE_WAKEUP | Out-Null } }
+function Resume-Phone { $adb = Get-Adb; foreach ($p in Get-Phone) { $null = & $adb shell -Api -Device $p.Device 'input keyevent KEYCODE_WAKEUP' } }
 
 function Get-KokoroDeviceReadiness {
     param([ValidateSet('SM8550', 'SM8635')][string] $Soc = 'SM8550',
@@ -187,42 +180,38 @@ function Get-KokoroDeviceReadiness {
     # Only whitelisted hardware facts and project-app booleans leave this function.
     # Never return native command output, identifiers, broad getprop/logcat dumps or personal app inventory.
     $adb = Get-Adb
-    $PSNativeCommandUseErrorActionPreference = $false
+    # One device shell command as a single string, so its own flags never bind to adb.ps1 parameters.
     $probe = {
-        param([string[]] $Arguments)
+        param([string] $Device, [string[]] $Command)
         try {
-            $nativeLines = @(& $adb @Arguments 2>&1)
-            [pscustomobject]@{ ExitCode = $LASTEXITCODE; Text = ($nativeLines -join "`n").Trim() }
+            $result = & $adb shell -Api -Device $Device ($Command -join ' ')
+            [pscustomobject]@{ ExitCode = [int]$result.ExitCode; Text = ([string]$result.Stdout).Trim() }
         } catch { throw 'Private device probe could not execute; native details suppressed.' }
     }
-    $inventory = & $probe -Arguments @('devices')
-    if ($inventory.ExitCode -ne 0) { throw 'Device enumeration failed; native details suppressed.' }
     $targets = [Collections.Generic.List[string]]::new()
-    foreach ($line in ($inventory.Text -split "`n")) {
-        $fields = $line.Trim().Split("`t")
-        if ($fields.Count -ne 2 -or $fields[1] -cne 'device') { continue }
-        $candidateId = $fields[0]
-        $hardware = & $probe -Arguments @('-s', $candidateId, 'shell', 'getprop', 'ro.soc.model')
+    foreach ($candidate in @(& $adb devices -Api | Where-Object { $_.IsAccessible -or $_.Connected })) {
+        $candidateId = [string]$candidate.Index
+        $hardware = & $probe $candidateId @('getprop', 'ro.soc.model')
         if ($hardware.ExitCode -eq 0 -and $hardware.Text -ceq $Soc) { $targets.Add($candidateId) }
     }
     if ($targets.Count -ne 1) { throw "Expected exactly one authorized attached $Soc device, found $($targets.Count); identifiers suppressed." }
     $selectedId = $targets[0]
-    $release = & $probe -Arguments @('-s', $selectedId, 'shell', 'getprop', 'ro.build.version.release')
-    $abi = & $probe -Arguments @('-s', $selectedId, 'shell', 'getprop', 'ro.product.cpu.abilist')
+    $release = & $probe $selectedId @('getprop', 'ro.build.version.release')
+    $abi = & $probe $selectedId @('getprop', 'ro.product.cpu.abilist')
     # Query only the selected project host, never a general app listing.
-    $installed = & $probe -Arguments @('-s', $selectedId, 'shell', 'pm', 'path', $Package)
-    $appAccess = & $probe -Arguments @('-s', $selectedId, 'shell', 'run-as', $Package, 'id', '-u')
-    $startup = & $probe -Arguments @('-s', $selectedId, 'shell', 'run-as', $Package, 'test', '-f', 'files/Start.ps1')
-    $profile = & $probe -Arguments @('-s', $selectedId, 'shell', 'run-as', $Package, 'test', '-f', 'files/PROFILE.PS1')
-    $consoleStartup = & $probe -Arguments @('-s', $selectedId, 'shell', 'run-as', $Package, 'test', '-f', 'files/app-scripts/Start-Console.ps1')
-    $process = & $probe -Arguments @('-s', $selectedId, 'shell', 'pidof', $Package)
-    $diagnosticReceipt = & $probe -Arguments @('-s', $selectedId, 'shell', 'run-as', $Package, 'cat', 'files/kokoro/generator-tail/receipt.txt')
+    $installed = & $probe $selectedId @('pm', 'path', $Package)
+    $appAccess = & $probe $selectedId @('run-as', $Package, 'id', '-u')
+    $startup = & $probe $selectedId @('run-as', $Package, 'test', '-f', 'files/Start.ps1')
+    $profile = & $probe $selectedId @('run-as', $Package, 'test', '-f', 'files/PROFILE.PS1')
+    $consoleStartup = & $probe $selectedId @('run-as', $Package, 'test', '-f', 'files/app-scripts/Start-Console.ps1')
+    $process = & $probe $selectedId @('pidof', $Package)
+    $diagnosticReceipt = & $probe $selectedId @('run-as', $Package, 'cat', 'files/kokoro/generator-tail/receipt.txt')
     $startedText = [regex]::Match($diagnosticReceipt.Text, '(?m)^Started=([0-9TZ:.+-]+)').Groups[1].Value
     $hostStages = [Collections.Generic.List[string]]::new()
     $fatalSignal = ''
     if ($startedText -and $appAccess.Text -match '^\d+$') {
         $epoch = [DateTimeOffset]::Parse($startedText, [Globalization.CultureInfo]::InvariantCulture).ToUnixTimeSeconds()
-        $hostLog = & $probe -Arguments @('-s', $selectedId, 'logcat', '-d', '-T', "$epoch.000", "--uid=$($appAccess.Text)", '-s', 'Pwsh:I', 'libc:E', 'AndroidRuntime:E', '*:S')
+        $hostLog = & $probe $selectedId @('logcat', '-d', '-T', "$epoch.000", "--uid=$($appAccess.Text)", '-s', 'Pwsh:I', 'libc:E', 'AndroidRuntime:E', "'*:S'")
         foreach ($stage in 'GATE2B managed resolution complete', 'GATE2C CreateDefault2', 'GATE2C CreateRunspace', 'GATE2C Open', 'GATE2C DefaultRunspace set', 'GATE2D START_INVOKE_BEGIN', 'GATE2D START_INVOKE_END') {
             if ($hostLog.Text.Contains($stage, [StringComparison]::Ordinal)) { $hostStages.Add($stage) }
         }
@@ -267,9 +256,8 @@ function Install-KokoroDiagnosticHost {
     $phones = @(Get-Phone | Where-Object Soc -CEQ $Soc)
     if ($phones.Count -ne 1) { throw "Expected exactly one authorized attached $Soc target; identifiers suppressed." }
     $adb = Get-Adb
-    $PSNativeCommandUseErrorActionPreference = $false
-    $installResult = @(& $adb -s $phones[0].Serial install -r $apkPath 2>&1)
-    if ($LASTEXITCODE -ne 0 -or 'Success' -cnotin $installResult) { throw 'Diagnostic host installation failed; native details suppressed.' }
+    $installResult = & $adb install -Api -Device $phones[0].Device $apkPath '-r'
+    if (([string]$installResult.Stdout) -cnotmatch '(?m)^Success\s*$') { throw 'Diagnostic host installation failed; native details suppressed.' }
     Get-KokoroDeviceReadiness -Soc $Soc -Package $packageReceipt.Package
 }
 
@@ -552,9 +540,9 @@ function Invoke-KokoroDeviceJob {
         [pscustomobject] $EmissionArtifact)
     Resume-Phone
     if ($null -ne $EmissionArtifact) {
-        $out = & (Join-Path $Root 'tools/Invoke-GeneratorTailProbe.ps1') -EmissionDirectory $EmissionDirectory -EmissionArtifact $EmissionArtifact -FixtureDirectory $InputDirectory -Soc $Soc -Runs $Runs -Package $Package -TimeoutSeconds 300 2>&1
+        $out = & (Join-Path $Root 'tools/Invoke-GeneratorTailProbe.ps1') -EmissionDirectory $EmissionDirectory -EmissionArtifact $EmissionArtifact -FixtureDirectory $InputDirectory -Soc $Soc -Runs $Runs -Package $Package -TimeoutSeconds 300 -Adb (Get-Adb) 2>&1
     } else {
-        $out = & (Get-Process -Id $PID).Path -NoProfile -File (Join-Path $Root 'tools/Invoke-GeneratorTailProbe.ps1') -EmissionDirectory $EmissionDirectory -FixtureDirectory $InputDirectory -Soc $Soc -Runs $Runs -Package $Package -TimeoutSeconds 300 2>&1
+        $out = & (Get-Process -Id $PID).Path -NoProfile -File (Join-Path $Root 'tools/Invoke-GeneratorTailProbe.ps1') -EmissionDirectory $EmissionDirectory -FixtureDirectory $InputDirectory -Soc $Soc -Runs $Runs -Package $Package -TimeoutSeconds 300 -Adb (Get-Adb) 2>&1
     }
     $text = ($out | ForEach-Object { "$_" }) -join "`n"
     $field = { param([string] $n) if ($text -match "(?m)\b$n=(\S+)") { $Matches[1] } }
@@ -2430,23 +2418,8 @@ function New-KokoroDiagnosticHost {
     $buildPrefix = [IO.Path]::GetFullPath($Build) + [IO.Path]::DirectorySeparatorChar
     if (-not $outputPath.StartsWith($buildPrefix, [StringComparison]::OrdinalIgnoreCase) -or
         (Test-Path -LiteralPath $outputPath)) { throw 'Choose a fresh host output directory under build/.' }
-    $upstream = (Get-Content (Join-Path $Root 'lib/manifest.json') -Raw | ConvertFrom-Json).pwshUpstream
-    $sourceRoot = Join-Path $Build "upstream/Pwsh-$($upstream.commit)"
-    if (-not (Test-Path -LiteralPath $sourceRoot)) {
-        $archivePath = Join-Path $Build "upstream/$($upstream.commit).zip"
-        [void][IO.Directory]::CreateDirectory((Split-Path $archivePath))
-        $client = [Net.Http.HttpClient]::new()
-        try {
-            $archiveBytes = $client.GetByteArrayAsync("https://codeload.github.com/MansfieldPlumbing/Pwsh/zip/$($upstream.commit)").GetAwaiter().GetResult()
-            [IO.File]::WriteAllBytes($archivePath, $archiveBytes)
-        } finally { $client.Dispose() }
-        Expand-Archive -LiteralPath $archivePath -DestinationPath (Split-Path $sourceRoot)
-    }
-    foreach ($sourcePin in $upstream.files) {
-        $sourcePath = Join-Path $sourceRoot $sourcePin.path
-        if ((Get-Item -LiteralPath $sourcePath).Length -ne [long]$sourcePin.bytes -or
-            (Get-FileHash -LiteralPath $sourcePath).Hash -cne $sourcePin.sha256) { throw 'Pinned host source integrity failed.' }
-    }
+    Import-Evaluator
+    $sourceRoot = Get-KokoroPwshSource -Pin pwshUpstream
     $setupPath = Join-Path $sourceRoot 'setup.ps1'
     # Admission also checks that the running emitter and packaged SMA versions match.
     $null = & (Join-Path $Root 'src/build/Import-PwshBuildFunction.ps1') -SetupPath $setupPath -FunctionName New-SignedApk

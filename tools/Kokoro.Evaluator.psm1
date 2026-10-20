@@ -31,6 +31,35 @@ $script:Standards = @{
     Fail = 'Make this failure impossible to repeat: a check, a clearer error or a tool fix, not a handoff note.'
 }
 
+# A pinned Pwsh source (lib/manifest.json pwshUpstream or pwshAdb): the repository archive at the pinned commit, extracted
+# once under build/upstream, every pinned file checked by length and SHA-256 before use.
+function Get-KokoroPwshSource {
+    param([Parameter(Mandatory)][ValidateSet('pwshUpstream', 'pwshAdb')][string]$Pin)
+    $source = (Get-Content -LiteralPath (Join-Path $script:Root 'lib/manifest.json') -Raw | ConvertFrom-Json).$Pin
+    if ([string]$source.commit -cnotmatch '^[0-9a-f]{40}$' -or [string]$source.repo -cne 'https://github.com/MansfieldPlumbing/Pwsh') { throw "The $Pin source identity is not admitted." }
+    $sourceRoot = Join-Path $script:Root "build/upstream/Pwsh-$($source.commit)"
+    if (-not (Test-Path -LiteralPath $sourceRoot)) {
+        $archivePath = Join-Path $script:Root "build/upstream/$($source.commit).zip"
+        [void][IO.Directory]::CreateDirectory((Split-Path $archivePath))
+        $client = [Net.Http.HttpClient]::new()
+        try {
+            $archiveBytes = $client.GetByteArrayAsync("https://codeload.github.com/MansfieldPlumbing/Pwsh/zip/$($source.commit)").GetAwaiter().GetResult()
+            [IO.File]::WriteAllBytes($archivePath, $archiveBytes)
+        } finally { $client.Dispose() }
+        Expand-Archive -LiteralPath $archivePath -DestinationPath (Split-Path $sourceRoot)
+    }
+    foreach ($sourcePin in $source.files) {
+        $sourcePath = Join-Path $sourceRoot $sourcePin.path
+        if (-not (Test-Path -LiteralPath $sourcePath) -or (Get-Item -LiteralPath $sourcePath).Length -ne [long]$sourcePin.bytes -or
+            (Get-FileHash -LiteralPath $sourcePath).Hash -cne $sourcePin.sha256) { throw "Pinned $Pin source integrity failed: $($sourcePin.path)." }
+    }
+    $sourceRoot
+}
+
+# The pinned PowerShell ADB client (Pwsh scripts/adb.ps1). Called with -Api it returns objects (shell: Stdout, Stderr,
+# ExitCode; exec-out: bytes); devices are selected by index and their identifiers never leave it.
+function Get-KokoroAdbClient { Join-Path (Get-KokoroPwshSource -Pin pwshAdb) 'scripts/adb.ps1' }
+
 function Get-KokoroSourceKey {
     $files = @(foreach ($d in 'hexagon', 'kernels', 'jobs') { Get-ChildItem (Join-Path $script:Root "src/$d") -Filter '*.ps1' -File }) + @(Get-Item (Join-Path $script:Root 'Invoke-HexagonDevelopment.ps1')) + @(Get-Item (Join-Path $script:Root 'tools/Emit-HexagonProbe.ps1'))
     $lines = foreach ($f in ($files | Sort-Object FullName)) { "$($f.Name)=$((Get-FileHash -LiteralPath $f.FullName).Hash)" }
@@ -219,9 +248,9 @@ function Invoke-KokoroExperiment {
         $e = Invoke-KokoroEmission -Kernel $c.Kernel -Parameters $p
         $inputDir = Join-Path $script:Root $c.Input
         if ($null -ne $e.PSObject.Properties['Layout']) {
-            $out = & (Join-Path $script:Root 'tools/Invoke-GeneratorTailProbe.ps1') -EmissionDirectory $e.Directory -EmissionArtifact $e -FixtureDirectory $inputDir -Soc $c.Soc -Runs $Runs -Package $Package -TimeoutSeconds 300 2>&1
+            $out = & (Join-Path $script:Root 'tools/Invoke-GeneratorTailProbe.ps1') -EmissionDirectory $e.Directory -EmissionArtifact $e -FixtureDirectory $inputDir -Soc $c.Soc -Runs $Runs -Package $Package -TimeoutSeconds 300 -Adb (Get-KokoroAdbClient) 2>&1
         } else {
-            $out = & $script:Pwsh -NoProfile -File (Join-Path $script:Root 'tools/Invoke-GeneratorTailProbe.ps1') -EmissionDirectory $e.Directory -FixtureDirectory $inputDir -Soc $c.Soc -Runs $Runs -Package $Package -TimeoutSeconds 300 2>&1
+            $out = & $script:Pwsh -NoProfile -File (Join-Path $script:Root 'tools/Invoke-GeneratorTailProbe.ps1') -EmissionDirectory $e.Directory -FixtureDirectory $inputDir -Soc $c.Soc -Runs $Runs -Package $Package -TimeoutSeconds 300 -Adb (Get-KokoroAdbClient) 2>&1
         }
         $text = ($out | ForEach-Object { "$_" }) -join "`n"
         $field = { param([string]$n) $i = $text.IndexOf("$n="); if ($i -lt 0) { return $null }; $j = $i + $n.Length + 1; $k = $j; while ($k -lt $text.Length -and -not [char]::IsWhiteSpace($text[$k])) { $k++ }; $text.Substring($j, $k - $j) }
@@ -327,4 +356,4 @@ function Update-KokoroRatchet {
     Write-Host "Ratchet moved for $($c.Name); commit tools/Kokoro.Ratchet.psd1 with the change and its score line." -ForegroundColor Green
 }
 
-Export-ModuleMember -Function Get-KokoroSourceKey, Get-KokoroRatchetCase, Invoke-KokoroEmission, Test-KokoroKernel, New-KokoroJobInput, Invoke-KokoroExperiment, Invoke-KokoroSweep, Compare-KokoroSetup, Test-KokoroRatchet, Update-KokoroRatchet
+Export-ModuleMember -Function Get-KokoroPwshSource, Get-KokoroAdbClient, Get-KokoroSourceKey,Get-KokoroRatchetCase, Invoke-KokoroEmission, Test-KokoroKernel, New-KokoroJobInput, Invoke-KokoroExperiment, Invoke-KokoroSweep, Compare-KokoroSetup, Test-KokoroRatchet, Update-KokoroRatchet

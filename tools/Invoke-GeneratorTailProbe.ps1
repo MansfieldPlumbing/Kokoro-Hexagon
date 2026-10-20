@@ -16,7 +16,8 @@ param(
     [Parameter(Mandatory)][string] $FixtureDirectory,
     [ValidateRange(1, 121)][int] $Runs = 3,
     [ValidateSet('SM8550', 'SM8635')][string] $Soc = 'SM8550',
-    [string] $Adb = $env:KOKORO_ADB,
+    # The pinned PowerShell ADB client (Kokoro.Evaluator.psm1 Get-KokoroAdbClient), called with -Api.
+    [Parameter(Mandatory)][string] $Adb,
     [string] $Package = 'dev.mansfieldplumbing.kokoro',
     [ValidateRange(10, 600)][int] $TimeoutSeconds = 180,
     [pscustomobject] $EmissionArtifact,
@@ -49,16 +50,19 @@ if ([long]$layout.Tiles -lt 1 -or [long]$layout.Tiles -gt 1024 -or
     [long]$layout.PcmOffset + 2L * [long]$layout.Samples -gt [long]$layout.OutputBytes) {
     throw 'Runner layout is out of range.'
 }
-if (-not $Adb) { $adbCommand = Get-Command adb -ErrorAction Ignore; if ($adbCommand) { $Adb = $adbCommand.Source } }
-if (-not $Adb) { throw 'adb not found: pass -Adb, set KOKORO_ADB, or put adb on PATH.' }
-$serials = @(& $Adb devices | ForEach-Object { $p = $_.Split("`t"); if ($p.Count -eq 2 -and $p[1] -eq 'device') { $p[0] } } |
-    Where-Object { (& $Adb -s $_ shell getprop ro.soc.model).Trim() -eq $Soc })
+if ([IO.Path]::GetFileName($Adb) -cne 'adb.ps1' -or -not (Test-Path -LiteralPath $Adb)) { throw 'Pass -Adb, the pinned PowerShell ADB client (Get-KokoroAdbClient).' }
+$serials = @(& $Adb devices -Api | Where-Object { $_.IsAccessible -or $_.Connected } | ForEach-Object { [string]$_.Index } |
+    Where-Object { ([string](& $Adb shell -Api -Device $_ 'getprop ro.soc.model').Stdout).Trim() -eq $Soc })
 if ($serials.Count -ne 1) { throw "Expected exactly one attached $Soc device, found $($serials.Count)." }
 $serial = $serials[0]
+# push copies a file; every other operation is one device shell command, sent as a single string so its flags never
+# bind to adb.ps1 parameters. Returns the command's output lines.
 $run = { param([string[]]$Arguments)
-    $result = & $Adb -s $serial @Arguments 2>&1
-    if ($LASTEXITCODE) { throw "Device operation failed: $($Arguments[0]) $($Arguments[1])" }
-    $result }
+    if ($Arguments[0] -ceq 'push') { $null = & $Adb push -Api -Device $serial $Arguments[1] $Arguments[2]; return }
+    $words = if ($Arguments[0] -ceq 'shell') { @($Arguments | Select-Object -Skip 1) } else { $Arguments }
+    $result = & $Adb shell -Api -Device $serial ($words -join ' ')
+    if ([int]$result.ExitCode) { throw "Device operation failed: $($Arguments[0]) $($Arguments[1])" }
+    ([string]$result.Stdout) -split "`r?`n" }
 $harness = Join-Path $PSScriptRoot '..\src\runspace\KokoroGeneratorTailProbe.ps1'
 $binding = Join-Path $PSScriptRoot '..\src\runspace\Native.Binding.psm1'
 $aaudio = Join-Path $PSScriptRoot '..\src\runspace\Audio.AAudio.psm1'
@@ -164,8 +168,8 @@ try {
     $hash = [regex]::Match($receipt, '(?m)^OutputSHA256=([0-9A-F]{64})')
     if ($hash.Success) {
         $outputPath = Join-Path $emission "device-output-$Soc-$id.bin"
-        & $Adb -s $serial exec-out run-as $Package cat "$target/tail-output.bin" > $outputPath
-        if ($LASTEXITCODE -or (Get-FileHash -LiteralPath $outputPath).Hash -cne $hash.Groups[1].Value) { throw 'Retrieved device output integrity mismatch.' }
+        [IO.File]::WriteAllBytes($outputPath, [byte[]](& $Adb exec-out -Api -Device $serial "run-as $Package cat $target/tail-output.bin"))
+        if ((Get-FileHash -LiteralPath $outputPath).Hash -cne $hash.Groups[1].Value) { throw 'Retrieved device output integrity mismatch.' }
         "OutputPath=$outputPath"
     }
     $receipt
@@ -177,7 +181,7 @@ try {
         if ($startupUid -match '^\d+$') {
             # Read only the project UID, fixed Pwsh tag and this launch's time
             # window, including an early exit. Only source-defined labels leave memory.
-            $startupLog = ((& $run @('logcat', '-d', '-T', "$startupEpoch.000", "--uid=$startupUid", '-s', 'Pwsh:I', 'libc:E', '*:S')) -join "`n")
+            $startupLog = ((& $run @('logcat', '-d', '-T', "$startupEpoch.000", "--uid=$startupUid", '-s', 'Pwsh:I', 'libc:E', "'*:S'")) -join "`n")
             $fatal = [regex]::Match($startupLog, 'Fatal signal (6|11)\b')
             if ($fatal.Success) { $startupMarkers.Add("NativeFatalSignal=$($fatal.Groups[1].Value)") }
             foreach ($marker in 'GATE2A Admit returned', 'GATE2B begin', 'GATE2B exception',
