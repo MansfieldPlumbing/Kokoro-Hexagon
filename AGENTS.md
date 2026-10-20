@@ -16,6 +16,16 @@ Follow [the shared agent rules](../Pwsh-Development/AGENTS.md).
 
 We improve a few single-file tools iteratively. Each subsystem has one owning file, laid out like Pwsh's `setup.ps1`: declared records (`$script:...` tables), one shared context, and steps that check their own output. The Hexagon builder is one file: instruction records, reusable fragments, kernel records, encoder, emitter, simulator and phone run. A new capability is a new record, fragment or step in the owner.
 
+Target layout: a few single-file appliances reached through `Invoke-KokoroDevelopment.ps1`.
+
+- `Invoke-HexagonDevelopment.ps1` is the Hexagon appliance: every instruction, fragment, kernel, job, emitter, simulator and phone-run record lives in it. The kernels and jobs under `src/` fold into it one at a time as records and fragments, each fold checked byte-identical with `VerifyEmission`, and the folded file is removed in the same commit.
+- `student/Invoke-Student.ps1` is the Student appliance and the pattern for the others: declared records, one shared context, lowered kernels in one class, typed objects with ETS members, and steps reached by name.
+- `phonemizer/Invoke-EnglishPhonemizer.ps1` is the phonemizer appliance.
+
+Tools are composable: functions over typed objects in one process, reused by every step that needs them, extended with a parameter or record rather than copied. Each change makes the owner more capable and leaves fewer lines than writing the capability separately would.
+
+Commit continually. Every step that passes `Verify` is committed and pushed before the next begins, so work is never stranded in a working tree.
+
 This repository grew to 131 files across 14 folders because agents did the following. Each is now prohibited:
 
 - **A new file per task.** Every kernel, job, fixture builder, probe and test became its own file. Do not create a tracked file or folder without the team lead's approval in chat. The default answer is to extend the owner.
