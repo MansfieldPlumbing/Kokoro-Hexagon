@@ -46,6 +46,7 @@ Text → custom CoreCLR phonemizer (ARM) → typed phonemes and prosody
 | DSP synthesis, decoder through PCM | Measured on SM8550 |
 | Custom CoreCLR phonemizer front end, on the phone | Measured |
 | Fixed normalization constants instead of runtime AdaIN statistics | Experimental: 99.6 ms, below the quality floor |
+| Student supplying the generator's inputs and AdaIN coefficients | Rebuilding: corpus, pronunciations and teacher in lowered PowerShell |
 | Streaming at any length (time-major schedule) | Next |
 | Time to first audio, end to end | Not yet measured |
 | SM8635 | Not yet run |
@@ -69,6 +70,20 @@ Machine-specific locations come from environment variables: `KOKORO_ADB` (or `ad
 on `PATH`) for phone commands, `KOKORO_PYTHON` for stock reference captures,
 `KOKORO_STOCK_SOURCE` for the pinned Kokoro source, and `HEXAGON_SDK_TOOLS` for the
 optional assembler check.
+
+## Layout
+
+Each subsystem is one file of declared records and steps, reached through
+`Invoke-KokoroDevelopment.ps1`:
+
+| File | Subsystem |
+|---|---|
+| `Invoke-HexagonDevelopment.ps1` | Hexagon instruction records, encoder, kernels and emission |
+| `student/Invoke-Student.ps1` | The Student: text corpus, pronunciations, teacher and training |
+| `phonemizer/Invoke-EnglishPhonemizer.ps1` | The English phonemizer and its compiled driver |
+| `tools/Invoke-KokoroPrecomputedDecoder.ps1` | The lowered host port of stock Kokoro used as the teacher |
+
+Kernels and jobs under `src/` are being folded into the Hexagon file.
 
 ## Published comparisons
 
