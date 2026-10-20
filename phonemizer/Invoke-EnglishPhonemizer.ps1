@@ -1483,8 +1483,12 @@ class CoreEngine {
     [void] Scan([string]$text) {
         if([object]::ReferenceEquals($null,$text) -or $text.Length -gt 8192){throw [ArgumentOutOfRangeException]::new('text')}
         [int]$at=0
-        while($at -lt $text.Length){
-            if([char]::IsWhiteSpace($text.get_Chars($at))){$at++;continue}
+        while($at -lt $text.Length){$at=$this.ScanNext($text,$at)}
+    }
+    [int] ScanNext([string]$text,[int]$at) {
+        if([object]::ReferenceEquals($null,$text) -or $text.Length -gt 8192 -or $at -lt 0 -or $at -gt $text.Length){throw [ArgumentOutOfRangeException]::new('text')}
+        while($at -lt $text.Length -and [char]::IsWhiteSpace($text.get_Chars($at))){$at++}
+        if($at -eq $text.Length){return $at}
             [int]$start=$at;[string]$kind='Word'
             [char]$first=$text.get_Chars($at)
             # Polish: a minus sign that starts a number joins it.
@@ -1506,7 +1510,7 @@ class CoreEngine {
             [CoreOccurrence]$o=[CoreOccurrence]::new();$o.Text=$text.Substring($start,$at-$start);$o.Start=$start;$o.End=$at;$o.Kind=$kind;$o.LexicalId=-1
             if($kind -ceq 'Word'){$o.LexicalId=[Lexicon]::Find($o.Text);if($o.LexicalId -ge 0){$o.Capabilities=[Lexicon]::Capabilities($o.LexicalId)}}
             $this.Add($o)
-        }
+        return $at
     }
     static [void] Alternatives([Collections.Generic.List[string]]$values,[int]$id,[int]$role) {
         [string[]]$parts=[Lexicon]::Phones($id,$role).Split([Convert]::ToChar(124),[StringSplitOptions]::RemoveEmptyEntries)
@@ -2934,9 +2938,18 @@ function Test-EnglishCoreDriver {
         @('What are you looking at?','wˈʌt ɑɹ ju lˈʊkɪŋ æt ?')
     )
     $normalizationOperations=[Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
+    $engineType=$driver.Assembly.GetType('CoreEngine',$true)
     foreach($case in $polishFixtures){
         $result=$driver.Run.Invoke($case[0])
         Assert-EnglishContract ('polish fixture: '+$case[0]) ($result.Complete -and $result.KokoroPhones -ceq $case[1])
+        $engine=$engineType::new();$engine.Polish=$true;$offset=0
+        while($offset -lt $case[0].Length){
+            $nextOffset=$engine.ScanNext($case[0],$offset)
+            Assert-EnglishContract 'incremental scanner advances' ($nextOffset -gt $offset)
+            $offset=$nextOffset
+        }
+        $incremental=$engine.Result($case[0])
+        Assert-EnglishContract 'incremental scanner preserves interpretation' ($incremental.KokoroPhones -ceq $result.KokoroPhones -and $incremental.GrammarStatus -ceq $result.GrammarStatus)
         foreach($token in $result.Tokens){
             if($null -eq $token.Normalization){continue}
             [void]$normalizationOperations.Add($token.Normalization.Operation)
