@@ -1272,6 +1272,27 @@ class CoreCandidate {
         return $c
     }
 }
+class CoreNormalizationDecision {
+    CoreNormalizationDecision() {}
+    [string]$Operation
+    [string]$Operand
+    [string]$PreviousWord
+    [int]$Role
+    [int]$ContextStart
+    [int]$ContextEnd
+    [bool]$Stress
+    [bool]$Flap
+    [string] Realize() {
+        [string]$phone=$null
+        if($this.Operation -ceq 'Number'){$phone=[CorePolish]::Number($this.Operand,$this.PreviousWord)}
+        elseif($this.Operation -ceq 'Morphology'){$phone=[CorePolish]::Inflect($this.Operand,$this.Role)}
+        else{throw [InvalidOperationException]::new('Unsupported normalization operation.')}
+        if([object]::ReferenceEquals($null,$phone)){throw [InvalidOperationException]::new('Normalization operands are unresolved.')}
+        if($this.Stress){$phone=[CorePolish]::Stress($phone)}
+        if($this.Flap){$phone=[CorePolish]::Flap($phone)}
+        return $phone
+    }
+}
 class CoreToken {
     CoreToken() {}
     [int]$Identity
@@ -1282,6 +1303,7 @@ class CoreToken {
     [string]$Pron
     [string]$PronunciationSource='CompiledLexicon'
     [string]$Polish=''
+    [CoreNormalizationDecision]$Normalization
     [int[]]$SymbolIds
     [int[]]$Roles
     [string[]]$Alternatives
@@ -2068,7 +2090,7 @@ class CorePolish {
             if(-not [object]::ReferenceEquals($null,$chosen)){$t.Pron=$chosen;$t.PronunciationSource='HeteronymDefault'}
             return
         }
-        [string]$phone=$null;[string]$source='Number'
+        [string]$phone=$null;[string]$source='Number';[int]$normalizationRole=0
         if([CorePolish]::IsNumber($text)){$phone=[CorePolish]::Number($text,$previous)}
         elseif([CorePolish]::Abbreviations().ContainsKey($text) -and [CorePolish]::IsPeriod($engine,$i+1)){
             $source='Abbreviation';$phone=[CorePolish]::Abbreviations().get_Item($text)
@@ -2081,8 +2103,18 @@ class CorePolish {
             $phone=[CorePolish]::Lexical2($lower)
             if([object]::ReferenceEquals($null,$phone)){$phone=[CorePolish]::Contract($lower,[CorePolish]::Role($engine,$tokens,$i,0))}
         }
-        else{$source='Morphology';$phone=[CorePolish]::Inflect($lower,[CorePolish]::Role($engine,$tokens,$i,0))}
-        if(-not [object]::ReferenceEquals($null,$phone)){$t.Pron=$phone;$t.PronunciationSource=$source}
+        else{$source='Morphology';$normalizationRole=[CorePolish]::Role($engine,$tokens,$i,0);$phone=[CorePolish]::Inflect($lower,$normalizationRole)}
+        if(-not [object]::ReferenceEquals($null,$phone)){
+            $t.Pron=$phone;$t.PronunciationSource=$source
+            if($source -ceq 'Number' -or $source -ceq 'Morphology'){
+                [CoreNormalizationDecision]$decision=[CoreNormalizationDecision]::new()
+                $decision.Operation=$source;$decision.Operand=$text
+                if($source -ceq 'Morphology'){$decision.Operand=$lower}
+                $decision.PreviousWord=$previous;$decision.Role=$normalizationRole
+                $decision.ContextStart=[Math]::Max(0,$i-2);$decision.ContextEnd=[Math]::Min($tokens.Length-1,$i+1)
+                $t.Normalization=$decision
+            }
+        }
     }
     static [string] Lexical2([string]$word) {
         [int]$id=[Lexicon]::Find($word)
@@ -2127,11 +2159,13 @@ class CorePolish {
                     if($phone -cne $t.Pron){$t.Polish=$t.Polish+'StrongForm;'}
                 }
             }elseif(-not $function){
+                if(-not [object]::ReferenceEquals($null,$t.Normalization)){$t.Normalization.Stress=$true}
                 [string]$stressed=[CorePolish]::Stress($phone)
                 if($stressed -cne $phone){$t.Polish=$t.Polish+'Stress;'}
                 $phone=$stressed
             }
             if($source -cne 'ZiraCorrection'){
+                if(-not [object]::ReferenceEquals($null,$t.Normalization)){$t.Normalization.Flap=$true}
                 [string]$flapped=[CorePolish]::Flap($phone)
                 if($flapped -cne $phone){$t.Polish=$t.Polish+'Flap;'}
                 $phone=$flapped
@@ -2899,10 +2933,19 @@ function Test-EnglishCoreDriver {
         @('Give it to him and to her.','ɡˈɪv ɪt tʊ hɪm æn tʊ hɜɹ .'),
         @('What are you looking at?','wˈʌt ɑɹ ju lˈʊkɪŋ æt ?')
     )
+    $normalizationOperations=[Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
     foreach($case in $polishFixtures){
         $result=$driver.Run.Invoke($case[0])
         Assert-EnglishContract ('polish fixture: '+$case[0]) ($result.Complete -and $result.KokoroPhones -ceq $case[1])
+        foreach($token in $result.Tokens){
+            if($null -eq $token.Normalization){continue}
+            [void]$normalizationOperations.Add($token.Normalization.Operation)
+            $expected=$token.Pron;$token.Pron=$null
+            try{Assert-EnglishContract 'typed normalization replay without target phones' ($token.Normalization.Realize() -ceq $expected)}
+            finally{$token.Pron=$expected}
+        }
     }
+    Assert-EnglishContract 'number and morphology operations are replayed' ($normalizationOperations.Contains('Number') -and $normalizationOperations.Contains('Morphology'))
     Assert-EnglishContract 'independent fixed record fixture' ($record.KokoroPhones -ceq 'ðə ɹˈɛkəɹd ɹɪkˈɔɹdz ðə ɹˈɛkəɹd .')
     $unknown=$driver.Run.Invoke('The quuxblarg records the record.')
     Assert-EnglishContract 'standalone source coverage rejection' (-not $unknown.Complete -and $null -eq $unknown.KokoroPhones -and $unknown.OovSpans.Count -gt 0)
