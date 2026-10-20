@@ -12,6 +12,12 @@ as the primary measured objective: our phonemizer on CoreCLR, the Student, and
 Kokoro's frozen generator on Hexagon. The Student learns from training text,
 retains what it has learned as stored percepts, and generalizes to unseen text.
 
+The Student is a procedural learning system, not a neural network or
+machine-learning model: it learns through rules, types and extended types
+(ETS members bound to typed objects). PowerShell is used as a live object
+system in the manner of Smalltalk or Lisp, with the full .NET runtime behind
+it, not as a shell.
+
 The design objective is amortization: every cost is paid once, at the coarsest
 rate that allows it, and reused at the audio rate. Per device: the generator's
 weights, resident once and shared by every voice. Per voice: the voice record
@@ -51,14 +57,15 @@ earlier StudentV2 work.
 ### Boundary
 
 The Student replaces everything in Kokoro up to and including the decoder and
-supplies the frozen generator's inputs, `Generator.forward(x, s, f0)` in
-upstream `kokoro/istftnet.py`:
+drives the frozen generator. Stock Kokoro calls it as
+`Generator.forward(x, s, f0)` in upstream `kokoro/istftnet.py`; here `s` is
+not used, and AdaIN conditioning comes from the Student's controller stream:
 
 | Input | Shape | Rate |
 | --- | --- | --- |
 | `x` | 512 channels | one vector per generator tick (300 samples at 24 kHz, 80 per second) |
 | `f0` | 1 value | one per tick; zero is unvoiced |
-| `s` | 128 values | per utterance: `ref_s[:, :128]`, the voice-pack row selected by phoneme count (`pipeline.py`: `pack[len(ps)-1]`) |
+| `s` | 128 values | stock only, not used here: per utterance, `ref_s[:, :128]`, the voice-pack row selected by phoneme count (`pipeline.py`: `pack[len(ps)-1]`) |
 
 Kokoro components the Student replaces: PL-BERT and `bert_encoder`, the
 duration predictor, the F0 and N predictor (`F0Ntrain`), the text encoder, the
@@ -70,7 +77,8 @@ Paths into the generator that matter for accuracy:
 - `f0` bypasses the decoder. Inside the generator it builds the harmonic and
   noise source, whose STFT is added at every upsampling stage (`noise_convs`,
   `noise_res`). Errors in `f0` reach every stage.
-- `s` drives AdaIN in every generator resblock and source block.
+- In stock Kokoro `s` drives AdaIN in every generator resblock and source
+  block; here the controller stream does.
 - Token identity reaches the generator only through `x`.
 
 ### Output streams
@@ -110,17 +118,19 @@ can start before the utterance is complete:
   supplied coefficients do not depend on where tiles are cut. Its one
   obligation is to run ahead of playback by at least one tile plus the
   generator's convolution lookahead.
-- Generator stream: per tick, `x` (512 channels) and `f0`; per stage,
-  `x_source` (see Generator implementation); and the coefficients of every
-  AdaIN site, expanded from the control stream.
+- Generator stream: per tick, `x` (512 channels) and `f0`; and the
+  coefficients of every AdaIN site, expanded from the control stream. The
+  source is produced on the DSP from the VTCM phase loop and seeded noise
+  counters (see Generator implementation), so `x_source` is never
+  transferred.
 
 AdaIN coefficients. The generator has 48 AdaIN sites: `resblocks.0-5` and
 `noise_res.0-1`, two per dilation, 24 sites at 256 channels and 24 at 128
 (consistent with the 2,377,728 `fc` parameters). Folding InstanceNorm into
 AdaIN, each site applies a per-channel scale and bias, 18,432 values in all.
-Twelve of the sites are in `noise_res`, the source branch, which runs off the
-DSP; the DSP receives the 36 `resblocks` sites, 13,824 values (6,912 scales
-and 6,912 biases).
+Twelve of the sites are in `noise_res`, the source branch, and 36 in
+`resblocks` (13,824 values: 6,912 scales and 6,912 biases); all run on the
+DSP.
 The stock model computes them from `s` and from moments over the whole
 utterance, which forces whole-utterance execution. The Student supplies them
 instead:
@@ -151,9 +161,11 @@ and supplying coefficients directly cut a decoder chunk from about 13.4 to
 `decoder-direct-coefficients-sm8550-20261010.md`). The generator sites have
 not been measured. Order:
 
-1. Teacher capture: for every window, each generator site's folded
-   coefficients from the whole window, recorded by the lowered teacher.
-   Supplying them back must reproduce the teacher's PCM exactly.
+1. Teacher capture: the coefficients each generator site applies, recorded
+   by the lowered teacher as evidence for the controller state that
+   reproduces them. Supplying them back must reproduce the teacher's PCM
+   exactly. The window is only the teacher's evidence scope; no moments over
+   a span are carried into the Student.
 2. Representation: the smallest k for which fitted `base` and `P` reproduce
    the captured coefficients, scored by generator PCM SNR against the teacher.
 3. Learnability: the Student's control stream predicts `v(t)` on held-out
@@ -315,8 +327,9 @@ predictors and decoder on every utterance:
 
 - Percepts are shared across voices and trained on all voices' teacher output.
 - Each voice is a record:
-  - the generator style rows (`ref_s[:, :128]`), or a smaller representation if
-    they vary smoothly with phoneme count;
+  - each AdaIN site's `base` and `P`: how the voice responds to the
+    controller, in place of the generator style rows (`ref_s[:, :128]`)
+    and the `fc` layers, with no dependence on phoneme count;
   - a transform of `x` across all 512 channels (per-channel scale and bias plus a
     residual), since the decoder imposed the voice on `x` largely through AdaIN;
   - prosody style (timing and pitch behavior), which replaces the role of
@@ -324,8 +337,7 @@ predictors and decoder on every utterance:
 - Switching voices replaces the record. Blending records is possible.
 
 Measure before building: the fraction of the difference in `x` between voices
-explained by a per-channel scale and bias, and how smoothly each voice's
-`s` rows vary with phoneme count.
+explained by a per-channel scale and bias.
 
 ### Teachers are adapters
 
@@ -334,7 +346,7 @@ and prosody behaviours in physical units (durations in seconds, pitch in hertz,
 energy, emphasis). Nothing in the core refers to a teacher's frames, token IDs
 or channels. Each teacher has an adapter that converts its evidence into those
 units and binds the Student's neutral output to its renderer's input (for
-Kokoro: `x`, `f0` and the style row). Only the renderer binding is
+Kokoro: `x`, `f0` and the controller's expansion into each AdaIN site). Only the renderer binding is
 teacher-specific and is retrained per teacher. Evidence records which teacher
 produced it, so evidence from several teachers for the same typed objects
 coexists. A later teacher (for example Chatterbox Turbo) is added as a lowered
@@ -449,8 +461,7 @@ on Hexagon. Its purpose is that this project never needs Python again.
   carries its left context from one tile to the next. The Student supplies
   each AdaIN site's scale and bias, which removes the generator's only
   whole-utterance dependency (`nn.InstanceNorm1d` over the full time axis in
-  `AdaIN1d`). Until residency is reached, the generator runs layer by layer
-  over spans with weights loaded once per span. The current `Speak` limit of
+  `AdaIN1d`). The current `Speak` limit of
   96 decoder frames (2.4 s) is a test point, not a design limit.
 
 ### Training stages
@@ -465,8 +476,8 @@ is reached.
 | --- | --- | --- | --- |
 | 1. Sound inventory | Phone percepts; `af_heart`'s voice record and AdaIN `base` | Short windows | Each phone's stretch of `x`, and the generator PCM it produces |
 | 2. Words | Word percepts; sequence edges | Short windows | Held-out words assembled from percepts |
-| 3. Phrases | Containment edges; phrase closures; duration and `f0` contours | Medium windows | Held-out sentences |
-| 4. Long-range context | Closures across sentences and paragraphs, with lifetimes, expiry and reopening; prosody-rulebook candidate types; counter-examples | Windows up to 510 phonemes and long-horizon sources | Held-out paragraphs; closure expiry and reopening rates |
+| 3. Phrases | Containment edges; phrase closures; duration and `f0` contours | Medium windows | Held-out phrases |
+| 4. Long-range context | Closures at any distance, across paragraphs and sections, with lifetimes, expiry and reopening; prosody-rulebook candidate types; counter-examples | Windows up to 510 phonemes and long-horizon sources | Held-out paragraphs; closure expiry and reopening rates |
 | 5. Consolidation | Merge, split, prune and lay out; training against the on-device generator | All earlier evidence | Same SNR with fewer percepts and lower production cost |
 | 6. Extension | A second voice, further teachers, listening mode | New teacher adapters | Each new gate passes without an earlier gate regressing |
 
@@ -483,7 +494,7 @@ Each cost is paid at the earliest point that allows it:
 
 | Paid | Work | Removed from the audio-rate path |
 | --- | --- | --- |
-| Build | Weights quantized, Snake α and quantization scales folded, laid out in VTCM tiles; DSP kernels emitted with fused epilogues; sine table and noise constants generated; lexicon and learned pronunciations compiled into the phonemizer; host code precompiled | Weight conversion, per-value Snake work, lexicon search, startup compilation |
+| Build | Weights quantized, Snake α and quantization scales folded, laid out in VTCM tiles; DSP kernels emitted with fused epilogues; noise constants generated; lexicon and learned pronunciations compiled into the phonemizer; host code precompiled | Weight conversion, per-value Snake work, lexicon search, startup compilation |
 | Application start | FastRPC session and queue opened once; resident weights loaded into VTCM once | Session setup and weight streaming per utterance |
 | Voice selected | The voice record and each AdaIN site's `base` and `P` | AdaIN `fc` layers and whole-utterance moments |
 | Text arrives | Phonemizer and Student run ahead on the CPU, pipelined with the DSP | Waiting for whole sentences or utterances |
@@ -492,8 +503,7 @@ Each cost is paid at the earliest point that allows it:
 
 Across utterances, frequently used percepts keep their produced output keyed
 by type and context, and the DSP's phase and noise counters persist. Time to
-first audio is phonemizing the first clause, the Student's first block and
-one generator tile.
+first audio is the first token's controller state plus one generator tile.
 
 Development is amortized the same way, so the training loop stays fast:
 teacher evidence is computed once, filed by type and cached by phoneme
@@ -519,8 +529,8 @@ generator tensors and the generator's rates (input 80 per second; stage 0 at
 | Stage 1: `resblocks.3-5`, `noise_res.1`, `noise_convs.1`, `conv_post` | 3,168,256 | 15.21 GMAC |
 | Total | 17,260,553 | 24.6 GMAC |
 
-AdaIN `fc` layers (2,377,728 parameters) do not run on the DSP; the front end
-computes each AdaIN site's scale and bias from `s`. Weight-norm gains and
+AdaIN `fc` layers (2,377,728 parameters) do not run; each AdaIN site's scale
+and bias is expanded from the Student's controller state. Weight-norm gains and
 biases are folded into the stored weights.
 
 Memory traffic:
@@ -537,6 +547,8 @@ Memory traffic:
 - Activation traffic disappears when a tile runs through consecutive layers
   while staying in VTCM (depth-first execution), which requires those layers'
   weights to be resident.
+- With the weights resident and the source on the VTCM loop, memory traffic
+  is basically zero: PCM is drained by DMA to AAudio.
 
 Plan:
 
@@ -550,11 +562,10 @@ Plan:
    on the measurement below: the lowest average bits per weight that holds
    generator PCM at 55 dB, using items 3, 4, 6 and 8.
    The source branch (`noise_convs`, `noise_res`, `m_source`; 3,904,265
-   weights) depends only on `f0` and the voice, never on `x`, so it runs off
-   the DSP: the CPU front end or the Student supplies `x_source` for both
-   stages (about 1.6 MB per second of audio). The remaining 13,356,288 weights
-   take 6.68 MB at 4 bits with one scale per output channel, within the
-   budget (about 4.1 bits per weight on average).
+   weights) depends only on `f0` and the voice, never on `x`. It runs on the
+   DSP from the VTCM phase loop and seeded noise counters (items 4 and 5), so
+   `x_source` is never transferred; its weights count against the residency
+   budget.
    Stage 0 and `ups.0` hold 13.7 million of the weights and run at the lower
    rate; stage 1 holds 3.2 million and carries most of the work and accuracy
    loss, so precision is assigned per layer from measured sensitivity.
@@ -584,7 +595,8 @@ Plan:
    utterance length, unlike Kokoro's `cumsum` phase in `SineGen`. Harmonic k
    advances at k times the same position, so harmonics stay locked. The comparison
    reference uses the same exact phase, labeled as a difference from stock.
-5. Compute the harmonic source from `f0` (off the DSP, item 1) using
+5. Generate the source's noise on the DSP ourselves, not through Kokoro's
+   sampling, using
    counter-based random numbers (for example Philox): every draw is a function
    of a seed and a position, so tiles, spans and the offline reference produce
    identical noise. The hardware random number generator
@@ -606,14 +618,12 @@ Plan:
 8. The Student learns against the on-device generator (its quantized weights
    and resident state), not against the stock generator, so what it supplies
    can compensate for the generator's implementation error. Its levers are
-   every generator input it provides: `x`, `f0`, `x_source` once the source
-   branch runs off the DSP, the scale and bias of each AdaIN site (a
+   every generator input it provides: `x`, `f0`, the scale and bias of each AdaIN site (a
    per-channel correction at every normalization point), the Lock operating
    points and phase state, and the noise seed.
 
 How the Student eases residency, each kept only if end-to-end PCM SNR holds:
 
-- The source branch leaves the DSP (item 1): 3,904,265 fewer resident weights.
 - Per-output-channel quantization scales cost nothing at run time: each
   scale folds exactly into the next AdaIN site's coefficients, which the
   Student supplies.
@@ -635,14 +645,15 @@ alone. Every change above is kept only if end-to-end PCM SNR does not drop.
 ## v2: long-horizon control and generator replacement
 
 Not current work. The generator's weight size is re-evaluated once v1 is
-complete.
+complete. When v1 holds its results and the generator can be dismantled, the
+v1 Student becomes the v2 Student; it is not rebuilt.
 
 - Long-horizon control: v1's control stream (Output streams) extended over
   long spans (phonetic targets, timing, pitch movement, emphasis). v1's work
   carries over unchanged: the control stream drives the v2 instrument as it
   drives the generator's AdaIN sites, the per-voice records and sensitivities
-  carry over, and the VTCM sine table serves both the folded Snake function
-  and the instrument's phase.
+  carry over, and the VTCM phase loop serves both the generator and the
+  instrument.
 - Listening mode: the Student also maps audio back to the same symbolic event
   stream it plays, not to stored units: phone onsets and offsets, pitch as a
   continuous pitch-bend control, emphasis as velocity, and the other controls
@@ -661,9 +672,9 @@ complete.
   the DSP decodes Universal MIDI Packets into per-channel and per-note state
   held in VTCM (phase, resonances, envelopes, loop state). Events update that
   state; between events the instrument runs without host traffic. Each
-  note's phase is an integer pointer into a one-period sine table in VTCM,
-  stepped by its pitch including per-note pitch bend; harmonics read at
-  integer multiples of the same pointer and stay locked.
+  note's phase is an integer position on the VTCM loop, stepped by its pitch
+  including per-note pitch bend; harmonics advance at integer multiples of
+  the same position and stay locked.
 - The instrument simulates air in three dimensions: pressure and particle
   velocity on sparse voxels covering only the air volume, with a
   low-dispersion scheme so coarse voxels stay accurate, plus steady flow.
@@ -700,7 +711,7 @@ complete.
   alignment and mixing come from superposition on the loop. Replacement is
   incremental: Kokoro's generator stays resident and keeps producing speech
   while its parts are replaced one at a time, starting with the source branch
-  (already off the DSP in v1). Each replaced part is driven by the same
+  (already on the VTCM loop and seeded noise in v1). Each replaced part is driven by the same
   control stream, and a replacement is kept only if end-to-end quality holds
   against the resident generator. The goal is natural human voice produced
   procedurally, with no learned generator weights.
