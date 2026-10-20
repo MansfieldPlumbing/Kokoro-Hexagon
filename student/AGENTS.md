@@ -12,6 +12,16 @@ as the primary measured objective: our phonemizer on CoreCLR, the Student, and
 Kokoro's frozen generator on Hexagon. The Student learns from training text,
 retains what it has learned as stored percepts, and generalizes to unseen text.
 
+The design objective is amortization: every cost is paid once, at the coarsest
+rate that allows it, and reused at the audio rate. Per device: the generator's
+weights, resident once and shared by every voice. Per voice: the voice record
+and each AdaIN site's sensitivities. Per typed object: its learned behaviour,
+shared by every occurrence. Per control event: the expansion into generator
+inputs. Per tick: only what cannot be computed earlier. Earlier work
+recomputed per utterance or per sample what a Student can learn once
+(whole-utterance AdaIN moments, per-unit storage, the source branch); the
+items below move that work out of the audio-rate path.
+
 The Student's source is `student/Invoke-Student.ps1`, reached through
 `Invoke-KokoroDevelopment.ps1 Student`. Extend that owner.
 
@@ -45,6 +55,64 @@ Paths into the generator that matter for accuracy:
   `noise_res`). Errors in `f0` reach every stage.
 - `s` drives AdaIN in every generator resblock and source block.
 - Token identity reaches the generator only through `x`.
+
+### Output streams
+
+The Student emits two streams, produced incrementally from the text so audio
+can start before the utterance is complete:
+
+- Control stream: sparse events, each a 96-bit record in the shape of an
+  XInput dual-analog controller state (16 button bits, two 8-bit triggers,
+  four 16-bit stick axes), timestamped on the generator tick clock. Buttons
+  carry discrete state (phrase and closure boundaries, voicing, emphasis
+  on or off); triggers and sticks carry continuous controls (prominence,
+  pitch movement, rate, voice-quality controls). A person can drive the same
+  record from a physical controller, which checks that every required sound
+  is reachable through the controls. Which control carries which quantity
+  is decided by measurement, not fixed here.
+- Generator stream: per tick, `x` (512 channels) and `f0`; per stage,
+  `x_source` (see Generator implementation); and the coefficients of every
+  AdaIN site, expanded from the control stream.
+
+AdaIN coefficients. The generator has 48 AdaIN sites: `resblocks.0-5` and
+`noise_res.0-1`, two per dilation, 24 sites at 256 channels and 24 at 128
+(consistent with the 2,377,728 `fc` parameters). Folding InstanceNorm into
+AdaIN, each site applies a per-channel scale and bias, 18,432 values in all.
+The stock model computes them from `s` and from moments over the whole
+utterance, which forces whole-utterance execution. The Student supplies them
+instead:
+
+    coefficients(site, t) = base(voice, site) + P(voice, site) * v(t)
+
+`v(t)` is the control stream's continuous state (k values, at most the six
+continuous controls of one record); `base` and `P` (channels by k) are per
+voice and stay resident with the generator; the DSP expands them with
+multiply-adds. Measured on the stock decoder, supplied whole-utterance
+moments reproduce the one-pass output bit for bit, chunks with their own
+moments reach 12.21 dB against one pass and 61.97 dB with supplied moments,
+and supplying coefficients directly cut a decoder chunk from about 13.4 to
+2.9 ms (`decoder-supplied-moments-sm8550-20261010.md`,
+`decoder-direct-coefficients-sm8550-20261010.md`). The generator sites have
+not been measured. Order:
+
+1. Teacher capture: for every window, each generator site's folded
+   coefficients from the whole window, recorded by the lowered teacher.
+   Supplying them back must reproduce the teacher's PCM exactly.
+2. Representation: the smallest k for which fitted `base` and `P` reproduce
+   the captured coefficients, scored by generator PCM SNR against the teacher.
+3. Learnability: the Student's control stream predicts `v(t)` on held-out
+   text, scored the same way.
+
+### Prosody rules as candidate types
+
+`../Pwsh-Development/# English Prosody Rulebook.txt` lists 80 rules of
+American English phrasing, timing, pitch, focus, lists, questions and
+quotation, each with a confidence rating. They are candidate closure types and
+expected directions of effect, not targets: each becomes a typed object or a
+closure type whose behaviour is learned from teacher evidence and kept only
+where held-out evidence supports it. Their effects map to the control stream
+(boundaries and closures to buttons, prominence to triggers, pitch and timing
+movement to sticks).
 
 ### Typed learning
 
@@ -99,6 +167,10 @@ values, not recordings of them. No unit bank is stored; units are generated on
 demand.
 
 ### Voices
+
+The first voice is `af_heart`: all teacher evidence is rendered with it until
+the Student meets its goals on held-out text with that voice. The second voice
+is then added to measure how much of each percept is shared.
 
 The Student learns several voices and switches between them. Storage differs
 from Kokoro, where each voice is 510 rows of 256 values used through the
@@ -292,7 +364,15 @@ Plan:
    `x + x_source`. Lock replaces Snake: displacement from an operating point
    set through the AdaIN scale and bias, reflection at the shape's turning
    points, a clamp and a bounded multiply-add correction, with no per-value
-   sine. Registers hold element-wise steps;
+   sine. The Student makes this easier: Snake is `z + sin²(αz)/α` with one α
+   per channel, and every Snake reads an AdaIN output whose coefficients the
+   Student supplies. Folding α into that site's scale and bias and 1/α into
+   the next convolution's input-channel weights is exact and leaves one
+   parameter-free function, `y + sin²(y)`, for every channel of every site.
+   It can read the same VTCM sine table as the harmonic phase (item 4), and
+   because the Student sets each site's coefficients it also bounds each
+   site's input range, which fixes the table span or the polynomial degree of
+   the replacement. Registers hold element-wise steps;
    VTCM holds data between convolutions, which need neighboring positions and
    all channels.
 3. Keep the residual stream and all phase state resident in VTCM at full
@@ -334,6 +414,20 @@ Plan:
    per-channel correction at every normalization point), the Lock operating
    points and phase state, and the noise seed.
 
+How the Student eases residency, each kept only if end-to-end PCM SNR holds:
+
+- The source branch leaves the DSP (item 1): 3,904,265 fewer resident weights.
+- Per-output-channel quantization scales cost nothing at run time: each
+  scale folds exactly into the next AdaIN site's coefficients, which the
+  Student supplies.
+- Trained against the quantized generator (item 8), the Student compensates
+  part of the quantization error through every input it supplies, so lower
+  precisions become usable.
+- Channels whose contribution the Student's coefficients can carry are
+  candidates for removal, measured per channel and per site.
+- One resident weight set serves every voice; a voice is its record and its
+  AdaIN `base` and `P`.
+
 Error budget: generator PCM above 50 dB against stock overall. Measured
 separately, with the Student fed stock decoder output, the generator
 implementation would need about 55 dB. Trained against the on-device
@@ -346,12 +440,12 @@ alone. Every change above is kept only if end-to-end PCM SNR does not drop.
 Not current work. The generator's weight size is re-evaluated once v1 is
 complete.
 
-- Long-horizon control: a low-rate control layer emits sparse events over long
-  spans (phonetic targets, timing, pitch movement, emphasis); percepts expand
-  them into the boundary values. Each event is the 96-bit state of an XInput
-  dual-analog controller (16 button bits, two 8-bit triggers, four 16-bit stick
-  axes). A person can drive it from a physical controller as a manual check
-  that every required sound is reachable through the controls.
+- Long-horizon control: v1's control stream (Output streams) extended over
+  long spans (phonetic targets, timing, pitch movement, emphasis). v1's work
+  carries over unchanged: the control stream drives the v2 instrument as it
+  drives the generator's AdaIN sites, the per-voice records and sensitivities
+  carry over, and the VTCM sine table serves both the folded Snake function
+  and the instrument's phase.
 - Listening mode: the Student also maps audio back to the same symbolic event
   stream it plays, not to stored units: phone onsets and offsets, pitch as a
   continuous pitch-bend control, emphasis as velocity, and the other controls
