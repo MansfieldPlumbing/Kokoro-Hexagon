@@ -546,23 +546,21 @@ Plan:
    Student supplies. Folding α into that site's scale and bias and 1/α into
    the next convolution's input-channel weights is exact and leaves one
    parameter-free function, `y + sin²(y)`, for every channel of every site.
-   It can read the same VTCM sine table as the harmonic phase (item 4), and
-   because the Student sets each site's coefficients it also bounds each
-   site's input range, which fixes the table span or the polynomial degree of
-   the replacement. Registers hold element-wise steps;
+   No sine table is needed: with the generator weights resident in VTCM,
+   phase locks to the generator's fixed cadence (5, 6, 10 and 300), and the
+   Student supplies a stateful stream in place of AdaIN, so no sine has to be
+   computed. Registers hold element-wise steps;
    VTCM holds data between convolutions, which need neighboring positions and
    all channels.
 3. Keep the residual stream and all phase state resident in VTCM at full
    precision (int32 fixed point or fp32), including the Lock operating points. Hypothesis to test: stage 1 loses most accuracy today
    (10x half alone 58.56 dB, 60x half plus tail 42.71 dB, whole generator
    42.05 dB), and full-precision residual and phase state recovers part of it.
-4. Harmonic phase is an integer pointer into a one-period sine table (a ring
-   in VTCM when the source runs on Hexagon, about 8 KB for 4,096 fp16 entries;
-   the same table in memory when it runs on the CPU). Advancing by frequency
+4. Harmonic phase is an integer position locked to the generator's cadence,
+   not a pointer into a sine table. Advancing by frequency
    is an integer add and wraps exactly, so precision does not decay with
    utterance length, unlike Kokoro's `cumsum` phase in `SineGen`. Harmonic k
-   reads at k times the pointer, so harmonics stay locked. Linear
-   interpolation between entries keeps the error near 130 dB. The comparison
+   advances at k times the same position, so harmonics stay locked. The comparison
    reference uses the same exact phase, labeled as a difference from stock.
 5. Compute the harmonic source from `f0` (off the DSP, item 1) using
    counter-based random numbers (for example Philox): every draw is a function
