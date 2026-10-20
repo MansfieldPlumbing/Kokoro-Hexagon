@@ -81,6 +81,7 @@ $script:StudentText = [ordered]@{
     MaximumPhonemes = 510         # stock KModel input limit (512 tokens with the two pads)
     AuditLineCharacters = 8192    # Get-EnglishZiraReference text bound
     ZiraCharacters = 1500         # source characters per Zira capture
+    ZiraBatchChunks = 128         # completed batches survive an interrupted corpus build
     CorrespondenceShare = 0.5     # minimum share for a learned Zira-to-Kokoro symbol mapping
     KokoroVowels = 'AIOWYaæɐɑɒeəɛɚɜɤiɪɨᵻoøœɔuʊʌɯyᵊ'
 }
@@ -674,20 +675,75 @@ function Invoke-StudentZiraCapture([string[]] $Texts) {
     $results
 }
 
+function Get-StudentZiraCaptures([string[]] $Texts) {
+    # Preserve existing whole-book captures; new work is committed one content-keyed batch at a time.
+    $legacyKey = [Convert]::ToHexString([Security.Cryptography.SHA256]::HashData([Text.Encoding]::UTF8.GetBytes(($Texts -join "`n"))))
+    $legacyPath = Join-Path $script:StudentBuild "student/zira/$legacyKey.clixml"
+    $legacy = [object[]]@()
+    if (Test-Path -LiteralPath $legacyPath) { $legacy = [object[]](Import-Clixml -LiteralPath $legacyPath) }
+    if ($legacy.Count -and $legacy.Count -ne $Texts.Count) { throw 'Existing Zira capture count does not match the projected text.' }
+    $directory = Join-Path $script:StudentBuild 'student/zira/batches'
+    [void][IO.Directory]::CreateDirectory($directory)
+    $referenceHash = (Get-FileHash -LiteralPath (Join-Path $script:StudentRoot $script:StudentInputs.Pronunciation)).Hash
+    $results = [object[]]::new($Texts.Count)
+    $reused = 0; $imported = 0; $captured = 0
+    for ($first = 0; $first -lt $Texts.Count; $first += $script:StudentText.ZiraBatchChunks) {
+        $count = [Math]::Min($script:StudentText.ZiraBatchChunks, $Texts.Count - $first)
+        $batchTexts = [string[]]$Texts[$first..($first + $count - 1)]
+        $hash = [Security.Cryptography.IncrementalHash]::CreateHash([Security.Cryptography.HashAlgorithmName]::SHA256)
+        try {
+            $hash.AppendData([Text.Encoding]::UTF8.GetBytes($referenceHash + '|Microsoft Zira Desktop'))
+            foreach ($item in $batchTexts) {
+                $bytes = [Text.Encoding]::UTF8.GetBytes($item)
+                $hash.AppendData([BitConverter]::GetBytes([int]$bytes.Length)); $hash.AppendData($bytes)
+            }
+            $key = [Convert]::ToHexString($hash.GetHashAndReset())
+        }
+        finally { $hash.Dispose() }
+        $path = Join-Path $directory ($key + '.clixml')
+        $cached = Test-Path -LiteralPath $path
+        if ($cached) { $batch = [object[]](Import-Clixml -LiteralPath $path); $reused++ }
+        elseif ($legacy.Count) {
+            $batch = [object[]]$legacy[$first..($first + $count - 1)]
+            if (@($batch | Where-Object { $null -eq $_ -or $null -eq $_.Starts }).Count) {
+                $batch = @(Invoke-StudentZiraCapture $batchTexts); $captured += $count
+            } else { $imported += $count }
+        }
+        else { $batch = @(Invoke-StudentZiraCapture $batchTexts); $captured += $count }
+        if ($batch.Count -ne $count) { throw 'Zira batch returned an incomplete result set.' }
+        $complete = $true
+        for ($i = 0; $i -lt $count; $i++) {
+            $capture = $batch[$i]
+            if ($null -eq $capture -or $null -eq $capture.Starts) { $complete = $false; continue }
+            $words = @($capture.Starts).Count
+            foreach ($name in 'Lengths', 'Ticks', 'Durations', 'Phones') {
+                if (@($capture.$name).Count -ne $words) { throw "Zira batch has mismatched $name." }
+            }
+            for ($word = 0; $word -lt $words; $word++) {
+                if ($capture.Starts[$word] -lt 0 -or $capture.Lengths[$word] -lt 0 -or
+                    [long]$capture.Starts[$word] + $capture.Lengths[$word] -gt $batchTexts[$i].Length -or
+                    $capture.Ticks[$word] -lt 0 -or $capture.Durations[$word] -lt 0) { throw 'Zira batch has an invalid source span or timing.' }
+            }
+        }
+        if (-not $cached -and $complete) {
+            $pending = $path + '.partial'
+            Export-Clixml -InputObject $batch -LiteralPath $pending -Depth 3
+            [IO.File]::Move($pending, $path)
+        }
+        for ($i = 0; $i -lt $count; $i++) { $results[$first + $i] = $batch[$i] }
+    }
+    [pscustomobject]@{ PSTypeName = 'Kokoro.StudentZiraCaptures'; Captures = $results; Cache = $directory
+        ReusedBatches = $reused; ImportedChunks = $imported; CapturedChunks = $captured }
+}
+
 function Add-StudentZiraPronunciations([object] $Book, [object] $Zira) {
     # Zira reads the whole book, including sentences our phonemizer rejects. Her word events are
     # joined to tokens by source span; several events over one span (a number read as words) form
-    # one pronunciation, words separated by spaces. Captures are cached per book under build/.
+    # one pronunciation, words separated by spaces. Completed batches are cached under build/.
     $kernels = $script:StudentContext.Kernels
     $chunks = @(Get-StudentZiraChunks $Book)
-    $key = [Convert]::ToHexString([Security.Cryptography.SHA256]::HashData([Text.Encoding]::UTF8.GetBytes(($chunks.Text -join "`n"))))
-    $cache = Join-Path $script:StudentBuild "student/zira/$key.clixml"
-    if (Test-Path -LiteralPath $cache) { $captures = @(Import-Clixml -LiteralPath $cache) }
-    else {
-        $captures = @(Invoke-StudentZiraCapture ([string[]]$chunks.Text))
-        [void][IO.Directory]::CreateDirectory((Split-Path $cache))
-        $captures | Export-Clixml -LiteralPath $cache -Depth 3
-    }
+    $captureResult = Get-StudentZiraCaptures ([string[]]$chunks.Text)
+    $captures = $captureResult.Captures
     $vocabulary = $script:StudentContext.Vocabulary
     $count = $Book.Tokens.Length -shr 2
     $table = New-StudentPronunciationTable $count
@@ -718,7 +774,8 @@ function Add-StudentZiraPronunciations([object] $Book, [object] $Zira) {
         }
     }
     $Book | Add-Member -NotePropertyName Zira -NotePropertyValue $table -Force
-    [pscustomobject]@{ Chunks = $chunks.Count; FailedChunks = $failed; OutsideVocabulary = $outside; Cache = $cache }
+    [pscustomobject]@{ Chunks = $chunks.Count; FailedChunks = $failed; OutsideVocabulary = $outside; Cache = $captureResult.Cache
+        ReusedBatches = $captureResult.ReusedBatches; ImportedChunks = $captureResult.ImportedChunks; CapturedChunks = $captureResult.CapturedChunks }
 }
 
 function Get-StudentCorrespondences([object[]] $Books) {
