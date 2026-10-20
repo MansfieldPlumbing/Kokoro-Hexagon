@@ -22,6 +22,8 @@ Target layout: a few single-file appliances reached through `Invoke-KokoroDevelo
 - `student/Invoke-Student.ps1` is the Student appliance and the pattern for the others: declared records, one shared context, lowered kernels in one class, typed objects with ETS members, and steps reached by name.
 - `phonemizer/Invoke-EnglishPhonemizer.ps1` is the phonemizer appliance.
 
+Because an appliance is declared records, a focused appliance (one kernel's emitter and phone run, a deployable generator, a single measurement) is produced from it by selecting records, never by copying code into a new file.
+
 Tools are composable: functions over typed objects in one process, reused by every step that needs them, extended with a parameter or record rather than copied. Each change makes the owner more capable and leaves fewer lines than writing the capability separately would.
 
 Commit continually. Every step that passes `Verify` is committed and pushed before the next begins, so work is never stranded in a working tree.
