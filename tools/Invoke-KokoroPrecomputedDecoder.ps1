@@ -8,10 +8,17 @@ No phone access. -h prints help. Admission precedes the render gates.
 Admit checks compiled SIMD workers; Nodes compares 25 dog intermediates;
 Levels checks exact normalization replay; Gate measures ten Supplied renders;
 Seeded renders the capture inputs with deterministic noise; Join runs the bank experiment.
+Speech runs our compiled phonemizer and the lowered teacher from Text in process.
+CompareConvolution checks every returned teacher boundary against the previous convolution.
+Kernels checks short spans, phase tails, output padding and dilation against the previous kernel.
+Library compiles and loads the reference, then returns without rendering; dot-source
+it (. ./Invoke-KokoroPrecomputedDecoder.ps1 -Mode Library) to call Invoke-OfflineDecoder,
+Invoke-OfflineGenerator and the compiled delegates from the caller's scope.
 .PARAMETER Threads
 Compiled convolution workers, 2 through 64; default 4.
 .PARAMETER Runs
 Supplied gate renders per case, 1 through 10; default 10. Report run ten as warm.
+Speech defaults to one render; an explicit Runs repeats in process with resident weights and kernels.
 .PARAMETER CaseName
 Optional dog or peach filter for capture diagnostics.
 .PARAMETER InputRepository
@@ -22,6 +29,19 @@ build/precomputed-decoder-20261014; other modes choose a fresh timestamped child
 Completed results and existing compiled artifacts are never overwritten.
 .PARAMETER Seed
 Seeded and Join reset this seed for each render, using uniform phase and Gaussian noise.
+.PARAMETER Text
+Speech mode input for the pinned compiled English phonemizer. One group of at most 510 phonemes.
+.PARAMETER Convolution
+Direct uses packed AVX2 with the reference FP32 rounding schedule; Reference uses the previous SSE worker.
+.PARAMETER CompareConvolution
+Render the same phonemes and seeded draws through both methods; require bit equality at every returned boundary.
+.PARAMETER ReferenceSpeechDirectory
+Compare every boundary with an existing Speech receipt instead of rendering a second teacher pass.
+.PARAMETER Dense
+Vector uses packed double-precision SIMD for dense layers and independent recurrent direction workers.
+Scalar retains the original accumulation loops. Both preserve the same rounding boundaries.
+.PARAMETER ConvolutionTileFrames
+Maximum time tile in frames. Each phase reduces it to fit the declared active-cache budget.
 .PARAMETER SelectedUnits
 An existing in-process mine.ps1 result, or its selection.clixml record. Reuses
 the recorded paths; the unchanged reference reader supplies donor provenance.
@@ -33,6 +53,8 @@ decoding the same donors again. Existing WAVs must reproduce exactly.
 Show help without compiling, loading weights or rendering.
 .EXAMPLE
 & ./Invoke-KokoroDevelopment.ps1 PrecomputedDecoder -Parameters @{Mode='Join'; Seed=17}
+.EXAMPLE
+& ./Invoke-KokoroDevelopment.ps1 PrecomputedDecoder -Parameters @{Mode='Speech'; Text='Text to render.'; CompareConvolution=$true}
 #>
 
 #requires -Version 7.7
@@ -40,13 +62,21 @@ using namespace System.Runtime.Intrinsics
 using namespace System.Runtime.Intrinsics.X86
 [CmdletBinding()]
 param(
-    [ValidateSet('Admit','Nodes','Levels','Gate','Seeded','Join')][string] $Mode = 'Gate',
+    [ValidateSet('Admit','Nodes','Levels','Gate','Seeded','Join','Library','Speech','Kernels')][string] $Mode = 'Gate',
     [ValidateRange(2,64)][int] $Threads = 4,
     [ValidateRange(1,10)][int] $Runs = 10,
     [ValidateSet('','dog','peach')][string] $CaseName = '',
     [string] $InputRepository = (Split-Path $PSScriptRoot -Parent),
     [string] $OutputDirectory = '',
     [int] $Seed = 17,
+    [string] $Text = '',
+    [ValidateSet('af_heart','am_michael')][string] $Voice = 'af_heart',
+    [ValidateRange(0.1,10)][double] $Speed = 1,
+    [ValidateSet('Direct','Reference')][string] $Convolution = 'Direct',
+    [switch] $CompareConvolution,
+    [string] $ReferenceSpeechDirectory = '',
+    [ValidateSet('Vector','Scalar')][string] $Dense = 'Vector',
+    [ValidateRange(8,1024)][int] $ConvolutionTileFrames = 1024,
     [Collections.IDictionary] $SelectedUnits = $null,
     [object[]] $DonorRecords = @(),
     [switch] $h
@@ -281,6 +311,231 @@ class OfflineConvolutionWorker {
                 if ($t + 3 -lt $this.OutputFrames) { $this.Output[$base + 3] = [System.Runtime.Intrinsics.X86.Sse41]::Extract($sum, [byte]3) }
             }
         }
+    }
+}
+
+class OfflineDirectConvolutionWorker {
+    # Stride-1, ungrouped Conv1d: out[oc, t] = bias[oc] + sum over ic, tap of w[oc, ic, tap] * x[ic, t + tap * dilation - padding].
+    # Weights are packed once as 8-output-channel AVX2 vectors; the input is a zero-padded copy, so
+    # every read is in bounds. Each step loads one weight vector and updates eight time positions.
+    [float[]] $Padded
+    [System.Runtime.Intrinsics.Vector256[float][]] $Packed
+    [float[]] $Bias
+    [float[]] $Output
+    [int] $InputChannels
+    [int] $OutputChannels
+    [int] $PaddedFrames
+    [int] $OutputFrames
+    [int] $WorkFrames
+    [int] $OutputStep
+    [int] $OutputOffset
+    [int] $InputOffset
+    [int] $TimeTile
+    [int] $Kernel
+    [int] $Dilation
+    [int] $FirstBlock
+    [int] $LastBlock
+
+    [void] Store([System.Runtime.Intrinsics.Vector256[float]] $sum, [int] $block, [int] $frame) {
+        if ($frame -ge $this.WorkFrames) { return }
+        $destinationFrame = $this.OutputOffset + $frame * $this.OutputStep
+        $low = [System.Runtime.Intrinsics.X86.Avx]::ExtractVector128($sum, [byte]0)
+        $high = [System.Runtime.Intrinsics.X86.Avx]::ExtractVector128($sum, [byte]1)
+        for ($lane = 0; $lane -lt 8; $lane++) {
+            $oc = $block * 8 + $lane
+            if ($oc -ge $this.OutputChannels) { return }
+            $value = [float]0
+            if ($lane -lt 4) { $value = [System.Runtime.Intrinsics.X86.Sse41]::Extract($low, [byte]$lane) }
+            else { $value = [System.Runtime.Intrinsics.X86.Sse41]::Extract($high, [byte]($lane - 4)) }
+            $this.Output[$oc * $this.OutputFrames + $destinationFrame] = [float]($value + $this.Bias[$oc])
+        }
+    }
+
+    [void] Run() {
+      # Two output-channel blocks share each input broadcast (16 accumulators). Each output's
+      # summation order (input channel, then tap) is unchanged, so results stay bit-identical.
+      $source = $this.Padded; $weights = $this.Packed
+      $inputs = $this.InputChannels; $kernelTaps = $this.Kernel; $tapStride = $this.Dilation
+      $rowFrames = $this.PaddedFrames; $shift = $this.InputOffset
+      for ($tile = 0; $tile -lt $this.WorkFrames; $tile += $this.TimeTile) {
+        $tileEnd = [Math]::Min($tile + $this.TimeTile, $this.WorkFrames)
+        $pairEnd = $this.LastBlock - ($this.LastBlock - $this.FirstBlock) % 2
+        for ($block = $this.FirstBlock; $block -lt $pairEnd; $block += 2) {
+            for ($t = $tile; $t -lt $tileEnd; $t += 8) {
+                $a0 = [System.Runtime.Intrinsics.Vector256[float]]::Zero; $a1 = $a0; $a2 = $a0; $a3 = $a0; $a4 = $a0; $a5 = $a0; $a6 = $a0; $a7 = $a0
+                $b0 = $a0; $b1 = $a0; $b2 = $a0; $b3 = $a0; $b4 = $a0; $b5 = $a0; $b6 = $a0; $b7 = $a0
+                for ($ic = 0; $ic -lt $inputs; $ic++) {
+                    $row = $ic * $rowFrames + $t + $shift
+                    $firstAt = ($block * $inputs + $ic) * $kernelTaps
+                    $secondAt = (($block + 1) * $inputs + $ic) * $kernelTaps
+                    for ($tap = 0; $tap -lt $kernelTaps; $tap++) {
+                        $wa = $weights[$firstAt + $tap]; $wb = $weights[$secondAt + $tap]
+                        $at = $row + $tap * $tapStride
+                        $x = [System.Runtime.Intrinsics.Vector256]::Create($source[$at])
+                        $a0 = [System.Runtime.Intrinsics.X86.Avx]::Add($a0, [System.Runtime.Intrinsics.X86.Avx]::Multiply($wa, $x)); $b0 = [System.Runtime.Intrinsics.X86.Avx]::Add($b0, [System.Runtime.Intrinsics.X86.Avx]::Multiply($wb, $x))
+                        $x = [System.Runtime.Intrinsics.Vector256]::Create($source[$at + 1])
+                        $a1 = [System.Runtime.Intrinsics.X86.Avx]::Add($a1, [System.Runtime.Intrinsics.X86.Avx]::Multiply($wa, $x)); $b1 = [System.Runtime.Intrinsics.X86.Avx]::Add($b1, [System.Runtime.Intrinsics.X86.Avx]::Multiply($wb, $x))
+                        $x = [System.Runtime.Intrinsics.Vector256]::Create($source[$at + 2])
+                        $a2 = [System.Runtime.Intrinsics.X86.Avx]::Add($a2, [System.Runtime.Intrinsics.X86.Avx]::Multiply($wa, $x)); $b2 = [System.Runtime.Intrinsics.X86.Avx]::Add($b2, [System.Runtime.Intrinsics.X86.Avx]::Multiply($wb, $x))
+                        $x = [System.Runtime.Intrinsics.Vector256]::Create($source[$at + 3])
+                        $a3 = [System.Runtime.Intrinsics.X86.Avx]::Add($a3, [System.Runtime.Intrinsics.X86.Avx]::Multiply($wa, $x)); $b3 = [System.Runtime.Intrinsics.X86.Avx]::Add($b3, [System.Runtime.Intrinsics.X86.Avx]::Multiply($wb, $x))
+                        $x = [System.Runtime.Intrinsics.Vector256]::Create($source[$at + 4])
+                        $a4 = [System.Runtime.Intrinsics.X86.Avx]::Add($a4, [System.Runtime.Intrinsics.X86.Avx]::Multiply($wa, $x)); $b4 = [System.Runtime.Intrinsics.X86.Avx]::Add($b4, [System.Runtime.Intrinsics.X86.Avx]::Multiply($wb, $x))
+                        $x = [System.Runtime.Intrinsics.Vector256]::Create($source[$at + 5])
+                        $a5 = [System.Runtime.Intrinsics.X86.Avx]::Add($a5, [System.Runtime.Intrinsics.X86.Avx]::Multiply($wa, $x)); $b5 = [System.Runtime.Intrinsics.X86.Avx]::Add($b5, [System.Runtime.Intrinsics.X86.Avx]::Multiply($wb, $x))
+                        $x = [System.Runtime.Intrinsics.Vector256]::Create($source[$at + 6])
+                        $a6 = [System.Runtime.Intrinsics.X86.Avx]::Add($a6, [System.Runtime.Intrinsics.X86.Avx]::Multiply($wa, $x)); $b6 = [System.Runtime.Intrinsics.X86.Avx]::Add($b6, [System.Runtime.Intrinsics.X86.Avx]::Multiply($wb, $x))
+                        $x = [System.Runtime.Intrinsics.Vector256]::Create($source[$at + 7])
+                        $a7 = [System.Runtime.Intrinsics.X86.Avx]::Add($a7, [System.Runtime.Intrinsics.X86.Avx]::Multiply($wa, $x)); $b7 = [System.Runtime.Intrinsics.X86.Avx]::Add($b7, [System.Runtime.Intrinsics.X86.Avx]::Multiply($wb, $x))
+                    }
+                }
+                $this.Store($a0, $block, $t); $this.Store($a1, $block, $t + 1); $this.Store($a2, $block, $t + 2); $this.Store($a3, $block, $t + 3)
+                $this.Store($a4, $block, $t + 4); $this.Store($a5, $block, $t + 5); $this.Store($a6, $block, $t + 6); $this.Store($a7, $block, $t + 7)
+                $this.Store($b0, $block + 1, $t); $this.Store($b1, $block + 1, $t + 1); $this.Store($b2, $block + 1, $t + 2); $this.Store($b3, $block + 1, $t + 3)
+                $this.Store($b4, $block + 1, $t + 4); $this.Store($b5, $block + 1, $t + 5); $this.Store($b6, $block + 1, $t + 6); $this.Store($b7, $block + 1, $t + 7)
+            }
+        }
+        for ($block = $pairEnd; $block -lt $this.LastBlock; $block++) {
+            for ($t = $tile; $t -lt $tileEnd; $t += 8) {
+                $s0 = [System.Runtime.Intrinsics.Vector256[float]]::Zero; $s1 = $s0; $s2 = $s0; $s3 = $s0
+                $s4 = $s0; $s5 = $s0; $s6 = $s0; $s7 = $s0
+                for ($ic = 0; $ic -lt $this.InputChannels; $ic++) {
+                    $row = $ic * $this.PaddedFrames + $t + $this.InputOffset
+                    $packedAt = ($block * $this.InputChannels + $ic) * $this.Kernel
+                    for ($tap = 0; $tap -lt $this.Kernel; $tap++) {
+                        $w = $this.Packed[$packedAt + $tap]
+                        $at = $row + $tap * $this.Dilation
+                        $s0 = [System.Runtime.Intrinsics.X86.Avx]::Add($s0, [System.Runtime.Intrinsics.X86.Avx]::Multiply($w, [System.Runtime.Intrinsics.Vector256]::Create($this.Padded[$at])))
+                        $s1 = [System.Runtime.Intrinsics.X86.Avx]::Add($s1, [System.Runtime.Intrinsics.X86.Avx]::Multiply($w, [System.Runtime.Intrinsics.Vector256]::Create($this.Padded[$at + 1])))
+                        $s2 = [System.Runtime.Intrinsics.X86.Avx]::Add($s2, [System.Runtime.Intrinsics.X86.Avx]::Multiply($w, [System.Runtime.Intrinsics.Vector256]::Create($this.Padded[$at + 2])))
+                        $s3 = [System.Runtime.Intrinsics.X86.Avx]::Add($s3, [System.Runtime.Intrinsics.X86.Avx]::Multiply($w, [System.Runtime.Intrinsics.Vector256]::Create($this.Padded[$at + 3])))
+                        $s4 = [System.Runtime.Intrinsics.X86.Avx]::Add($s4, [System.Runtime.Intrinsics.X86.Avx]::Multiply($w, [System.Runtime.Intrinsics.Vector256]::Create($this.Padded[$at + 4])))
+                        $s5 = [System.Runtime.Intrinsics.X86.Avx]::Add($s5, [System.Runtime.Intrinsics.X86.Avx]::Multiply($w, [System.Runtime.Intrinsics.Vector256]::Create($this.Padded[$at + 5])))
+                        $s6 = [System.Runtime.Intrinsics.X86.Avx]::Add($s6, [System.Runtime.Intrinsics.X86.Avx]::Multiply($w, [System.Runtime.Intrinsics.Vector256]::Create($this.Padded[$at + 6])))
+                        $s7 = [System.Runtime.Intrinsics.X86.Avx]::Add($s7, [System.Runtime.Intrinsics.X86.Avx]::Multiply($w, [System.Runtime.Intrinsics.Vector256]::Create($this.Padded[$at + 7])))
+                    }
+                }
+                $this.Store($s0, $block, $t); $this.Store($s1, $block, $t + 1); $this.Store($s2, $block, $t + 2); $this.Store($s3, $block, $t + 3)
+                $this.Store($s4, $block, $t + 4); $this.Store($s5, $block, $t + 5); $this.Store($s6, $block, $t + 6); $this.Store($s7, $block, $t + 7)
+            }
+        }
+      }
+    }
+
+    static [System.Runtime.Intrinsics.Vector256[float][]] PackWeights([float[]] $weights, [int] $outputs, [int] $inputs, [int] $tapCount, [bool] $transpose, [int] $tapStep, [int] $firstTap) {
+        if ($weights.Length -ne $outputs * $inputs * $tapCount) { throw [ArgumentException]::new('Packed weight shape mismatch.') }
+        if ($tapStep -lt 1 -or $firstTap -lt 0) { throw [ArgumentException]::new('Invalid convolution phase.') }
+        $selectedTaps = 0
+        if ($firstTap -lt $tapCount) { $selectedTaps = [int](($tapCount - 1 - $firstTap - ($tapCount - 1 - $firstTap) % $tapStep) / $tapStep) + 1 }
+        $blocks = [int](($outputs + 7 - ($outputs + 7) % 8) / 8)
+        $vectors = [System.Runtime.Intrinsics.Vector256[float][]]::new($blocks * $inputs * $selectedTaps)
+        $lanes = [float[]]::new(8)
+        for ($block = 0; $block -lt $blocks; $block++) {
+            for ($ic = 0; $ic -lt $inputs; $ic++) {
+                for ($tap = 0; $tap -lt $selectedTaps; $tap++) {
+                    for ($lane = 0; $lane -lt 8; $lane++) {
+                        $oc = $block * 8 + $lane; $lanes[$lane] = [float]0
+                        if ($oc -lt $outputs) {
+                            $weightAt = ($oc * $inputs + $ic) * $tapCount + $firstTap + $tap * $tapStep
+                            if ($transpose) { $weightAt = ($ic * $outputs + $oc) * $tapCount + $firstTap + $tap * $tapStep }
+                            $lanes[$lane] = $weights[$weightAt]
+                        }
+                    }
+                    $vectors[($block * $inputs + $ic) * $selectedTaps + $tap] = [System.Runtime.Intrinsics.Vector256]::Create($lanes[0], $lanes[1], $lanes[2], $lanes[3], $lanes[4], $lanes[5], $lanes[6], $lanes[7])
+                }
+            }
+        }
+        return $vectors
+    }
+
+    static [float[]] PadInput([float[]] $values, [int] $channels, [int] $frames, [int] $padding, [int] $copyFrames) {
+        if ($values.Length -ne $channels * $frames -or $copyFrames -lt $frames + 2 * $padding) { throw [ArgumentException]::new('Padded input shape mismatch.') }
+        $copy = [float[]]::new($channels * $copyFrames)
+        for ($c = 0; $c -lt $channels; $c++) { [Array]::Copy($values, $c * $frames, $copy, $c * $copyFrames + $padding, $frames) }
+        return $copy
+    }
+}
+
+class OfflineDenseWorker {
+    [float[]] $Input
+    [System.Runtime.Intrinsics.Vector256[double][]] $Packed
+    [System.Runtime.Intrinsics.Vector256[double][]] $Bias
+    [float[]] $Output
+    [int] $Rows
+    [int] $InputChannels
+    [int] $OutputChannels
+    [int] $FirstBlock
+    [int] $LastBlock
+
+    [void] Store([System.Runtime.Intrinsics.Vector256[double]] $sum, [int] $block, [int] $row) {
+        if ($row -ge $this.Rows) { return }
+        $at = $row * $this.OutputChannels + $block * 4
+        $low = [System.Runtime.Intrinsics.X86.Sse2]::ConvertToVector128Single([System.Runtime.Intrinsics.X86.Avx]::ExtractVector128($sum, [byte]0))
+        $high = [System.Runtime.Intrinsics.X86.Sse2]::ConvertToVector128Single([System.Runtime.Intrinsics.X86.Avx]::ExtractVector128($sum, [byte]1))
+        $this.Output[$at] = [System.Runtime.Intrinsics.X86.Sse41]::Extract($low, [byte]0)
+        if ($block * 4 + 1 -lt $this.OutputChannels) { $this.Output[$at + 1] = [System.Runtime.Intrinsics.X86.Sse41]::Extract($low, [byte]1) }
+        if ($block * 4 + 2 -lt $this.OutputChannels) { $this.Output[$at + 2] = [System.Runtime.Intrinsics.X86.Sse41]::Extract($high, [byte]0) }
+        if ($block * 4 + 3 -lt $this.OutputChannels) { $this.Output[$at + 3] = [System.Runtime.Intrinsics.X86.Sse41]::Extract($high, [byte]1) }
+    }
+
+    [void] Run() {
+        for ($block = $this.FirstBlock; $block -lt $this.LastBlock; $block++) {
+            for ($r = 0; $r -lt $this.Rows; $r += 4) {
+                $s0 = $this.Bias[$block]; $s1 = $s0; $s2 = $s0; $s3 = $s0
+                $xAt = $r * $this.InputChannels; $wAt = $block * $this.InputChannels
+                for ($i = 0; $i -lt $this.InputChannels; $i++) {
+                    $w = $this.Packed[$wAt + $i]
+                    $s0 = [System.Runtime.Intrinsics.X86.Avx]::Add($s0, [System.Runtime.Intrinsics.X86.Avx]::Multiply($w, [System.Runtime.Intrinsics.Vector256]::Create([double]$this.Input[$xAt + $i])))
+                    $s1 = [System.Runtime.Intrinsics.X86.Avx]::Add($s1, [System.Runtime.Intrinsics.X86.Avx]::Multiply($w, [System.Runtime.Intrinsics.Vector256]::Create([double]$this.Input[$xAt + $this.InputChannels + $i])))
+                    $s2 = [System.Runtime.Intrinsics.X86.Avx]::Add($s2, [System.Runtime.Intrinsics.X86.Avx]::Multiply($w, [System.Runtime.Intrinsics.Vector256]::Create([double]$this.Input[$xAt + 2 * $this.InputChannels + $i])))
+                    $s3 = [System.Runtime.Intrinsics.X86.Avx]::Add($s3, [System.Runtime.Intrinsics.X86.Avx]::Multiply($w, [System.Runtime.Intrinsics.Vector256]::Create([double]$this.Input[$xAt + 3 * $this.InputChannels + $i])))
+                }
+                $this.Store($s0, $block, $r); $this.Store($s1, $block, $r + 1); $this.Store($s2, $block, $r + 2); $this.Store($s3, $block, $r + 3)
+            }
+        }
+    }
+
+    static [System.Runtime.Intrinsics.Vector256[double][]] Pack([float[]] $weights, [int] $outputs, [int] $inputs) {
+        if ($outputs -lt 1 -or $inputs -lt 1 -or $weights.Length -ne $outputs * $inputs) { throw [ArgumentException]::new('Dense weight shape mismatch.') }
+        $blocks = [int](($outputs + 3 - ($outputs + 3) % 4) / 4)
+        $vectors = [System.Runtime.Intrinsics.Vector256[double][]]::new($blocks * $inputs)
+        $lanes = [double[]]::new(4)
+        for ($block = 0; $block -lt $blocks; $block++) {
+            for ($i = 0; $i -lt $inputs; $i++) {
+                for ($lane = 0; $lane -lt 4; $lane++) {
+                    $o = $block * 4 + $lane; $lanes[$lane] = [double]0
+                    if ($o -lt $outputs) { $lanes[$lane] = [double]$weights[$o * $inputs + $i] }
+                }
+                $vectors[$block * $inputs + $i] = [System.Runtime.Intrinsics.Vector256]::Create($lanes[0], $lanes[1], $lanes[2], $lanes[3])
+            }
+        }
+        return $vectors
+    }
+}
+
+class OfflineLstmWorker {
+    [float[]] $Values
+    [float[]] $InputWeights
+    [float[]] $HiddenWeights
+    [float[]] $InputBias
+    [float[]] $HiddenBias
+    [float[]] $Output
+    [int] $Rows
+    [int] $Inputs
+    [int] $Hidden
+    [int] $FirstDirection
+    [int] $LastDirection
+    # Phase 0 computes every step's input projection for gates [FirstGate, LastGate) of one
+    # direction; phase 1 runs that direction's recurrence. Both add in the same order as
+    # OfflineUpstreamMath.Lstm (biases, then inputs, then hidden state) in double precision.
+    [double[]] $Projection
+    [int] $Phase
+    [int] $FirstGate
+    [int] $LastGate
+    [void] Run() {
+        if ($this.Phase -eq 0) { [OfflineUpstreamMath]::LstmProjection($this.Values, $this.Rows, $this.Inputs, $this.Hidden, $this.InputWeights, $this.InputBias, $this.HiddenBias, $this.Projection, $this.FirstDirection, $this.FirstGate, $this.LastGate); return }
+        if ($this.Phase -eq 1) { [OfflineUpstreamMath]::LstmRecurrence($this.Projection, $this.Rows, $this.Hidden, $this.HiddenWeights, $this.Output, $this.FirstDirection); return }
+        $completed = [OfflineUpstreamMath]::Lstm($this.Values, $this.Rows, $this.Inputs, $this.Hidden, $this.InputWeights, $this.HiddenWeights, $this.InputBias, $this.HiddenBias, $this.Output, $this.FirstDirection, $this.LastDirection)
     }
 }
 
@@ -597,9 +852,239 @@ class OfflineRenderMath {
     }
 }
 
+# Stock KModel upstream of the decoder: transformers AlbertModel (PL-BERT), bert_encoder,
+# the prosody predictor's LSTMs and AdaLayerNorm, and duration rounding (kokoro/model.py,
+# kokoro/modules.py). Arrays are time-major [rows x columns] unless a name says channels.
+class OfflineUpstreamMath {
+    static [float[]] Linear([float[]] $x, [int] $rows, [int] $inputs, [float[]] $weight, [float[]] $bias, [int] $outputs) {
+        if ($x.Length -ne $rows * $inputs -or $weight.Length -ne $outputs * $inputs -or $bias.Length -ne $outputs) { throw [ArgumentException]::new('Linear shape mismatch.') }
+        $y = [float[]]::new($rows * $outputs)
+        for ($r = 0; $r -lt $rows; $r++) {
+            $xAt = $r * $inputs
+            for ($o = 0; $o -lt $outputs; $o++) {
+                $wAt = $o * $inputs; $sum = [double]$bias[$o]
+                for ($i = 0; $i -lt $inputs; $i++) { $sum += [double]$x[$xAt + $i] * [double]$weight[$wAt + $i] }
+                $y[$r * $outputs + $o] = [float]$sum
+            }
+        }
+        return $y
+    }
+    static [float[]] LayerNorm([float[]] $x, [int] $rows, [int] $columns, [float[]] $gamma, [float[]] $beta, [double] $epsilon) {
+        if ($x.Length -ne $rows * $columns -or $gamma.Length -ne $columns -or $beta.Length -ne $columns) { throw [ArgumentException]::new('LayerNorm shape mismatch.') }
+        $y = [float[]]::new($x.Length)
+        for ($r = 0; $r -lt $rows; $r++) {
+            $at = $r * $columns; $mean = [double]0; $variance = [double]0
+            for ($c = 0; $c -lt $columns; $c++) { $mean += [double]$x[$at + $c] }
+            $mean = $mean / [double]$columns
+            for ($c = 0; $c -lt $columns; $c++) { $delta = [double]$x[$at + $c] - $mean; $variance += $delta * $delta }
+            $inverse = [double]1 / [Math]::Sqrt($variance / [double]$columns + $epsilon)
+            for ($c = 0; $c -lt $columns; $c++) { $y[$at + $c] = [float](([double]$x[$at + $c] - $mean) * $inverse * [double]$gamma[$c] + [double]$beta[$c]) }
+        }
+        return $y
+    }
+    static [float[]] AdaLayerNorm([float[]] $x, [int] $rows, [int] $columns, [float[]] $affine, [double] $epsilon) {
+        # AdaLayerNorm: layer_norm without affine, then (1 + gamma) * x + beta, gamma and beta from fc(style).
+        if ($x.Length -ne $rows * $columns -or $affine.Length -ne 2 * $columns) { throw [ArgumentException]::new('AdaLayerNorm shape mismatch.') }
+        $y = [float[]]::new($x.Length)
+        for ($r = 0; $r -lt $rows; $r++) {
+            $at = $r * $columns; $mean = [double]0; $variance = [double]0
+            for ($c = 0; $c -lt $columns; $c++) { $mean += [double]$x[$at + $c] }
+            $mean = $mean / [double]$columns
+            for ($c = 0; $c -lt $columns; $c++) { $delta = [double]$x[$at + $c] - $mean; $variance += $delta * $delta }
+            $inverse = [double]1 / [Math]::Sqrt($variance / [double]$columns + $epsilon)
+            for ($c = 0; $c -lt $columns; $c++) {
+                $normal = ([double]$x[$at + $c] - $mean) * $inverse
+                $y[$at + $c] = [float](([double]1 + [double]$affine[$c]) * $normal + [double]$affine[$columns + $c])
+            }
+        }
+        return $y
+    }
+    static [float[]] Add([float[]] $a, [float[]] $b) {
+        if ($a.Length -ne $b.Length) { throw [ArgumentException]::new('Add shape mismatch.') }
+        $y = [float[]]::new($a.Length)
+        for ($i = 0; $i -lt $a.Length; $i++) { $y[$i] = [float]([double]$a[$i] + [double]$b[$i]) }
+        return $y
+    }
+    static [float[]] GeluNew([float[]] $x) {
+        # transformers gelu_new: 0.5 x (1 + tanh(sqrt(2 / pi) (x + 0.044715 x^3)))
+        $y = [float[]]::new($x.Length); $scale = [Math]::Sqrt([double]2 / [Math]::PI)
+        for ($i = 0; $i -lt $x.Length; $i++) {
+            $v = [double]$x[$i]
+            $y[$i] = [float]([double]0.5 * $v * ([double]1 + [Math]::Tanh($scale * ($v + [double]0.044715 * $v * $v * $v))))
+        }
+        return $y
+    }
+    static [float[]] AlbertEmbeddings([int[]] $ids, [float[]] $words, [float[]] $positions, [float[]] $types, [int] $width) {
+        # word + position (0..rows-1) + token type 0; LayerNorm is applied by the caller.
+        $rows = $ids.Length
+        if ($rows * $width -gt $positions.Length -or $types.Length -lt $width) { throw [ArgumentException]::new('Embedding extent exceeded.') }
+        $y = [float[]]::new($rows * $width)
+        for ($t = 0; $t -lt $rows; $t++) {
+            if ($ids[$t] -lt 0 -or ($ids[$t] + 1) * $width -gt $words.Length) { throw [ArgumentException]::new('Token outside vocabulary.') }
+            for ($c = 0; $c -lt $width; $c++) {
+                $y[$t * $width + $c] = [float]([double]$words[$ids[$t] * $width + $c] + [double]$positions[$t * $width + $c] + [double]$types[$c])
+            }
+        }
+        return $y
+    }
+    static [float[]] SelfAttention([float[]] $query, [float[]] $key, [float[]] $value, [int] $rows, [int] $heads, [int] $width) {
+        # Unmasked scaled dot-product attention per head (a single unpadded utterance).
+        $headWidth = [int]($width / $heads)
+        if ($query.Length -ne $rows * $width -or $key.Length -ne $query.Length -or $value.Length -ne $query.Length -or $headWidth * $heads -ne $width) { throw [ArgumentException]::new('Attention shape mismatch.') }
+        $context = [float[]]::new($rows * $width); $scores = [double[]]::new($rows)
+        $scale = [double]1 / [Math]::Sqrt([double]$headWidth)
+        for ($h = 0; $h -lt $heads; $h++) {
+            $offset = $h * $headWidth
+            for ($i = 0; $i -lt $rows; $i++) {
+                $maximum = [double]::NegativeInfinity
+                for ($j = 0; $j -lt $rows; $j++) {
+                    $dot = [double]0
+                    for ($d = 0; $d -lt $headWidth; $d++) { $dot += [double]$query[$i * $width + $offset + $d] * [double]$key[$j * $width + $offset + $d] }
+                    $scores[$j] = $dot * $scale
+                    if ($scores[$j] -gt $maximum) { $maximum = $scores[$j] }
+                }
+                $total = [double]0
+                for ($j = 0; $j -lt $rows; $j++) { $scores[$j] = [Math]::Exp($scores[$j] - $maximum); $total += $scores[$j] }
+                for ($d = 0; $d -lt $headWidth; $d++) {
+                    $sum = [double]0
+                    for ($j = 0; $j -lt $rows; $j++) { $sum += $scores[$j] * [double]$value[$j * $width + $offset + $d] }
+                    $context[$i * $width + $offset + $d] = [float]($sum / $total)
+                }
+            }
+        }
+        return $context
+    }
+    static [float[]] Lstm([float[]] $x, [int] $rows, [int] $inputs, [int] $hidden, [float[]] $inputWeights, [float[]] $hiddenWeights, [float[]] $inputBias, [float[]] $hiddenBias, [float[]] $y, [int] $firstDirection, [int] $lastDirection) {
+        # Bidirectional single-layer nn.LSTM, gate order i, f, g, o. Weights hold the forward
+        # direction followed by the reverse direction. Output [rows x 2 hidden], forward first.
+        $gates = 4 * $hidden
+        if ($x.Length -ne $rows * $inputs -or $inputWeights.Length -ne 2 * $gates * $inputs -or $hiddenWeights.Length -ne 2 * $gates * $hidden -or
+            $inputBias.Length -ne 2 * $gates -or $hiddenBias.Length -ne 2 * $gates -or $y.Length -ne $rows * 2 * $hidden -or
+            $firstDirection -lt 0 -or $lastDirection -gt 2 -or $firstDirection -ge $lastDirection) { throw [ArgumentException]::new('LSTM shape mismatch.') }
+        $state = [double[]]::new($hidden); $cell = [double[]]::new($hidden); $pre = [double[]]::new($gates)
+        for ($direction = $firstDirection; $direction -lt $lastDirection; $direction++) {
+            for ($j = 0; $j -lt $hidden; $j++) { $state[$j] = [double]0; $cell[$j] = [double]0 }
+            for ($step = 0; $step -lt $rows; $step++) {
+                $t = $step
+                if ($direction -eq 1) { $t = $rows - 1 - $step }
+                for ($g = 0; $g -lt $gates; $g++) {
+                    $row = $direction * $gates + $g
+                    $sum = [double]$inputBias[$row] + [double]$hiddenBias[$row]
+                    $wAt = $row * $inputs; $xAt = $t * $inputs
+                    for ($i = 0; $i -lt $inputs; $i++) { $sum += [double]$inputWeights[$wAt + $i] * [double]$x[$xAt + $i] }
+                    $hAt = $row * $hidden
+                    for ($i = 0; $i -lt $hidden; $i++) { $sum += [double]$hiddenWeights[$hAt + $i] * $state[$i] }
+                    $pre[$g] = $sum
+                }
+                for ($j = 0; $j -lt $hidden; $j++) {
+                    $inputGate = [double]1 / ([double]1 + [Math]::Exp(-$pre[$j]))
+                    $forgetGate = [double]1 / ([double]1 + [Math]::Exp(-$pre[$hidden + $j]))
+                    $candidate = [Math]::Tanh($pre[2 * $hidden + $j])
+                    $outputGate = [double]1 / ([double]1 + [Math]::Exp(-$pre[3 * $hidden + $j]))
+                    $cell[$j] = $forgetGate * $cell[$j] + $inputGate * $candidate
+                    $state[$j] = $outputGate * [Math]::Tanh($cell[$j])
+                    $y[$t * 2 * $hidden + $direction * $hidden + $j] = [float]$state[$j]
+                }
+            }
+        }
+        return $y
+    }
+    static [void] LstmProjection([float[]] $x, [int] $rows, [int] $inputs, [int] $hidden, [float[]] $inputWeights, [float[]] $inputBias, [float[]] $hiddenBias, [double[]] $projection, [int] $direction, [int] $firstGate, [int] $lastGate) {
+        $gates = 4 * $hidden
+        if ($projection.Length -ne 2 * $rows * $gates -or $firstGate -lt 0 -or $lastGate -gt $gates) { throw [ArgumentException]::new('LSTM projection shape mismatch.') }
+        for ($t = 0; $t -lt $rows; $t++) {
+            $xAt = $t * $inputs; $outAt = ($direction * $rows + $t) * $gates
+            for ($g = $firstGate; $g -lt $lastGate; $g++) {
+                $row = $direction * $gates + $g
+                $sum = [double]$inputBias[$row] + [double]$hiddenBias[$row]
+                $wAt = $row * $inputs
+                for ($i = 0; $i -lt $inputs; $i++) { $sum += [double]$inputWeights[$wAt + $i] * [double]$x[$xAt + $i] }
+                $projection[$outAt + $g] = $sum
+            }
+        }
+    }
+    static [void] LstmRecurrence([double[]] $projection, [int] $rows, [int] $hidden, [float[]] $hiddenWeights, [float[]] $y, [int] $direction) {
+        $gates = 4 * $hidden
+        $state = [double[]]::new($hidden); $cell = [double[]]::new($hidden); $pre = [double[]]::new($gates)
+        for ($step = 0; $step -lt $rows; $step++) {
+            $t = $step
+            if ($direction -eq 1) { $t = $rows - 1 - $step }
+            $inAt = ($direction * $rows + $t) * $gates
+            for ($g = 0; $g -lt $gates; $g++) {
+                $sum = $projection[$inAt + $g]
+                $hAt = ($direction * $gates + $g) * $hidden
+                for ($i = 0; $i -lt $hidden; $i++) { $sum += [double]$hiddenWeights[$hAt + $i] * $state[$i] }
+                $pre[$g] = $sum
+            }
+            for ($j = 0; $j -lt $hidden; $j++) {
+                $inputGate = [double]1 / ([double]1 + [Math]::Exp(-$pre[$j]))
+                $forgetGate = [double]1 / ([double]1 + [Math]::Exp(-$pre[$hidden + $j]))
+                $candidate = [Math]::Tanh($pre[2 * $hidden + $j])
+                $outputGate = [double]1 / ([double]1 + [Math]::Exp(-$pre[3 * $hidden + $j]))
+                $cell[$j] = $forgetGate * $cell[$j] + $inputGate * $candidate
+                $state[$j] = $outputGate * [Math]::Tanh($cell[$j])
+                $y[$t * 2 * $hidden + $direction * $hidden + $j] = [float]$state[$j]
+            }
+        }
+    }
+    static [float[]] AppendStyle([float[]] $x, [int] $rows, [int] $columns, [float[]] $style) {
+        $width = $columns + $style.Length
+        if ($x.Length -ne $rows * $columns) { throw [ArgumentException]::new('Style append shape mismatch.') }
+        $y = [float[]]::new($rows * $width)
+        for ($r = 0; $r -lt $rows; $r++) {
+            for ($c = 0; $c -lt $columns; $c++) { $y[$r * $width + $c] = $x[$r * $columns + $c] }
+            for ($c = 0; $c -lt $style.Length; $c++) { $y[$r * $width + $columns + $c] = $style[$c] }
+        }
+        return $y
+    }
+    static [int[]] Durations([float[]] $logits, [int] $rows, [int] $bins, [double] $speed) {
+        # sigmoid(logits).sum(-1) / speed, rounded half to even (torch.round), clamped to at least 1.
+        if ($logits.Length -ne $rows * $bins -or $speed -le [double]0) { throw [ArgumentException]::new('Duration shape mismatch.') }
+        $durations = [int[]]::new($rows)
+        for ($r = 0; $r -lt $rows; $r++) {
+            $sum = [float]0
+            for ($b = 0; $b -lt $bins; $b++) { $sum += [float]([double]1 / ([double]1 + [Math]::Exp(-[double]$logits[$r * $bins + $b]))) }
+            $rounded = [Math]::Round([double]$sum / $speed)
+            if ($rounded -lt [double]1) { $rounded = [double]1 }
+            $durations[$r] = [int]$rounded
+        }
+        return $durations
+    }
+    static [float[]] ExpandChannels([float[]] $x, [int] $rows, [int] $columns, [int[]] $durations) {
+        # Time-major token rows to channel-major frames: x^T @ alignment.
+        if ($x.Length -ne $rows * $columns -or $durations.Length -ne $rows) { throw [ArgumentException]::new('Expansion shape mismatch.') }
+        $frames = 0
+        for ($r = 0; $r -lt $rows; $r++) { $frames += $durations[$r] }
+        $y = [float[]]::new($columns * $frames); $at = 0
+        for ($r = 0; $r -lt $rows; $r++) {
+            for ($k = 0; $k -lt $durations[$r]; $k++) {
+                for ($c = 0; $c -lt $columns; $c++) { $y[$c * $frames + $at] = $x[$r * $columns + $c] }
+                $at++
+            }
+        }
+        return $y
+    }
+    static [float[]] ChannelsToRows([float[]] $x, [int] $channels, [int] $frames) {
+        if ($x.Length -ne $channels * $frames) { throw [ArgumentException]::new('Transpose shape mismatch.') }
+        $y = [float[]]::new($x.Length)
+        for ($c = 0; $c -lt $channels; $c++) { for ($f = 0; $f -lt $frames; $f++) { $y[$f * $channels + $c] = $x[$c * $frames + $f] } }
+        return $y
+    }
+    static [float[]] RowsToChannels([float[]] $x, [int] $frames, [int] $channels) {
+        if ($x.Length -ne $channels * $frames) { throw [ArgumentException]::new('Transpose shape mismatch.') }
+        $y = [float[]]::new($x.Length)
+        for ($f = 0; $f -lt $frames; $f++) { for ($c = 0; $c -lt $channels; $c++) { $y[$c * $frames + $f] = $x[$f * $channels + $c] } }
+        return $y
+    }
+}
+
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 if ($h) { Get-Help $PSCommandPath -Detailed; return }
+if ($Mode -eq 'Speech' -and [string]::IsNullOrWhiteSpace($Text)) { throw 'Speech requires Text.' }
+if ($CompareConvolution -and $Mode -ne 'Speech') { throw 'CompareConvolution requires Speech mode.' }
+if ($ReferenceSpeechDirectory -and $Mode -ne 'Speech') { throw 'ReferenceSpeechDirectory requires Speech mode.' }
+if ($CompareConvolution -and $ReferenceSpeechDirectory) { throw 'Choose a fresh convolution comparison or a recorded speech reference.' }
 if ($CaseName) { $CaseName = $CaseName.ToLowerInvariant() }
 if ($Mode -eq 'Nodes' -and $CaseName -eq 'peach') { throw 'The supplied intermediate-node reference covers dog only.' }
 $root = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..'))
@@ -616,6 +1101,7 @@ $finishedOutputs = switch ($Mode) {
     'Levels' { 'dog-level-gate.clixml'; 'peach-level-gate.clixml' }
     'Seeded' { 'dog-seeded-pcm.f32'; 'peach-seeded-pcm.f32' }
     'Join' { 'store-size.clixml' }
+    'Speech' { 'speech.clixml'; 'speech.wav' }
 }
 foreach ($finishedOutput in $finishedOutputs) {
     if ([IO.File]::Exists((Join-Path $output $finishedOutput))) { throw 'Existing completed result is immutable; choose a fresh output directory.' }
@@ -640,6 +1126,11 @@ if (-not $admission.ClrOnlyAdmitted) { throw 'Offline numeric kernels reference 
 $assembly = [Reflection.Assembly]::LoadFrom($dll)
 $workerType = $assembly.GetType('OfflineConvolutionWorker', $true)
 $mathType = $assembly.GetType('OfflineRenderMath', $true)
+$upstreamMath = $assembly.GetType('OfflineUpstreamMath', $true)
+$directConvolution = $assembly.GetType('OfflineDirectConvolutionWorker', $true)
+$denseWorker = $assembly.GetType('OfflineDenseWorker', $true)
+$lstmWorker = $assembly.GetType('OfflineLstmWorker', $true)
+if (-not [System.Runtime.Intrinsics.X86.Avx2]::IsSupported) { throw 'The direct convolution kernel needs AVX2.' }
 $frameIndices = $mathType.GetMethod('FrameIndices').CreateDelegate([Func[int,int,int,int,int,int,bool,int[]]])
 $packInputs = $mathType.GetMethod('PackInputs').CreateDelegate([Func[float[],int[],int,int,int,int,System.Runtime.Intrinsics.Vector128[float][]]])
 $activeIndices = $mathType.GetMethod('ActiveIndices').CreateDelegate([Func[int[],int,bool[]]])
@@ -689,6 +1180,8 @@ if ((Get-FileHash -LiteralPath $modelPath).Hash -cne '496DBA118D1A58F5F3DB2EFC88
 $checkpoint = & $reader.Read $modelPath
 $weightCache = [Collections.Generic.Dictionary[string,float[]]]::new([StringComparer]::Ordinal)
 $convolutionCache = [Collections.Generic.Dictionary[string,object]]::new([StringComparer]::Ordinal)
+$denseCache = [Collections.Generic.Dictionary[string,object]]::new([StringComparer]::Ordinal)
+$lstmCache = [Collections.Generic.Dictionary[string,object]]::new([StringComparer]::Ordinal)
 $profile = [Collections.Generic.List[object]]::new()
 $levelContext = $null
 $nodeReferences = [Collections.Generic.Dictionary[string,object]]::new([StringComparer]::Ordinal)
@@ -733,9 +1226,9 @@ function Read-OfflineWeight([string] $Name) {
     [Buffer]::BlockCopy($raw, 0, $values, 0, $raw.Length); $weightCache.Add($Name, $values)
     return , $values
 }
-function Get-OfflineConvolution([string] $Name, [int] $Groups, [bool] $Transpose) {
-    if ($convolutionCache.ContainsKey($Name)) { return $convolutionCache[$Name] }
-    $prefix = 'decoder.module.' + $Name
+function Get-OfflineConvolution([string] $Name, [int] $Groups, [bool] $Transpose, [string] $Module = 'decoder.module.') {
+    $prefix = $Module + $Name
+    if ($convolutionCache.ContainsKey($prefix)) { return $convolutionCache[$prefix] }
     $weightName = $prefix + '.weight'; $weight = $null
     if ($checkpoint.Tensors.Contains($weightName)) { $weight = Read-OfflineWeight $weightName }
     else {
@@ -747,16 +1240,66 @@ function Get-OfflineConvolution([string] $Name, [int] $Groups, [bool] $Transpose
     if ($Transpose) { $cin = $shape[0]; $cout = $shape[1] * $Groups }
     $bias = [float[]]::new($cout)
     if ($checkpoint.Tensors.Contains($prefix + '.bias')) { $bias = Read-OfflineWeight ($prefix + '.bias') }
-    $result = [pscustomobject]@{ Weights = $weight; Bias = $bias; InputChannels = $cin; OutputChannels = $cout; Kernel = $shape[2] }
-    $convolutionCache.Add($Name, $result); $result
+    $result = [pscustomobject]@{ Weights = $weight; Bias = $bias; InputChannels = $cin; OutputChannels = $cout; Kernel = $shape[2]; Packed = [Collections.Generic.Dictionary[string,object]]::new([StringComparer]::Ordinal) }
+    $convolutionCache.Add($prefix, $result); $result
 }
 function Invoke-OfflineConv {
-    param([float[]] $InputValues, [int] $Frames, [string] $Name, [int] $Stride = 1, [int] $Padding = 0, [int] $Dilation = 1, [int] $Groups = 1, [switch] $Transpose, [int] $OutputPadding = 0)
-    $conv = Get-OfflineConvolution $Name $Groups $Transpose.IsPresent
+    param([float[]] $InputValues, [int] $Frames, [string] $Name, [int] $Stride = 1, [int] $Padding = 0, [int] $Dilation = 1, [int] $Groups = 1, [switch] $Transpose, [int] $OutputPadding = 0,
+        [string] $Module = 'decoder.module.')
+    $conv = Get-OfflineConvolution $Name $Groups $Transpose.IsPresent $Module
     if ($InputValues.Length -ne $conv.InputChannels * $Frames) { throw "Convolution input shape: $Name" }
     $outFrames = [int][Math]::Floor(($Frames + 2 * $Padding - $Dilation * ($conv.Kernel - 1) - 1) / [double]$Stride) + 1
     if ($Transpose) { $outFrames = ($Frames - 1) * $Stride - 2 * $Padding + $Dilation * ($conv.Kernel - 1) + $OutputPadding + 1 }
     $result = [float[]]::new($conv.OutputChannels * $outFrames)
+    if ($Convolution -eq 'Direct' -and $Groups -eq 1 -and (($Stride -eq 1 -and -not $Transpose) -or ($Transpose -and $Dilation -eq 1))) {
+        # One packed kernel handles ordinary convolution and each transposed phase.
+        # A phase visits ascending original taps and consecutive input frames; there are no inserted zeros.
+        $phaseCount = 1; $inputPadding = $Padding
+        if ($Transpose) { $phaseCount = $Stride; $inputPadding = [int][Math]::Ceiling(($conv.Kernel + $Padding) / [double]$Stride) }
+        $packingKey = '{0}:{1}:{2}:{3}' -f $Transpose.IsPresent, $Stride, $Padding, $Dilation
+        if (-not $conv.Packed.ContainsKey($packingKey)) {
+            $conv.Packed[$packingKey] = @(for ($phase = 0; $phase -lt $phaseCount; $phase++) {
+                $firstTap = 0; $tapStep = 1; $inputOffset = 0; $tapDirection = $Dilation
+                if ($Transpose) {
+                    $firstTap = ($phase + $Padding) % $Stride; $tapStep = $Stride
+                    $inputOffset = $inputPadding + [int](($phase + $Padding - $firstTap) / $Stride); $tapDirection = -1
+                }
+                $packed = $directConvolution::PackWeights($conv.Weights, $conv.OutputChannels, $conv.InputChannels, $conv.Kernel, $Transpose.IsPresent, $tapStep, $firstTap)
+                [pscustomobject]@{ Weights = $packed; Taps = [int]($packed.Length / ([Math]::Ceiling($conv.OutputChannels / 8.0) * $conv.InputChannels)); InputOffset = $inputOffset; Dilation = $tapDirection }
+            })
+        }
+        $paddedFrames = $Frames + 2 * $inputPadding + 7
+        $padded = $directConvolution::PadInput($InputValues, $conv.InputChannels, $Frames, $inputPadding, $paddedFrames)
+        $blocks = [int][Math]::Ceiling($conv.OutputChannels / 8.0); $workerCount = [Math]::Min($Threads, $blocks)
+        $running = [Collections.Generic.List[Threading.Tasks.Task]]::new(); $keepWorkers = [Collections.Generic.List[object]]::new()
+        $watch = [Diagnostics.Stopwatch]::StartNew()
+        for ($phase = 0; $phase -lt $phaseCount; $phase++) {
+          $phaseFrames = [int][Math]::Floor(($outFrames - 1 - $phase) / [double]$phaseCount) + 1
+          if ($phaseFrames -le 0) { continue }
+          $phaseWeights = $conv.Packed[$packingKey][$phase]
+          # Bound the active input tile, output block and weights to 1 MiB,
+          # leaving room within the target CPU's 1.25 MiB per-core L2.
+          $activeWeightBytes = 32 * $conv.InputChannels * $phaseWeights.Taps
+          $haloBytes = 4 * $conv.InputChannels * [Math]::Abs($phaseWeights.Dilation) * [Math]::Max(0, $phaseWeights.Taps - 1)
+          $cacheFrames = [int][Math]::Floor((1048576 - $activeWeightBytes - $haloBytes) / [double](4 * $conv.InputChannels + 32))
+          $timeTile = [Math]::Max(8, [Math]::Min($ConvolutionTileFrames, $cacheFrames))
+          $timeTile -= $timeTile % 8
+          for ($workerIndex = 0; $workerIndex -lt $workerCount; $workerIndex++) {
+            $worker = [Activator]::CreateInstance($directConvolution)
+            $worker.Padded = $padded; $worker.Packed = $phaseWeights.Weights; $worker.Bias = $conv.Bias; $worker.Output = $result
+            $worker.InputChannels = $conv.InputChannels; $worker.OutputChannels = $conv.OutputChannels
+            $worker.PaddedFrames = $paddedFrames; $worker.OutputFrames = $outFrames; $worker.Kernel = $phaseWeights.Taps; $worker.Dilation = $phaseWeights.Dilation
+            $worker.WorkFrames = $phaseFrames; $worker.OutputStep = $phaseCount; $worker.OutputOffset = $phase; $worker.InputOffset = $phaseWeights.InputOffset
+            $worker.TimeTile = $timeTile
+            $worker.FirstBlock = [int][Math]::Floor($workerIndex * $blocks / [double]$workerCount)
+            $worker.LastBlock = [int][Math]::Floor(($workerIndex + 1) * $blocks / [double]$workerCount)
+            $keepWorkers.Add($worker); $running.Add([Threading.Tasks.Task]::Run($directConvolution.GetMethod('Run').CreateDelegate([Action], $worker)))
+          }
+        }
+        [Threading.Tasks.Task]::WaitAll($running.ToArray()); $watch.Stop()
+        $profile.Add([pscustomobject]@{ Stage = $Name; Kind = 'DirectConvolution'; Milliseconds = $watch.Elapsed.TotalMilliseconds; Frames = $outFrames })
+        return , $result
+    }
     $indices = $frameIndices.Invoke($Frames, $outFrames, $conv.Kernel, $Stride, $Dilation, $Padding, $Transpose.IsPresent)
     $vectors = $packInputs.Invoke($InputValues, $indices, $conv.InputChannels, $Frames, $outFrames, $conv.Kernel)
     $active = $activeIndices.Invoke($indices, $conv.Kernel)
@@ -779,8 +1322,8 @@ function Invoke-OfflineConv {
     $profile.Add([pscustomobject]@{ Stage = $Name; Kind = 'Convolution'; Milliseconds = $watch.Elapsed.TotalMilliseconds; Frames = $outFrames })
     return , $result
 }
-function Invoke-OfflineAdaIn([float[]] $InputValues, [int] $Channels, [int] $Frames, [float[]] $AcousticStyle, [string] $Name) {
-    $prefix = 'decoder.module.' + $Name
+function Invoke-OfflineAdaIn([float[]] $InputValues, [int] $Channels, [int] $Frames, [float[]] $AcousticStyle, [string] $Name, [string] $Module = 'decoder.module.') {
+    $prefix = $Module + $Name
     $fc = Read-OfflineWeight ($prefix + '.fc.weight'); $bias = Read-OfflineWeight ($prefix + '.fc.bias')
     # The checkpoint omits these affine parameters. Stock's non-strict load
     # retains InstanceNorm's initialized ones/zeros in that case.
@@ -811,19 +1354,20 @@ function Join-OfflineChannels([float[]] $A, [float[]] $B, [float[]] $C, [float[]
     [Array]::Copy($C, 0, $result, $A.Length + $B.Length, $C.Length); [Array]::Copy($D, 0, $result, $A.Length + $B.Length + $C.Length, $D.Length)
     return , $result
 }
-function Invoke-OfflineDecoderBlock([float[]] $InputValues, [int] $Frames, [float[]] $AcousticStyle, [string] $Name, [switch] $Upsample) {
+function Invoke-OfflineDecoderBlock([float[]] $InputValues, [int] $Frames, [float[]] $AcousticStyle, [string] $Name, [switch] $Upsample, [string] $Module = 'decoder.module.') {
+    # Stock AdainResBlk1d (istftnet.py); the predictor's F0 and N blocks use the same form under predictor.module.
     $cin = [int]($InputValues.Length / $Frames)
-    $next = Invoke-OfflineAdaIn $InputValues $cin $Frames $AcousticStyle ($Name + '.norm1')
+    $next = Invoke-OfflineAdaIn $InputValues $cin $Frames $AcousticStyle ($Name + '.norm1') $Module
     $next = $leaky.Invoke($next, [float]0.2); $nextFrames = $Frames
-    if ($Upsample) { $next = Invoke-OfflineConv $next $Frames ($Name + '.pool') -Stride 2 -Padding 1 -Groups $cin -Transpose -OutputPadding 1; $nextFrames = 2 * $Frames }
-    $next = Invoke-OfflineConv $next $nextFrames ($Name + '.conv1') -Padding 1
+    if ($Upsample) { $next = Invoke-OfflineConv $next $Frames ($Name + '.pool') -Stride 2 -Padding 1 -Groups $cin -Transpose -OutputPadding 1 -Module $Module; $nextFrames = 2 * $Frames }
+    $next = Invoke-OfflineConv $next $nextFrames ($Name + '.conv1') -Padding 1 -Module $Module
     $cout = [int]($next.Length / $nextFrames)
-    $next = Invoke-OfflineAdaIn $next $cout $nextFrames $AcousticStyle ($Name + '.norm2')
+    $next = Invoke-OfflineAdaIn $next $cout $nextFrames $AcousticStyle ($Name + '.norm2') $Module
     $next = $leaky.Invoke($next, [float]0.2)
-    $next = Invoke-OfflineConv $next $nextFrames ($Name + '.conv2') -Padding 1
+    $next = Invoke-OfflineConv $next $nextFrames ($Name + '.conv2') -Padding 1 -Module $Module
     $shortcut = $InputValues
     if ($Upsample) { $shortcut = $nearest2.Invoke($InputValues, $cin, $Frames) }
-    if ($cin -ne $cout) { $shortcut = Invoke-OfflineConv $shortcut $nextFrames ($Name + '.conv1x1') }
+    if ($cin -ne $cout) { $shortcut = Invoke-OfflineConv $shortcut $nextFrames ($Name + '.conv1x1') -Module $Module }
     return , $residual.Invoke($next, $shortcut, [float]0.70710677)
 }
 function Invoke-OfflineDecoder {
@@ -930,6 +1474,182 @@ function Invoke-OfflineGenerator([float[]] $Features, [float[]] $AcousticStyle, 
     Test-OfflineNode 'gen.conv_post' $x
     return , $inverseStft.Invoke($x, $frames)
 }
+function Invoke-OfflineLstm([float[]] $Rows, [int] $rowCount, [string] $Prefix) {
+    $stageWatch = [Diagnostics.Stopwatch]::StartNew()
+    # Stock bidirectional nn.LSTM: forward weights followed by the _reverse weights.
+    if (-not $lstmCache.ContainsKey($Prefix)) {
+      $joinedParts = @(foreach ($name in 'weight_ih_l0', 'weight_hh_l0', 'bias_ih_l0', 'bias_hh_l0') {
+        $forward = Read-OfflineWeight ($Prefix + '.' + $name); $reverse = Read-OfflineWeight ($Prefix + '.' + $name + '_reverse')
+        $joined = [float[]]::new($forward.Length + $reverse.Length)
+        [Array]::Copy($forward, 0, $joined, 0, $forward.Length); [Array]::Copy($reverse, 0, $joined, $forward.Length, $reverse.Length)
+        , $joined
+      })
+      $lstmCache.Add($Prefix, $joinedParts)
+    }
+    $parts = $lstmCache[$Prefix]
+    $hidden = [int]($parts[2].Length / 8); $inputs = [int]($parts[0].Length / (8 * $hidden))
+    $values = [float[]]::new($rowCount * 2 * $hidden)
+    if ($Dense -eq 'Scalar') {
+        [void]$upstreamMath::Lstm($Rows, $rowCount, $inputs, $hidden, $parts[0], $parts[1], $parts[2], $parts[3], $values, 0, 2)
+    } else {
+        # Input projections for every step first, split by gate across all threads; then one
+        # recurrence per direction. Bit-identical to the single-pass scalar Lstm.
+        $gateCount = 4 * $hidden; $projection = [double[]]::new(2 * $rowCount * $gateCount)
+        $perDirection = [Math]::Max(1, [int][Math]::Floor($Threads / 2))
+        foreach ($phase in 0, 1) {
+            $running = [Collections.Generic.List[Threading.Tasks.Task]]::new(); $keepWorkers = [Collections.Generic.List[object]]::new()
+            for ($direction = 0; $direction -lt 2; $direction++) {
+                $pieces = 1; if ($phase -eq 0) { $pieces = $perDirection }
+                for ($piece = 0; $piece -lt $pieces; $piece++) {
+                    $worker = [Activator]::CreateInstance($lstmWorker)
+                    $worker.Values = $Rows; $worker.Rows = $rowCount; $worker.Inputs = $inputs; $worker.Hidden = $hidden
+                    $worker.InputWeights = $parts[0]; $worker.HiddenWeights = $parts[1]; $worker.InputBias = $parts[2]; $worker.HiddenBias = $parts[3]
+                    $worker.Output = $values; $worker.FirstDirection = $direction; $worker.LastDirection = $direction + 1
+                    $worker.Projection = $projection; $worker.Phase = $phase
+                    $worker.FirstGate = [int][Math]::Floor($piece * $gateCount / [double]$pieces)
+                    $worker.LastGate = [int][Math]::Floor(($piece + 1) * $gateCount / [double]$pieces)
+                    $keepWorkers.Add($worker); $running.Add([Threading.Tasks.Task]::Run($lstmWorker.GetMethod('Run').CreateDelegate([Action], $worker)))
+                }
+            }
+            [Threading.Tasks.Task]::WaitAll($running.ToArray())
+        }
+    }
+    $profile.Add([pscustomobject]@{ Stage = $Prefix; Kind = 'Lstm'; Milliseconds = $stageWatch.Elapsed.TotalMilliseconds; Frames = $rowCount })
+    return , $values
+}
+function Invoke-OfflineLinear([float[]] $Rows, [int] $rowCount, [string] $Prefix) {
+    $stageWatch = [Diagnostics.Stopwatch]::StartNew()
+    $weight = Read-OfflineWeight ($Prefix + '.weight'); $bias = Read-OfflineWeight ($Prefix + '.bias')
+    $inputs = [int]($weight.Length / $bias.Length)
+    if ($Dense -eq 'Scalar') {
+        $values = $upstreamMath::Linear($Rows, $rowCount, $inputs, $weight, $bias, $bias.Length)
+    } else {
+        if ($Rows.Length -ne $rowCount * $inputs -or $rowCount -lt 1) { throw 'Dense input shape mismatch.' }
+        if (-not $denseCache.ContainsKey($Prefix)) {
+            $denseCache.Add($Prefix, [pscustomobject]@{ Weights = $denseWorker::Pack($weight, $bias.Length, $inputs); Bias = $denseWorker::Pack($bias, $bias.Length, 1) })
+        }
+        $packed = $denseCache[$Prefix]
+        $roundedRows = [int][Math]::Ceiling($rowCount / 4.0) * 4
+        $paddedRows = [float[]]::new($roundedRows * $inputs)
+        [Array]::Copy($Rows, $paddedRows, $Rows.Length)
+        $values = [float[]]::new($rowCount * $bias.Length)
+        $blocks = [int][Math]::Ceiling($bias.Length / 4.0); $workerCount = [Math]::Min($Threads, $blocks)
+        $running = [Collections.Generic.List[Threading.Tasks.Task]]::new(); $keepWorkers = [Collections.Generic.List[object]]::new()
+        for ($workerIndex = 0; $workerIndex -lt $workerCount; $workerIndex++) {
+            $worker = [Activator]::CreateInstance($denseWorker)
+            $worker.Input = $paddedRows; $worker.Packed = $packed.Weights; $worker.Bias = $packed.Bias; $worker.Output = $values
+            $worker.Rows = $rowCount; $worker.InputChannels = $inputs; $worker.OutputChannels = $bias.Length
+            $worker.FirstBlock = [int][Math]::Floor($workerIndex * $blocks / [double]$workerCount)
+            $worker.LastBlock = [int][Math]::Floor(($workerIndex + 1) * $blocks / [double]$workerCount)
+            $keepWorkers.Add($worker); $running.Add([Threading.Tasks.Task]::Run($denseWorker.GetMethod('Run').CreateDelegate([Action], $worker)))
+        }
+        [Threading.Tasks.Task]::WaitAll($running.ToArray())
+    }
+    $profile.Add([pscustomobject]@{ Stage = $Prefix; Kind = 'Linear'; Milliseconds = $stageWatch.Elapsed.TotalMilliseconds; Frames = $rowCount })
+    return , $values
+}
+function Invoke-OfflineAlbert([int[]] $Ids) {
+    # transformers AlbertModel as used by stock CustomAlbert: one shared layer applied 12 times.
+    $p = 'bert.module.'; $layer = $p + 'encoder.albert_layer_groups.0.albert_layers.0.'; $t = $Ids.Length
+    $x = $upstreamMath::AlbertEmbeddings($Ids, (Read-OfflineWeight ($p + 'embeddings.word_embeddings.weight')),
+        (Read-OfflineWeight ($p + 'embeddings.position_embeddings.weight')), (Read-OfflineWeight ($p + 'embeddings.token_type_embeddings.weight')), 128)
+    $x = $upstreamMath::LayerNorm($x, $t, 128, (Read-OfflineWeight ($p + 'embeddings.LayerNorm.weight')), (Read-OfflineWeight ($p + 'embeddings.LayerNorm.bias')), [double]1e-12)
+    $h = Invoke-OfflineLinear $x $t ($p + 'encoder.embedding_hidden_mapping_in')
+    for ($repeat = 0; $repeat -lt 12; $repeat++) {
+        $query = Invoke-OfflineLinear $h $t ($layer + 'attention.query')
+        $key = Invoke-OfflineLinear $h $t ($layer + 'attention.key')
+        $value = Invoke-OfflineLinear $h $t ($layer + 'attention.value')
+        $context = $upstreamMath::SelfAttention($query, $key, $value, $t, 12, 768)
+        $projected = Invoke-OfflineLinear $context $t ($layer + 'attention.dense')
+        $attention = $upstreamMath::LayerNorm($upstreamMath::Add($h, $projected), $t, 768,
+            (Read-OfflineWeight ($layer + 'attention.LayerNorm.weight')), (Read-OfflineWeight ($layer + 'attention.LayerNorm.bias')), [double]1e-12)
+        $feedForward = $upstreamMath::GeluNew((Invoke-OfflineLinear $attention $t ($layer + 'ffn')))
+        $feedForward = Invoke-OfflineLinear $feedForward $t ($layer + 'ffn_output')
+        $h = $upstreamMath::LayerNorm($upstreamMath::Add($feedForward, $attention), $t, 768,
+            (Read-OfflineWeight ($layer + 'full_layer_layer_norm.weight')), (Read-OfflineWeight ($layer + 'full_layer_layer_norm.bias')), [double]1e-12)
+    }
+    return , $h
+}
+function Read-OfflineVoiceRow([string] $Voice, [int] $PhonemeCount) {
+    # Stock KPipeline: pack[len(phonemes) - 1]; acoustic style is [:128], prosody style [128:].
+    if ($Voice -cnotmatch '^[a-z]{2}_[a-z]+$') { throw 'Invalid voice name.' }
+    if ($PhonemeCount -lt 1 -or $PhonemeCount -gt 510) { throw 'Phoneme count outside the voice pack (1..510).' }
+    $manifest = Get-Content -LiteralPath (Join-Path $InputRepository 'lib/manifest.json') -Raw | ConvertFrom-Json
+    $pin = @($manifest.model.files | Where-Object path -CEQ "voices\$Voice.pt")
+    if ($pin.Count -ne 1) { throw "Voice $Voice is not pinned in lib/manifest.json." }
+    $archive = & $reader.ReadTensor (Join-Path $InputRepository "build/inputs/kokoro/$($manifest.model.revision)/voices/$Voice.pt") $pin[0].sha256
+    $raw = & $reader.TensorRow $archive ($PhonemeCount - 1)
+    if ($raw.Length -ne 1024) { throw 'Voice row is not 256 float32 values.' }
+    $row = [float[]]::new(256); [Buffer]::BlockCopy($raw, 0, $row, 0, 1024)
+    return [pscustomobject]@{ Acoustic = [float[]]$row[0..127]; Prosody = [float[]]$row[128..255] }
+}
+function Invoke-OfflineSpeech {
+    # Stock KModel.forward_with_tokens on the host: phonemes to PCM, every intermediate returned.
+    # -SkipGenerator stops at the decoder: Pcm is $null. Teacher evidence for the Student
+    # (durations, F0, N, encodings and the generator input Features) does not need PCM.
+    param([Parameter(Mandatory)][string] $Phonemes, [string] $Voice = 'af_heart', [double] $Speed = 1, [switch] $SkipGenerator)
+    $config = Get-Content -LiteralPath (Join-Path $InputRepository "build/inputs/kokoro/f3ff3571791e39611d31c381e3a41a3af07b4987/config.json") -Raw | ConvertFrom-Json -AsHashtable
+    $ids = [Collections.Generic.List[int]]::new(); $ids.Add(0)
+    foreach ($symbol in $Phonemes.ToCharArray()) { $id = $config.vocab[[string]$symbol]; if ($null -ne $id) { $ids.Add([int]$id) } }
+    $ids.Add(0); $tokenIds = $ids.ToArray(); $t = $tokenIds.Length
+    if ($t -gt 512) { throw 'More than 510 phonemes; stock splits longer input.' }
+    $style = Read-OfflineVoiceRow $Voice $Phonemes.Length
+    $bert = Invoke-OfflineAlbert $tokenIds
+    $durationInput = Invoke-OfflineLinear $bert $t 'bert_encoder.module'
+    $x = $upstreamMath::AppendStyle($durationInput, $t, 512, $style.Prosody)
+    for ($layer = 0; $layer -lt 3; $layer++) {
+        $x = Invoke-OfflineLstm $x $t "predictor.module.text_encoder.lstms.$(2 * $layer)"
+        $affine = Invoke-OfflineLinear $style.Prosody 1 "predictor.module.text_encoder.lstms.$(2 * $layer + 1).fc"
+        $x = $upstreamMath::AppendStyle($upstreamMath::AdaLayerNorm($x, $t, 512, $affine, [double]1e-5), $t, 512, $style.Prosody)
+    }
+    $durationFeatures = $x
+    $logits = Invoke-OfflineLinear (Invoke-OfflineLstm $durationFeatures $t 'predictor.module.lstm') $t 'predictor.module.duration_proj.linear_layer'
+    $durations = $upstreamMath::Durations($logits, $t, 50, $Speed)
+    $frames = 0; foreach ($duration in $durations) { $frames += $duration }
+    $aligned = $upstreamMath::ExpandChannels($durationFeatures, $t, 640, $durations)
+    $shared = Invoke-OfflineLstm ($upstreamMath::ChannelsToRows($aligned, 640, $frames)) $frames 'predictor.module.shared'
+    $shared = $upstreamMath::RowsToChannels($shared, $frames, 512)
+    $curves = @{}
+    foreach ($curve in 'F0', 'N') {
+        $values = $shared; $curveFrames = $frames
+        for ($block = 0; $block -lt 3; $block++) {
+            $values = Invoke-OfflineDecoderBlock $values $curveFrames $style.Prosody "$curve.$block" -Upsample:($block -eq 1) -Module 'predictor.module.'
+            if ($block -eq 1) { $curveFrames *= 2 }
+        }
+        $curves[$curve] = Invoke-OfflineConv $values $curveFrames "$($curve)_proj" -Module 'predictor.module.'
+    }
+    $encoderWatch = [Diagnostics.Stopwatch]::StartNew()
+    if ($null -eq $script:OfflineTextEncoder) {
+        Import-Module (Join-Path $root 'tools/Kokoro.TextEncoder.psm1')
+        $script:OfflineTextEncoder = (Initialize-KokoroTextEncoder -CheckpointPath $modelPath).Engine
+    }
+    if ($Convolution -eq 'Direct') {
+        for ($layer = 0; $layer -lt 3; $layer++) {
+            $encoderPrefix = "text_encoder.module.cnn.$layer.0"
+            if (-not $convolutionCache.ContainsKey($encoderPrefix)) {
+                $encoderWeights = [float[]]::new(1310720); $encoderBias = [float[]]::new(512)
+                [Array]::Copy($script:OfflineTextEncoder.ConvWeights, $layer * 1310720, $encoderWeights, 0, 1310720)
+                [Array]::Copy($script:OfflineTextEncoder.ConvBias, $layer * 512, $encoderBias, 0, 512)
+                $convolutionCache.Add($encoderPrefix, [pscustomobject]@{ Weights = $encoderWeights; Bias = $encoderBias; InputChannels = 512; OutputChannels = 512; Kernel = 5; Packed = [Collections.Generic.Dictionary[string,object]]::new([StringComparer]::Ordinal) })
+            }
+        }
+        $script:OfflineTextEncoder.Convolution = [Func[float[],int,int,float[]]]{
+            param([float[]] $Values, [int] $FrameCount, [int] $LayerIndex)
+            return , (Invoke-OfflineConv $Values $FrameCount "cnn.$LayerIndex.0" -Padding 2 -Module 'text_encoder.module.')
+        }
+    } else { $script:OfflineTextEncoder.Convolution = $null }
+    $textEncoding = $script:OfflineTextEncoder.Run($tokenIds, $t)
+    $profile.Add([pscustomobject]@{ Stage = 'text_encoder'; Kind = 'TextEncoderTotal'; Milliseconds = $encoderWatch.Elapsed.TotalMilliseconds; Frames = $t })
+    $decoded = Invoke-OfflineDecoder ($align.Invoke($textEncoding, $durations)) $curves.F0 $curves.N $style.Acoustic -TokenDurations $durations
+    $pcm = $null
+    if (-not $SkipGenerator) {
+        $sourceDraws = New-OfflineDraws ($curves.F0.Length * 300)
+        $pcm = Invoke-OfflineGenerator $decoded.Features $style.Acoustic $curves.F0 $sourceDraws.Uniform $sourceDraws.Harmonic $sourceDraws.Extra
+    }
+    [pscustomobject]@{ Phonemes = $Phonemes; Voice = $Voice; Seed = $Seed; TokenIds = $tokenIds; Bert = $bert; DurationFeatures = $durationFeatures
+        Durations = $durations; F0 = $curves.F0; N = $curves.N; TextEncoding = $textEncoding; Features = $decoded.Features; Pcm = $pcm }
+}
+$script:OfflineTextEncoder = $null
 function New-OfflineDraws([int] $SampleCount) {
     $flat = $draws.Invoke($Seed, $SampleCount)
     $repeated = $draws.Invoke($Seed, $SampleCount)
@@ -1191,8 +1911,121 @@ function Invoke-OfflineJoinExperiment {
     [pscustomobject]@{ Donors = $donors.Count; Units = $tokenTotal; DecoderBytes = $decoderBytes; TextEncoderBytes = $encoderBytes; MomentBytes = $momentBytes; DecoderBytesPerUnit = $decoderBytes / $tokenTotal; TextEncoderBytesPerUnit = $encoderBytes / $tokenTotal } | Export-Clixml -LiteralPath (Join-Path $output 'store-size.clixml')
     return $measurements.ToArray()
 }
+if ($Mode -eq 'Library') { return }
 if ($Mode -eq 'Join') { Invoke-OfflineJoinExperiment; return }
-$captures = Import-PowerShellDataFile (Join-Path $InputRepository 'build/score-capture-20261014/capture.psd1')
+if ($Mode -eq 'Kernels') {
+    $kernelCases = @(
+        @{ Name = 'generator.ups.0'; Stride = 10; Padding = 5; Dilation = 1; Transpose = $true }
+        @{ Name = 'generator.ups.1'; Stride = 6; Padding = 3; Dilation = 1; Transpose = $true }
+        @{ Name = 'generator.resblocks.3.convs1.0'; Stride = 1; Padding = 1; Dilation = 1; Transpose = $false }
+        @{ Name = 'generator.resblocks.3.convs1.0'; Stride = 1; Padding = 3; Dilation = 3; Transpose = $false }
+    )
+    $kernelResults = [Collections.Generic.List[object]]::new()
+    foreach ($kernelCase in $kernelCases) {
+      $definition = Get-OfflineConvolution $kernelCase.Name 1 $kernelCase.Transpose
+      foreach ($frameCount in 1,7,17) {
+        $values = [float[]]::new($definition.InputChannels * $frameCount)
+        $randomValues = $draws.Invoke($Seed, $values.Length)
+        [Array]::Copy($randomValues, 9, $values, 0, $values.Length)
+        $callParameters = @{ InputValues = $values; Frames = $frameCount; Name = $kernelCase.Name; Stride = $kernelCase.Stride; Padding = $kernelCase.Padding; Dilation = $kernelCase.Dilation; Transpose = $kernelCase.Transpose; OutputPadding = 0 }
+        if ($kernelCase.Transpose -and $frameCount -eq 7) { $callParameters.OutputPadding = 1 }
+        $Convolution = 'Reference'; $expectedValues = Invoke-OfflineConv @callParameters
+        $Convolution = 'Direct'; $actualValues = Invoke-OfflineConv @callParameters
+        $metrics = $compare.Invoke($actualValues, $expectedValues)
+        $exact = [Linq.Enumerable]::SequenceEqual[float]($actualValues, $expectedValues)
+        $kernelResults.Add([pscustomobject]@{ Kernel = $kernelCase.Name; InputFrames = $frameCount; Dilation = $kernelCase.Dilation; OutputPadding = $callParameters.OutputPadding; Exact = $exact; SnrDb = $metrics[0]; MaxAbsError = $metrics[1]; SourceSHA256 = $sourceHash; AssemblySHA256 = $admission.SHA256 })
+      }
+    }
+    $kernelResults.ToArray() | Export-Clixml -LiteralPath (Join-Path $output 'kernel-checks.clixml')
+    if (@($kernelResults | Where-Object { -not $_.Exact }).Count -gt 0) { throw 'Packed convolution boundary check failed.' }
+    $kernelResults.ToArray()
+    return
+}
+if ($Mode -eq 'Speech') {
+    $speechOutput = $output
+    $speechRuns = 1
+    if ($PSBoundParameters.ContainsKey('Runs')) { $speechRuns = $Runs }
+    $speechResults = [Collections.Generic.List[object]]::new()
+    for ($speechRun = 1; $speechRun -le $speechRuns; $speechRun++) {
+    if ($speechRuns -gt 1) {
+        $output = Join-Path $speechOutput ('run-{0:D2}' -f $speechRun)
+        [void][IO.Directory]::CreateDirectory($output)
+    }
+    $speechWatch = [Diagnostics.Stopwatch]::StartNew()
+    $driverDirectory = Join-Path $root 'build/phonemizer/english/driver/D7B06FD52B900130E8702544D14BE2F662EC2E009EFCE6B33E3FC92BE8B70AD1-library-dll'
+    $driverPin = '112DC0B565042184DF74FA5176F09F6E8294857693B44F0BBED456A43B3FEEF1'
+    $driverReceipt = Import-PowerShellDataFile (Join-Path $driverDirectory 'driver-receipt.psd1')
+    $driverPath = Join-Path $driverDirectory ([IO.Path]::GetFileName($driverReceipt.Output))
+    if ($driverReceipt.AssemblySha256 -cne $driverPin -or (Get-FileHash -LiteralPath $driverPath).Hash -cne $driverPin) { throw 'Compiled English phonemizer integrity mismatch.' }
+    $driverAssembly = [Reflection.Assembly]::LoadFrom($driverPath)
+    $phonemize = $driverAssembly.GetType('CoreDriver', $true).GetMethod('Run').CreateDelegate([Func[string,object]])
+    $pronunciation = $phonemize.Invoke($Text)
+    if (-not $pronunciation.Complete -or -not $pronunciation.KokoroPhones) { throw 'Compiled phonemizer could not resolve Text.' }
+    $phonemizerMs = $speechWatch.Elapsed.TotalMilliseconds
+    $profile.Clear()
+    $teacherWatch = [Diagnostics.Stopwatch]::StartNew()
+    $speech = Invoke-OfflineSpeech -Phonemes $pronunciation.KokoroPhones -Voice $Voice -Speed $Speed
+    $teacherWatch.Stop(); $speechWatch.Stop()
+    $profile.ToArray() | Export-Clixml -LiteralPath (Join-Path $output 'speech-profile.clixml')
+    Write-OfflineWave (Join-Path $output 'speech.wav') $speech.Pcm
+    foreach ($boundary in 'TokenIds','Durations','Bert','DurationFeatures','F0','N','TextEncoding','Features','Pcm') {
+        Write-OfflineArray (Join-Path $output ($boundary + '.bin')) $speech.$boundary
+    }
+    $result = [pscustomobject]@{
+        Text = $Text; Phonemes = $speech.Phonemes; Voice = $Voice; Seed = $Seed; Speed = $Speed
+        Tokens = $speech.TokenIds.Length; Samples = $speech.Pcm.Length; AudioSeconds = $speech.Pcm.Length / 24000.0
+        Run = $speechRun; Convolution = $Convolution; Dense = $Dense; Threads = $Threads; ConvolutionTileFrames = $ConvolutionTileFrames; PhonemizerMs = $phonemizerMs; TeacherMs = $teacherWatch.Elapsed.TotalMilliseconds
+        TextToPcmMs = $speechWatch.Elapsed.TotalMilliseconds
+        RealTimeFactor = $speechWatch.Elapsed.TotalSeconds / ($speech.Pcm.Length / 24000.0)
+        TimingScope = 'Host text-to-PCM including phonemizer, excluding teacher compilation and checkpoint loading'
+        SourceSHA256 = $sourceHash; AssemblySHA256 = $admission.SHA256; DriverSHA256 = $driverPin
+        TextEncoderSHA256 = (Get-FileHash -LiteralPath $script:OfflineTextEncoder.GetType().Assembly.Location).Hash
+        PcmSHA256 = (Get-FileHash -LiteralPath (Join-Path $output 'Pcm.bin')).Hash
+        Path = Join-Path $output 'speech.wav'; Comparison = @()
+    }
+    if ($CompareConvolution -or $ReferenceSpeechDirectory) {
+        $candidateMethod = $Convolution
+        if ($ReferenceSpeechDirectory) {
+            $referenceDirectory = [IO.Path]::GetFullPath($ReferenceSpeechDirectory)
+            $referenceReceipt = Import-Clixml -LiteralPath (Join-Path $referenceDirectory 'speech.clixml')
+            if ($referenceReceipt.Phonemes -cne $speech.Phonemes -or $referenceReceipt.Voice -cne $Voice -or $referenceReceipt.Seed -ne $Seed -or $referenceReceipt.Speed -ne $Speed -or $referenceReceipt.DriverSHA256 -cne $driverPin) { throw 'Speech reference has different inputs.' }
+            if ((Get-FileHash -LiteralPath (Join-Path $referenceDirectory 'Pcm.bin')).Hash -cne $referenceReceipt.PcmSHA256) { throw 'Recorded reference PCM integrity mismatch.' }
+            $referenceSpeech = @{}
+            foreach ($boundary in 'TokenIds','Durations','Bert','DurationFeatures','F0','N','TextEncoding','Features','Pcm') {
+                $referenceSpeech[$boundary] = Read-OfflineArray (Join-Path $referenceDirectory ($boundary + '.bin')) $speech.$boundary.GetType().GetElementType() $speech.$boundary.Length
+            }
+            $comparisonMethod = 'Recorded'; $comparisonMs = $referenceReceipt.TeacherMs
+        } else {
+            $Convolution = if ($candidateMethod -eq 'Direct') { 'Reference' } else { 'Direct' }
+            $profile.Clear(); $teacherWatch.Restart()
+            $referenceSpeech = Invoke-OfflineSpeech -Phonemes $pronunciation.KokoroPhones -Voice $Voice -Speed $Speed
+            $teacherWatch.Stop()
+            $profile.ToArray() | Export-Clixml -LiteralPath (Join-Path $output 'comparison-profile.clixml')
+            $comparisonMethod = $Convolution; $comparisonMs = $teacherWatch.Elapsed.TotalMilliseconds
+        }
+        $comparisons = foreach ($boundary in 'TokenIds','Durations','Bert','DurationFeatures','F0','N','TextEncoding','Features','Pcm') {
+            $candidateValues = $speech.$boundary; $referenceValues = $referenceSpeech.$boundary
+            $referenceBytes = [byte[]]::new([Buffer]::ByteLength($referenceValues))
+            [Buffer]::BlockCopy($referenceValues, 0, $referenceBytes, 0, $referenceBytes.Length)
+            $exact = [Linq.Enumerable]::SequenceEqual[byte](
+                [IO.File]::ReadAllBytes((Join-Path $output ($boundary + '.bin'))),
+                $referenceBytes)
+            $metrics = if ($candidateValues.Length -eq $referenceValues.Length) { $compare.Invoke([float[]]$candidateValues, [float[]]$referenceValues) } else { [double[]]@([double]::NegativeInfinity, [double]::PositiveInfinity) }
+            [pscustomobject]@{ Boundary = $boundary; BitExact = $exact; SnrDb = $metrics[0]; MaxAbsError = $metrics[1] }
+        }
+        $result.Comparison = [pscustomobject]@{ Method = $comparisonMethod; TeacherMs = $comparisonMs; Boundaries = @($comparisons) }
+        $Convolution = $candidateMethod
+    }
+    $result | Export-Clixml -LiteralPath (Join-Path $output 'speech.clixml')
+    if (($CompareConvolution -or $ReferenceSpeechDirectory) -and @($result.Comparison.Boundaries | Where-Object { -not $_.BitExact }).Count -gt 0) { throw 'Rewrite changed a teacher boundary; inspect speech.clixml.' }
+    $speechResults.Add($result)
+    Write-Host ('Speech run {0}: {1:F3} seconds, RTF {2:F3}, PCM {3}' -f $speechRun, ($result.TextToPcmMs / 1000), $result.RealTimeFactor, $result.PcmSHA256)
+    }
+    $output = $speechOutput
+    $speechResults.ToArray() | Export-Clixml -LiteralPath (Join-Path $output 'speech-runs.clixml')
+    return $speechResults.ToArray()
+}
+$captures =Import-PowerShellDataFile (Join-Path $InputRepository 'build/score-capture-20261014/capture.psd1')
 $gateResults = [Collections.Generic.List[object]]::new()
 foreach ($case in $captures.Cases) {
     if ($CaseName -and $case.Name -cne $CaseName) { continue }

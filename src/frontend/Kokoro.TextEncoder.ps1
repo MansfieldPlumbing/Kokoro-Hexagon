@@ -10,6 +10,8 @@ class KokoroTextEncoder {
     [float[]] $HiddenWeights
     [float[]] $InputBias
     [float[]] $HiddenBias
+    # Optional in-process convolution dispatcher; masked batches retain the scalar path.
+    [System.Func[float[],int,int,float[]]] $Convolution
 
     static [float[]] FoldWeightNorm([float[]] $values, [float[]] $gain) {
         if ($values.Length -ne 1310720 -or $gain.Length -ne 512) { throw [ArgumentException]::new('Convolution weight shape mismatch.') }
@@ -35,6 +37,10 @@ class KokoroTextEncoder {
         }
         for ($layer = 0; $layer -lt 3; $layer++) {
             $y = [float[]]::new(512 * $tokens)
+            if (-not [object]::ReferenceEquals($null, $this.Convolution) -and $length -eq $tokens) {
+                $y = $this.Convolution.Invoke($x, $tokens, $layer)
+                if ($y.Length -ne 512 * $tokens) { throw [ArgumentException]::new('Dispatched convolution shape mismatch.') }
+            } else {
             for ($oc = 0; $oc -lt 512; $oc++) {
                 for ($t = 0; $t -lt $length; $t++) {
                     $sum = [float]0
@@ -49,6 +55,7 @@ class KokoroTextEncoder {
                     }
                     $y[$oc * $tokens + $t] = [float]($sum + $this.ConvBias[$layer * 512 + $oc])
                 }
+            }
             }
             for ($t = 0; $t -lt $length; $t++) {
                 $mean = [float]0

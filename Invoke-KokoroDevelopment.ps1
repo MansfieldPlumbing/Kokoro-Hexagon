@@ -49,28 +49,8 @@ twice, or written as a scratch script, is a missing command: add it here.
   FrontEnd -Parameters <typed bank inputs> -OutputDirectory
   PrecomputedDecoder -Parameters @{ Mode = 'Gate' } (offline decoder/generator experiment)
                               Manufacture and gate the compact prosody bank on the laptop; no phone access.
-  Student -Parameters @{ Step = 'Measure' } -OutputDirectory <fresh build directory>
-  Student -Parameters @{ Step = 'StrokeBoundary'; TrainingSentences = 32 } -OutputDirectory <fresh build directory>
-    Captures the actual 512-channel decoder handoff and checks existing dog/peach/nine references, offline.
-  Student -Parameters @{ Step = 'Strokes'; Stage = 'Library'; ExperimentDirectory = '<boundary directory>' }
-    Offline shared-stroke experiment. Admit checks kernels; Library selects training-only directions.
-    Ceiling tests distinct 4/8/16-stroke budgets; Render writes reference-then-reconstruction listening pairs.
-  Student -Parameters @{ Step = 'Render'; Replay = 'CopyOnly' } -OutputDirectory <fresh build directory>
-    Renders nine held-out original/COPY-only PCM16 WAV pairs with matched offline controls and PCM SNR.
-  Student -Parameters @{ Step = 'Replay' } -OutputDirectory <fresh build directory>
-    Admits native opcode replay and packs real exemplars with one selected shared voice key.
-  Student -Parameters @{ Step = 'Climb' } -OutputDirectory <fresh build directory>
-    Tests shorter programs at 46/70 dB feature SNR and journals every mutation; KernelOnly checks fixtures.
-    Threads partitions at source-sentence boundaries; ResumeDirectory preserves completed chunks.
-    Finalize compacts a completed ClimbDirectory into libraries and rewritten native programs.
-  Student -Parameters @{ Step = 'Render'; PrepareOnly = $true; Text = 'Peach.' }
-    Reuses the existing selector; SelectionSentences bounds an explicitly labelled preview. No new JSON.
-    DriverDirectory plus DriverSHA256 selects an alternative pinned phonemizer for controlled tests.
-    StudentReplay renders SelectedUnits at the 70 dB feature bar. Intensity is output gain;
-    StoreDirectory replays a completed compact store; omitted SelectedUnits uses the nine held-out selections.
-    DurationScale changes token durations and stretches F0/N without changing their values.
-                              Offline student opcode loop: real exemplars and direction medoids. -Path selects the bank.
-                              Typed results; read-only bank; no phone. -h prints entrypoint help.
+  Student -Parameters @{ Step = 'Console' }
+    Host text-to-speech console (student/Invoke-Student.ps1): our phonemizer and the lowered teacher; plays and saves WAVs under build/.
   AlbertLinear -Linear name[,name...] [-Path] [-Soc] [-Runs]
                               One ALBERT linear (mapping_in, query.0 .. ffn_output.11, bert_encoder) on the phone: job input
                               from the capture, emit, run, decode, SNR against stock. Default capture stock-albert-capture-hello.
@@ -2149,12 +2129,9 @@ if ($MyInvocation.InvocationName -eq '.') { return }
 
 switch ($Command) {
     'Student' {
-        Import-Module (Join-Path $Root 'tools/Kokoro.Student.psm1')
         $studentArguments=@{}
         if($Parameters){foreach($key in $Parameters.Keys){$studentArguments[$key]=$Parameters[$key]}}
-        if($OutputDirectory){$studentArguments.OutputDirectory=$OutputDirectory}
-        if($Path){$studentArguments.BankPath=$Path}
-        Invoke-KokoroStudent @studentArguments
+        & (Join-Path $Root 'student/Invoke-Student.ps1') @studentArguments
     }
     'MeasureAudio' {
         if (-not $Path) { throw 'MeasureAudio needs -Path (a WAV file or folder).' }
