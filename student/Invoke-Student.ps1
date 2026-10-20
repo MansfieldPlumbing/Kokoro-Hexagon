@@ -1287,7 +1287,8 @@ function Invoke-StudentTeacher {
             $file = Join-Path $cache "$key.clixml"; $cached = Test-Path -LiteralPath $file
             if ($cached) { $evidence = ConvertFrom-StudentStored (Import-Clixml -LiteralPath $file) }
             else {
-                if ($null -eq $teacher) { $teacher = Import-StudentTeacher $cache }
+                # The teacher compiles its kernels once into a fresh directory; evidence stays in the cache.
+                if ($null -eq $teacher) { $teacher = Import-StudentTeacher (Join-Path (New-StudentOutputDirectory 'teacher') 'teacher') }
                 $render = [Diagnostics.Stopwatch]::StartNew()
                 $speech = Invoke-OfflineSpeech -Phonemes $window.Phonemes -Voice $Voice -Speed $Speed -SkipGenerator
                 $renderSeconds += $render.Elapsed.TotalSeconds
