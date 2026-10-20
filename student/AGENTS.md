@@ -84,6 +84,15 @@ instead:
 
     coefficients(site, t) = base(voice, site) + P(voice, site) * v(t)
 
+Supplying every AdaIN site's coefficients is a requirement on the Student's
+design from stage 1, not a later optimization. Whole-utterance normalization
+is what forces the generator to hold or recompute a whole utterance's
+activations and to accumulate moments before any audio can be produced. With
+supplied coefficients the generator runs depth-first in time tiles, and its
+working memory is only the per-layer context buffers, which fit in the VTCM
+that remains after the resident weights (see Generator implementation, item
+1). Any Student design that cannot supply the coefficients is rejected.
+
 `v(t)` is the control stream's continuous state (k values, at most the six
 continuous controls of one record); `base` and `P` (channels by k) are per
 voice and stay resident with the generator; the DSP expands them with
@@ -243,6 +252,13 @@ produced it, so evidence from several teachers for the same typed objects
 coexists. A later teacher (for example Chatterbox Turbo) is added as a lowered
 port and an adapter, specified from its source at a pinned commit, without
 changing the core.
+
+The core stays open to what later teachers add, by extension, not by
+redesign: new token kinds (for example non-verbal events such as laughter
+or breaths) are new typed objects; new continuous expressive controls are new
+control-stream axes or records; a voice estimated from reference audio is a
+voice record produced by listening mode. Each later teacher is specified from
+its own source at a pinned commit before its adapter is built.
 
 ### Teacher data
 
@@ -590,7 +606,13 @@ complete.
 - Generator replacement: a fixed acoustic instrument with no learned values
   (excitation, resonances on the resident loop, built-in stop, fricative and
   nasal techniques, prosody-driven timing), played by the Student. Phase
-  alignment and mixing come from superposition on the loop.
+  alignment and mixing come from superposition on the loop. Replacement is
+  incremental: Kokoro's generator stays resident and keeps producing speech
+  while its parts are replaced one at a time, starting with the source branch
+  (already off the DSP in v1). Each replaced part is driven by the same
+  control stream, and a replacement is kept only if end-to-end quality holds
+  against the resident generator. The goal is natural human voice produced
+  procedurally, with no learned generator weights.
 - Input: a 16-bit token of phonetic features from our phonemizer.
 - Evaluation: Kokoro's self-distance across random seeds (Kokoro draws random
   harmonic start phases and noise on every run), measured at the audio output.
