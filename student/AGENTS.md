@@ -625,12 +625,10 @@ alone. Every change above is kept only if end-to-end PCM SNR does not drop.
 
 ## v2: long-horizon control and generator replacement
 
-Not current work. Order: v1 first, complete. v1 replaces everything in Kokoro
-up to and including the decoder, replaces AdaIN normalization with the
-Student's stateful stream, and integrates our own seeded noise source and
-cadence-locked phase with the resident generator. After v1, further generator
-layers are replaced one at a time, each kept only if end-to-end PCM SNR
-holds; v2 follows. The generator's weight size is re-evaluated once v1 is complete.
+Not current work. Order: v1 first (Student-supplied inputs, cadence-locked
+phase, seeded noise, resident weights); then further generator layers are
+replaced one at a time, each kept only if end-to-end PCM SNR holds; v2
+follows. The generator's weight size is re-evaluated once v1 is complete.
 
 - Long-horizon control: v1's control stream (Output streams) extended over
   long spans (phonetic targets, timing, pitch movement, emphasis). v1's work
