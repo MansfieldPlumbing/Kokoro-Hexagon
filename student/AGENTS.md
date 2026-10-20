@@ -69,7 +69,11 @@ can start before the utterance is complete:
   pitch movement, rate, voice-quality controls). A person can drive the same
   record from a physical controller, which checks that every required sound
   is reachable through the controls. Which control carries which quantity
-  is decided by measurement, not fixed here.
+  is decided by measurement, not fixed here. The stream itself is encoded
+  as MIDI 2.0 Universal MIDI Packet messages (per-note events, velocity,
+  per-note pitch bend and per-note controllers, with timestamps), specified
+  from the MIDI 2.0 specification before encoding; the XInput record is one
+  input device mapped onto those messages, and v2 consumes the same stream.
 - Generator stream: per tick, `x` (512 channels) and `f0`; per stage,
   `x_source` (see Generator implementation); and the coefficients of every
   AdaIN site, expanded from the control stream.
