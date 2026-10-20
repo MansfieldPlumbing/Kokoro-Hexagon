@@ -46,7 +46,7 @@ Text → custom CoreCLR phonemizer (ARM) → typed phonemes and prosody
 | DSP synthesis, decoder through PCM | Measured on SM8550 |
 | Custom CoreCLR phonemizer front end, on the phone | Measured |
 | Fixed normalization constants instead of runtime AdaIN statistics | Experimental: 99.6 ms, below the quality floor |
-| Student supplying the generator's inputs and AdaIN coefficients | Rebuilding: corpus, pronunciations and teacher in lowered PowerShell |
+| Student supplying the generator's inputs and AdaIN coefficients | Rebuilding: resumable corpus, replayable typed normalization and carried grammar state; acoustic learning pending |
 | Streaming at any length (time-major schedule) | Next |
 | Time to first audio, end to end | Not yet measured |
 | SM8635 | Not yet run |

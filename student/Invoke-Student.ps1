@@ -21,7 +21,13 @@ Corpus: read at most this many paragraphs per book (0 reads all).
 .PARAMETER Step
 The step to run.
 .PARAMETER Text
-Text for Render.
+Text for Render or Normalize.
+.PARAMETER State
+Normalize: a previous result's live interpretation state. MoreText retains the unfinished final token.
+.PARAMETER MoreText
+Normalize: more fragments will follow; complete tokens advance the resident grammar without rescanning earlier input.
+.PARAMETER SourceIdentity
+Normalize: stable source identity for a live interpretation stream.
 .PARAMETER Voice
 Voice pack for Render; any voice pinned in lib/manifest.json.
 .PARAMETER Speed
@@ -44,12 +50,23 @@ param(
     [string] $Voice = 'af_heart',
     [ValidateRange(0.5, 2)][double] $Speed = 1,
     [string] $Corpus = '',
+    [object] $State = $null,
+    [switch] $MoreText,
+    [string] $SourceIdentity = '',
     [ValidateRange(0, [int]::MaxValue)][int] $ParagraphLimit = 0
 )
+$studentInvocation = @{}
+foreach ($parameterName in $MyInvocation.MyCommand.Parameters.Keys) {
+    if ([Management.Automation.PSCmdlet]::CommonParameters.Contains($parameterName)) { continue }
+    $studentInvocation[$parameterName] = Get-Variable -Name $parameterName -ValueOnly
+}
+$studentOwner = New-Module -Name KokoroStudent -ArgumentList $studentInvocation, $PSCommandPath, $PSScriptRoot -ScriptBlock {
+param($Invocation, $StudentOwnerPath, $StudentOwnerRoot)
+foreach ($parameterName in $Invocation.Keys) { Set-Variable -Scope Script -Name $parameterName -Value $Invocation[$parameterName] }
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
-$script:StudentRoot = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..'))
+$script:StudentRoot = [IO.Path]::GetFullPath((Join-Path $StudentOwnerRoot '..'))
 $script:StudentBuild = Join-Path $script:StudentRoot 'build'
 $script:StudentContext = [ordered]@{
     Teacher = $null          # in-memory module exporting Invoke-OfflineSpeech
@@ -60,14 +77,15 @@ $script:StudentContext = [ordered]@{
     Vocabulary = $null       # Kokoro symbol set
     Correspondences = $null  # learned Zira-to-Kokoro symbol mappings
     NormalizationType = $null # admitted managed normalization program type
+    InterpretationType = $null # persistent compiled grammar engine
 }
 
 # Pinned inputs. The phonemizer is the compiled English driver built by
 # phonemizer/Invoke-EnglishPhonemizer.ps1; the teacher is tools/Invoke-KokoroPrecomputedDecoder.ps1.
 $script:StudentInputs = [ordered]@{
     Phonemizer = [ordered]@{
-        Directory = 'build/phonemizer/english/driver/E970EEC73CBB8CCA52267D46DA06A0319EFFE106869FC393B02FC165D52EE19A-library-dll'
-        SHA256 = 'B021978611019C1C628FA1F05025D6F3E8B94C64CA3FD75EDBC6B3170EAA8675'
+        Directory = 'build/phonemizer/english/driver/27394F8EE7C83EA37142C313813931AF2D9B4FA2E4679BB200804BA7759D6558-library-dll'
+        SHA256 = '865C1DB6C5F0B5A95BED00CD33B6E9859726F0B64376D28FB60152601D3AF226'
     }
     Teacher = 'tools/Invoke-KokoroPrecomputedDecoder.ps1'
     Manifest = 'lib/manifest.json'
@@ -88,6 +106,11 @@ $script:StudentText = [ordered]@{
     KokoroVowels = 'AIOWYaæɐɑɒeəɛɚɜɤiɪɨᵻoøœɔuʊʌɯyᵊ'
 }
 
+$script:StudentProsodyRules = @(
+    [pscustomobject]@{ PSTypeName = 'Kokoro.StudentProsodyRule'; Name = 'SubjectAwaitingPredicate'; Rule = 12
+        Established = 'Subject'; Awaited = 'Predicate'; Preference = 'Continuation'; Confidence = 'Medium' }
+)
+
 function New-StudentOutputDirectory([string] $Name) {
     $directory = Join-Path $script:StudentBuild ('{0}-{1:yyyyMMddTHHmmss}' -f $Name, [DateTime]::UtcNow)
     if (Test-Path -LiteralPath $directory) { throw "Output directory already exists: $directory" }
@@ -103,6 +126,7 @@ function Import-StudentPhonemizer {
     if ($receipt.AssemblySha256 -cne $pin.SHA256 -or (Get-FileHash -LiteralPath $path).Hash -cne $pin.SHA256) { throw 'Compiled English phonemizer integrity mismatch.' }
     $assembly = [Reflection.Assembly]::LoadFrom($path)
     $script:StudentContext.NormalizationType = $assembly.GetType('CoreNormalizationDecision', $true)
+    $script:StudentContext.InterpretationType = $assembly.GetType('CoreEngine', $true)
     $assembly.GetType('CoreDriver', $true).GetMethod('Run').CreateDelegate([Func[string,object]])
 }
 
@@ -471,12 +495,79 @@ class StudentTextKernels {
 $script:StudentTokenKinds = @{ 1 = 'Word'; 2 = 'Number'; 3 = 'Ordinal'; 4 = 'Punctuation'; 5 = 'Quote'; 6 = 'Symbol'; 7 = 'Note' }
 $script:StudentPronunciationSources = @{ 0 = 'None'; 1 = 'Phonemizer'; 2 = 'Zira' }
 Update-TypeData -TypeName 'Kokoro.StudentNormalizationDecision' -MemberType ScriptMethod -MemberName Realize -Value {
-    if ($null -eq $script:StudentContext.NormalizationType) { throw 'Import the pinned Student phonemizer before replaying normalization.' }
-    $programType = $script:StudentContext.NormalizationType
+    if ($null -eq $this.RuntimeType) { throw 'Import the pinned Student phonemizer before replaying normalization.' }
+    $programType = $this.RuntimeType
     $program = $programType::new()
     foreach ($name in 'Operation', 'Operand', 'PreviousWord', 'Role', 'Stress', 'Flap') { $program.$name = $this.$name }
     $program.Realize()
 } -Force
+Update-TypeData -TypeName 'Kokoro.StudentNormalizationDecision' -DefaultDisplayPropertySet Operation, ValueKind, Value, Provenance -Force
+Update-TypeData -TypeName 'Kokoro.StudentInterpretationState' -MemberType ScriptMethod -MemberName Append -Value {
+    param([string] $Fragment, [bool] $Final)
+    & $this.Owner { param($Interpretation, $Text, $Complete); Add-StudentInterpretationText $Interpretation $Text $Complete } $this $Fragment $Final
+} -Force
+
+function New-StudentInterpretationState([string] $Source) {
+    $engineType = $script:StudentContext.InterpretationType
+    $engine = $engineType::new(); $engine.Polish = $true
+    if (-not $Source) { $Source = 'stream:' + [Guid]::NewGuid().ToString('N') }
+    [pscustomobject]@{ PSTypeName = 'Kokoro.StudentInterpretationState'; Source = $Source
+        Owner = $ExecutionContext.SessionState.Module
+        Engine = $engine; Text = [Text.StringBuilder]::new(); Buffered = ''; Processed = 0; Completed = $false
+        DriverSHA256 = $script:StudentInputs.Phonemizer.SHA256; Observations = [ordered]@{}
+        Transitions = [Collections.Generic.List[object]]::new(); Result = $null }
+}
+
+function Add-StudentInterpretationText([object] $Interpretation, [string] $Fragment, [bool] $Final) {
+    if ($Interpretation.PSObject.TypeNames -notcontains 'Kokoro.StudentInterpretationState') { throw 'Normalize requires a Student interpretation object.' }
+    if ($Interpretation.DriverSHA256 -cne $script:StudentInputs.Phonemizer.SHA256) { throw 'Interpretation state was created with a different front-end pin.' }
+    if ($Interpretation.Engine.GetType() -ne $script:StudentContext.InterpretationType) { throw 'Interpretation state requires its live compiled grammar engine.' }
+    if ($Interpretation.Completed) { throw 'The interpretation stream is already complete.' }
+    [void]$Interpretation.Text.Append($Fragment)
+    $buffer = $Interpretation.Buffered + $Fragment
+    $ready = $buffer.Length
+    if (-not $Final) {
+        $ready = 0
+        for ($i = $buffer.Length - 1; $i -ge 0; $i--) {
+            if ([char]::IsWhiteSpace($buffer[$i])) { $ready = $i + 1; break }
+        }
+    }
+    $segment = $buffer.Substring(0, $ready)
+    $offset = 0
+    while ($offset -lt $segment.Length) {
+        $count = $Interpretation.Engine.Occurrences.Count
+        $next = $Interpretation.Engine.ScanNext($segment, $offset)
+        if ($next -le $offset) { throw 'The compiled scanner did not advance.' }
+        $offset = $next
+        if ($Interpretation.Engine.Occurrences.Count -eq $count) { continue }
+        $occurrence = $Interpretation.Engine.Occurrences[$count]
+        $occurrence.Start += $Interpretation.Processed; $occurrence.End += $Interpretation.Processed
+        foreach ($rule in $script:StudentProsodyRules) {
+            $recognized = @($Interpretation.Engine.Candidates | Where-Object {
+                $_.Status -cnotin 'Unsupported', 'Contradictory' -and $null -ne $_.($rule.Established) -and
+                @($_.($rule.Established).Dependencies).Count -gt 0
+            })
+            $waiting = @($recognized | Where-Object { $null -eq $_.($rule.Awaited) })
+            $satisfied = @($recognized | Where-Object { $null -ne $_.($rule.Awaited) })
+            $previous = $Interpretation.Observations[$rule.Name]
+            $status = if ($waiting.Count -and $satisfied.Count) { 'Ambiguous' }
+                elseif ($waiting.Count) { 'Open' } elseif ($satisfied.Count) { 'Satisfied' }
+                elseif ($null -ne $previous -and $previous.Status -cne 'Inactive') { 'Unresolved' } else { 'Inactive' }
+            if ($null -ne $previous -and $previous.Status -ceq $status) { continue }
+            $observation = [pscustomobject]@{ PSTypeName = 'Kokoro.StudentProsodyTransition'; Source = $Interpretation.Source
+                Token = $occurrence.Identity; Rule = $rule.Rule; Name = $rule.Name; Status = $status
+                Preference = if ($waiting.Count) { $rule.Preference } else { 'Unspecified' }
+                Confidence = $rule.Confidence; Pause = 'Unspecified'; Provenance = 'AuthoredComposition'
+                Dependencies = [int[]]@($recognized | ForEach-Object { $_.($rule.Established).Dependencies } | Sort-Object -Unique) }
+            $Interpretation.Observations[$rule.Name] = $observation
+            $Interpretation.Transitions.Add($observation)
+        }
+    }
+    $Interpretation.Processed += $ready; $Interpretation.Buffered = $buffer.Substring($ready)
+    $Interpretation.Completed = $Final
+    $Interpretation.Result = $Interpretation.Engine.Result($Interpretation.Text.ToString())
+    Get-StudentNormalizationResult $Interpretation
+}
 
 function New-StudentNormalizationDecision([object] $Program, [object] $Occurrence, [object] $Context) {
     $value = $null; $kind = 'Unclassified'
@@ -490,12 +581,14 @@ function New-StudentNormalizationDecision([object] $Program, [object] $Occurrenc
     [pscustomobject]@{ PSTypeName = 'Kokoro.StudentNormalizationDecision'; Operation = $Program.Operation
         Operand = $Program.Operand; PreviousWord = $Program.PreviousWord; Role = $Program.Role
         Stress = $Program.Stress; Flap = $Program.Flap; ValueKind = $kind; Value = $value
-        Occurrence = $Occurrence; Context = $Context; Provenance = 'AuthoredReuse' }
+        Occurrence = $Occurrence; Context = $Context; Provenance = 'AuthoredReuse'
+        RuntimeType = $script:StudentContext.NormalizationType }
 }
 
 function Invoke-StudentNormalization {
     $phonemize = Import-StudentPhonemizer
     if ($Corpus) {
+        if ($Text -or $null -ne $State -or $MoreText) { throw 'Choose corpus replay or live text interpretation.' }
         $path = Get-StudentCorpusPath
         $data = ConvertFrom-StudentStored (Import-Clixml -LiteralPath (Join-Path $path 'corpus.clixml'))
         $decisions = @(foreach ($book in $data.Books) {
@@ -511,9 +604,15 @@ function Invoke-StudentNormalization {
             Decisions = $decisions; Replayed = $decisions.Count; Provenance = 'AuthoredReuse' }
         return
     }
-    if (-not $Text.Trim()) { throw 'Normalize needs -Text or -Corpus.' }
-    $result = $phonemize.Invoke($Text)
-    $source = [Convert]::ToHexString([Security.Cryptography.SHA256]::HashData([Text.Encoding]::UTF8.GetBytes($Text)))
+    if (-not $Text.Trim() -and $null -eq $State) { throw 'Normalize needs -Text, -Corpus or live -State.' }
+    if ($null -ne $State -and $SourceIdentity -and $State.Source -cne $SourceIdentity) { throw 'A live interpretation stream must retain its source identity.' }
+    $interpretation = if ($null -ne $State) { $State } else { New-StudentInterpretationState $SourceIdentity }
+    $interpretation.Append($Text, [bool](-not $MoreText))
+}
+
+function Get-StudentNormalizationResult([object] $Interpretation) {
+    $result = $Interpretation.Result
+    $source = $Interpretation.Source
     $decisions = @(foreach ($token in $result.Tokens) {
         if ($null -eq $token.Normalization) { continue }
         $occurrence = [pscustomobject]@{ PSTypeName = 'Kokoro.StudentOccurrenceReference'; Source = $source; Token = $token.Identity
@@ -524,8 +623,11 @@ function Invoke-StudentNormalization {
         if ($decision.Realize() -cne $token.Pron) { throw 'Student normalization replay differs from the front end.' }
         $decision
     })
-    [pscustomobject]@{ PSTypeName = 'Kokoro.StudentNormalization'; Source = $source; Complete = $result.Complete
-        Phones = $result.KokoroPhones; Decisions = $decisions; Unresolved = $result.UnresolvedSpans }
+    [pscustomobject]@{ PSTypeName = 'Kokoro.StudentNormalization'; Source = $source
+        Complete = $result.Complete -and $Interpretation.Completed; GrammarStatus = $result.GrammarStatus
+        Phones = $result.KokoroPhones; Decisions = $decisions; Unresolved = $result.UnresolvedSpans
+        State = $Interpretation; Prosody = $Interpretation.Transitions.ToArray()
+        DriverSHA256 = $Interpretation.DriverSHA256 }
 }
 Update-TypeData -TypeName 'Kokoro.StudentToken' -MemberType ScriptProperty -MemberName Spoken -Value { $this.Kind -in 'Word', 'Number', 'Ordinal', 'Punctuation', 'Quote' } -Force
 Update-TypeData -TypeName 'Kokoro.StudentToken' -MemberType ScriptProperty -MemberName CounterExample -Value {
@@ -541,10 +643,10 @@ function Import-StudentKernels {
     $pins = @(Import-Csv -LiteralPath (Join-Path $compiler 'verified-source.tsv') -Delimiter "`t")
     foreach ($item in $pins) { if ($item.Commit -cne $pin -or (Get-FileHash -LiteralPath (Join-Path $compiler $item.Path)).Hash -cne $item.Sha256) { throw 'Pinned compiler integrity mismatch.' } }
     Import-Module (Join-Path $compiler 'src/Dev.MansfieldPlumbing.PowerShell.Lowering.psd1')
-    $directory = Join-Path $script:StudentBuild ('student/kernels/' + (Get-FileHash -LiteralPath $PSCommandPath).Hash)
+    $directory = Join-Path $script:StudentBuild ('student/kernels/' + (Get-FileHash -LiteralPath $StudentOwnerPath).Hash)
     [void][IO.Directory]::CreateDirectory($directory)
     $dll = Join-Path $directory 'Kokoro.Student.dll'
-    if (-not (Test-Path -LiteralPath $dll)) { $null = Export-LoweredAssembly -SourcePath $PSCommandPath -ClassName StudentTextKernels -OutputPath $dll -Deterministic }
+    if (-not (Test-Path -LiteralPath $dll)) { $null = Export-LoweredAssembly -SourcePath $StudentOwnerPath -ClassName StudentTextKernels -OutputPath $dll -Deterministic }
     $admission = Test-LoweredAssembly -AssemblyPath $dll
     if (-not $admission.ClrOnlyAdmitted) { throw 'Student kernels reference SMA.' }
     $type = [Reflection.Assembly]::LoadFrom($dll).GetType('StudentTextKernels', $true)
@@ -696,6 +798,7 @@ function Add-StudentPhonemizerPronunciations([object] $Book, [Func[string,object
     }
     $Book | Add-Member -NotePropertyName Phonemizer -NotePropertyValue $table -Force
     $table | Add-Member -NotePropertyName Normalizations -NotePropertyValue $normalizations.ToArray()
+    $table | Add-Member -NotePropertyName DriverSHA256 -NotePropertyValue $script:StudentInputs.Phonemizer.SHA256
     $Book | Add-Member -NotePropertyName CompleteSentences -NotePropertyValue $complete -Force
 }
 
@@ -1033,7 +1136,10 @@ function ConvertTo-StudentStored([object] $Value) {
     }
     if ($Value.PSObject.BaseObject -is [Management.Automation.PSCustomObject]) {
         $stored = [ordered]@{}
-        foreach ($property in $Value.PSObject.Properties) { $stored[$property.Name] = ConvertTo-StudentStored $property.Value }
+        foreach ($property in $Value.PSObject.Properties) {
+            if ($Value.PSObject.TypeNames -contains 'Kokoro.StudentNormalizationDecision' -and $property.Name -ceq 'RuntimeType') { continue }
+            $stored[$property.Name] = ConvertTo-StudentStored $property.Value
+        }
         $result = [pscustomobject]$stored; $result.PSObject.TypeNames.Insert(0, $Value.PSObject.TypeNames[0]); return $result
     }
     if ($Value -is [Array]) { return , @(foreach ($item in $Value) { ConvertTo-StudentStored $item }) }
@@ -1063,7 +1169,11 @@ function ConvertFrom-StudentStored([object] $Value) {
     if ($Value -is [Management.Automation.PSObject] -and $names[0].StartsWith('Deserialized.', [StringComparison]::Ordinal)) {
         $restored = [ordered]@{}
         foreach ($property in $Value.PSObject.Properties) { $restored[$property.Name] = ConvertFrom-StudentStored $property.Value }
-        $result = [pscustomobject]$restored; $result.PSObject.TypeNames.Insert(0, $names[0].Substring(13)); return $result
+        $result = [pscustomobject]$restored; $result.PSObject.TypeNames.Insert(0, $names[0].Substring(13))
+        if ($result.PSObject.TypeNames -contains 'Kokoro.StudentNormalizationDecision') {
+            $result | Add-Member -NotePropertyName RuntimeType -NotePropertyValue $script:StudentContext.NormalizationType
+        }
+        return $result
     }
     $Value
 }
@@ -1135,4 +1245,5 @@ $script:StudentSteps = [ordered]@{
     Pronunciation = { Invoke-StudentPronunciation }
     Normalize = { Invoke-StudentNormalization }
 }
-& $script:StudentSteps[$Step]
+}
+& $studentOwner { & $script:StudentSteps[$Step] }
