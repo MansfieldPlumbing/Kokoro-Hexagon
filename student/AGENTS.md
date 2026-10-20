@@ -153,6 +153,39 @@ where held-out evidence supports it. Their effects map to the control stream
 (boundaries and closures to buttons, prominence to triggers, pitch and timing
 movement to sticks).
 
+Impart the rulebook's structural knowledge as reusable behaviours with explicit
+activation conditions, state effects, pending expectations and completion.
+Resolve their interactions using the rulebook's precedence and confidence
+distinctions. Accent, boundary pitch and boundary timing remain distinct
+decisions; overlapping rules describing one boundary produce one coordinated
+action. Teacher evidence calibrates the realization and supports contextual
+exceptions; acoustic similarity alone does not establish a semantic or
+structural correction.
+
+### Normalization transfer from the front end
+
+The existing compiled PC front end supplies text normalization and
+pronunciation knowledge. Extend its owning phonemizer and the Student's
+existing token interface to retain typed values, the selected normalization
+operation, relevant context dependencies, unresolved alternatives and the
+source identities of emitted words and phones. Preserve correspondence when
+one source occurrence expands into several spoken objects.
+
+Bind reusable operations and state transitions to typed objects through ETS.
+Reuse admitted compiled operations directly where they already implement the
+required behaviour. Report this as reuse of authored knowledge; claims of
+learned generalization require evaluation on held-out values, occurrences or
+contexts with stored output lookup excluded. Select each next normalization
+family from coverage and unresolved cases in the actual corpus.
+
+Context is carried state: interpretation alternatives, open closures and
+controller state survive subsequent inputs. A behaviour consumes a typed
+occurrence and the current state, produces decisions and control actions,
+and updates that state. Controller events change held state; sensitivity,
+acceleration and response modes determine its evolution over elapsed time.
+Extend the existing types and graph; lower hot operations into typed managed
+calls while keeping ETS members available for composition and inspection.
+
 ### Typed learning
 
 The Student never sees raw sentences. Sentences are not the unit of learning
@@ -246,6 +279,14 @@ Consolidation bounds the Student's size as the corpus grows and lowers the
 cost of producing output.
 
 ### Voices
+
+There is one shared corpus of typed content, interpretation and relationships.
+Each voice contributes realization evidence attached to the same occurrence
+identities with its provenance. Voice differences alter how shared behaviour
+is performed; normalization and linguistic structure are shared. Matched
+observations retain each voice's actual durations, with phone correspondence
+used to compare local trajectories. Adding a voice extends its record and
+evidence rather than generating another corpus.
 
 The first voice is `af_heart`: all teacher evidence is rendered with it until
 the Student meets its goals on held-out text with that voice. The second voice
