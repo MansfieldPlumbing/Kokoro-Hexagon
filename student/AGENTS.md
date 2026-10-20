@@ -22,6 +22,23 @@ recomputed per utterance or per sample what a Student can learn once
 (whole-utterance AdaIN moments, per-unit storage, the source branch); the
 items below move that work out of the audio-rate path.
 
+### This is not stock Kokoro
+
+At run time only Kokoro's frozen generator weights and voice records are used. Kokoro is
+the teacher for local sound, not the design. Do not reason about this system
+as if it were stock Kokoro with faster kernels.
+
+| Stock Kokoro (upstream `pipeline.py`, `model.py`) | This system |
+| --- | --- |
+| Input is a string: `KModel.forward(phonemes: str, ref_s)` | No strings. Text enters as typed token occurrences with global identity (book, paragraph, token index, source offset) |
+| The pipeline splits text with regular expressions and chunks it at punctuation into pieces of at most 510 phonemes | No sentences, spans or windows. Interpretation advances token by token through closures and carried state, at any distance |
+| PL-BERT, predictor and decoder run over the whole chunk | The Student replaces everything up to and including the decoder |
+| AdaIN normalizes with moments over the whole utterance | AdaIN normalization is the Student's controller stream: the Student holds a dual-analog controller, and conditioning is held controller state |
+| Audio is returned per chunk, after the chunk is complete | The generator runs continuously on its cadence with resident weights; audio starts at the first controller state and has no utterance boundary |
+
+The 510-phoneme window appears in this project only as the scope of the
+evidence Kokoro can supply as a teacher (see Teacher data).
+
 The Student's source is `student/Invoke-Student.ps1`, reached through
 `Invoke-KokoroDevelopment.ps1 Student`. Extend that owner.
 
