@@ -81,8 +81,13 @@ can start before the utterance is complete:
 - The Student does not depend on the target. Its streams bind to a renderer
   per target (the Hexagon generator, a host emulator of it, later others);
   training against a quantized generator (stage 5) is a refinement of one
-  binding. If six continuous controls are not enough, a second controller
-  record is added and each update becomes a 192-bit snapshot.
+  binding.
+- The stream format is extensible without revision. A layout is declared
+  once when the stream opens: the number of records, each record's type
+  (the controller record above; other device types later) and the quantity
+  each control carries. Every update is then that many records at fixed
+  offsets. A further controller (two records, 192 bits per update, or more)
+  changes the declaration, not the format.
 - Tiles are the DSP's execution granularity only. The Student emits a
   continuous stream on the tick clock and never sees tile boundaries;
   supplied coefficients do not depend on where tiles are cut. Its one
