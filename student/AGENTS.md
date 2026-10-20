@@ -361,6 +361,11 @@ on Hexagon. Its purpose is that this project never needs Python again.
   rendering the same span inside windows with different preceding context
   and carrying the measured effect beyond 510 phonemes. Kokoro remains the
   reference for local sound (`x` and voice).
+- The 510-phoneme window is Kokoro's limitation (upstream `pipeline.py`
+  rejects longer phoneme strings), not the Student's. It is a pragmatic scope
+  for learning from Kokoro. Chatterbox, the next target, is not bound by
+  Kokoro's limit, so nothing in the Student's types, closures or runtime is
+  scoped to it.
 - Text source: the full text of the Project Gutenberg books in
   `build/grammar-corpus/raw`, read in order, not the extracted example lists.
   Sections headed "IMPROPRIETIES FOR CORRECTION." and "FALSE SYNTAX ..." run
