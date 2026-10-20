@@ -166,6 +166,46 @@ one of its fields and may be removed later. Percepts store how to produce
 values, not recordings of them. No unit bank is stored; units are generated on
 demand.
 
+### Percept graph
+
+Percepts are linked by typed edges, so the Student is a sparse typed graph:
+
+- Nodes are percepts: phone, syllable, word, phrase, closure type, voice.
+- Edge types: sequence (one percept followed by another), containment
+  (phone in syllable in word), closure binding (opening and closing tokens
+  at any distance) and voice (a percept under a voice).
+- A node's output in context is its own program plus the contributions of
+  its active incoming edges. A sequence edge produces the transition between
+  two percepts (coarticulation); a closure edge produces the timing and pitch
+  of a continuing contour.
+- Learning fits node programs first, then each edge type to the remaining
+  error. An edge is added only where held-out evidence supports it.
+- Only edges active in the current context are evaluated, so producing
+  output stays sparse and runs ahead of the DSP on the CPU.
+- An edge's contribution is a stretch of `x` (512 channels), stored as a
+  low-rank program, never as a dense matrix, so the graph does not rebuild
+  the weight problem the Student removes.
+- Every node and edge has a type and is listed by the tool's description of
+  itself; nothing in the graph is opaque.
+
+### Consolidation
+
+A consolidation pass runs between training stages and whenever evidence
+accumulates. Each change is kept only if held-out PCM SNR holds:
+
+- Merge types whose learned behaviours have converged (one percept, several
+  keys).
+- Split a type where held-out evidence shows two behaviours (a heteronym, a
+  function word stressed and unstressed).
+- Prune nodes and edges that are unused or not supported by held-out
+  evidence.
+- Lay out storage by use: percepts and edges used together are stored
+  together; frequently used ones are compiled to lowered code and kept
+  resident (hot-path compilation), so speed follows use.
+
+Consolidation bounds the Student's size as the corpus grows and lowers the
+cost of producing output.
+
 ### Voices
 
 The first voice is `af_heart`: all teacher evidence is rendered with it until
@@ -303,6 +343,56 @@ on Hexagon. Its purpose is that this project never needs Python again.
   `AdaIN1d`). Until residency is reached, the generator runs layer by layer
   over spans with weights loaded once per span. The current `Speak` limit of
   96 decoder frames (2.4 s) is a test point, not a design limit.
+
+### Training stages
+
+The Student is trained in stages. Each stage has a gate on held-out text; the
+next stage starts only when the gate passes, and every earlier gate remains a
+regression check, so a change that improves a later stage and breaks an
+earlier one is rejected. Gate thresholds are set by measurement when each stage
+is reached.
+
+| Stage | Learns | Evidence | Gate |
+| --- | --- | --- | --- |
+| 1. Sound inventory | Phone percepts; `af_heart`'s voice record and AdaIN `base` | Short windows | Each phone's stretch of `x`, and the generator PCM it produces |
+| 2. Words | Word percepts; sequence edges | Short windows | Held-out words assembled from percepts |
+| 3. Phrases | Containment edges; phrase closures; duration and `f0` contours | Medium windows | Held-out sentences |
+| 4. Long-range context | Closures across sentences and paragraphs, with lifetimes, expiry and reopening; prosody-rulebook candidate types; counter-examples | Windows up to 510 phonemes and long-horizon sources | Held-out paragraphs; closure expiry and reopening rates |
+| 5. Consolidation | Merge, split, prune and lay out; training against the on-device generator | All earlier evidence | Same SNR with fewer percepts and lower production cost |
+| 6. Extension | A second voice, further teachers, listening mode | New teacher adapters | Each new gate passes without an earlier gate regressing |
+
+Plasticity is scheduled: early stages admit new types and edges readily;
+later stages require more held-out support for a change, so learned behaviour
+stays stable. Consolidation runs between stages. Reliance on the teacher
+narrows as stages advance: stages 1 to 3 learn local sound from Kokoro, stage 4
+carries context beyond the teacher's window, and stage 6 corrects the teacher
+where other evidence shows it wrong.
+
+### Amortization
+
+Each cost is paid at the earliest point that allows it:
+
+| Paid | Work | Removed from the audio-rate path |
+| --- | --- | --- |
+| Build | Weights quantized, Snake α and quantization scales folded, laid out in VTCM tiles; DSP kernels emitted with fused epilogues; sine table and noise constants generated; lexicon and learned pronunciations compiled into the phonemizer; host code precompiled | Weight conversion, per-value Snake work, lexicon search, startup compilation |
+| Application start | FastRPC session and queue opened once; resident weights loaded into VTCM once | Session setup and weight streaming per utterance |
+| Voice selected | The voice record and each AdaIN site's `base` and `P` | AdaIN `fc` layers and whole-utterance moments |
+| Text arrives | Phonemizer and Student run ahead on the CPU, pipelined with the DSP | Waiting for whole sentences or utterances |
+| Control event | The DSP expands control state into coefficients | Host traffic per tick |
+| Tick | Generator convolutions only, depth-first in VTCM | |
+
+Across utterances, frequently used percepts keep their produced output keyed
+by type and context, and the DSP's phase and noise counters persist. Time to
+first audio is phonemizing the first clause, the Student's first block and
+one generator tile.
+
+Development is amortized the same way, so the training loop stays fast:
+teacher evidence is computed once, filed by type and cached by phoneme
+content; Zira captures are cached by text; the propagation measurement lets
+most experiments be scored from boundary error without running the
+generator; a host emulator of the quantized generator, bit-exact with the
+DSP, lets the Student train against device behaviour without the phone; and
+every baseline (emission hashes, SNRs, timings) is kept as a record.
 
 ### Generator implementation on Hexagon
 
