@@ -82,6 +82,9 @@ AdaIN coefficients. The generator has 48 AdaIN sites: `resblocks.0-5` and
 `noise_res.0-1`, two per dilation, 24 sites at 256 channels and 24 at 128
 (consistent with the 2,377,728 `fc` parameters). Folding InstanceNorm into
 AdaIN, each site applies a per-channel scale and bias, 18,432 values in all.
+Twelve of the sites are in `noise_res`, the source branch, which runs off the
+DSP; the DSP receives the 36 `resblocks` sites, 13,824 values (6,912 scales
+and 6,912 biases).
 The stock model computes them from `s` and from moments over the whole
 utterance, which forces whole-utterance execution. The Student supplies them
 instead:
