@@ -461,7 +461,7 @@ Each cost is paid at the earliest point that allows it:
 
 | Paid | Work | Removed from the audio-rate path |
 | --- | --- | --- |
-| Build | Weights quantized, Snake α and quantization scales folded, laid out in VTCM tiles; DSP kernels emitted with fused epilogues; iSTFT basis and noise constants generated; lexicon and learned pronunciations compiled into the phonemizer; host code precompiled | Weight conversion, per-value Snake work, lexicon search, startup compilation |
+| Build | Weights quantized, Snake α and quantization scales folded, laid out in VTCM tiles; DSP kernels emitted with fused epilogues; sine table and noise constants generated; lexicon and learned pronunciations compiled into the phonemizer; host code precompiled | Weight conversion, per-value Snake work, lexicon search, startup compilation |
 | Application start | FastRPC session and queue opened once; resident weights loaded into VTCM once | Session setup and weight streaming per utterance |
 | Voice selected | The voice record and each AdaIN site's `base` and `P` | AdaIN `fc` layers and whole-utterance moments |
 | Text arrives | Phonemizer and Student run ahead on the CPU, pipelined with the DSP | Waiting for whole sentences or utterances |
@@ -546,37 +546,26 @@ Plan:
    Student supplies. Folding α into that site's scale and bias and 1/α into
    the next convolution's input-channel weights is exact and leaves one
    parameter-free function, `y + sin²(y)`, for every channel of every site.
-   The Student's control stream is a stateful substitution for AdaIN: each
-   site's operating point and input range are carried state, updated by
-   controller events, not moments recomputed from activations. Lock is
-   evaluated against that state, so no sine is computed and no table is held.
-   Registers hold element-wise steps;
+   It can read the same VTCM sine table as the harmonic phase (item 4), and
+   because the Student sets each site's coefficients it also bounds each
+   site's input range, which fixes the table span or the polynomial degree of
+   the replacement. Registers hold element-wise steps;
    VTCM holds data between convolutions, which need neighboring positions and
    all channels.
 3. Keep the residual stream and all phase state resident in VTCM at full
    precision (int32 fixed point or fp32), including the Lock operating points. Hypothesis to test: stage 1 loses most accuracy today
    (10x half alone 58.56 dB, 60x half plus tail 42.71 dB, whole generator
    42.05 dB), and full-precision residual and phase state recovers part of it.
-4. Phase is locked to the generator's cadence, not computed. One tick is 300
-   samples: `ups.0` multiplies the rate by 10, `ups.1` by 6, and the iSTFT
-   hop is 5 (upstream `istftnet.py`: `upsample_scale = prod(upsample_rates) *
-   gen_istft_hop_size`). Every position inside a tick is a fixed integer
-   index on that cadence, and with the weights resident the phase state is a
-   set of integer counters in VTCM that advance by integer adds and wrap
-   exactly, so precision does not decay with utterance length, unlike
-   Kokoro's `cumsum` phase in `SineGen`. Harmonics advance at integer
-   multiples of the same counter and stay locked. The generator never reads
-   the time-domain sine: it reads the source as `har_spec` and `har_phase`,
-   11 bins per 5-sample hop (`stft.transform(har_source)` before
-   `noise_convs`), so the Student supplies those per hop as part of its
-   stateful stream and no sine is produced. The iSTFT basis is 20 fixed
-   constants on the cadence. Remaining trigonometry is at the output only:
-   `sin` of the predicted phase and `exp(i·phase)` per bin per hop
-   (`istftnet.py` lines 323-325); its replacement is measured by PCM SNR.
-   The comparison reference uses the same exact phase, labeled as a
-   difference from stock.
-5. Generate the source's noise ourselves, not through Kokoro's sampling,
-   using counter-based random numbers (for example Philox): every draw is a function
+4. Harmonic phase is an integer pointer into a one-period sine table (a ring
+   in VTCM when the source runs on Hexagon, about 8 KB for 4,096 fp16 entries;
+   the same table in memory when it runs on the CPU). Advancing by frequency
+   is an integer add and wraps exactly, so precision does not decay with
+   utterance length, unlike Kokoro's `cumsum` phase in `SineGen`. Harmonic k
+   reads at k times the pointer, so harmonics stay locked. Linear
+   interpolation between entries keeps the error near 130 dB. The comparison
+   reference uses the same exact phase, labeled as a difference from stock.
+5. Compute the harmonic source from `f0` (off the DSP, item 1) using
+   counter-based random numbers (for example Philox): every draw is a function
    of a seed and a position, so tiles, spans and the offline reference produce
    identical noise. The hardware random number generator
    supplies one seed per utterance, and the seed is logged so any utterance
@@ -625,17 +614,15 @@ alone. Every change above is kept only if end-to-end PCM SNR does not drop.
 
 ## v2: long-horizon control and generator replacement
 
-Not current work. Order: v1 first (Student-supplied inputs, cadence-locked
-phase, seeded noise, resident weights); then further generator layers are
-replaced one at a time, each kept only if end-to-end PCM SNR holds; v2
-follows. The generator's weight size is re-evaluated once v1 is complete.
+Not current work. The generator's weight size is re-evaluated once v1 is
+complete.
 
 - Long-horizon control: v1's control stream (Output streams) extended over
   long spans (phonetic targets, timing, pitch movement, emphasis). v1's work
   carries over unchanged: the control stream drives the v2 instrument as it
   drives the generator's AdaIN sites, the per-voice records and sensitivities
-  carry over, and the cadence-locked phase counters in VTCM serve both the
-  generator and the instrument.
+  carry over, and the VTCM sine table serves both the folded Snake function
+  and the instrument's phase.
 - Listening mode: the Student also maps audio back to the same symbolic event
   stream it plays, not to stored units: phone onsets and offsets, pitch as a
   continuous pitch-bend control, emphasis as velocity, and the other controls
@@ -654,9 +641,9 @@ follows. The generator's weight size is re-evaluated once v1 is complete.
   the DSP decodes Universal MIDI Packets into per-channel and per-note state
   held in VTCM (phase, resonances, envelopes, loop state). Events update that
   state; between events the instrument runs without host traffic. Each
-  note's phase is an integer counter in VTCM, stepped by its pitch including
-  per-note pitch bend; harmonics advance at integer multiples of the same
-  counter and stay locked.
+  note's phase is an integer pointer into a one-period sine table in VTCM,
+  stepped by its pitch including per-note pitch bend; harmonics read at
+  integer multiples of the same pointer and stay locked.
 - The instrument simulates air in three dimensions: pressure and particle
   velocity on sparse voxels covering only the air volume, with a
   low-dispersion scheme so coarse voxels stay accurate, plus steady flow.
