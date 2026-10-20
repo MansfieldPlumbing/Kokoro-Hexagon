@@ -643,6 +643,28 @@ complete.
   control stream, and a replacement is kept only if end-to-end quality holds
   against the resident generator. The goal is natural human voice produced
   procedurally, with no learned generator weights.
+- Knowledge transfer from simulation: the physical instrument is also a
+  teacher. The Student learns reusable control programs from its responses,
+  including excitation, resonance, transitions and their dependence on
+  context. Consolidation may replace repeated simulation work with a cheaper
+  typed program where measured acoustic fidelity and responses to controls
+  hold. Percepts retain how to produce an effect, rather than recordings of
+  the effect. The physical model remains available for calibration and for
+  behaviours the learned programs do not yet reproduce. This is a proposed
+  transfer mechanism, not a measured replacement: compare the original and
+  replacement under the same controls, including transitions and contexts
+  excluded from fitting, and measure production cost before adopting it.
+  Learned behaviour belongs to the Student; the physical instrument retains
+  its explicit acoustic equations and has no learned generator weights.
+- Playback binding: keep the percept's intent, the mechanism producing sound
+  and the playback device's response distinct. Phone and computer speakers
+  are renderer bindings with measured transducer responses; their calibration
+  does not change the percept's meaning. Evaluate transferred behaviour both
+  at the generated audio boundary and through the intended playback device.
+  A faithful simulated source may be replaced by another mechanism that
+  preserves its acoustic effect and control response within that device's
+  reproducible range. Simulation does not remove the physical speaker's
+  bandwidth, output-level or spatial limits.
 - Input: a 16-bit token of phonetic features from our phonemizer.
 - Evaluation: Kokoro's self-distance across random seeds (Kokoro draws random
   harmonic start phases and noise on every run), measured at the audio output.
