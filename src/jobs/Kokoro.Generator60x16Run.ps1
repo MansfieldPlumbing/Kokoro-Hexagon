@@ -166,14 +166,29 @@ function New-KokoroGenerator60x16RunSteps {
     }
     # Place each section after the previous one, then bind the first. VTCM is shared: the job requests the largest.
     $bases=[Collections.Generic.List[long[]]]::new(); $ddrAt=$(if($Source){$sourceDdrBytes}else{0L}); $inAt=0L; $wAt=0L; $pAt=0L; $vtcmTotal=0L
+    # Weight regions by part: Main is the path from x to PCM, Source the branch fed only by the excitation. Resblock
+    # stages are W8 two-plane records (high plane, then low plane, Channels^2 K bytes each).
+    $weightRegions=[Collections.Generic.List[object]]::new()
     foreach($sec in $sections){
         $bases.Add([long[]]@($ddrAt,$inAt,$wAt,$pAt)); . $configure $sec $ddrAt $inAt $wAt $pAt
         $vtcmTotal=[math]::Max($vtcmTotal,$vtcmBytes)
+        for($b=0;$b -lt $branches;$b++){$weightRegions.Add([pscustomobject]@{Name="resblocks.c$Channels.k$($Kernels[$b])";Part='Main';Format='ResblockW16';Channels=$Channels;Kernel=$Kernels[$b];Offset=$branchWeights[$b];Bytes=6L*2*$Channels*$Channels*$Kernels[$b]})}
+        if($Tail){$weightRegions.Add([pscustomobject]@{Name='tail';Part='Main';Format='Tail';Channels=$Channels;Kernel=7;Offset=$tailWeightOffset;Bytes=172032L})}
+        if($front10){
+            $weightRegions.Add([pscustomobject]@{Name='noise_res.0';Part='Source';Format='ResblockW16';Channels=256;Kernel=7;Offset=$noiseWeightOffset;Bytes=6L*2*256*256*7})
+            $weightRegions.Add([pscustomobject]@{Name='noise_convs.0';Part='Source';Format='Front';Channels=256;Kernel=12;Offset=$frontWeightOffset;Bytes=393216L})
+            $weightRegions.Add([pscustomobject]@{Name='ups.0';Part='Main';Format='Front';Channels=256;Kernel=20;Offset=$frontWeightOffset+393216;Bytes=10*786432L})
+        } elseif($Front){
+            $weightRegions.Add([pscustomobject]@{Name='noise_res.1';Part='Source';Format='ResblockW16';Channels=128;Kernel=11;Offset=$noiseWeightOffset;Bytes=6L*32768*11})
+            $weightRegions.Add([pscustomobject]@{Name='noise_convs.1';Part='Source';Format='Front';Channels=128;Kernel=1;Offset=$frontWeightOffset;Bytes=49152L})
+            $weightRegions.Add([pscustomobject]@{Name='ups.1';Part='Main';Format='Front';Channels=128;Kernel=12;Offset=$frontWeightOffset+49152;Bytes=1179648L})
+        }
         $ddrAt=[long]([math]::Ceiling(($outputBytes-192)/4096)*4096); $inAt=$inputBytes; $wAt=$weightBytes; $pAt=$parameterBytes
     }
     $totalInput=$inputBytes; $totalWeights=$weightBytes; $totalParameters=$parameterBytes; $totalOutput=$outputBytes
     if($Source){
         $sourceIn=$totalInput; $sourceW=$totalWeights; $sourceP=$totalParameters
+        $weightRegions.Add([pscustomobject]@{Name='source.stft';Part='Source';Format='Stft';Channels=22;Kernel=20;Offset=$sourceW;Bytes=[long]$sourceLayout.WeightBytes})
         $totalInput+=$sourceLayout.InputBytes; $totalWeights+=$sourceLayout.WeightBytes; $totalParameters+=$sourceLayout.ParameterBytes
         # The phase-major gather uses VTCM from 0: both 60x har planes, then both phase-major planes.
         $gHi=0L; $gLo=[long]([math]::Ceiling($tiles60*4096/65536)*65536); $gPmHi=2*$gLo; $gPmLo=$gPmHi+[long]([math]::Ceiling($tiles10*16384/65536)*65536)
@@ -766,6 +781,7 @@ function New-KokoroGenerator60x16RunSteps {
     foreach($c in $calls){$delta=[long]([uint32](($labels[$c.label]-$pcs[$c.pc]) -band 0xffffffffL));$c.low.i=$delta -band 65535;$c.high.i=$delta -shr 16}
     $resultLayout=[ordered]@{Frames=$Frames;Tiles=$tiles;InputBytes=$totalInput;WeightBytes=$totalWeights;ParameterBytes=$totalParameters;OutputBytes=$totalOutput;VtcmBytes=$vtcmTotal;Samples=$(if($Tail){5*($Frames-1)}else{1});PcmOffset=$(if($Tail){$pcmOffset}else{256});BranchStride=$stride;FinalWorkspaceOffset=$finalOffset;CoefficientOffset=$coefOffset;ScratchOffset=$scratchOffset;CompletedStages=$(6*$branches+[int]$withMean);BatchTiles=$batch;HvxThreads=$HvxThreads;Regions=$layout.Regions}
     $resultLayout.AdaInMode=$AdaInMode
+    $resultLayout.WeightRegions=$weightRegions.ToArray()
     if($PmuEvents){$resultLayout.PmuProfile=[pscustomobject]@{Categories=$pmuCategories;SiteRecordOffset=$pmuSiteOffset;SiteRecordCount=$pmuSiteRecordCount;Sites=$pmuSites}}
     $resultLayout.ConstantPacking=[pscustomobject]@{Frames=$Frames;ParameterBytes=$constantsTableOffset;ConstantsTableOffset=$constantsTableOffset;
         ConstantsBytes=$momentAt;ConstantsParameterBytes=$constantsTableOffset+$momentAt;OutputBytes=$exportOffset;

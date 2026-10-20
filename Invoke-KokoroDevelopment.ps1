@@ -1394,6 +1394,98 @@ function Test-KokoroGeneratorRepresentation {
     [pscustomobject]$report
 }
 
+# Generator PCM at reduced weight precision on the phone. The 16-bit resblock weights of the accepted constants input are
+# requantized per output channel to symmetric n-bit levels (2^(n-1) - 1 steps of max|w| / (2^(n-1) - 1)); each channel's
+# group 0 and group 1 table biases absorb the change in its high and low plane row sums (the -128 sumH, -128 sumL terms of
+# tools/New-KokoroGenerator60x16Fixture.ps1), so every conv stays exact for its new weights. The unmodified run must
+# reproduce the accepted PCM; each variant is scored against it and against stock PCM.
+function Test-KokoroGeneratorWeightPrecision {
+    param([Parameter(Mandatory)][string]$OutputDirectory,[string]$Soc='SM8550',[string]$Package='dev.mansfieldplumbing.kokoro',
+        [ValidateRange(2,15)][int[]]$Bits=@(8,6,5,4),[ValidateSet('Stage0','Stage1','Both')][string[]]$Scopes=@('Stage0','Stage1','Both'),
+        [string]$PriorReceipt=(Join-Path $Build 'generator-constants-full-corpus-20261012-143702-run.clixml'))
+    $out=[IO.Path]::GetFullPath($OutputDirectory)
+    if(-not $out.StartsWith($Build+[IO.Path]::DirectorySeparatorChar,[StringComparison]::OrdinalIgnoreCase) -or (Test-Path -LiteralPath $out)){throw 'Choose a fresh precision directory under build/.'}
+    [void][IO.Directory]::CreateDirectory($out)
+    Import-Evaluator
+    $prior=Import-Clixml -LiteralPath $PriorReceipt
+    if($prior.Gate.Status -cne 'Passed'){throw 'Prior generator constants gate did not pass.'}
+    $peach=Join-Path $Root 'data/baselines/decoder-generator-bank-input-sm8550-20261010/input'
+    $whole=Get-Content -LiteralPath (Join-Path $peach 'fixture.json') -Raw | ConvertFrom-Json
+    $source=Join-Path $prior.OutputDirectory 'A/generator-exact-constants'
+    $generator=Invoke-KokoroEmission -Kernel KokoroGeneratorWholeSource16Run -Parameters @{ResBlockFrames=[int]$whole.Frames;ResidentHvxThreads=4;ResidentBatchTiles=14;GeneratorMoments='Constants'}
+    $activations=[IO.File]::ReadAllBytes((Join-Path $source 'activations.bin')); $tables=[IO.File]::ReadAllBytes((Join-Path $source 'tables.bin')); $weights=[IO.File]::ReadAllBytes((Join-Path $source 'weights.bin'))
+    if($generator.Layout.WeightBytes -ne $weights.Length){throw 'Generator weight layout differs from the accepted weights.'}
+    $records=@{}; foreach($site in $generator.Layout.ConstantPacking.MomentSites){if($site.Module -ceq 'resblocks'){$records["$($site.Block).$($site.Stage)"]=[long]$site.RecordOffset}}
+    # Decode every resblock stage once: 16-bit value and output channel per byte position (HMX order of
+    # Get-PackWeightPlanesShapedKernel: ((g K + k) CB + blk) 2048 + 1024 hh + 128 (i >> 2) + 4 c + (i & 3), o = 64 g + 32 hh + c).
+    $stages=[Collections.Generic.List[object]]::new()
+    foreach($region in @($generator.Layout.WeightRegions | Where-Object {$_.Name -like 'resblocks.*'})){
+        $width=[int]$region.Channels; $kernel=[int]$region.Kernel; $count=$width*$width*$kernel; $blocks=$width/32
+        $block=$(if($width -eq 256){0}else{3})+[Array]::IndexOf([int[]]@(3,7,11),$kernel)
+        for($st=0;$st -lt 6;$st++){
+            $high=[long]$region.Offset+2L*$count*$st; $low=$high+$count
+            $values=[int[]]::new($count); $owner=[int[]]::new($count); $peak=[int[]]::new($width); $sumHigh=[long[]]::new($width); $sumLow=[long[]]::new($width)
+            for($at=0;$at -lt $count;$at++){
+                $hb=[int]$weights[$high+$at]; if($hb -ge 128){$hb-=256}; $lb=[int]$weights[$low+$at]; if($lb -ge 128){$lb-=256}
+                $group=[math]::Floor($at/2048); $within=$at%2048
+                $o=64*[math]::Floor($group/($kernel*$blocks))+$(if($within -ge 1024){32}else{0})+[math]::Floor(($within%128)/4)
+                $v=256*$hb+$lb; $values[$at]=$v; $owner[$at]=$o; $sumHigh[$o]+=$hb; $sumLow[$o]+=$lb
+                if([math]::Abs($v) -gt $peak[$o]){$peak[$o]=[math]::Abs($v)}
+            }
+            $stages.Add([pscustomobject]@{Block=$block;Stage=$st;Width=$width;High=$high;Low=$low;Count=$count;Values=$values;Owner=$owner;Peak=$peak;SumHigh=$sumHigh;SumLow=$sumLow
+                Record=$records["$block.$st"];Scope=$(if($width -eq 256){'Stage0'}else{'Stage1'})})
+        }
+    }
+    if($stages.Count -ne 36){throw "Expected 36 resblock stages, found $($stages.Count)."}
+    $stockBytes=[IO.File]::ReadAllBytes((Join-Path $peach 'expected-pcm-f32.bin')); $stock=[float[]]::new($whole.Samples); [Buffer]::BlockCopy($stockBytes,0,$stock,0,$stockBytes.Length)
+    $snr={param([double[]]$Reference,[double[]]$Candidate) $s=0.0;$e=0.0; for($i=0;$i -lt $Reference.Length;$i++){$d=$Reference[$i]-$Candidate[$i];$s+=$Reference[$i]*$Reference[$i];$e+=$d*$d}; if($e -eq 0){[double]::PositiveInfinity}else{[math]::Round(10*[math]::Log10($s/$e),2)}}
+    $deviceRun={param([string]$Name,[byte[]]$WeightBytes,[byte[]]$TableBytes)
+        $directory=Join-Path $out $Name; [void][IO.Directory]::CreateDirectory($directory)
+        [IO.File]::WriteAllBytes((Join-Path $directory 'activations.bin'),$activations); [IO.File]::WriteAllBytes((Join-Path $directory 'tables.bin'),$TableBytes); [IO.File]::WriteAllBytes((Join-Path $directory 'weights.bin'),$WeightBytes)
+        $job=Invoke-KokoroDeviceJob -EmissionDirectory $generator.Directory -EmissionArtifact $generator -InputDirectory $directory -Soc $Soc -Runs 1 -Package $Package
+        [IO.File]::Delete((Join-Path $directory 'weights.bin'))
+        $samples=[double[]]::new($whole.Samples)
+        for($i=0;$i -lt $samples.Length;$i++){$samples[$i]=[BitConverter]::ToInt16($job.Output,$generator.Layout.PcmOffset+2*$i)/32768.0}
+        [pscustomobject]@{Samples=$samples;PcmSHA256=[Convert]::ToHexString([Security.Cryptography.SHA256]::HashData([byte[]]$job.Output[$generator.Layout.PcmOffset..($generator.Layout.PcmOffset+2*$whole.Samples-1)]));DspMs=$job.MedianMs}}
+    $accepted=Get-KokoroRatchetCase -Name decoder-generator-bank-input-sm8550
+    $base=& $deviceRun 'weights16' $weights $tables
+    if($base.PcmSHA256 -cne $accepted.PcmSHA256){throw 'Unmodified constants generator PCM differs from the accepted peach PCM.'}
+    $rows=[Collections.Generic.List[object]]::new()
+    $rows.Add([pscustomobject]@{Bits=16;Scope='None';Weights=0;WeightSnrDb=$null;PcmSnrDb=[double]::PositiveInfinity;StockSnrDb=(& $snr ([double[]]$stock) $base.Samples);DspMs=$base.DspMs})
+    foreach($precision in $Bits){
+        foreach($part in $Scopes){
+            $levels=[math]::Pow(2,$precision-1)-1; $weightCopy=[byte[]]$weights.Clone(); $tableCopy=[byte[]]$tables.Clone(); $signal=0.0; $noise=0.0; $changed=0L
+            foreach($stage in @($stages | Where-Object {$part -ceq 'Both' -or $_.Scope -ceq $part})){
+                $newHigh=[long[]]::new($stage.Width); $newLow=[long[]]::new($stage.Width)
+                for($at=0;$at -lt $stage.Count;$at++){
+                    $o=$stage.Owner[$at]; $v=$stage.Values[$at]; $step=$stage.Peak[$o]/$levels
+                    $w=[int][math]::Round([math]::Round($v/$step)*$step); $hb=[int][math]::Floor(($w+128)/256); $lb=$w-256*$hb
+                    $weightCopy[$stage.High+$at]=[byte]($hb -band 255); $weightCopy[$stage.Low+$at]=[byte]($lb -band 255)
+                    $newHigh[$o]+=$hb; $newLow[$o]+=$lb; $signal+=[double]$v*$v; $noise+=[double]($w-$v)*($w-$v)
+                }
+                $changed+=$stage.Count
+                for($o=0;$o -lt $stage.Width;$o++){
+                    $ob=[math]::Floor($o/32); $cc=$o%32
+                    for($plane=0;$plane -lt 4;$plane++){
+                        $at=[int]($stage.Record+32L*$stage.Width+(6*$ob+$plane)*256+128+4*$cc)
+                        $delta=if($plane -lt 2){-128L*($newHigh[$o]-$stage.SumHigh[$o])}else{-128L*($newLow[$o]-$stage.SumLow[$o])}
+                        $corrected=[long][BitConverter]::ToInt32($tableCopy,$at)+$delta
+                        if($corrected -lt [int]::MinValue -or $corrected -gt [int]::MaxValue){throw "Table bias overflow at block $($stage.Block) stage $($stage.Stage) channel $o."}
+                        [Array]::Copy([BitConverter]::GetBytes([int]$corrected),0,$tableCopy,$at,4)
+                    }
+                }
+            }
+            $result=& $deviceRun ("int{0}-{1}" -f $precision,$part) $weightCopy $tableCopy
+            $row=[pscustomobject]@{Bits=$precision;Scope=$part;Weights=$changed;WeightSnrDb=[math]::Round(10*[math]::Log10($signal/[math]::Max($noise,1e-300)),2)
+                PcmSnrDb=(& $snr $base.Samples $result.Samples);StockSnrDb=(& $snr ([double[]]$stock) $result.Samples);DspMs=$result.DspMs}
+            $rows.Add($row); Write-Host ("Precision int{0} {1} weights={2} weight={3} pcm={4} stock={5}" -f $precision,$part,$changed,$row.WeightSnrDb,$row.PcmSnrDb,$row.StockSnrDb)
+        }
+    }
+    $report=[pscustomobject]@{Soc=$Soc;Fixture=$peach;GeneratorLibrarySHA256=$generator.LibrarySHA256;BasePcmSHA256=$base.PcmSHA256;Rows=$rows.ToArray()}
+    $report | Export-Clixml -LiteralPath (Join-Path $out 'precision.clixml') -Depth 6
+    $report
+}
+
 # Emits a diagnostic tensor job, runs it on the phone with a job input directory, and returns the output tensor bytes
 # (from runner-layout.json OutputOffset), the count of halfwords at the int16 limits, DSP time and the skel identity.
 function Invoke-KokoroTensorJob {
@@ -2529,6 +2621,11 @@ switch ($Command) {
         if($Case -ceq 'generator-pmu'){
             $profileParameters=if($Parameters){$Parameters}else{@{}}
             Test-KokoroGeneratorPmu -OutputDirectory $OutputDirectory -Soc $Soc -Package $HostPackage @profileParameters
+            break
+        }
+        if($Case -ceq 'generator-weight-precision'){
+            $precisionParameters=if($Parameters){$Parameters}else{@{}}
+            Test-KokoroGeneratorWeightPrecision -OutputDirectory $OutputDirectory -Soc $Soc -Package $HostPackage @precisionParameters
             break
         }
         if($Case -ceq 'generator-representation'){
