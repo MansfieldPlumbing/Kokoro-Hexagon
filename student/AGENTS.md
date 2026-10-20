@@ -100,7 +100,11 @@ that remains after the resident weights (see Generator implementation, item
 `v(t)` is the control stream's continuous state (k values, at most the six
 continuous controls of one record); `base` and `P` (channels by k) are per
 voice and stay resident with the generator; the DSP expands them with
-multiply-adds. Measured on the stock decoder, supplied whole-utterance
+multiply-adds. With k = 1 a single stick axis carries `v(t)`: one 16-bit value
+per update moves all 18,432 coefficients, each through its own sensitivity, in
+place of about 36 KB of fp16 coefficients per update. Further axes and
+triggers are added only if the representation measurement requires them.
+Measured on the stock decoder, supplied whole-utterance
 moments reproduce the one-pass output bit for bit, chunks with their own
 moments reach 12.21 dB against one pass and 61.97 dB with supplied moments,
 and supplying coefficients directly cut a decoder chunk from about 13.4 to
