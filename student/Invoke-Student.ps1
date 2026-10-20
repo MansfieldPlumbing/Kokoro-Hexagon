@@ -8,10 +8,15 @@ Steps:
             WAV under build/ and play it. Keys: Enter speak, F2 voice, F3/F4 speed, F5 replay,
             F6 toggle playback, Esc quit.
   Render    Render -Text with the lowered teacher to a WAV under build/ and return a typed result.
-  Corpus    Pack the pinned Project Gutenberg text into continuous windows of at most 510 phonemes,
-            flag counter-example sections, and write pronunciation-audit inputs.
-  Pronunciation  Aggregate Zira pronunciation audits (-AuditDetails words.psd1 paths): agreement,
-            disagreements by word and recurring symbol substitutions.
+  Corpus    Tokenize the pinned Project Gutenberg text, pronounce every word with our phonemizer and
+            with Zira (joined by source span), learn Zira-to-Kokoro symbol correspondences, and
+            pack continuous windows of at most 510 phonemes as token ranges. Writes corpus.clixml.
+  Pronunciation  Counter-examples from a corpus (-Corpus, default the latest): words where Zira's
+            form differs from ours, by word, with recurring symbol differences.
+.PARAMETER Corpus
+Corpus directory for Pronunciation; defaults to the latest build/corpus-* with corpus.clixml.
+.PARAMETER ParagraphLimit
+Corpus: read at most this many paragraphs per book (0 reads all).
 .PARAMETER Step
 The step to run.
 .PARAMETER Text
@@ -37,7 +42,8 @@ param(
     [string] $Text = '',
     [string] $Voice = 'af_heart',
     [ValidateRange(0.5, 2)][double] $Speed = 1,
-    [string[]] $AuditDetails = @()
+    [string] $Corpus = '',
+    [ValidateRange(0, [int]::MaxValue)][int] $ParagraphLimit = 0
 )
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
@@ -49,6 +55,9 @@ $script:StudentContext = [ordered]@{
     Phonemize = $null        # compiled English phonemizer: Func[string,object]
     Voices = @()
     OutputDirectory = $null
+    Kernels = $null          # compiled StudentTextKernels delegates
+    Vocabulary = $null       # Kokoro symbol set
+    Correspondences = $null  # learned Zira-to-Kokoro symbol mappings
 }
 
 # Pinned inputs. The phonemizer is the compiled English driver built by
@@ -70,9 +79,10 @@ $script:StudentText = [ordered]@{
     # Word sequences that open a counter-example section when they occur in a heading.
     CounterExampleHeadings = @(@('FALSE', 'SYNTAX'), @('IMPROPRIETIES', 'FOR', 'CORRECTION'), @('EXAMPLES', 'OF', 'ERROR'), @('ERRORS', 'CONCERNING'), @('ERROR', 'CONCERNING'))
     MaximumPhonemes = 510         # stock KModel input limit (512 tokens with the two pads)
-    AuditFileBytes = 1000000      # Test-EnglishPronunciationCorpus bounds: 1 MiB and 4096 lines
-    AuditFileLines = 4000
     AuditLineCharacters = 8192    # Get-EnglishZiraReference text bound
+    ZiraCharacters = 1500         # source characters per Zira capture
+    CorrespondenceShare = 0.5     # minimum share for a learned Zira-to-Kokoro symbol mapping
+    KokoroVowels = 'AIOWYaæɐɑɒeəɛɚɜɤiɪɨᵻoøœɔuʊʌɯyᵊ'
 }
 
 function New-StudentOutputDirectory([string] $Name) {
@@ -233,10 +243,10 @@ function Show-StudentConsole {
     }
 }
 
-class StudentTextTokenizer {
-    # One pass over a paragraph's characters, compiled through PSLowering. Each token is four
-    # integers: kind, start, length, flags. Kinds: 1 word, 2 number, 3 ordinal or format word
-    # (2d, 12mo), 4 punctuation, 5 quotation mark, 6 symbol, 7 transcriber note. Flags: 1 emphasis
+class StudentTextKernels {
+    # Text kernels compiled through PSLowering. A token is four integers: kind, start, length,
+    # flags. Kinds: 1 word, 2 number, 3 ordinal or format word (2d, 12mo), 4 punctuation,
+    # 5 quotation mark, 6 symbol, 7 transcriber note; kinds 1 to 5 are spoken. Flags: 1 emphasis
     # (_..._ in Project Gutenberg text), 2 editorial insertion ([...]). Markup characters
     # themselves produce no token; nothing is removed from the source text.
     static [bool] IsWordChar([char[]] $c, [int] $at, [int] $start) {
@@ -259,7 +269,8 @@ class StudentTextTokenizer {
         }
         return $false
     }
-    static [int[]] Tokenize([string] $text) {
+    static [int[]] Tokenize([string] $text, [int] $offset) {
+        # Tokens of one paragraph; starts are offset into the text that holds the paragraph.
         $c = $text.ToCharArray(); $n = $c.Length
         $out = [int[]]::new(4 * $n + 4); $count = 0; $flags = 0; $i = 0
         while ($i -lt $n) {
@@ -269,8 +280,8 @@ class StudentTextTokenizer {
             if ($code -eq 91) {
                 $close = -1
                 for ($j = $i + 1; $j -lt $n -and $j -le $i + 80; $j++) { if ($close -lt 0 -and [int]$c[$j] -eq 93) { $close = $j } }
-                if ($close -gt 0 -and [StudentTextTokenizer]::NoteAt($c, $i + 1)) {
-                    $out[4 * $count] = 7; $out[4 * $count + 1] = $i; $out[4 * $count + 2] = $close - $i + 1; $out[4 * $count + 3] = $flags; $count++
+                if ($close -gt 0 -and [StudentTextKernels]::NoteAt($c, $i + 1)) {
+                    $out[4 * $count] = 7; $out[4 * $count + 1] = $i + $offset; $out[4 * $count + 2] = $close - $i + 1; $out[4 * $count + 3] = $flags; $count++
                     $i = $close + 1; continue
                 }
                 if ($close -gt 0) { $flags = $flags -bor 2; $i++; continue }
@@ -279,7 +290,7 @@ class StudentTextTokenizer {
             $kind = 6; $j = $i + 1
             if ([char]::IsLetter($c[$i])) {
                 $kind = 1
-                while ($j -lt $n -and [StudentTextTokenizer]::IsWordChar($c, $j, $i)) { $j++ }
+                while ($j -lt $n -and [StudentTextKernels]::IsWordChar($c, $j, $i)) { $j++ }
             }
             elseif ([char]::IsDigit($c[$i])) {
                 $kind = 2
@@ -295,20 +306,170 @@ class StudentTextTokenizer {
             elseif ($code -eq 45 -and $i + 1 -lt $n -and [int]$c[$i + 1] -eq 45) { $kind = 4; while ($j -lt $n -and [int]$c[$j] -eq 45) { $j++ } }
             elseif ($code -eq 34 -or $code -eq 39 -or $code -eq 8216 -or $code -eq 8217 -or $code -eq 8220 -or $code -eq 8221) { $kind = 5 }
             elseif ($code -eq 46 -or $code -eq 44 -or $code -eq 59 -or $code -eq 58 -or $code -eq 33 -or $code -eq 63 -or $code -eq 40 -or $code -eq 41 -or $code -eq 8212 -or $code -eq 8211 -or $code -eq 45 -or $code -eq 8230) { $kind = 4 }
-            $out[4 * $count] = $kind; $out[4 * $count + 1] = $i; $out[4 * $count + 2] = $j - $i; $out[4 * $count + 3] = $flags; $count++
+            $out[4 * $count] = $kind; $out[4 * $count + 1] = $i + $offset; $out[4 * $count + 2] = $j - $i; $out[4 * $count + 3] = $flags; $count++
             $i = $j
         }
         $result = [int[]]::new(4 * $count)
         for ($k = 0; $k -lt 4 * $count; $k++) { $result[$k] = $out[$k] }
         return $result
     }
+    static [int[]] Sentences([int[]] $tokens, [char[]] $c, [int] $first, [int] $end) {
+        # Sentence token ranges in tokens [first, end) as (first, last) pairs: a sentence ends at
+        # . ! or ? (with any closing quotation marks) when the next spoken token starts with a
+        # capital letter or a digit, or at the end of the range.
+        $out = [int[]]::new(2 * ($end - $first) + 2); $count = 0; $start = $first
+        for ($k = $first; $k -lt $end; $k++) {
+            if ($tokens[4 * $k] -ne 4 -or $tokens[4 * $k + 2] -ne 1) { continue }
+            $code = [int]$c[$tokens[4 * $k + 1]]
+            if ($code -ne 46 -and $code -ne 33 -and $code -ne 63) { continue }
+            $close = $k
+            while ($close + 1 -lt $end -and $tokens[4 * ($close + 1)] -eq 5) { $close++ }
+            $next = $close + 1
+            while ($next -lt $end -and $tokens[4 * $next] -gt 5) { $next++ }
+            if ($next -lt $end) {
+                $lead = $c[$tokens[4 * $next + 1]]
+                if (-not ([char]::IsUpper($lead) -or [char]::IsDigit($lead))) { continue }
+            }
+            $out[2 * $count] = $start; $out[2 * $count + 1] = $close; $count++
+            $start = $close + 1; $k = $close
+        }
+        if ($start -lt $end) { $out[2 * $count] = $start; $out[2 * $count + 1] = $end - 1; $count++ }
+        $result = [int[]]::new(2 * $count)
+        for ($k = 0; $k -lt 2 * $count; $k++) { $result[$k] = $out[$k] }
+        return $result
+    }
+    static [string] Project([int[]] $tokens, [char[]] $c, [int] $first, [int] $last, [int[]] $spans) {
+        # The text our phonemizer and Zira receive for tokens first..last: spoken tokens only,
+        # words separated by spaces, punctuation attached to the preceding token except ( and
+        # dashes, quotation marks as alternating open and close double quotes, and -- as an em
+        # dash. spans receives each token's (start, length) in that text, or (-1, 0) if unspoken.
+        $size = 1
+        for ($k = $first; $k -le $last; $k++) { $size += $tokens[4 * $k + 2] + 1 }
+        $buffer = [char[]]::new($size); $count = 0; $open = $false; $attachNext = $true
+        $marks = ' "—'.ToCharArray()
+        for ($k = $first; $k -le $last; $k++) {
+            $at = 2 * ($k - $first); $kind = $tokens[4 * $k]
+            $spans[$at] = -1; $spans[$at + 1] = 0
+            if ($kind -gt 5) { continue }
+            $s = $tokens[4 * $k + 1]; $len = $tokens[4 * $k + 2]
+            if ($kind -eq 5) {
+                $open = -not $open
+                if ($open -and -not $attachNext) { $buffer[$count] = $marks[0]; $count++ }
+                $spans[$at] = $count; $spans[$at + 1] = 1; $buffer[$count] = $marks[1]; $count++
+                $attachNext = $open
+                continue
+            }
+            $dash = $kind -eq 4 -and $len -ge 2 -and [int]$c[$s] -eq 45 -and [int]$c[$s + 1] -eq 45
+            $openParen = $kind -eq 4 -and $len -eq 1 -and [int]$c[$s] -eq 40
+            $emDash = $dash -or ($kind -eq 4 -and $len -eq 1 -and [int]$c[$s] -eq 8212)
+            $attach = $attachNext -or ($kind -eq 4 -and -not $openParen -and -not $emDash)
+            if (-not $attach) { $buffer[$count] = $marks[0]; $count++ }
+            $spans[$at] = $count
+            if ($dash) { $buffer[$count] = $marks[2]; $count++; $spans[$at + 1] = 1 }
+            else {
+                for ($j = 0; $j -lt $len; $j++) { $buffer[$count] = $c[$s + $j]; $count++ }
+                $spans[$at + 1] = $len
+            }
+            $attachNext = $openParen
+        }
+        return [string]::new($buffer, 0, $count)
+    }
+    static [int[]] Cover([int[]] $spans, [int[]] $events) {
+        # For each event (start, length) in projected text, in text order, the first and last
+        # token (indices into spans) lying wholly inside it; (-1, -1) when none does or a token
+        # straddles the event's edge.
+        $n = $spans.Length -shr 1; $m = $events.Length -shr 1
+        $out = [int[]]::new(2 * $m); $p = 0
+        for ($e = 0; $e -lt $m; $e++) {
+            $s = $events[2 * $e]; $end = $s + $events[2 * $e + 1]
+            while ($p -lt $n -and ($spans[2 * $p] -lt 0 -or $spans[2 * $p] + $spans[2 * $p + 1] -le $s)) { $p++ }
+            $firstToken = -1; $lastToken = -1; $broken = $false; $q = $p
+            while ($q -lt $n -and ($spans[2 * $q] -lt 0 -or $spans[2 * $q] -lt $end)) {
+                if ($spans[2 * $q] -ge 0) {
+                    if ($spans[2 * $q] -lt $s -or $spans[2 * $q] + $spans[2 * $q + 1] -gt $end) { $broken = $true }
+                    else { if ($firstToken -lt 0) { $firstToken = $q }; $lastToken = $q }
+                }
+                $q++
+            }
+            if ($broken) { $firstToken = -1; $lastToken = -1 }
+            $out[2 * $e] = $firstToken; $out[2 * $e + 1] = $lastToken
+        }
+        return $out
+    }
+    static [string] Unstressed([string] $phones) {
+        # Phones without primary and secondary stress marks.
+        $c = $phones.ToCharArray(); $buffer = [char[]]::new($c.Length); $count = 0
+        for ($k = 0; $k -lt $c.Length; $k++) { if ([int]$c[$k] -ne 712 -and [int]$c[$k] -ne 716) { $buffer[$count] = $c[$k]; $count++ } }
+        return [string]::new($buffer, 0, $count)
+    }
+    static [int[]] Align([string] $source, [string] $target) {
+        # Minimum-edit alignment of two symbol strings as (source index, target index) pairs in
+        # order; -1 marks a gap.
+        $a = $source.ToCharArray(); $b = $target.ToCharArray(); $w = $b.Length + 1
+        $cost = [int[]]::new(($a.Length + 1) * $w)
+        for ($i = 0; $i -le $a.Length; $i++) { $cost[$i * $w] = $i }
+        for ($j = 0; $j -le $b.Length; $j++) { $cost[$j] = $j }
+        for ($i = 1; $i -le $a.Length; $i++) {
+            for ($j = 1; $j -le $b.Length; $j++) {
+                $same = 1; if ([int]$a[$i - 1] -eq [int]$b[$j - 1]) { $same = 0 }
+                $cost[$i * $w + $j] = [Math]::Min([Math]::Min($cost[($i - 1) * $w + $j] + 1, $cost[$i * $w + $j - 1] + 1), $cost[($i - 1) * $w + $j - 1] + $same)
+            }
+        }
+        $reverse = [int[]]::new(2 * ($a.Length + $b.Length) + 2); $count = 0; $i = $a.Length; $j = $b.Length
+        while ($i -gt 0 -or $j -gt 0) {
+            $same = 1; if ($i -gt 0 -and $j -gt 0 -and [int]$a[$i - 1] -eq [int]$b[$j - 1]) { $same = 0 }
+            if ($i -gt 0 -and $j -gt 0 -and $cost[$i * $w + $j] -eq $cost[($i - 1) * $w + $j - 1] + $same) { $i--; $j--; $reverse[2 * $count] = $i; $reverse[2 * $count + 1] = $j }
+            elseif ($i -gt 0 -and $cost[$i * $w + $j] -eq $cost[($i - 1) * $w + $j] + 1) { $i--; $reverse[2 * $count] = $i; $reverse[2 * $count + 1] = -1 }
+            else { $j--; $reverse[2 * $count] = -1; $reverse[2 * $count + 1] = $j }
+            $count++
+        }
+        $result = [int[]]::new(2 * $count)
+        for ($k = 0; $k -lt $count; $k++) { $result[2 * $k] = $reverse[2 * ($count - 1 - $k)]; $result[2 * $k + 1] = $reverse[2 * ($count - 1 - $k) + 1] }
+        return $result
+    }
+    static [string] Substitute([string] $phones, [char[]] $from, [string[]] $to) {
+        # Replaces each symbol found in from with the corresponding string in to.
+        $c = $phones.ToCharArray(); $size = $c.Length
+        for ($k = 0; $k -lt $to.Length; $k++) { $size += $to[$k].Length * $c.Length }
+        $buffer = [char[]]::new($size); $count = 0
+        for ($i = 0; $i -lt $c.Length; $i++) {
+            $hit = -1
+            for ($k = 0; $k -lt $from.Length; $k++) { if ($hit -lt 0 -and [int]$from[$k] -eq [int]$c[$i]) { $hit = $k } }
+            if ($hit -lt 0) { $buffer[$count] = $c[$i]; $count++ }
+            else { $r = $to[$hit].ToCharArray(); for ($j = 0; $j -lt $r.Length; $j++) { $buffer[$count] = $r[$j]; $count++ } }
+        }
+        return [string]::new($buffer, 0, $count)
+    }
+    static [string] StressFirstVowel([string] $phones, [string] $vowels) {
+        # Primary stress before the first vowel of each space-separated word that has no stress mark.
+        $c = $phones.ToCharArray(); $v = $vowels.ToCharArray()
+        $buffer = [char[]]::new(2 * $c.Length + 1); $count = 0; $i = 0
+        $marks = ' ˈ'.ToCharArray()
+        while ($i -lt $c.Length) {
+            $end = $i; $stressed = $false
+            while ($end -lt $c.Length -and [int]$c[$end] -ne 32) { if ([int]$c[$end] -eq 712 -or [int]$c[$end] -eq 716) { $stressed = $true }; $end++ }
+            $placed = $stressed
+            for ($k = $i; $k -lt $end; $k++) {
+                if (-not $placed) {
+                    $vowel = $false
+                    for ($j = 0; $j -lt $v.Length; $j++) { if ([int]$v[$j] -eq [int]$c[$k]) { $vowel = $true } }
+                    if ($vowel) { $buffer[$count] = $marks[1]; $count++; $placed = $true }
+                }
+                $buffer[$count] = $c[$k]; $count++
+            }
+            if ($end -lt $c.Length) { $buffer[$count] = $marks[0]; $count++ }
+            $i = $end + 1
+        }
+        return [string]::new($buffer, 0, $count)
+    }
 }
 
 $script:StudentTokenKinds = @{ 1 = 'Word'; 2 = 'Number'; 3 = 'Ordinal'; 4 = 'Punctuation'; 5 = 'Quote'; 6 = 'Symbol'; 7 = 'Note' }
+$script:StudentPronunciationSources = @{ 0 = 'None'; 1 = 'Phonemizer'; 2 = 'Zira' }
 Update-TypeData -TypeName 'Kokoro.StudentToken' -MemberType ScriptProperty -MemberName Spoken -Value { $this.Kind -in 'Word', 'Number', 'Ordinal', 'Punctuation', 'Quote' } -Force
-Update-TypeData -TypeName 'Kokoro.StudentToken' -MemberType ScriptProperty -MemberName Projection -Value {
-    # The text the phonemizer receives for this token: dashes become an em dash, quotation marks a double quote.
-    switch ($this.Kind) { 'Quote' { '"' } 'Punctuation' { if ($this.Text.StartsWith('--')) { '—' } else { $this.Text } } default { $this.Text } }
+Update-TypeData -TypeName 'Kokoro.StudentToken' -MemberType ScriptProperty -MemberName CounterExample -Value {
+    # Zira's pronunciation of the same span differs from the one used: kept as a counter-example.
+    $null -ne $this.Zira -and $null -ne $this.Phonemizer -and $this.ZiraLast -eq $this.Last -and $this.ZiraComparable -cne $script:StudentContext.Kernels.Unstressed.Invoke($this.Phonemizer)
 } -Force
 
 function Import-StudentKernels {
@@ -322,40 +483,35 @@ function Import-StudentKernels {
     $directory = Join-Path $script:StudentBuild ('student/kernels/' + (Get-FileHash -LiteralPath $PSCommandPath).Hash)
     [void][IO.Directory]::CreateDirectory($directory)
     $dll = Join-Path $directory 'Kokoro.Student.dll'
-    if (-not (Test-Path -LiteralPath $dll)) { $null = Export-LoweredAssembly -SourcePath $PSCommandPath -ClassName StudentTextTokenizer -OutputPath $dll -Deterministic }
+    if (-not (Test-Path -LiteralPath $dll)) { $null = Export-LoweredAssembly -SourcePath $PSCommandPath -ClassName StudentTextKernels -OutputPath $dll -Deterministic }
     $admission = Test-LoweredAssembly -AssemblyPath $dll
     if (-not $admission.ClrOnlyAdmitted) { throw 'Student kernels reference SMA.' }
-    $assembly = [Reflection.Assembly]::LoadFrom($dll)
-    $script:StudentContext.Kernels = [pscustomobject]@{ Tokenize = $assembly.GetType('StudentTextTokenizer', $true).GetMethod('Tokenize').CreateDelegate([Func[string,int[]]]); SHA256 = $admission.SHA256 }
+    $type = [Reflection.Assembly]::LoadFrom($dll).GetType('StudentTextKernels', $true)
+    $script:StudentContext.Kernels = [pscustomobject]@{ SHA256 = $admission.SHA256
+        Tokenize = $type.GetMethod('Tokenize').CreateDelegate([Func[string,int,int[]]])
+        Sentences = $type.GetMethod('Sentences').CreateDelegate([Func[int[],char[],int,int,int[]]])
+        Project = $type.GetMethod('Project').CreateDelegate([Func[int[],char[],int,int,int[],string]])
+        Cover = $type.GetMethod('Cover').CreateDelegate([Func[int[],int[],int[]]])
+        Unstressed = $type.GetMethod('Unstressed').CreateDelegate([Func[string,string]])
+        Align = $type.GetMethod('Align').CreateDelegate([Func[string,string,int[]]])
+        Substitute = $type.GetMethod('Substitute').CreateDelegate([Func[string,char[],string[],string]])
+        StressFirstVowel = $type.GetMethod('StressFirstVowel').CreateDelegate([Func[string,string,string]]) }
     $script:StudentContext.Kernels
 }
 
-function ConvertTo-StudentTokens([string] $Text) {
-    $packed = $script:StudentContext.Kernels.Tokenize.Invoke($Text)
-    for ($k = 0; $k -lt $packed.Length; $k += 4) {
-        [pscustomobject]@{ PSTypeName = 'Kokoro.StudentToken'; Kind = $script:StudentTokenKinds[$packed[$k]]; Text = $Text.Substring($packed[$k + 1], $packed[$k + 2])
-            Start = $packed[$k + 1]; Length = $packed[$k + 2]; Emphasis = ($packed[$k + 3] -band 1) -ne 0; Editorial = ($packed[$k + 3] -band 2) -ne 0 }
+function Import-StudentZira {
+    # Zira capture and symbol mapping from the phonemizer's library mode, in their own module scope.
+    $reference = Join-Path $script:StudentRoot $script:StudentInputs.Pronunciation
+    New-Module -Name StudentZira -ArgumentList $reference -ScriptBlock {
+        param([string] $Reference)
+        . $Reference -Import
+        Export-ModuleMember -Function Get-EnglishZiraReference, ConvertTo-EnglishKokoroPhones, Get-EnglishKokoroSpecification
     }
 }
 
-function ConvertTo-StudentProjection([object[]] $Tokens) {
-    # The string the phonemizer receives, generated from spoken tokens: words separated by spaces,
-    # punctuation attached to the preceding token, quotation marks alternating open and close.
-    $builder = [Text.StringBuilder]::new(); $open = $false; $attachNext = $true
-    foreach ($token in $Tokens) {
-        if (-not $token.Spoken) { continue }
-        $piece = $token.Projection
-        if ($token.Kind -ceq 'Quote') { $open = -not $open; if ($open) { if (-not $attachNext) { [void]$builder.Append(' ') }; [void]$builder.Append($piece); $attachNext = $true } else { [void]$builder.Append($piece); $attachNext = $false }; continue }
-        $attach = $attachNext -or ($token.Kind -ceq 'Punctuation' -and $piece -notin '(', '—')
-        if (-not $attach) { [void]$builder.Append(' ') }
-        [void]$builder.Append($piece); $attachNext = $piece -ceq '('
-    }
-    $builder.ToString()
-}
-
-function Test-StudentCounterExampleHeading([object[]] $Words) {
+function Test-StudentCounterExampleHeading([string[]] $Words) {
     # True when the heading's words contain one of the counter-example word sequences.
-    $texts = @($Words | ForEach-Object { $_.Text.ToUpperInvariant() })
+    $texts = @($Words | ForEach-Object { $_.ToUpperInvariant() })
     foreach ($sequence in $script:StudentText.CounterExampleHeadings) {
         for ($at = 0; $at + $sequence.Count -le $texts.Count; $at++) {
             $match = $true
@@ -366,10 +522,18 @@ function Test-StudentCounterExampleHeading([object[]] $Words) {
     $false
 }
 
-function Get-StudentParagraphs {    # The full text of each pinned Project Gutenberg book in order, without its header and footer,
-    # as paragraphs of typed tokens with heading and counter-example flags.
-    $null = Import-StudentKernels
+function Invoke-StudentPhonemize([Func[string,object]] $Phonemize, [string] $Text) {
+    # The compiled driver throws on input beyond its internal bounds; that text is unresolved.
+    try { $Phonemize.Invoke($Text) } catch { $null }
+}
+
+function Get-StudentBooks {
+    # Each pinned Project Gutenberg book without its header and footer, as one packed record: its
+    # paragraphs joined by line feeds, its tokens (starts index that text), the first token of each
+    # paragraph, per-paragraph heading and counter-example flags, and its sentence token ranges.
+    $kernels = Import-StudentKernels
     $directory = Join-Path $script:StudentRoot $script:StudentInputs.Text
+    $index = 0
     foreach ($file in @(Get-ChildItem -LiteralPath $directory -Filter 'pg*.txt' | Sort-Object Name)) {
         $lines = [IO.File]::ReadAllLines($file.FullName)
         $first = -1; $last = $lines.Length
@@ -378,150 +542,433 @@ function Get-StudentParagraphs {    # The full text of each pinned Project Guten
             elseif ($lines[$i].StartsWith('*** END OF', [StringComparison]::Ordinal)) { $last = $i; break }
         }
         if ($first -lt 0) { throw "No Project Gutenberg start marker in $($file.Name)." }
-        $paragraph = [Collections.Generic.List[string]]::new(); $counterExample = $false; $index = 0
+        $text = [Text.StringBuilder]::new(); $tokens = [Collections.Generic.List[int]]::new()
+        $paragraphs = [Collections.Generic.List[int]]::new(); $headings = [Collections.Generic.List[bool]]::new(); $counterExamples = [Collections.Generic.List[bool]]::new()
+        $paragraph = [Collections.Generic.List[string]]::new(); $counterExample = $false
         for ($i = $first; $i -le $last; $i++) {
             $line = if ($i -lt $last) { $lines[$i].Trim() } else { '' }
             if ($line) { $paragraph.Add($line); continue }
             if ($paragraph.Count -eq 0) { continue }
-            $text = $paragraph -join ' '; $paragraph.Clear()
-            $tokens = @(ConvertTo-StudentTokens $text)
-            $words = @($tokens | Where-Object Kind -ceq 'Word')
-            if ($words.Count -eq 0) { continue }
-            $heading = $text.Length -le 120 -and -not @($words | Where-Object { $_.Text -cne $_.Text.ToUpperInvariant() }).Count
-            if ($heading) { $counterExample = Test-StudentCounterExampleHeading $words }
-            [pscustomobject]@{ PSTypeName = 'Kokoro.StudentParagraph'; Book = $file.BaseName; Index = $index; Text = $text; Tokens = $tokens; Heading = $heading; CounterExample = $counterExample }
-            $index++
+            if ($ParagraphLimit -gt 0 -and $paragraphs.Count -ge $ParagraphLimit) { break }
+            $value = $paragraph -join ' '; $paragraph.Clear()
+            $offset = if ($text.Length) { $text.Length + 1 } else { 0 }
+            $packed = $kernels.Tokenize.Invoke($value, $offset)
+            $hasWord = $false
+            for ($k = 0; $k -lt $packed.Length -and -not $hasWord; $k += 4) { if ($packed[$k] -eq 1) { $hasWord = $true } }
+            if (-not $hasWord) { continue }
+            $heading = $false
+            if ($value.Length -le 120) {
+                $words = @(for ($k = 0; $k -lt $packed.Length; $k += 4) { if ($packed[$k] -eq 1) { $value.Substring($packed[$k + 1] - $offset, $packed[$k + 2]) } })
+                $heading = -not @($words | Where-Object { $_ -cne $_.ToUpperInvariant() }).Count
+                if ($heading) { $counterExample = Test-StudentCounterExampleHeading $words }
+            }
+            if ($text.Length) { [void]$text.Append("`n") }
+            [void]$text.Append($value)
+            $paragraphs.Add($tokens.Count -shr 2); $tokens.AddRange($packed); $headings.Add($heading); $counterExamples.Add($counterExample)
         }
+        $paragraphs.Add($tokens.Count -shr 2)
+        $book = [pscustomobject]@{ PSTypeName = 'Kokoro.StudentBook'; Index = $index; Name = $file.BaseName; Text = $text.ToString(); Tokens = $tokens.ToArray()
+            Paragraphs = $paragraphs.ToArray(); Headings = $headings.ToArray(); CounterExample = $counterExamples.ToArray(); Sentences = $null; SentenceParagraphs = $null }
+        $chars = $book.Text.ToCharArray()
+        $sentences = [Collections.Generic.List[int]]::new(); $owners = [Collections.Generic.List[int]]::new()
+        for ($p = 0; $p + 1 -lt $book.Paragraphs.Length; $p++) {
+            $found = $kernels.Sentences.Invoke($book.Tokens, $chars, $book.Paragraphs[$p], $book.Paragraphs[$p + 1])
+            $sentences.AddRange($found); for ($k = 0; $k -lt $found.Length; $k += 2) { $owners.Add($p) }
+        }
+        $book.Sentences = $sentences.ToArray(); $book.SentenceParagraphs = $owners.ToArray()
+        $book
+        $index++
     }
 }
 
-function Get-StudentSentences([object] $Paragraph) {
-    # Sentence spans over typed tokens: a sentence ends at . ! or ? (with any closing quotation
-    # marks) when the next spoken token starts with a capital letter or a digit, or at the paragraph end.
-    $tokens = $Paragraph.Tokens; $start = 0
-    for ($k = 0; $k -lt $tokens.Count; $k++) {
-        if ($tokens[$k].Kind -cne 'Punctuation' -or $tokens[$k].Text -notin '.', '!', '?') { continue }
-        $end = $k; while ($end + 1 -lt $tokens.Count -and $tokens[$end + 1].Kind -ceq 'Quote') { $end++ }
-        $next = $end + 1; while ($next -lt $tokens.Count -and -not $tokens[$next].Spoken) { $next++ }
-        if ($next -lt $tokens.Count -and -not ([char]::IsUpper($tokens[$next].Text[0]) -or [char]::IsDigit($tokens[$next].Text[0]))) { continue }
-        [pscustomobject]@{ PSTypeName = 'Kokoro.StudentSentence'; Book = $Paragraph.Book; Paragraph = $Paragraph.Index; CounterExample = $Paragraph.CounterExample; Tokens = @($tokens[$start..$end]) }
-        $start = $end + 1; $k = $end
-    }
-    if ($start -lt $tokens.Count) { [pscustomobject]@{ PSTypeName = 'Kokoro.StudentSentence'; Book = $Paragraph.Book; Paragraph = $Paragraph.Index; CounterExample = $Paragraph.CounterExample; Tokens = @($tokens[$start..($tokens.Count - 1)]) } }
-}
-function Invoke-StudentPhonemize([Func[string,object]] $Phonemize, [string] $Text) {
-    # The compiled driver throws on input beyond its internal bounds; that text is unresolved.
-    try { $Phonemize.Invoke($Text) } catch { $null }
+function New-StudentPronunciationTable([int] $Count) {
+    # Pronunciations keyed by the first token of the span they cover: Last is the span's last
+    # token (-1 when none starts there), Phones the Kokoro symbols.
+    $last = [int[]]::new($Count); [Array]::Fill($last, -1)
+    [pscustomobject]@{ Last = $last; Phones = [string[]]::new($Count) }
 }
 
-function New-StudentWindows {    # Continuous windows of whole sentences, packed in reading order across sentence and paragraph
-    # boundaries (never across books), each at most MaximumPhonemes long after phonemization of the
-    # whole window. Window budgets vary over 1..MaximumPhonemes so every voice-pack row is used.
-    param([Parameter(Mandatory)][Func[string,object]] $Phonemize, [int] $Seed = 17)
-    $random = [Random]::new($Seed)
-    $windows = [Collections.Generic.List[object]]::new(); $unresolved = [Collections.Generic.List[object]]::new()
-    $pending = [Collections.Generic.List[object]]::new()
-    function Close-Window {
-        while ($pending.Count -gt 0) {
-            $text = ($pending | ForEach-Object Text) -join ' '
-            $pronunciation = Invoke-StudentPhonemize $Phonemize $text
-            if ($null -ne $pronunciation -and $pronunciation.Complete -and $pronunciation.KokoroPhones -and $pronunciation.KokoroPhones.Length -le $script:StudentText.MaximumPhonemes) {
-                $windows.Add([pscustomobject]@{ PSTypeName = 'Kokoro.StudentWindow'; Index = $windows.Count; Book = $pending[0].Book
-                    FirstParagraph = $pending[0].Paragraph; LastParagraph = $pending[$pending.Count - 1].Paragraph; Text = $text
-                    Phonemes = $pronunciation.KokoroPhones; PhonemeCount = $pronunciation.KokoroPhones.Length; Sentences = $pending.Count
-                    CounterExampleSentences = @($pending | Where-Object CounterExample).Count })
-                $pending.Clear(); return
-            }
-            if ($pending.Count -eq 1) { $unresolved.Add($pending[0]); $pending.Clear(); return }
-            # The joined window exceeded the limit: close it without its last sentence, carry that one on.
-            $carry = $pending[$pending.Count - 1]; $pending.RemoveAt($pending.Count - 1)
-            Close-Window; $pending.Add($carry)
+function Add-StudentPhonemizerPronunciations([object] $Book, [Func[string,object]] $Phonemize) {
+    # Our phonemizer over each sentence's projected text. Every token it pronounces (status Valid)
+    # is kept, including tokens of sentences it rejects; the whole-sentence result is kept for the
+    # projection check.
+    $kernels = $script:StudentContext.Kernels
+    $chars = $Book.Text.ToCharArray(); $count = $Book.Tokens.Length -shr 2
+    $table = New-StudentPronunciationTable $count
+    $sentenceCount = $Book.Sentences.Length -shr 1
+    $complete = [string[]]::new($sentenceCount)
+    for ($s = 0; $s -lt $sentenceCount; $s++) {
+        $first = $Book.Sentences[2 * $s]; $last = $Book.Sentences[2 * $s + 1]
+        $spans = [int[]]::new(2 * ($last - $first + 1))
+        $projected = $kernels.Project.Invoke($Book.Tokens, $chars, $first, $last, $spans)
+        if (-not $projected) { continue }
+        $result = Invoke-StudentPhonemize $Phonemize $projected
+        if ($null -eq $result) { continue }
+        if ($result.Complete) { $complete[$s] = $result.KokoroPhones }
+        $driverTokens = @($result.Tokens)
+        $events = [int[]]::new(2 * $driverTokens.Count)
+        for ($t = 0; $t -lt $driverTokens.Count; $t++) { $events[2 * $t] = $driverTokens[$t].SourceStart; $events[2 * $t + 1] = $driverTokens[$t].SourceEnd - $driverTokens[$t].SourceStart }
+        $cover = $kernels.Cover.Invoke($spans, $events)
+        for ($t = 0; $t -lt $driverTokens.Count; $t++) {
+            if ($cover[2 * $t] -lt 0 -or $driverTokens[$t].Status -cne 'Valid' -or -not $driverTokens[$t].Pron) { continue }
+            $at = $first + $cover[2 * $t]
+            $table.Phones[$at] = $driverTokens[$t].Pron; $table.Last[$at] = $first + $cover[2 * $t + 1]
         }
     }
-    $budget = $random.Next(1, $script:StudentText.MaximumPhonemes + 1); $estimate = 0; $book = ''
-    foreach ($paragraph in Get-StudentParagraphs) {
-        if ($paragraph.Book -cne $book) { Close-Window; $book = $paragraph.Book; $estimate = 0 }
-        foreach ($typed in Get-StudentSentences $paragraph) {
-            $sentence = ConvertTo-StudentProjection $typed.Tokens
-            if (-not $sentence) { continue }
-            $pronunciation = Invoke-StudentPhonemize $Phonemize $sentence
-            if ($null -eq $pronunciation -or -not $pronunciation.Complete -or -not $pronunciation.KokoroPhones) {
-                Close-Window; $estimate = 0
-                $unresolved.Add([pscustomobject]@{ Book = $paragraph.Book; Paragraph = $paragraph.Index; Text = $sentence; CounterExample = $paragraph.CounterExample })
-                continue
+    $Book | Add-Member -NotePropertyName Phonemizer -NotePropertyValue $table -Force
+    $Book | Add-Member -NotePropertyName CompleteSentences -NotePropertyValue $complete -Force
+}
+
+function Get-StudentZiraChunks([object] $Book) {
+    # Zira's input: consecutive sentences of one paragraph, projected together, up to
+    # ZiraCharacters of source text. A sentence longer than the capture bound is not read.
+    $kernels = $script:StudentContext.Kernels
+    $chars = $Book.Text.ToCharArray(); $sentenceCount = $Book.Sentences.Length -shr 1
+    $limit = $script:StudentText.ZiraCharacters
+    $close = {
+        param([int] $From, [int] $To)
+        $spans = [int[]]::new(2 * ($To - $From + 1))
+        $projected = $kernels.Project.Invoke($Book.Tokens, $chars, $From, $To, $spans)
+        if ($projected -and $projected.Length -le $script:StudentText.AuditLineCharacters) { [pscustomobject]@{ First = $From; Last = $To; Text = $projected; Spans = $spans } }
+    }
+    $from = -1; $to = -1; $paragraph = -1
+    for ($s = 0; $s -lt $sentenceCount; $s++) {
+        $first = $Book.Sentences[2 * $s]; $last = $Book.Sentences[2 * $s + 1]
+        if ($from -ge 0) {
+            $end = $Book.Tokens[4 * $last + 1] + $Book.Tokens[4 * $last + 2]
+            if ($Book.SentenceParagraphs[$s] -ne $paragraph -or $end - $Book.Tokens[4 * $from + 1] -gt $limit) { & $close $from $to; $from = -1 }
+        }
+        if ($from -lt 0) { $from = $first; $paragraph = $Book.SentenceParagraphs[$s] }
+        $to = $last
+    }
+    if ($from -ge 0) { & $close $from $to }
+}
+
+function Invoke-StudentZiraCapture([string[]] $Texts) {
+    # Zira's word events for each text on Threads parallel synthesizers: for each word event its
+    # source start and length, audio position and duration (100 ns ticks) and raw phones.
+    $reference = Join-Path $script:StudentRoot $script:StudentInputs.Pronunciation
+    $results = [object[]]::new($Texts.Count)
+    $batches = @(for ($t = 0; $t -lt $Threads; $t++) { , @(for ($i = $t; $i -lt $Texts.Count; $i += $Threads) { $i }) })
+    $captured = $batches | Where-Object { $_.Count } | ForEach-Object -ThrottleLimit $Threads -Parallel {
+        $captureTexts = $using:Texts
+        $null = New-Module -Name StudentZira -ArgumentList $using:reference -ScriptBlock { param([string] $Reference); . $Reference -Import; Export-ModuleMember -Function Get-EnglishZiraReference }
+        foreach ($i in $_) {
+            $capture = try { Get-EnglishZiraReference -Text $captureTexts[$i] -NoSave } catch { $null }
+            if ($null -eq $capture) { [pscustomobject]@{ Index = $i; Starts = $null }; continue }
+            $audible = @($capture.Phones | Where-Object { $_.Phone.Length -gt 0 -and -not [char]::IsControl($_.Phone[0]) })
+            $words = @($capture.Words); $count = $words.Count
+            $starts = [int[]]::new($count); $lengths = [int[]]::new($count); $ticks = [long[]]::new($count); $durations = [long[]]::new($count); $phones = [string[]]::new($count)
+            $p = 0
+            for ($w = 0; $w -lt $count; $w++) {
+                $limit = if ($w + 1 -lt $count) { $words[$w + 1].Ticks } else { [long]::MaxValue }
+                while ($p -lt $audible.Count -and $audible[$p].Ticks -lt $words[$w].Ticks) { $p++ }
+                $builder = [Text.StringBuilder]::new(); $end = $words[$w].Ticks
+                while ($p -lt $audible.Count -and $audible[$p].Ticks -lt $limit) { [void]$builder.Append($audible[$p].Phone); $end = $audible[$p].Ticks + $audible[$p].DurationTicks; $p++ }
+                $starts[$w] = $words[$w].Start; $lengths[$w] = $words[$w].Length; $ticks[$w] = $words[$w].Ticks; $durations[$w] = $end - $words[$w].Ticks; $phones[$w] = $builder.ToString()
             }
-            $length = $pronunciation.KokoroPhones.Length
-            if ($pending.Count -gt 0 -and $estimate + 1 + $length -gt $budget) { Close-Window; $estimate = 0; $budget = $random.Next(1, $script:StudentText.MaximumPhonemes + 1) }
-            $pending.Add([pscustomobject]@{ Book = $paragraph.Book; Paragraph = $paragraph.Index; Text = $sentence; CounterExample = $paragraph.CounterExample })
-            $estimate += $length + 1
+            [pscustomobject]@{ Index = $i; Starts = $starts; Lengths = $lengths; Ticks = $ticks; Durations = $durations; Phones = $phones }
         }
     }
-    Close-Window
-    [pscustomobject]@{ Windows = $windows.ToArray(); Unresolved = $unresolved.ToArray() }
+    foreach ($item in $captured) { $results[$item.Index] = $item }
+    $results
+}
+
+function Add-StudentZiraPronunciations([object] $Book, [object] $Zira) {
+    # Zira reads the whole book, including sentences our phonemizer rejects. Her word events are
+    # joined to tokens by source span; several events over one span (a number read as words) form
+    # one pronunciation, words separated by spaces. Captures are cached per book under build/.
+    $kernels = $script:StudentContext.Kernels
+    $chunks = @(Get-StudentZiraChunks $Book)
+    $key = [Convert]::ToHexString([Security.Cryptography.SHA256]::HashData([Text.Encoding]::UTF8.GetBytes(($chunks.Text -join "`n"))))
+    $cache = Join-Path $script:StudentBuild "student/zira/$key.clixml"
+    if (Test-Path -LiteralPath $cache) { $captures = @(Import-Clixml -LiteralPath $cache) }
+    else {
+        $captures = @(Invoke-StudentZiraCapture ([string[]]$chunks.Text))
+        [void][IO.Directory]::CreateDirectory((Split-Path $cache))
+        $captures | Export-Clixml -LiteralPath $cache -Depth 3
+    }
+    $vocabulary = $script:StudentContext.Vocabulary
+    $count = $Book.Tokens.Length -shr 2
+    $table = New-StudentPronunciationTable $count
+    $table | Add-Member -NotePropertyName Ticks -NotePropertyValue ([long[]]::new($count))
+    $table | Add-Member -NotePropertyName Durations -NotePropertyValue ([long[]]::new($count))
+    $failed = 0; $outside = 0
+    for ($c = 0; $c -lt $chunks.Count; $c++) {
+        $capture = $captures[$c]
+        if ($null -eq $capture -or $null -eq $capture.Starts) { $failed++; continue }
+        $events = [Collections.Generic.List[int]]::new(); $phones = [Collections.Generic.List[string]]::new(); $ticks = [Collections.Generic.List[long]]::new(); $durations = [Collections.Generic.List[long]]::new()
+        $starts = [int[]]$capture.Starts; $lengths = [int[]]$capture.Lengths; $starting = [long[]]$capture.Ticks; $lasting = [long[]]$capture.Durations; $raw = [string[]]$capture.Phones
+        for ($w = 0; $w -lt $starts.Length; $w++) {
+            $mapped = ConvertTo-EnglishKokoroPhones $raw[$w]
+            $n = $events.Count
+            if ($n -and $events[$n - 2] -eq $starts[$w] -and $events[$n - 1] -eq $lengths[$w]) {
+                $phones[$phones.Count - 1] += ' ' + $mapped; $durations[$durations.Count - 1] = $starting[$w] + $lasting[$w] - $ticks[$ticks.Count - 1]; continue
+            }
+            $events.Add($starts[$w]); $events.Add($lengths[$w]); $phones.Add($mapped); $ticks.Add($starting[$w]); $durations.Add($lasting[$w])
+        }
+        $cover = $kernels.Cover.Invoke($chunks[$c].Spans, $events.ToArray())
+        for ($e = 0; $e -lt $phones.Count; $e++) {
+            if ($cover[2 * $e] -lt 0 -or -not $phones[$e]) { continue }
+            $valid = $true
+            foreach ($symbol in $phones[$e].ToCharArray()) { if ($symbol -ne ' ' -and -not $vocabulary.Contains($symbol)) { $valid = $false } }
+            if (-not $valid) { $outside++; continue }
+            $at = $chunks[$c].First + $cover[2 * $e]
+            $table.Phones[$at] = $phones[$e]; $table.Last[$at] = $chunks[$c].First + $cover[2 * $e + 1]; $table.Ticks[$at] = $ticks[$e]; $table.Durations[$at] = $durations[$e]
+        }
+    }
+    $Book | Add-Member -NotePropertyName Zira -NotePropertyValue $table -Force
+    [pscustomobject]@{ Chunks = $chunks.Count; FailedChunks = $failed; OutsideVocabulary = $outside; Cache = $cache }
+}
+
+function Get-StudentCorrespondences([object[]] $Books) {
+    # Zira-to-Kokoro symbol correspondences learned from every span both pronounce: each Zira
+    # symbol's aligned symbol in our unstressed pronunciation, counted over occurrences. A symbol
+    # is mapped when one correspondence other than itself holds at least CorrespondenceShare.
+    $kernels = $script:StudentContext.Kernels
+    $pairs = [Collections.Generic.Dictionary[ValueTuple[string,string],int]]::new()
+    foreach ($book in $Books) {
+        $ours = $book.Phonemizer; $zira = $book.Zira
+        for ($a = 0; $a -lt $ours.Phones.Length; $a++) {
+            if ($null -eq $ours.Phones[$a] -or $null -eq $zira.Phones[$a] -or $ours.Last[$a] -ne $zira.Last[$a]) { continue }
+            $key = [ValueTuple[string,string]]::new($zira.Phones[$a], $kernels.Unstressed.Invoke($ours.Phones[$a]))
+            $seen = 0; $null = $pairs.TryGetValue($key, [ref]$seen); $pairs[$key] = $seen + 1
+        }
+    }
+    $counts = [Collections.Generic.Dictionary[char,Collections.Generic.Dictionary[string,int]]]::new()
+    foreach ($entry in $pairs.GetEnumerator()) {
+        $source = $entry.Key.Item1; $target = $entry.Key.Item2
+        $alignment = $kernels.Align.Invoke($source, $target)
+        for ($k = 0; $k -lt $alignment.Length; $k += 2) {
+            if ($alignment[$k] -lt 0) { continue }
+            $symbol = $source[$alignment[$k]]
+            $aligned = if ($alignment[$k + 1] -ge 0) { [string]$target[$alignment[$k + 1]] } else { '' }
+            if (-not $counts.ContainsKey($symbol)) { $counts[$symbol] = [Collections.Generic.Dictionary[string,int]]::new() }
+            $seen = 0; $null = $counts[$symbol].TryGetValue($aligned, [ref]$seen); $counts[$symbol][$aligned] = $seen + $entry.Value
+        }
+    }
+    $records = foreach ($symbol in $counts.Keys) {
+        $total = 0; $best = $null; $bestCount = 0
+        foreach ($item in $counts[$symbol].GetEnumerator()) { $total += $item.Value; if ($item.Value -gt $bestCount) { $best = $item.Key; $bestCount = $item.Value } }
+        [pscustomobject]@{ PSTypeName = 'Kokoro.StudentCorrespondence'; Zira = [string]$symbol; Kokoro = $best; Share = $bestCount / $total; Occurrences = $total
+            Mapped = $best -cne [string]$symbol -and $bestCount / $total -ge $script:StudentText.CorrespondenceShare }
+    }
+    $mapped = @($records | Where-Object Mapped)
+    [pscustomobject]@{ Records = @($records | Sort-Object Occurrences -Descending); From = [char[]]@($mapped | ForEach-Object { $_.Zira[0] }); To = [string[]]@($mapped | ForEach-Object Kokoro); SpanPairs = $pairs.Count }
+}
+
+function Resolve-StudentPronunciations([object] $Book, [object] $Correspondences) {
+    # The pronunciation used for each span: ours where our phonemizer pronounces the token; else
+    # Zira's, with the learned correspondences applied and primary stress before the first vowel.
+    # Where both pronounce the same span and differ, ours is used and Zira's form stays on the
+    # token as a counter-example.
+    $kernels = $script:StudentContext.Kernels
+    $count = $Book.Tokens.Length -shr 2
+    $table = New-StudentPronunciationTable $count
+    $table | Add-Member -NotePropertyName Source -NotePropertyValue ([byte[]]::new($count))
+    $ours = $Book.Phonemizer; $zira = $Book.Zira
+    for ($a = 0; $a -lt $count; $a++) {
+        if ($null -ne $ours.Phones[$a]) { $table.Phones[$a] = $ours.Phones[$a]; $table.Last[$a] = $ours.Last[$a]; $table.Source[$a] = 1 }
+        elseif ($null -ne $zira.Phones[$a]) {
+            $learned = $kernels.Substitute.Invoke($zira.Phones[$a], $Correspondences.From, $Correspondences.To)
+            $table.Phones[$a] = $kernels.StressFirstVowel.Invoke($learned, $script:StudentText.KokoroVowels); $table.Last[$a] = $zira.Last[$a]; $table.Source[$a] = 2
+        }
+    }
+    $Book | Add-Member -NotePropertyName Resolved -NotePropertyValue $table -Force
+}
+
+function Get-StudentSentencePhonemes([object] $Book, [int] $Sentence) {
+    # The sentence's Kokoro phonemes from resolved spans in token order, or null when a spoken
+    # token has no pronunciation or a span runs past the sentence.
+    $first = $Book.Sentences[2 * $Sentence]; $last = $Book.Sentences[2 * $Sentence + 1]
+    $resolved = $Book.Resolved; $parts = [Collections.Generic.List[string]]::new(); $zira = 0; $k = $first
+    while ($k -le $last) {
+        if ($Book.Tokens[4 * $k] -gt 5) { $k++; continue }
+        if ($null -eq $resolved.Phones[$k] -or $resolved.Last[$k] -gt $last) { return $null }
+        $parts.Add($resolved.Phones[$k]); if ($resolved.Source[$k] -eq 2) { $zira++ }
+        $k = $resolved.Last[$k] + 1
+    }
+    if ($parts.Count -eq 0) { return $null }
+    [pscustomobject]@{ Phonemes = $parts -join ' '; ZiraSpans = $zira }
+}
+
+function New-StudentWindows([object[]] $Books, [int] $Seed = 17) {
+    # Continuous windows of whole sentences in reading order across sentence and paragraph
+    # boundaries, never across books or past a sentence without a pronunciation, each a token
+    # range of at most MaximumPhonemes phonemes. Budgets vary over 1..MaximumPhonemes so every
+    # voice-pack row is used.
+    $random = [Random]::new($Seed); $maximum = $script:StudentText.MaximumPhonemes
+    $windows = [Collections.Generic.List[object]]::new(); $pending = [Collections.Generic.List[object]]::new()
+    $unresolved = 0; $mismatches = 0; $checked = 0
+    $close = {
+        if ($pending.Count -eq 0) { return }
+        $phonemes = ($pending | ForEach-Object Phonemes) -join ' '
+        $windows.Add([pscustomobject]@{ PSTypeName = 'Kokoro.StudentWindow'; Index = $windows.Count; Book = $pending[0].Book; FirstToken = $pending[0].First
+            LastToken = $pending[$pending.Count - 1].Last; Sentences = $pending.Count; Phonemes = $phonemes; PhonemeCount = $phonemes.Length
+            ZiraSpans = ($pending | Measure-Object ZiraSpans -Sum).Sum; CounterExampleSentences = @($pending | Where-Object CounterExample).Count })
+        $pending.Clear()
+    }
+    foreach ($book in $Books) {
+        $budget = $random.Next(1, $maximum + 1); $length = 0
+        for ($s = 0; $s -lt ($book.Sentences.Length -shr 1); $s++) {
+            $sentence = Get-StudentSentencePhonemes $book $s
+            if ($null -eq $sentence -or $sentence.Phonemes.Length -gt $maximum) { & $close; $length = 0; $unresolved++; continue }
+            if ($null -ne $book.CompleteSentences[$s] -and $sentence.ZiraSpans -eq 0) { $checked++; if ($sentence.Phonemes -cne $book.CompleteSentences[$s]) { $mismatches++ } }
+            if ($pending.Count -gt 0 -and $length + 1 + $sentence.Phonemes.Length -gt $budget) { & $close; $length = 0; $budget = $random.Next(1, $maximum + 1) }
+            $pending.Add([pscustomobject]@{ Book = $book.Index; First = $book.Sentences[2 * $s]; Last = $book.Sentences[2 * $s + 1]; Phonemes = $sentence.Phonemes; ZiraSpans = $sentence.ZiraSpans
+                CounterExample = $book.CounterExample[$book.SentenceParagraphs[$s]] })
+            $length += $sentence.Phonemes.Length + 1
+        }
+        & $close
+    }
+    [pscustomobject]@{ Windows = $windows.ToArray(); UnresolvedSentences = $unresolved; CheckedSentences = $checked; ProjectionMismatches = $mismatches }
+}
+
+function Get-StudentTokens([object] $Book, [int] $First, [int] $Last) {
+    # Typed view of packed tokens First..Last with every pronunciation of the span each starts;
+    # ZiraComparable is Zira's form after the learned correspondences.
+    $kernels = $script:StudentContext.Kernels; $correspondences = $script:StudentContext.Correspondences
+    for ($k = $First; $k -le $Last; $k++) {
+        $flags = $Book.Tokens[4 * $k + 3]; $zira = $Book.Zira.Phones[$k]
+        [pscustomobject]@{ PSTypeName = 'Kokoro.StudentToken'; Book = $Book.Name; Index = $k; Kind = $script:StudentTokenKinds[$Book.Tokens[4 * $k]]
+            Text = $Book.Text.Substring($Book.Tokens[4 * $k + 1], $Book.Tokens[4 * $k + 2]); Start = $Book.Tokens[4 * $k + 1]; Length = $Book.Tokens[4 * $k + 2]
+            Emphasis = ($flags -band 1) -ne 0; Editorial = ($flags -band 2) -ne 0
+            Phonemizer = $Book.Phonemizer.Phones[$k]; Last = $Book.Phonemizer.Last[$k]; Zira = $zira; ZiraLast = $Book.Zira.Last[$k]
+            ZiraComparable = if ($null -ne $zira) { $kernels.Substitute.Invoke($zira, $correspondences.From, $correspondences.To) } else { $null }; ZiraSeconds = $Book.Zira.Durations[$k] / 1e7
+            Resolved = $Book.Resolved.Phones[$k]; Source = $script:StudentPronunciationSources[[int]$Book.Resolved.Source[$k]] }
+    }
 }
 
 function Invoke-StudentCorpus {
     $output = New-StudentOutputDirectory 'corpus'
-    $watch = [Diagnostics.Stopwatch]::StartNew()
-    $result = New-StudentWindows -Phonemize (Import-StudentPhonemizer)
-    $result.Windows | Export-Clixml -LiteralPath (Join-Path $output 'windows.clixml')
-    $result.Unresolved | Export-Clixml -LiteralPath (Join-Path $output 'unresolved.clixml')
-    # Pronunciation-audit inputs: one window per line, files within the audit's size bounds.
-    $files = [Collections.Generic.List[string]]::new(); $lines = [Collections.Generic.List[string]]::new(); $bytes = 0
-    $flush = { if ($lines.Count) { $path = Join-Path $output ('audit-{0:D3}.txt' -f $files.Count); [IO.File]::WriteAllLines($path, [string[]]$lines, [Text.UTF8Encoding]::new($false)); $files.Add($path); $lines.Clear(); $script:auditBytes = 0 } }
-    $script:auditBytes = 0
-    foreach ($window in $result.Windows) {
-        if ($window.Text.Length -gt $script:StudentText.AuditLineCharacters) { continue }
-        $size = [Text.Encoding]::UTF8.GetByteCount($window.Text) + 2
-        if ($lines.Count -ge $script:StudentText.AuditFileLines -or $script:auditBytes + $size -gt $script:StudentText.AuditFileBytes) { & $flush }
-        $lines.Add($window.Text); $script:auditBytes += $size
+    $watch = [Diagnostics.Stopwatch]::StartNew(); $phases = [ordered]@{}
+    $null = Import-StudentKernels
+    $zira = Import-StudentZira
+    try {
+        $script:StudentContext.Vocabulary = [Collections.Generic.HashSet[char]]::new([char[]]@((Get-EnglishKokoroSpecification).vocab.Keys | ForEach-Object { $_[0] }))
+        $books = @(Get-StudentBooks); $phases.Text = $watch.Elapsed.TotalSeconds
+        $phonemize = Import-StudentPhonemizer
+        foreach ($book in $books) { Add-StudentPhonemizerPronunciations $book $phonemize }
+        $phases.Phonemizer = $watch.Elapsed.TotalSeconds
+        $capture = @(foreach ($book in $books) { Add-StudentZiraPronunciations $book $zira })
+        $phases.Zira = $watch.Elapsed.TotalSeconds
     }
-    & $flush
+    finally { Remove-Module -ModuleInfo $zira -Force }
+    $correspondences = Get-StudentCorrespondences $books
+    $script:StudentContext.Correspondences = $correspondences
+    foreach ($book in $books) { Resolve-StudentPronunciations $book $correspondences }
+    $result = New-StudentWindows $books
+    $phases.Windows = $watch.Elapsed.TotalSeconds
+    $words = 0; $both = 0; $agree = 0; $phonemizerOnly = 0; $ziraOnly = 0; $neither = 0
+    foreach ($book in $books) {
+        for ($a = 0; $a -lt ($book.Tokens.Length -shr 2); $a++) {
+            if ($book.Tokens[4 * $a] -ne 1) { continue }
+            $words++
+            $ours = $book.Phonemizer.Phones[$a]; $theirs = $book.Zira.Phones[$a]
+            if ($null -ne $ours -and $null -ne $theirs -and $book.Phonemizer.Last[$a] -eq $book.Zira.Last[$a]) {
+                $both++; if ($script:StudentContext.Kernels.Unstressed.Invoke($ours) -ceq $script:StudentContext.Kernels.Substitute.Invoke($theirs, $correspondences.From, $correspondences.To)) { $agree++ }
+            }
+            elseif ($null -ne $ours) { $phonemizerOnly++ } elseif ($null -ne $theirs) { $ziraOnly++ } else { $neither++ }
+        }
+    }
+    $corpus = [pscustomobject]@{ PSTypeName = 'Kokoro.StudentCorpusData'; Books = $books; Windows = $result.Windows; Correspondences = $correspondences }
+    Export-Clixml -LiteralPath (Join-Path $output 'corpus.clixml') -InputObject (ConvertTo-StudentStored $corpus) -Depth 8
+    $phases.Saved = $watch.Elapsed.TotalSeconds
     [pscustomobject]@{ PSTypeName = 'Kokoro.StudentCorpus'; Directory = $output; Windows = $result.Windows.Count; Phonemes = ($result.Windows | Measure-Object PhonemeCount -Sum).Sum
-        CounterExampleWindows = @($result.Windows | Where-Object { $_.CounterExampleSentences -gt 0 }).Count; UnresolvedSentences = $result.Unresolved.Count
-        AuditFiles = $files.ToArray(); Seconds = $watch.Elapsed.TotalSeconds }
+        WindowsWithZira = @($result.Windows | Where-Object ZiraSpans).Count; CounterExampleWindows = @($result.Windows | Where-Object CounterExampleSentences).Count
+        Sentences = ($books | ForEach-Object { $_.Sentences.Length -shr 1 } | Measure-Object -Sum).Sum; UnresolvedSentences = $result.UnresolvedSentences
+        CheckedSentences = $result.CheckedSentences; ProjectionMismatches = $result.ProjectionMismatches
+        Words = $words; BothPronounce = $both; Agree = $agree; CounterExamples = $both - $agree; PhonemizerOnly = $phonemizerOnly; ZiraOnly = $ziraOnly; Neither = $neither
+        MappedCorrespondences = @($correspondences.Records | Where-Object Mapped); ZiraCapture = $capture; Phases = [pscustomobject]$phases }
 }
 
-function Get-StudentSymbolSubstitutions([string] $Teacher, [string] $Student) {
-    # Edit-distance alignment of two symbol strings; returns the substituted, inserted and deleted
-    # symbol pairs ('teacher>student', '>student' for insertions, 'teacher>' for deletions).
-    $a = $Teacher.ToCharArray(); $b = $Student.ToCharArray()
-    $cost = [int[,]]::new($a.Length + 1, $b.Length + 1)
-    for ($i = 0; $i -le $a.Length; $i++) { $cost[$i, 0] = $i }
-    for ($j = 0; $j -le $b.Length; $j++) { $cost[0, $j] = $j }
-    for ($i = 1; $i -le $a.Length; $i++) {
-        for ($j = 1; $j -le $b.Length; $j++) {
-            $same = if ($a[$i - 1] -ceq $b[$j - 1]) { 0 } else { 1 }
-            $cost[$i, $j] = [Math]::Min([Math]::Min($cost[($i - 1), $j] + 1, $cost[$i, ($j - 1)] + 1), $cost[($i - 1), ($j - 1)] + $same)
-        }
+function ConvertTo-StudentStored([object] $Value) {
+    # Storage shape for Export-Clixml: primitive arrays as bytes, sparse string arrays as positions
+    # and values, custom objects member by member.
+    if ($null -eq $Value) { return $null }
+    if ($Value -is [string[]]) {
+        $positions = [Collections.Generic.List[int]]::new(); $values = [Collections.Generic.List[string]]::new()
+        for ($k = 0; $k -lt $Value.Length; $k++) { if ($null -ne $Value[$k]) { $positions.Add($k); $values.Add($Value[$k]) } }
+        return [pscustomobject]@{ PSTypeName = 'Kokoro.StudentStoredStrings'; Count = $Value.Length; Positions = ConvertTo-StudentStored $positions.ToArray(); Values = $values.ToArray() }
     }
-    $i = $a.Length; $j = $b.Length
-    while ($i -gt 0 -or $j -gt 0) {
-        if ($i -gt 0 -and $j -gt 0 -and $cost[$i, $j] -eq $cost[($i - 1), ($j - 1)] + $(if ($a[$i - 1] -ceq $b[$j - 1]) { 0 } else { 1 })) {
-            if ($a[$i - 1] -cne $b[$j - 1]) { "$($a[$i - 1])>$($b[$j - 1])" }
-            $i--; $j--
-        }
-        elseif ($i -gt 0 -and $cost[$i, $j] -eq $cost[($i - 1), $j] + 1) { "$($a[$i - 1])>"; $i-- }
-        else { ">$($b[$j - 1])"; $j-- }
+    if ($Value -is [Array] -and $Value.GetType().GetElementType().IsPrimitive -and $Value -isnot [byte[]]) {
+        $bytes = [byte[]]::new([Buffer]::ByteLength($Value)); [Buffer]::BlockCopy($Value, 0, $bytes, 0, $bytes.Length)
+        return [pscustomobject]@{ PSTypeName = 'Kokoro.StudentStoredArray'; Type = $Value.GetType().GetElementType().FullName; Bytes = $bytes }
     }
+    if ($Value.PSObject.BaseObject -is [Management.Automation.PSCustomObject]) {
+        $stored = [ordered]@{}
+        foreach ($property in $Value.PSObject.Properties) { $stored[$property.Name] = ConvertTo-StudentStored $property.Value }
+        $result = [pscustomobject]$stored; $result.PSObject.TypeNames.Insert(0, $Value.PSObject.TypeNames[0]); return $result
+    }
+    if ($Value -is [Array]) { return , @(foreach ($item in $Value) { ConvertTo-StudentStored $item }) }
+    $Value
+}
+
+function ConvertFrom-StudentStored([object] $Value) {
+    # Inverse of ConvertTo-StudentStored after Import-Clixml.
+    if ($null -eq $Value) { return $null }
+    $names = $Value.PSObject.TypeNames
+    if ($names -contains 'Deserialized.Kokoro.StudentStoredArray') {
+        $type = [type]$Value.Type; $bytes = [byte[]]$Value.Bytes
+        $array = [Array]::CreateInstance($type, $bytes.Length / [Buffer]::ByteLength([Array]::CreateInstance($type, 1))); [Buffer]::BlockCopy($bytes, 0, $array, 0, $bytes.Length)
+        return , $array
+    }
+    if ($names -contains 'Deserialized.Kokoro.StudentStoredStrings') {
+        $array = [string[]]::new($Value.Count); $positions = ConvertFrom-StudentStored $Value.Positions; $values = @($Value.Values)
+        for ($k = 0; $k -lt $positions.Length; $k++) { $array[$positions[$k]] = $values[$k] }
+        return , $array
+    }
+    if ($Value -is [byte[]] -or $Value -is [string] -or $Value.GetType().IsPrimitive) { return $Value }
+    if ($Value -is [Collections.IList]) {
+        $items = @(foreach ($item in $Value) { ConvertFrom-StudentStored $item })
+        if ($items.Count -and @($items | Where-Object { $_ -isnot [bool] }).Count -eq 0) { return , [bool[]]$items }
+        return , $items
+    }
+    if ($Value -is [Management.Automation.PSObject] -and $names[0].StartsWith('Deserialized.', [StringComparison]::Ordinal)) {
+        $restored = [ordered]@{}
+        foreach ($property in $Value.PSObject.Properties) { $restored[$property.Name] = ConvertFrom-StudentStored $property.Value }
+        $result = [pscustomobject]$restored; $result.PSObject.TypeNames.Insert(0, $names[0].Substring(13)); return $result
+    }
+    $Value
+}
+
+function Get-StudentCorpusPath {
+    if ($Corpus) { return (Resolve-Path -LiteralPath $Corpus).Path }
+    $latest = @(Get-ChildItem -LiteralPath $script:StudentBuild -Directory -Filter 'corpus-*' | Where-Object { Test-Path -LiteralPath (Join-Path $_.FullName 'corpus.clixml') } | Sort-Object Name)
+    if (-not $latest.Count) { throw 'No corpus with corpus.clixml under build/; run -Step Corpus or pass -Corpus.' }
+    $latest[-1].FullName
 }
 
 function Invoke-StudentPronunciation {
-    # Aggregates Zira pronunciation audits (phonemizer -Audit words.psd1 records): agreement,
-    # disagreements by word, and symbol substitutions that recur across words.
-    param([Parameter(Mandatory)][string[]] $AuditDetails)
-    $rows = foreach ($path in $AuditDetails) { (Import-PowerShellDataFile -LiteralPath $path).r }
-    $compared = @($rows | Where-Object { $null -ne $_[8] })
-    $disagreements = @($compared | Where-Object { -not $_[8] })
-    $byWord = $disagreements | Group-Object { '{0}|{1}|{2}' -f $_[1].ToLowerInvariant(), $_[7], ($_[6] -creplace '[ˈˌ]', '') } |
-        Sort-Object Count -Descending | ForEach-Object { $w, $zira, $ours = $_.Name.Split('|'); [pscustomobject]@{ Word = $w; Count = $_.Count; Zira = $zira; Ours = $ours } }
-    $substitutions = @{}
-    foreach ($entry in $byWord) { foreach ($pair in @(Get-StudentSymbolSubstitutions $entry.Zira $entry.Ours)) { $substitutions[$pair] = [int]$substitutions[$pair] + $entry.Count } }
-    [pscustomobject]@{ PSTypeName = 'Kokoro.StudentPronunciation'; Words = @($rows).Count; Compared = $compared.Count
-        Agreement = if ($compared.Count) { ($compared.Count - $disagreements.Count) / $compared.Count } else { $null }
-        DisagreeingOccurrences = $disagreements.Count; DistinctDisagreements = @($byWord).Count; ByWord = @($byWord)
-        Substitutions = @($substitutions.GetEnumerator() | Sort-Object Value -Descending | ForEach-Object { [pscustomobject]@{ Pair = $_.Key; Occurrences = $_.Value } }) }
+    # Counter-examples from a corpus: words both pronounce where Zira's form, after the learned
+    # correspondences, differs from ours; grouped by word with their recurring symbol differences.
+    $path = Get-StudentCorpusPath
+    $data = ConvertFrom-StudentStored (Import-Clixml -LiteralPath (Join-Path $path 'corpus.clixml'))
+    $null = Import-StudentKernels
+    $script:StudentContext.Correspondences = $data.Correspondences
+    $occurrences = foreach ($book in $data.Books) {
+        for ($a = 0; $a -lt ($book.Tokens.Length -shr 2); $a++) {
+            if ($book.Tokens[4 * $a] -ne 1 -or $null -eq $book.Phonemizer.Phones[$a] -or $null -eq $book.Zira.Phones[$a]) { continue }
+            Get-StudentTokens $book $a $a | Where-Object CounterExample
+        }
+    }
+    $kernels = $script:StudentContext.Kernels
+    $byWord = @($occurrences | Group-Object { [ValueTuple[string,string,string]]::new($_.Text.ToLowerInvariant(), $_.Phonemizer, $_.ZiraComparable) } | Sort-Object Count -Descending | ForEach-Object {
+        [pscustomobject]@{ Word = $_.Group[0].Text.ToLowerInvariant(); Count = $_.Count; Phonemizer = $_.Group[0].Phonemizer; Zira = $_.Group[0].ZiraComparable } })
+    $substitutions = [Collections.Generic.Dictionary[string,int]]::new()
+    foreach ($entry in $byWord) {
+        $source = $entry.Zira; $target = $kernels.Unstressed.Invoke($entry.Phonemizer); $alignment = $kernels.Align.Invoke($source, $target)
+        for ($k = 0; $k -lt $alignment.Length; $k += 2) {
+            $z = if ($alignment[$k] -ge 0) { [string]$source[$alignment[$k]] } else { '' }
+            $o = if ($alignment[$k + 1] -ge 0) { [string]$target[$alignment[$k + 1]] } else { '' }
+            if ($z -cne $o) { $pair = $z + '>' + $o; $seen = 0; $null = $substitutions.TryGetValue($pair, [ref]$seen); $substitutions[$pair] = $seen + $entry.Count }
+        }
+    }
+    [pscustomobject]@{ PSTypeName = 'Kokoro.StudentPronunciation'; Corpus = $path; CounterExampleOccurrences = @($occurrences).Count; DistinctCounterExamples = $byWord.Count
+        ByWord = $byWord; Substitutions = @($substitutions.GetEnumerator() | Sort-Object Value -Descending | ForEach-Object { [pscustomobject]@{ Pair = $_.Key; Occurrences = $_.Value } })
+        Correspondences = $data.Correspondences.Records }
 }
+
 
 function Invoke-StudentRender {
     if (-not $Text.Trim()) { throw 'Render needs -Text.' }
@@ -549,6 +996,6 @@ $script:StudentSteps = [ordered]@{
     Console = { Show-StudentConsole }
     Render = { Invoke-StudentRender }
     Corpus = { Invoke-StudentCorpus }
-    Pronunciation = { Invoke-StudentPronunciation -AuditDetails $AuditDetails }
+    Pronunciation = { Invoke-StudentPronunciation }
 }
 & $script:StudentSteps[$Step]

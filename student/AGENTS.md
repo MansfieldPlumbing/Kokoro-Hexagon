@@ -12,9 +12,8 @@ as the primary measured objective: our phonemizer on CoreCLR, the Student, and
 Kokoro's frozen generator on Hexagon. The Student learns from training text,
 retains what it has learned as stored percepts, and generalizes to unseen text.
 
-The Student's source is `tools/Kokoro.Student.psm1` and
-`tools/Kokoro.StudentStrokes.psm1`, reached through
-`Invoke-KokoroDevelopment.ps1 Student`. Extend those owners.
+The Student's source is `student/Invoke-Student.ps1`, reached through
+`Invoke-KokoroDevelopment.ps1 Student`. Extend that owner.
 
 This document describes two designs. v1 is current work. v2 follows v1 and is
 not current work. The Student is being rebuilt; these names are unrelated to
@@ -178,13 +177,20 @@ on Hexagon. Its purpose is that this project never needs Python again.
 - Zira (Windows speech API, `Microsoft Zira Desktop`) reads the whole text,
   including sentences our phonemizer rejects. Every word token carries both
   pronunciations as typed members, joined by source span: ours and Zira's
-  (mapped to Kokoro symbols, with her emphasis and timing). Where they agree,
-  ours is used (it carries Kokoro's stress marks); where our phonemizer does
-  not know the word, Zira's is used with primary stress before her emphasized
-  vowel; where they disagree, both are kept and the phonemizer's existing
-  admission rules decide, with Zira authoritative for segments by default.
-  Windows are assembled from the tokens' resolved phonemes and passed to the
-  teacher as phonemes.
+  (mapped to Kokoro symbols, with her word timing). Our phonemizer's
+  pronunciation is used wherever it has one (it carries stress marks). Where
+  Zira's differs, hers stays on the token as a counter-example. Systematic
+  differences between her symbols and Kokoro's are learned from the spans both
+  pronounce, not written by hand (for example her `o`, which aligns with
+  Kokoro's `O`). These correspondences
+  are applied to Zira's pronunciations of words our phonemizer does not know.
+  Zira's events carry no stress, so those words get primary stress before the
+  first vowel until stress is learned. Context-dependent differences (Kokoro's
+  flap `ɾ` for Zira's `t` and `d` between vowels) need correspondences
+  conditioned on neighbouring symbols. Windows are token ranges, assembled
+  from the tokens' resolved phonemes and passed to the teacher as phonemes;
+  for sentences our phonemizer accepts whole, the assembled phonemes equal
+  its output.
 - Teacher evidence passes validity gates before the Student learns from it:
   complete, aligned with Zira by source span, and agreeing with the resolved
   pronunciation. Where the resolved pronunciation differs from what stock
@@ -360,6 +366,43 @@ complete.
   pitch bend, emphasis as velocity, other controls as per-note controllers.
   It is not specific to speech, so the same Student may later produce a
   procedural first pass for music tracks.
+- The instrument is Hexagon-resident and takes the event stream as input:
+  the DSP decodes Universal MIDI Packets into per-channel and per-note state
+  held in VTCM (phase, resonances, envelopes, loop state). Events update that
+  state; between events the instrument runs without host traffic. Each
+  note's phase is an integer pointer into a one-period sine table in VTCM,
+  stepped by its pitch including per-note pitch bend; harmonics read at
+  integer multiples of the same pointer and stay locked.
+- The instrument simulates air in three dimensions: pressure and particle
+  velocity on sparse voxels covering only the air volume, with a
+  low-dispersion scheme so coarse voxels stay accurate, plus steady flow.
+  Vocal folds and lips are moving walls driven by the pressure and flow
+  interaction; tubes, mouth, bore and bell are the shape of the confined air;
+  fricatives and breath are turbulence where flow accelerates through a
+  constriction; radiation is air leaving the opening. Each source (speech,
+  brass, other voices) is a build: geometry, dimensions and excitation
+  settings, calibrated once against acoustics. The voxel model's accuracy is
+  checked against the resonances of known three-dimensional shapes before
+  use. A one-dimensional tube model (plane waves with side branches) is kept
+  as the calibration baseline and as the fallback where the GPU is not
+  available.
+- Processor split, to be measured on the phone (power and latency) before it
+  is adopted. Work coupled at the simulation step stays on one processor;
+  only boundaries cross between processors, at block rate (a few hundred
+  exchanges per second):
+  - GPU (Vulkan compute, SPIR-V emitted by PowerShell; fragment-shader
+    ping-pong as a fallback): the air, as sparse three-dimensional voxels
+    where needed, and the radiated output at the lips.
+  - Hexagon: MIDI 2.0 event decoding, articulator dynamics and geometry,
+    the Student's learned parts on HMX, and the vibrating source (folds or
+    lips) at full rate.
+  - Hexagon sends the GPU the instrument's boundary (geometry and the
+    source flow of the last block); the GPU returns the air's reflection
+    function at the source boundary for the current geometry, from which the
+    source computes its boundary pressure locally (exact for linear air;
+    turbulence at the source stays with the source).
+  - Offline fluid simulation (lattice Boltzmann) calibrates the source and
+    turbulence models; it does not run in real time.
 - Generator replacement: a fixed acoustic instrument with no learned values
   (excitation, resonances on the resident loop, built-in stop, fricative and
   nasal techniques, prosody-driven timing), played by the Student. Phase
