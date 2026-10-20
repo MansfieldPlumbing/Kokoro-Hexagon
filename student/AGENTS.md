@@ -78,6 +78,11 @@ can start before the utterance is complete:
   inspection format, converted losslessly for the mapped controls and
   specified from the MIDI 2.0 specification before encoding; v2 uses them
   for per-note polyphony.
+- The Student does not depend on the target. Its streams bind to a renderer
+  per target (the Hexagon generator, a host emulator of it, later others);
+  training against a quantized generator (stage 5) is a refinement of one
+  binding. If six continuous controls are not enough, a second controller
+  record is added and each update becomes a 192-bit snapshot.
 - Tiles are the DSP's execution granularity only. The Student emits a
   continuous stream on the tick clock and never sees tile boundaries;
   supplied coefficients do not depend on where tiles are cut. Its one
