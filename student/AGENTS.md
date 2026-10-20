@@ -37,7 +37,7 @@ as if it were stock Kokoro with faster kernels.
 | Stock Kokoro (upstream `pipeline.py`, `model.py`) | This system |
 | --- | --- |
 | Input is a string: `KModel.forward(phonemes: str, ref_s)` | No strings. Text enters as typed token occurrences with global identity (book, paragraph, token index, source offset) |
-| The pipeline splits text with regular expressions and chunks it at punctuation into pieces of at most 510 phonemes | No sentences, spans or windows. Interpretation advances token by token through closures and carried state, at any distance |
+| The pipeline splits text with regular expressions and chunks it at punctuation into pieces of at most 510 phonemes | No sentences, spans or windows. The system is object-based, not token-based: typed objects (occurrences, percepts, closures, the controller, voices) hold state and act on messages; tokens are only how text enters. Context is carried state, at any distance |
 | PL-BERT, predictor and decoder run over the whole chunk | The Student replaces everything up to and including the decoder |
 | AdaIN normalizes with moments over the whole utterance | AdaIN normalization is the Student's controller stream: the Student holds a dual-analog controller, and conditioning is held controller state |
 | Audio is returned per chunk, after the chunk is complete | The generator runs continuously on its cadence with resident weights; audio starts at the first controller state and has no utterance boundary |
