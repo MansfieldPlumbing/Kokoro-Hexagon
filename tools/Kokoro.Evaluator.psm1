@@ -32,7 +32,7 @@ $script:Standards = @{
 }
 
 function Get-KokoroSourceKey {
-    $files = @(foreach ($d in 'hexagon', 'kernels', 'jobs') { Get-ChildItem (Join-Path $script:Root "src/$d") -Filter '*.ps1' -File }) + @(Get-Item (Join-Path $script:Root 'tools/Emit-HexagonProbe.ps1'))
+    $files = @(foreach ($d in 'hexagon', 'kernels', 'jobs') { Get-ChildItem (Join-Path $script:Root "src/$d") -Filter '*.ps1' -File }) + @(Get-Item (Join-Path $script:Root 'Invoke-HexagonDevelopment.ps1')) + @(Get-Item (Join-Path $script:Root 'tools/Emit-HexagonProbe.ps1'))
     $lines = foreach ($f in ($files | Sort-Object FullName)) { "$($f.Name)=$((Get-FileHash -LiteralPath $f.FullName).Hash)" }
     [Convert]::ToHexString([Security.Cryptography.SHA256]::HashData([Text.Encoding]::UTF8.GetBytes(($lines -join "`n"))))
 }
