@@ -1244,6 +1244,156 @@ function Test-KokoroGeneratorPropagation {
     $report
 }
 
+# Representation of generator AdaIN constants as a voice base plus k components. 170-tick segments of Student teacher
+# evidence (-Corpus, its cached windows) run through the export generator on the phone; each segment's exported 1/std and
+# mean per site channel become ln(1/std) and mean/std coordinates. Principal components of the training segments give
+# base + P v; each held-out segment (windows with index 7 mod 8) receives its own least-squares v for each k and runs
+# through the constants generator, scored against its exported (statistics) PCM. The peach input rebuilt from its stock
+# capture at the decoder output scales first checks the input encoding against stock PCM.
+function Test-KokoroGeneratorRepresentation {
+    param([Parameter(Mandatory)][string]$OutputDirectory,[Parameter(Mandatory)][string]$Corpus,[string]$Soc='SM8550',
+        [string]$Package='dev.mansfieldplumbing.kokoro',[ValidateRange(2,4096)][int]$TrainingSegments=48,[ValidateRange(1,64)][int]$HeldOutSegments=4,
+        [ValidateRange(0,64)][int[]]$Components=@(0,1,2,3,4,5,6),
+        [string]$PriorReceipt=(Join-Path $Build 'generator-constants-full-corpus-20261012-143702-run.clixml'))
+    $out=[IO.Path]::GetFullPath($OutputDirectory)
+    if(-not $out.StartsWith($Build+[IO.Path]::DirectorySeparatorChar,[StringComparison]::OrdinalIgnoreCase) -or (Test-Path -LiteralPath $out)){throw 'Choose a fresh representation directory under build/.'}
+    [void][IO.Directory]::CreateDirectory($out)
+    Import-Evaluator
+    Import-Module (Join-Path $Root 'tools/Kokoro.CaptureMath.psm1') -Force
+    Import-Module (Join-Path $Root 'tools/Kokoro.CaptureKernels.psm1')
+    $prior=Import-Clixml -LiteralPath $PriorReceipt
+    if($prior.Gate.Status -cne 'Passed'){throw 'Prior generator constants gate did not pass.'}
+    $peach=Join-Path $Root 'data/baselines/decoder-generator-bank-input-sm8550-20261010/input'
+    $whole=Get-Content -LiteralPath (Join-Path $peach 'fixture.json') -Raw | ConvertFrom-Json
+    $decoderFixture=Get-Content -LiteralPath (Join-Path $whole.DecoderFixture 'fixture.json') -Raw | ConvertFrom-Json
+    # The generator input is stored at the decoder fixture's DecoderScales (fitted against the stock capture per channel).
+    $units=[double[]]$decoderFixture.DecoderScales
+    $statistics=Join-Path $prior.OutputDirectory 'A/generator'
+    $template=[IO.File]::ReadAllBytes((Join-Path $statistics 'activations.bin')); $statisticsTables=[IO.File]::ReadAllBytes((Join-Path $statistics 'tables.bin'))
+    $exportGenerator=Invoke-KokoroEmission -Kernel KokoroGeneratorWholeSource16Run -Parameters @{ResBlockFrames=[int]$whole.Frames;ResidentHvxThreads=4;ResidentBatchTiles=14;GeneratorMoments='Export'}
+    $constantGenerator=Invoke-KokoroEmission -Kernel KokoroGeneratorWholeSource16Run -Parameters @{ResBlockFrames=[int]$whole.Frames;ResidentHvxThreads=4;ResidentBatchTiles=14;GeneratorMoments='Constants'}
+    $packing=$constantGenerator.Layout.ConstantPacking
+    $contracts=@(Get-KokoroGeneratorSiteContracts -Fixture $whole -Layout $packing -Tables $statisticsTables)
+    $ticks=[int](($whole.Frames-1)/60); $xBytes=[int]([math]::Ceiling($ticks/32)*64*512)
+    if($exportGenerator.Layout.InputBytes -ne $template.Length -or $units.Length -ne 512){throw 'Generator input layout differs from x, f0 and source draws.'}
+    $deviceRun={param([string]$Name,$Emission,[byte[]]$Activation,[byte[]]$Table)
+        $directory=Join-Path $out $Name; [void][IO.Directory]::CreateDirectory($directory)
+        [IO.File]::WriteAllBytes((Join-Path $directory 'activations.bin'),$Activation); [IO.File]::WriteAllBytes((Join-Path $directory 'tables.bin'),$Table)
+        [IO.File]::Copy((Join-Path $statistics 'weights.bin'),(Join-Path $directory 'weights.bin'))
+        $job=Invoke-KokoroDeviceJob -EmissionDirectory $Emission.Directory -EmissionArtifact $Emission -InputDirectory $directory -Soc $Soc -Runs 1 -Package $Package
+        [IO.File]::Delete((Join-Path $directory 'weights.bin'))
+        $samples=[double[]]::new($whole.Samples)
+        for($i=0;$i -lt $samples.Length;$i++){$samples[$i]=[BitConverter]::ToInt16($job.Output,$Emission.Layout.PcmOffset+2*$i)/32768.0}
+        [pscustomobject]@{Output=$job.Output;Samples=$samples;DspMs=$job.MedianMs}}
+    $snr={param([double[]]$Reference,[double[]]$Candidate) $s=0.0;$e=0.0; for($i=0;$i -lt $Reference.Length;$i++){$d=$Reference[$i]-$Candidate[$i];$s+=$Reference[$i]*$Reference[$i];$e+=$d*$d}; if($e -eq 0){[double]::PositiveInfinity}else{[math]::Round(10*[math]::Log10($s/$e),2)}}
+    # x as stored decoder output croutons at Decode3OutputScales; f0 as int32 Q16 Hz; source draws from the template.
+    $encode={param([float[]]$Values,[float[]]$Pitch)
+        $encodedInput=[byte[]]$template.Clone(); $saturated=0
+        for($c=0;$c -lt 512;$c++){for($t=0;$t -lt $ticks;$t++){if([math]::Abs($Values[$c*$ticks+$t]/$units[$c]) -gt 32767){$saturated++}}}
+        [Array]::Copy((ConvertTo-KokoroCroutons16 -Values $Values -Frames $ticks -Scales $units),$encodedInput,$xBytes)
+        for($t=0;$t -lt $ticks;$t++){[Array]::Copy([BitConverter]::GetBytes([int][math]::Round([double]$Pitch[$t]*65536)),0,$encodedInput,$xBytes+4*$t,4)}
+        [pscustomobject]@{Activation=$encodedInput;Saturated=$saturated}}
+    $report=[ordered]@{Soc=$Soc;Corpus=$Corpus;Ticks=$ticks;ExportLibrarySHA256=$exportGenerator.LibrarySHA256;ConstantsLibrarySHA256=$constantGenerator.LibrarySHA256}
+
+    # Input encoding check: the peach stock capture's generator input and f0 at the fixture scales, scored against stock.
+    $capture=Read-KokoroCapture -Directory (Get-Content -LiteralPath (Join-Path $whole.SourceFixture 'fixture.json') -Raw | ConvertFrom-Json).Capture
+    $peachInput=& $encode ([float[]](Read-KokoroCaptureTensor -Capture $capture -Name 'generator.leaky.0.input')) ([float[]](Read-KokoroCaptureTensor -Capture $capture -Name 'f0'))
+    for($t=0;$t -lt $ticks;$t++){if([BitConverter]::ToInt32($peachInput.Activation,$xBytes+4*$t) -ne [BitConverter]::ToInt32($template,$xBytes+4*$t)){throw "Rebuilt peach f0 differs from the fixture at tick $t."}}
+    $stockBytes=[IO.File]::ReadAllBytes((Join-Path $peach 'expected-pcm-f32.bin')); $stock=[float[]]::new($whole.Samples); [Buffer]::BlockCopy($stockBytes,0,$stock,0,$stockBytes.Length)
+    $peachRun=& $deviceRun 'peach-rebuilt' $exportGenerator $peachInput.Activation $statisticsTables
+    $report.PeachRebuiltStockSnrDb=& $snr ([double[]]$stock) $peachRun.Samples; $report.PeachRebuiltSaturated=$peachInput.Saturated
+    Write-Host "Representation PeachRebuiltStockSnrDb=$($report.PeachRebuiltStockSnrDb) Saturated=$($peachInput.Saturated)"
+    # Stock x must score at least as well as the DSP decoder's x on the same job (the accepted gate's statistics variant).
+    $decoderInputSnr=[double](@($prior.Gate.Variants | Where-Object Variant -CEQ 'A')[0].PcmSnrDb)
+    if($report.PeachRebuiltStockSnrDb -lt $decoderInputSnr){throw "Rebuilt peach input scores $($report.PeachRebuiltStockSnrDb) dB against stock, below the DSP decoder input's $decoderInputSnr dB; the input encoding is wrong."}
+
+    # Segments from cached teacher evidence; held-out segments come only from held-out windows.
+    $teacher=& (Join-Path $Root 'student/Invoke-Student.ps1') -Step Teacher -Corpus $Corpus
+    if($teacher.Rendered){throw 'Representation segments must come from cached teacher evidence; run the Student Teacher step first.'}
+    $training=[Collections.Generic.List[object]]::new(); $heldOut=[Collections.Generic.List[object]]::new()
+    foreach($window in $teacher.Windows){
+        $list=$training; $limit=$TrainingSegments
+        if($window.Index%8 -eq 7){$list=$heldOut; $limit=$HeldOutSegments}
+        for($start=0;$start+$ticks -le $window.Ticks -and $list.Count -lt $limit;$start+=$ticks){
+            $segmentValues=[float[]]::new(512*$ticks); $segmentPitch=[float[]]::new($ticks)
+            for($c=0;$c -lt 512;$c++){[Array]::Copy($window.Evidence.X,$c*$window.Ticks+$start,$segmentValues,$c*$ticks,$ticks)}
+            [Array]::Copy($window.Evidence.F0,$start,$segmentPitch,0,$ticks)
+            if(@($segmentPitch | Where-Object {$_ -gt 0}).Count -eq 0){continue}
+            $list.Add([pscustomobject]@{Window=$window.Index;Start=$start;Values=$segmentValues;Pitch=$segmentPitch})
+        }
+        if($training.Count -ge $TrainingSegments -and $heldOut.Count -ge $HeldOutSegments){break}
+    }
+    if($training.Count -lt $TrainingSegments -or $heldOut.Count -lt $HeldOutSegments){throw "Corpus supplies $($training.Count) training and $($heldOut.Count) held-out segments."}
+
+    # Export each segment's exact constants; coordinates ln(1/std) and mean/std per site channel.
+    $exported={param([string]$Name,$Segment)
+        $encoded=& $encode $Segment.Values $Segment.Pitch
+        $result=& $deviceRun $Name $exportGenerator $encoded.Activation $statisticsTables
+        $exact=New-KokoroDecoderConstantsTables -Layout $packing -Tables $statisticsTables -Observation $result.Output -OutputOffset 0 -Contracts $contracts
+        $coordinates=[double[]]::new(2*$exact.Terms.Count)
+        for($i=0;$i -lt $exact.Terms.Count;$i++){$coordinates[2*$i]=[math]::Log($exact.Terms[$i].Inverse); $coordinates[2*$i+1]=$exact.Terms[$i].Mean*$exact.Terms[$i].Inverse}
+        [pscustomobject]@{Segment=$Segment;Exact=$exact;Coordinates=$coordinates;Samples=$result.Samples;Saturated=$encoded.Saturated;Activation=$encoded.Activation}}
+    $trainingRows=@(for($i=0;$i -lt $training.Count;$i++){& $exported "train-$i" $training[$i]})
+    $heldOutRows=@(for($i=0;$i -lt $heldOut.Count;$i++){& $exported "held-$i" $heldOut[$i]})
+    $dimension=$trainingRows[0].Coordinates.Length; $count=$trainingRows.Count
+    $base=[double[]]::new($dimension); foreach($row in $trainingRows){for($d=0;$d -lt $dimension;$d++){$base[$d]+=$row.Coordinates[$d]/$count}}
+    $centered=@(foreach($row in $trainingRows){$v=[double[]]::new($dimension); for($d=0;$d -lt $dimension;$d++){$v[$d]=$row.Coordinates[$d]-$base[$d]}; ,$v})
+    # Principal components from the Gram matrix of the centered training rows (cyclic Jacobi).
+    $gram=[double[,]]::new($count,$count)
+    for($i=0;$i -lt $count;$i++){for($j=$i;$j -lt $count;$j++){$s=0.0; $a=$centered[$i]; $b=$centered[$j]; for($d=0;$d -lt $dimension;$d++){$s+=$a[$d]*$b[$d]}; $gram[$i,$j]=$s; $gram[$j,$i]=$s}}
+    $vectors=[double[,]]::new($count,$count); for($i=0;$i -lt $count;$i++){$vectors[$i,$i]=1.0}
+    for($sweep=0;$sweep -lt 100;$sweep++){
+        $off=0.0; for($i=0;$i -lt $count;$i++){for($j=$i+1;$j -lt $count;$j++){$off+=$gram[$i,$j]*$gram[$i,$j]}}
+        if($off -lt 1e-22){break}
+        for($p1=0;$p1 -lt $count-1;$p1++){for($q1=$p1+1;$q1 -lt $count;$q1++){
+            if([math]::Abs($gram[$p1,$q1]) -lt 1e-300){continue}
+            $theta=($gram[$q1,$q1]-$gram[$p1,$p1])/(2*$gram[$p1,$q1]); $tangent=[math]::Sign($theta)/([math]::Abs($theta)+[math]::Sqrt($theta*$theta+1)); if($theta -eq 0){$tangent=1.0}
+            $cosine=1/[math]::Sqrt($tangent*$tangent+1); $sine=$tangent*$cosine
+            for($k1=0;$k1 -lt $count;$k1++){$gp=$gram[$k1,$p1]; $gq=$gram[$k1,$q1]; $gram[$k1,$p1]=$cosine*$gp-$sine*$gq; $gram[$k1,$q1]=$sine*$gp+$cosine*$gq}
+            for($k1=0;$k1 -lt $count;$k1++){$gp=$gram[$p1,$k1]; $gq=$gram[$q1,$k1]; $gram[$p1,$k1]=$cosine*$gp-$sine*$gq; $gram[$q1,$k1]=$sine*$gp+$cosine*$gq}
+            for($k1=0;$k1 -lt $count;$k1++){$vp=$vectors[$k1,$p1]; $vq=$vectors[$k1,$q1]; $vectors[$k1,$p1]=$cosine*$vp-$sine*$vq; $vectors[$k1,$q1]=$sine*$vp+$cosine*$vq}
+        }}
+    }
+    $order=@(0..($count-1) | Sort-Object { -$gram[$_,$_] }); $total=0.0; foreach($i in $order){$total+=[math]::Max(0,$gram[$i,$i])}
+    $axes=[Collections.Generic.List[double[]]]::new(); $explained=[Collections.Generic.List[double]]::new(); $cumulative=0.0
+    foreach($i in $order){
+        $lambda=$gram[$i,$i]; if($lambda -le 1e-12*$total){break}
+        $axis=[double[]]::new($dimension); for($r=0;$r -lt $count;$r++){$weight=$vectors[$r,$i]/[math]::Sqrt($lambda); $row=$centered[$r]; for($d=0;$d -lt $dimension;$d++){$axis[$d]+=$weight*$row[$d]}}
+        $axes.Add($axis); $cumulative+=$lambda; $explained.Add([math]::Round($cumulative/$total,6))
+    }
+    $report.TrainingSegments=$count; $report.Dimension=$dimension; $report.ExplainedVariance=$explained.ToArray()
+
+    # Held-out scoring: the exact constants written through the ratio encoding, then base + top-k components.
+    $rows=[Collections.Generic.List[object]]::new(); $siteByName=@{}; foreach($contract in $contracts){$siteByName[$contract.Site.Name]=$contract}
+    for($h=0;$h -lt $heldOutRows.Count;$h++){
+        $held=$heldOutRows[$h]; $difference=[double[]]::new($dimension); for($d=0;$d -lt $dimension;$d++){$difference[$d]=$held.Coordinates[$d]-$base[$d]}
+        foreach($k in @(-1)+$Components){
+            if($k -gt $axes.Count){continue}
+            $fitted=if($k -lt 0){$held.Coordinates}else{
+                $f=[double[]]$base.Clone()
+                for($a1=0;$a1 -lt $k;$a1++){$axis=$axes[$a1]; $v=0.0; for($d=0;$d -lt $dimension;$d++){$v+=$axis[$d]*$difference[$d]}; for($d=0;$d -lt $dimension;$d++){$f[$d]+=$v*$axis[$d]}}
+                $f}
+            $fittedTable=[byte[]]$held.Exact.Tables.Clone(); $noise=0.0
+            for($i=0;$i -lt $held.Exact.Terms.Count;$i++){
+                $term=$held.Exact.Terms[$i]; $contract=$siteByName[$term.Site]
+                $inverse=[math]::Exp($fitted[2*$i]); $mean=$fitted[2*$i+1]/$inverse
+                $ka=[BitConverter]::ToInt64($statisticsTables,[int]($contract.RecordOffset+32L*$term.Channel))
+                Set-KokoroDecoderConstantRatio -Tables $fittedTable -Offset ([int]($packing.ConstantsTableOffset+$contract.Site.Offset+16L*$term.Channel)) -Inverse $inverse -Mean $mean -Ka $ka
+                $scaleError=$inverse/$term.Inverse-1; $meanError=($mean-$term.Mean)*$term.Inverse; $noise+=$scaleError*$scaleError+$meanError*$meanError
+            }
+            $label=if($k -lt 0){'Exact'}else{"k$k"}
+            $result=& $deviceRun "held-$h-$label" $constantGenerator $held.Activation $fittedTable
+            $row=[pscustomobject]@{Segment=$h;Window=$held.Segment.Window;Start=$held.Segment.Start;Components=$label
+                BoundarySnrDb=if($noise -eq 0){[double]::PositiveInfinity}else{[math]::Round(10*[math]::Log10(2*$held.Exact.Terms.Count/$noise),2)}
+                PcmSnrDb=(& $snr $held.Samples $result.Samples);Saturated=$held.Saturated;DspMs=$result.DspMs}
+            $rows.Add($row); Write-Host ("Representation segment={0} {1} boundary={2} pcm={3}" -f $h,$label,$row.BoundarySnrDb,$row.PcmSnrDb)
+        }
+    }
+    $report.Rows=$rows.ToArray()
+    $report | Export-Clixml -LiteralPath (Join-Path $out 'representation.clixml') -Depth 6
+    [pscustomobject]$report
+}
+
 # Emits a diagnostic tensor job, runs it on the phone with a job input directory, and returns the output tensor bytes
 # (from runner-layout.json OutputOffset), the count of halfwords at the int16 limits, DSP time and the skel identity.
 function Invoke-KokoroTensorJob {
@@ -2379,6 +2529,10 @@ switch ($Command) {
         if($Case -ceq 'generator-pmu'){
             $profileParameters=if($Parameters){$Parameters}else{@{}}
             Test-KokoroGeneratorPmu -OutputDirectory $OutputDirectory -Soc $Soc -Package $HostPackage @profileParameters
+            break
+        }
+        if($Case -ceq 'generator-representation'){
+            Test-KokoroGeneratorRepresentation -OutputDirectory $OutputDirectory -Soc $Soc -Package $HostPackage @Parameters
             break
         }
         if($Case -ceq 'generator-propagation'){
