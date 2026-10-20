@@ -134,10 +134,9 @@ and supplying coefficients directly cut a decoder chunk from about 13.4 to
 `decoder-direct-coefficients-sm8550-20261010.md`). The generator sites have
 not been measured. Order:
 
-1. Teacher capture: the coefficients each generator site applies, recorded
-   by the lowered teacher as evidence for fitting controller state. Supplying
-   them back must reproduce the teacher's PCM exactly. The Student is fitted
-   to hold the controller, never to reproduce windows, frames or moments.
+1. Teacher capture: for every window, each generator site's folded
+   coefficients from the whole window, recorded by the lowered teacher.
+   Supplying them back must reproduce the teacher's PCM exactly.
 2. Representation: the smallest k for which fitted `base` and `P` reproduce
    the captured coefficients, scored by generator PCM SNR against the teacher.
 3. Learnability: the Student's control stream predicts `v(t)` on held-out
