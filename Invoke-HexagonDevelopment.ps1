@@ -824,13 +824,45 @@ function New-HexagonProbeSteps {
 }
 
 $script:HexagonToolsRoot=Join-Path $PSScriptRoot 'tools'
+# Graph models lowered by src/lower/Lower-Model.ps1. Each is PowerShell text parsed into an AST and never invoked;
+# parsing the text on its own keeps the source line numbers recorded in lowered.json.
+$script:KernelModels=[ordered]@{
+    'Kokoro.R0Sub0'=@'
+# Elementwise graph used by the R0Sub0 HVX benchmark specialization.
+# Constants are explicit inputs so the backend cannot reassociate floating-point operations.
+param($z, $gain, $shift, $mask, $alpha, $inverseAlpha, $one, $cubic)
+$scaled = Mul $z $gain
+$affine = Add $scaled $shift
+$y = Mul $affine $mask
+$u = Mul $y $alpha
+$u2 = Mul $u $u
+$cubicTerm = Mul $u2 $cubic
+$polynomial = Add $one $cubicTerm
+$sine = Mul $u $polynomial
+$sine2 = Mul $sine $sine
+$correction = Mul $sine2 $inverseAlpha
+$output = Add $y $correction
+'@
+    'Kokoro.Affine'=@'
+# AdaIN affine subgraph from generator.resblocks.3.adain1.0.
+# Input is the normalized channel-first tensor. Gain already includes 1+gamma.
+# Normalization, the output mask, Snake and convolution are outside this subgraph.
+param($normalized, $gain, $shift)
+$scaled = Mul $normalized $gain
+$output = Add $scaled $shift
+'@
+    'Kokoro.ConvTile'=@'
+# The caller supplies a channel-first tile with one sample of halo on each side.
+# Existing weights are [tap,input-channel,output-channel], without repacking.
+param($halo, $weight, $bias)
+$dot = Conv1D $halo $weight -Kernel 3 -Stride 1 -Dilation 1
+$output = Add $dot $bias
+'@
+}
 # Kernel records retain the existing builder arguments and artifact contracts.
 $script:Kernels=@(
     @{ Names=@('KokoroR0Sub0'); Build={
-    $modelPath=Join-Path $script:HexagonToolsRoot '..\src\models\Kokoro.R0Sub0.ps1'
-    $modelAst=[Management.Automation.Language.Parser]::ParseFile($modelPath,[ref]$tokens,[ref]$errors)
-    if($errors.Count) { throw 'R0Sub0 model does not parse' }
-    $nodes=@(& (Join-Path $script:HexagonToolsRoot '..\src\lower\Lower-Model.ps1') -Model $modelAst.GetScriptBlock())
+    $nodes=@(& (Join-Path $script:HexagonToolsRoot '..\src\lower\Lower-Model.ps1') -Model ([scriptblock]::Create($script:KernelModels['Kokoro.R0Sub0'])))
     $weights=Get-Content $WeightManifest -Raw | ConvertFrom-Json
     $weightPath=Join-Path (Split-Path $WeightManifest) 'r0_static.bin'
     if((Get-FileHash $weightPath).Hash -ne $weights.Sha256 -or (Get-Item $weightPath).Length -ne $weights.Bytes) { throw 'Existing weights fail their manifest' }
@@ -840,12 +872,8 @@ $script:Kernels=@(
     Write-NewOrIdenticalFile (Join-Path $OutputDirectory 'lowered.json') ([Text.Encoding]::UTF8.GetBytes(($nodes | ConvertTo-Json -Depth 6))) -AllowOverwrite:$Force
 } }
     @{ Names=@('KokoroAffine','KokoroConvTile'); Build={
-    $modelName=if($Kernel -eq 'KokoroAffine'){'Kokoro.Affine.ps1'}else{'Kokoro.ConvTile.ps1'}
-    $modelPath=Join-Path $script:HexagonToolsRoot "..\src\models\$modelName"
-    $modelAst=[Management.Automation.Language.Parser]::ParseFile($modelPath,[ref]$tokens,[ref]$errors)
-    if($errors.Count) { throw 'Model does not parse' }
-    # GetScriptBlock supplies an AST to the lowerer; the model is never invoked.
-    $nodes=@(& (Join-Path $script:HexagonToolsRoot '..\src\lower\Lower-Model.ps1') -Model $modelAst.GetScriptBlock())
+    $modelName=if($Kernel -eq 'KokoroAffine'){'Kokoro.Affine'}else{'Kokoro.ConvTile'}
+    $nodes=@(& (Join-Path $script:HexagonToolsRoot '..\src\lower\Lower-Model.ps1') -Model ([scriptblock]::Create($script:KernelModels[$modelName])))
     $weights=Get-Content $WeightManifest -Raw | ConvertFrom-Json
     $weightPath=Join-Path (Split-Path $WeightManifest) 'r0_static.bin'
     if((Get-FileHash $weightPath).Hash -ne $weights.Sha256 -or (Get-Item $weightPath).Length -ne $weights.Bytes) { throw 'Existing weights fail their manifest' }
