@@ -13,6 +13,7 @@ Steps:
             pack continuous windows of at most 510 phonemes as token ranges. Writes corpus.clixml.
   Pronunciation  Counter-examples from a corpus (-Corpus, default the latest): words where Zira's
             form differs from ours, by word, with recurring symbol differences.
+  Normalize Source-aligned front-end decisions for -Text, or replay stored -Corpus decisions as typed behaviours.
 .PARAMETER Corpus
 Corpus directory for Pronunciation; defaults to the latest build/corpus-* with corpus.clixml.
 .PARAMETER ParagraphLimit
@@ -37,7 +38,7 @@ Run from a PowerShell prompt: pwsh -File passes every argument as a string, so a
 #requires -Version 7.7
 [CmdletBinding()]
 param(
-    [ValidateSet('Console', 'Render', 'Corpus', 'Pronunciation')][string] $Step = 'Console',
+    [ValidateSet('Console', 'Render', 'Corpus', 'Pronunciation', 'Normalize')][string] $Step = 'Console',
     [ValidateRange(2, 64)][int] $Threads = [Math]::Max(2, [Environment]::ProcessorCount),
     [string] $Text = '',
     [string] $Voice = 'af_heart',
@@ -58,14 +59,15 @@ $script:StudentContext = [ordered]@{
     Kernels = $null          # compiled StudentTextKernels delegates
     Vocabulary = $null       # Kokoro symbol set
     Correspondences = $null  # learned Zira-to-Kokoro symbol mappings
+    NormalizationType = $null # admitted managed normalization program type
 }
 
 # Pinned inputs. The phonemizer is the compiled English driver built by
 # phonemizer/Invoke-EnglishPhonemizer.ps1; the teacher is tools/Invoke-KokoroPrecomputedDecoder.ps1.
 $script:StudentInputs = [ordered]@{
     Phonemizer = [ordered]@{
-        Directory = 'build/phonemizer/english/driver/D7B06FD52B900130E8702544D14BE2F662EC2E009EFCE6B33E3FC92BE8B70AD1-library-dll'
-        SHA256 = '112DC0B565042184DF74FA5176F09F6E8294857693B44F0BBED456A43B3FEEF1'
+        Directory = 'build/phonemizer/english/driver/E970EEC73CBB8CCA52267D46DA06A0319EFFE106869FC393B02FC165D52EE19A-library-dll'
+        SHA256 = 'B021978611019C1C628FA1F05025D6F3E8B94C64CA3FD75EDBC6B3170EAA8675'
     }
     Teacher = 'tools/Invoke-KokoroPrecomputedDecoder.ps1'
     Manifest = 'lib/manifest.json'
@@ -100,6 +102,7 @@ function Import-StudentPhonemizer {
     $path = Join-Path $directory ([IO.Path]::GetFileName($receipt.Output))
     if ($receipt.AssemblySha256 -cne $pin.SHA256 -or (Get-FileHash -LiteralPath $path).Hash -cne $pin.SHA256) { throw 'Compiled English phonemizer integrity mismatch.' }
     $assembly = [Reflection.Assembly]::LoadFrom($path)
+    $script:StudentContext.NormalizationType = $assembly.GetType('CoreNormalizationDecision', $true)
     $assembly.GetType('CoreDriver', $true).GetMethod('Run').CreateDelegate([Func[string,object]])
 }
 
@@ -467,6 +470,63 @@ class StudentTextKernels {
 
 $script:StudentTokenKinds = @{ 1 = 'Word'; 2 = 'Number'; 3 = 'Ordinal'; 4 = 'Punctuation'; 5 = 'Quote'; 6 = 'Symbol'; 7 = 'Note' }
 $script:StudentPronunciationSources = @{ 0 = 'None'; 1 = 'Phonemizer'; 2 = 'Zira' }
+Update-TypeData -TypeName 'Kokoro.StudentNormalizationDecision' -MemberType ScriptMethod -MemberName Realize -Value {
+    if ($null -eq $script:StudentContext.NormalizationType) { throw 'Import the pinned Student phonemizer before replaying normalization.' }
+    $programType = $script:StudentContext.NormalizationType
+    $program = $programType::new()
+    foreach ($name in 'Operation', 'Operand', 'PreviousWord', 'Role', 'Stress', 'Flap') { $program.$name = $this.$name }
+    $program.Realize()
+} -Force
+
+function New-StudentNormalizationDecision([object] $Program, [object] $Occurrence, [object] $Context) {
+    $value = $null; $kind = 'Unclassified'
+    if ($Program.Operation -ceq 'Morphology') { $value = $Program.Operand; $kind = 'WordForm' }
+    elseif ($Program.Operation -ceq 'Number') {
+        $number = [decimal]0
+        if ([decimal]::TryParse($Program.Operand, [Globalization.NumberStyles]::Number, [Globalization.CultureInfo]::InvariantCulture, [ref]$number)) {
+            $value = $number; $kind = 'Number'
+        }
+    }
+    [pscustomobject]@{ PSTypeName = 'Kokoro.StudentNormalizationDecision'; Operation = $Program.Operation
+        Operand = $Program.Operand; PreviousWord = $Program.PreviousWord; Role = $Program.Role
+        Stress = $Program.Stress; Flap = $Program.Flap; ValueKind = $kind; Value = $value
+        Occurrence = $Occurrence; Context = $Context; Provenance = 'AuthoredReuse' }
+}
+
+function Invoke-StudentNormalization {
+    $phonemize = Import-StudentPhonemizer
+    if ($Corpus) {
+        $path = Get-StudentCorpusPath
+        $data = ConvertFrom-StudentStored (Import-Clixml -LiteralPath (Join-Path $path 'corpus.clixml'))
+        $decisions = @(foreach ($book in $data.Books) {
+            if (-not $book.Phonemizer.PSObject.Properties['Normalizations']) { throw 'Corpus has no normalization decisions; rebuild it with the current Student.' }
+            foreach ($decision in $book.Phonemizer.Normalizations) {
+                if ($decision.Occurrence.Book -ne $book.Index -or $decision.Context.Book -ne $book.Index -or
+                    $decision.Occurrence.First -lt 0 -or $decision.Occurrence.Last -ge $book.Phonemizer.Phones.Length) { throw 'Stored normalization occurrence is outside its book.' }
+                if ($decision.Realize() -cne $book.Phonemizer.Phones[$decision.Occurrence.First]) { throw 'Stored Student normalization replay differs from its source occurrence.' }
+                $decision
+            }
+        })
+        [pscustomobject]@{ PSTypeName = 'Kokoro.StudentCorpusNormalization'; Corpus = $path
+            Decisions = $decisions; Replayed = $decisions.Count; Provenance = 'AuthoredReuse' }
+        return
+    }
+    if (-not $Text.Trim()) { throw 'Normalize needs -Text or -Corpus.' }
+    $result = $phonemize.Invoke($Text)
+    $source = [Convert]::ToHexString([Security.Cryptography.SHA256]::HashData([Text.Encoding]::UTF8.GetBytes($Text)))
+    $decisions = @(foreach ($token in $result.Tokens) {
+        if ($null -eq $token.Normalization) { continue }
+        $occurrence = [pscustomobject]@{ PSTypeName = 'Kokoro.StudentOccurrenceReference'; Source = $source; Token = $token.Identity
+            Start = $token.SourceStart; Length = $token.SourceEnd - $token.SourceStart }
+        $context = [pscustomobject]@{ PSTypeName = 'Kokoro.StudentContextReference'; Source = $source
+            First = $token.Normalization.ContextStart; Last = $token.Normalization.ContextEnd; Alternatives = $token.Alternatives }
+        $decision = New-StudentNormalizationDecision $token.Normalization $occurrence $context
+        if ($decision.Realize() -cne $token.Pron) { throw 'Student normalization replay differs from the front end.' }
+        $decision
+    })
+    [pscustomobject]@{ PSTypeName = 'Kokoro.StudentNormalization'; Source = $source; Complete = $result.Complete
+        Phones = $result.KokoroPhones; Decisions = $decisions; Unresolved = $result.UnresolvedSpans }
+}
 Update-TypeData -TypeName 'Kokoro.StudentToken' -MemberType ScriptProperty -MemberName Spoken -Value { $this.Kind -in 'Word', 'Number', 'Ordinal', 'Punctuation', 'Quote' } -Force
 Update-TypeData -TypeName 'Kokoro.StudentToken' -MemberType ScriptProperty -MemberName CounterExample -Value {
     # Zira's pronunciation of the same span differs from the one used: kept as a counter-example.
@@ -596,6 +656,7 @@ function Add-StudentPhonemizerPronunciations([object] $Book, [Func[string,object
     $kernels = $script:StudentContext.Kernels
     $chars = $Book.Text.ToCharArray(); $count = $Book.Tokens.Length -shr 2
     $table = New-StudentPronunciationTable $count
+    $normalizations = [Collections.Generic.List[object]]::new()
     $sentenceCount = $Book.Sentences.Length -shr 1
     $complete = [string[]]::new($sentenceCount)
     for ($s = 0; $s -lt $sentenceCount; $s++) {
@@ -614,9 +675,27 @@ function Add-StudentPhonemizerPronunciations([object] $Book, [Func[string,object
             if ($cover[2 * $t] -lt 0 -or $driverTokens[$t].Status -cne 'Valid' -or -not $driverTokens[$t].Pron) { continue }
             $at = $first + $cover[2 * $t]
             $table.Phones[$at] = $driverTokens[$t].Pron; $table.Last[$at] = $first + $cover[2 * $t + 1]
+            $program = $driverTokens[$t].Normalization
+            if ($null -ne $program) {
+                $occurrence = [pscustomobject]@{ PSTypeName = 'Kokoro.StudentOccurrenceReference'; Book = $Book.Index
+                    First = $at; Last = $table.Last[$at]; Start = $Book.Tokens[4 * $at + 1]
+                    Length = $Book.Tokens[4 * $table.Last[$at] + 1] + $Book.Tokens[4 * $table.Last[$at] + 2] - $Book.Tokens[4 * $at + 1] }
+                $dependencies = [Collections.Generic.HashSet[int]]::new()
+                for ($c = $program.ContextStart; $c -le $program.ContextEnd; $c++) {
+                    if ($cover[2 * $c] -ge 0) {
+                        for ($k = $cover[2 * $c]; $k -le $cover[2 * $c + 1]; $k++) { [void]$dependencies.Add($first + $k) }
+                    }
+                }
+                $context = [pscustomobject]@{ PSTypeName = 'Kokoro.StudentContextReference'; Book = $Book.Index
+                    Tokens = [int[]]@($dependencies | Sort-Object); Alternatives = $driverTokens[$t].Alternatives }
+                $decision = New-StudentNormalizationDecision $program $occurrence $context
+                if ($decision.Realize() -cne $driverTokens[$t].Pron) { throw 'Corpus normalization replay differs from the front end.' }
+                $normalizations.Add($decision)
+            }
         }
     }
     $Book | Add-Member -NotePropertyName Phonemizer -NotePropertyValue $table -Force
+    $table | Add-Member -NotePropertyName Normalizations -NotePropertyValue $normalizations.ToArray()
     $Book | Add-Member -NotePropertyName CompleteSentences -NotePropertyValue $complete -Force
 }
 
@@ -1054,5 +1133,6 @@ $script:StudentSteps = [ordered]@{
     Render = { Invoke-StudentRender }
     Corpus = { Invoke-StudentCorpus }
     Pronunciation = { Invoke-StudentPronunciation }
+    Normalize = { Invoke-StudentNormalization }
 }
 & $script:StudentSteps[$Step]
