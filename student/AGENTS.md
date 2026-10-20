@@ -69,11 +69,20 @@ can start before the utterance is complete:
   pitch movement, rate, voice-quality controls). A person can drive the same
   record from a physical controller, which checks that every required sound
   is reachable through the controls. Which control carries which quantity
-  is decided by measurement, not fixed here. The stream itself is encoded
-  as MIDI 2.0 Universal MIDI Packet messages (per-note events, velocity,
-  per-note pitch bend and per-note controllers, with timestamps), specified
-  from the MIDI 2.0 specification before encoding; the XInput record is one
-  input device mapped onto those messages, and v2 consumes the same stream.
+  is decided by measurement, not fixed here. On the wire to the DSP each
+  update is one 96-bit snapshot of that record: all six analog values and
+  the buttons at fixed offsets, read without parsing (12 bytes, against 48
+  bytes for six separate 64-bit MIDI 2.0 controller messages). MIDI 2.0
+  Universal MIDI Packet messages (per-note events, velocity, per-note pitch
+  bend and per-note controllers, with timestamps) are the interchange and
+  inspection format, converted losslessly for the mapped controls and
+  specified from the MIDI 2.0 specification before encoding; v2 uses them
+  for per-note polyphony.
+- Tiles are the DSP's execution granularity only. The Student emits a
+  continuous stream on the tick clock and never sees tile boundaries;
+  supplied coefficients do not depend on where tiles are cut. Its one
+  obligation is to run ahead of playback by at least one tile plus the
+  generator's convolution lookahead.
 - Generator stream: per tick, `x` (512 channels) and `f0`; per stage,
   `x_source` (see Generator implementation); and the coefficients of every
   AdaIN site, expanded from the control stream.
