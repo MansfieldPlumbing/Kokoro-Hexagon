@@ -1638,7 +1638,9 @@ function Test-HexagonEmissionEquivalence {
     [CmdletBinding()]
     param(
         [Parameter(Mandatory)][string]$BaselinePath,
-        [Parameter(Mandatory)][string]$OutputDirectory
+        [Parameter(Mandatory)][string]$OutputDirectory,
+        # Emission processes running at once; each kernel still gets its own process.
+        [ValidateRange(1,256)][int]$Throttle=[Environment]::ProcessorCount
     )
     $baseline=@(Import-Csv -LiteralPath $BaselinePath)
     $expectedNames=@($script:KernelByName.Keys | Where-Object {$_ -cne 'Definition'})
@@ -1659,39 +1661,48 @@ function Test-HexagonEmissionEquivalence {
     [void][IO.Directory]::CreateDirectory($output)
     $results=[Collections.Generic.List[object]]::new()
     $pwsh=Join-Path $PSHOME $(if($IsWindows){'pwsh.exe'}else{'pwsh'})
+    # Start up to $Throttle emission processes; each finished one is recorded as it exits, then the results are
+    # written in baseline order. The first runs alone: it fills the lowered-encoder cache the others load, which
+    # concurrent first writers would race to save.
+    $exitCodes=@{}; $seconds=@{}; $running=[Collections.Generic.List[object]]::new(); $next=0
+    while($next -lt $baseline.Count -or $running.Count){
+        while($next -lt $baseline.Count -and $running.Count -lt $(if($exitCodes.Count){$Throttle}else{1})){
+            $row=$baseline[$next]; $next++
+            $start=[Diagnostics.ProcessStartInfo]::new()
+            $start.FileName=$pwsh
+            $start.UseShellExecute=$false
+            $start.CreateNoWindow=$true
+            $start.RedirectStandardOutput=$true
+            $start.RedirectStandardError=$true
+            foreach($argument in @('-NoProfile','-File',(Join-Path $script:HexagonToolsRoot 'Emit-HexagonProbe.ps1'),
+                '-Kernel',$row.Recipe,'-OutputDirectory',(Join-Path $output $row.Recipe),'-Force')){
+                $start.ArgumentList.Add($argument)
+            }
+            $process=[Diagnostics.Process]::new(); $process.StartInfo=$start
+            if(-not $process.Start()){$process.Dispose(); throw "Cannot start emission for $($row.Recipe)"}
+            $running.Add([pscustomobject]@{Recipe=$row.Recipe;Process=$process;Stdout=$process.StandardOutput.ReadToEndAsync();Stderr=$process.StandardError.ReadToEndAsync();Exit=$process.WaitForExitAsync();Clock=[Diagnostics.Stopwatch]::StartNew()})
+        }
+        $finished=[Threading.Tasks.Task]::WaitAny([Threading.Tasks.Task[]]@($running.Exit))
+        $done=$running[$finished]; $running.RemoveAt($finished)
+        try{
+            $exitCodes[$done.Recipe]=$done.Process.ExitCode; $seconds[$done.Recipe]=[math]::Round($done.Clock.Elapsed.TotalSeconds,1)
+            [IO.File]::WriteAllText((Join-Path $output ($done.Recipe+'.stdout.txt')),$done.Stdout.GetAwaiter().GetResult())
+            [IO.File]::WriteAllText((Join-Path $output ($done.Recipe+'.stderr.txt')),$done.Stderr.GetAwaiter().GetResult())
+        }
+        finally{$done.Process.Dispose()}
+        Write-Progress -Activity 'Hexagon emission equivalence' -Status "$($exitCodes.Count)/$($baseline.Count): $($done.Recipe)" -PercentComplete (100*$exitCodes.Count/$baseline.Count)
+    }
     foreach($row in $baseline){
         $directory=Join-Path $output $row.Recipe
-        $start=[Diagnostics.ProcessStartInfo]::new()
-        $start.FileName=$pwsh
-        $start.UseShellExecute=$false
-        $start.CreateNoWindow=$true
-        $start.RedirectStandardOutput=$true
-        $start.RedirectStandardError=$true
-        foreach($argument in @('-NoProfile','-File',(Join-Path $script:HexagonToolsRoot 'Emit-HexagonProbe.ps1'),
-            '-Kernel',$row.Recipe,'-OutputDirectory',$directory,'-Force')){
-            $start.ArgumentList.Add($argument)
-        }
-        $process=[Diagnostics.Process]::new()
-        try{
-            $process.StartInfo=$start
-            if(-not $process.Start()){throw "Cannot start emission for $($row.Recipe)"}
-            $stdout=$process.StandardOutput.ReadToEndAsync()
-            $stderr=$process.StandardError.ReadToEndAsync()
-            $process.WaitForExit()
-            $exitCode=$process.ExitCode
-            [IO.File]::WriteAllText((Join-Path $output ($row.Recipe+'.stdout.txt')),$stdout.GetAwaiter().GetResult())
-            [IO.File]::WriteAllText((Join-Path $output ($row.Recipe+'.stderr.txt')),$stderr.GetAwaiter().GetResult())
-        }
-        finally{$process.Dispose()}
+        $exitCode=$exitCodes[$row.Recipe]
         $libraries=@(Get-ChildItem -LiteralPath $directory -Filter *.so -File -ErrorAction SilentlyContinue)
         $hash=if($libraries.Count -eq 1){(Get-FileHash -LiteralPath $libraries[0].FullName).Hash}else{''}
         $status=if($exitCode -ne 0 -or $libraries.Count -ne 1){'Fails'}
             elseif($hash -ceq $row.EmitterSHA256){'Identical'}else{'Differs'}
         $passed=if($row.Status -ceq 'Emits'){$status -ceq 'Identical'}else{$status -ceq 'Fails' -and -not $libraries.Count}
-        $result=[pscustomobject]@{Recipe=$row.Recipe;Baseline=$row.Status;Now=$status;Passed=$passed;SHA256=$hash;ExitCode=$exitCode}
+        $result=[pscustomobject]@{Recipe=$row.Recipe;Baseline=$row.Status;Now=$status;Passed=$passed;SHA256=$hash;ExitCode=$exitCode;Seconds=$seconds[$row.Recipe]}
         $results.Add($result)
         $result | Export-Csv -LiteralPath (Join-Path $output 'emitter-compare.csv') -Append
-        Write-Progress -Activity 'Hexagon emission equivalence' -Status "$($results.Count)/$($baseline.Count): $($row.Recipe)" -PercentComplete (100*$results.Count/$baseline.Count)
     }
     Write-Progress -Activity 'Hexagon emission equivalence' -Completed
     $failures=@($results | Where-Object {-not $_.Passed})
