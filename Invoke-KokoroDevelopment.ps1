@@ -932,7 +932,8 @@ function Test-KokoroGeneratorPmu {
                     $parameters=$case.Parameters.Clone(); $parameters.ResidentPmuEvents=$events[$eventSet]
                     $emission=Invoke-KokoroEmission -Kernel $case.Kernel -Parameters $parameters
                 }
-                $run=Invoke-KokoroDeviceJob -EmissionDirectory $emission.Directory -EmissionArtifact $emission -InputDirectory $case.Input -Soc $Soc -Package $Package -Runs 3
+                # The resident listener returns only the header and PCM ranges; the PMU records need the whole output.
+                $run=Invoke-KokoroDeviceJob -EmissionDirectory $emission.Directory -EmissionArtifact $emission -InputDirectory $case.Input -Soc $Soc -Package $Package -Runs 3 -OneShot
                 $samples=[byte[]]::new(2*$emission.Layout.Samples); [Array]::Copy($run.Output,$emission.Layout.PcmOffset,$samples,0,$samples.Length)
                 $pcmHash=[Convert]::ToHexString([Security.Cryptography.SHA256]::HashData($samples))
                 if($case.ContainsKey('Pcm') -and $pcmHash -cne $case.Pcm){throw "$($case.Name) profile PCM differs: expected $($case.Pcm), received $pcmHash."}
@@ -2856,7 +2857,7 @@ switch ($Command) {
     'Run' {
         if (-not $Case) { throw 'Run needs -Case (see Status for names).' }
         # Measurement cases write a fresh receipt directory; without -OutputDirectory it is build/<case>-<UTC time>.
-        if (-not $OutputDirectory -and $Case -cin @('generator-propagation', 'generator-representation', 'generator-weight-precision', 'generator-tile-equivalence', 'source-seeded-noise', 'generator-seeded-noise')) {
+        if (-not $OutputDirectory -and $Case -cin @('generator-propagation', 'generator-representation', 'generator-weight-precision', 'generator-tile-equivalence', 'source-seeded-noise', 'generator-seeded-noise', 'generator-pmu')) {
             $OutputDirectory = Join-Path $Build ('{0}-{1:yyyyMMddTHHmmss}' -f $Case, [DateTime]::UtcNow)
         }
         if($Case -ceq 'decoder-constants'){
