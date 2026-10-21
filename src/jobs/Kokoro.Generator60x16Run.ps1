@@ -82,7 +82,11 @@ function New-KokoroGenerator60x16RunSteps {
         # interior steps run in a counted loop with ring slots computed in registers, the six steps at each end
         # unrolled; the tile-parallel bodies use every HVX thread. One section without fronts or tail, three kernels and
         # their mean, supplied AdaIN values, a power-of-two BatchTiles.
-        [ValidateSet('Layer','Tile')][string]$Schedule='Layer')
+        [ValidateSet('Layer','Tile')][string]$Schedule='Layer',
+        # How HVX workers wait for work and the main thread waits for them: QuRT futex traps, or polling the pool
+        # with pause. Default: Spin for the tile schedule (dispatches microseconds apart), Futex otherwise.
+        [ValidateSet('','Futex','Spin')][string]$PoolWait='')
+    if(-not $PoolWait){ $PoolWait=if($Schedule -eq 'Tile'){'Spin'}else{'Futex'} }
     if($Schedule -eq 'Tile' -and ($Whole -or $Source -or $Decoder -or $Front -or $Tail -or $RuntimeFrames -or $StopAfterStage -ge 0 -or
         $Kernels.Count -ne 3 -or $AdaInMode -ne 'Constants' -or ($BatchTiles -band ($BatchTiles-1)) -or $Channels -ne 128 -or $PmuEvents)) {
         throw 'The tile schedule runs one 128-channel section of three kernels and their mean with supplied AdaIN values, a power-of-two block of tiles per step.'
@@ -320,6 +324,8 @@ function New-KokoroGenerator60x16RunSteps {
     # + 65536 - 4096 + 16384*k. Futex, HVX lock and unlock are the libqurt.a trap stubs (SDK 6.4.0.2
     # computev73 pic/libqurt.a 8e0ba5fd...); thread create/join/exit are imports.
     $poolOffset=$scratchOffset+4096; $stackOffset=$scratchOffset+65536
+    # Spin waits poll the pool between pause(#16) instructions.
+    $poolPause=16
     $futexWait={param([int]$addrReg,[int]$valueReg) $s.Add(@{Op='addi';d=1;s=$valueReg;i=0}); $s.Add(@{Op='addi';d=0;s=$addrReg;i=0}); $s.Add(@{Op='imm';d=3;i=0}); $s.Add(@{Op='imm';d=4;i=-1}); $s.Add(@{Op='imm';d=5;i=-1}); $s.Add(@{Op='trap0';i=0x20}) }
     # Tile-parallel call: arguments are VTCM offsets (r18-relative); perTile ones advance 8192 bytes per tile.
     # With -Moments the second argument is the job's moments record: each worker accumulates into its own
@@ -330,7 +336,7 @@ function New-KokoroGenerator60x16RunSteps {
     $wake={
         $s.Add(@{Op='syncht'})
         & $ptr 6 25 $poolOffset; $s.Add(@{Op='load';d=0;s=6;Offset=0}); $s.Add(@{Op='addi';d=0;s=0;i=1}); $s.Add(@{Op='store';s=6;t=0;Offset=0})
-        $s.Add(@{Op='addi';d=0;s=6;i=0}); & $imm 1 ($HvxThreads-1); $s.Add(@{Op='trap0';i=0x11})
+        if($PoolWait -eq 'Futex'){ $s.Add(@{Op='addi';d=0;s=6;i=0}); & $imm 1 ($HvxThreads-1); $s.Add(@{Op='trap0';i=0x11}) }
     }
     $join={
         for($k=1;$k -lt $HvxThreads;$k++){
@@ -338,7 +344,8 @@ function New-KokoroGenerator60x16RunSteps {
             $s.Add(@{Op='label';Name=$wait})
             & $ptr 6 25 ($poolOffset+64*$k); & $ptr 7 25 $poolOffset; $s.Add(@{Op='load';d=8;s=6;Offset=20}); $s.Add(@{Op='load';d=9;s=7;Offset=0})
             $s.Add(@{Op='eq';d=0;s=8;t=9}); $s.Add(@{Op='jump-p';u=0;Label=$done})
-            $s.Add(@{Op='addi';d=6;s=6;i=20}); & $futexWait 6 8; & $jump $wait
+            if($PoolWait -eq 'Futex'){ $s.Add(@{Op='addi';d=6;s=6;i=20}); & $futexWait 6 8 } else { $s.Add(@{Op='pause';i=$poolPause}) }
+            & $jump $wait
             $s.Add(@{Op='label';Name=$done})
         }
     }
@@ -907,10 +914,12 @@ function New-KokoroGenerator60x16RunSteps {
         $s.Add(@{Op='load';d=20;s=16;Offset=44}); $s.Add(@{Op='callr';s=20})
         $s.Add(@{Op='syncht'})
         $s.Add(@{Op='label';Name=$done})
-        $s.Add(@{Op='store';s=16;t=18;Offset=20}); $s.Add(@{Op='addi';d=0;s=16;i=20}); $s.Add(@{Op='imm';d=1;i=1}); $s.Add(@{Op='trap0';i=0x11})
+        $s.Add(@{Op='store';s=16;t=18;Offset=20})
+        if($PoolWait -eq 'Futex'){ $s.Add(@{Op='addi';d=0;s=16;i=20}); $s.Add(@{Op='imm';d=1;i=1}); $s.Add(@{Op='trap0';i=0x11}) }
         & $jump $loop
         $s.Add(@{Op='label';Name=$idle})
-        & $futexWait 17 18; & $jump $loop
+        if($PoolWait -eq 'Futex'){ & $futexWait 17 18 } else { $s.Add(@{Op='pause';i=$poolPause}) }
+        & $jump $loop
         $s.Add(@{Op='label';Name=$quit})
         $s.Add(@{Op='imm';d=0;i=3}); $s.Add(@{Op='imm';d=5;i=0}); $s.Add(@{Op='trap0';i=0x55})
         $s.Add(@{Op='imm';d=0;i=0}); $s.Add(@{Op='got-call';Import='qurt_thread_exit';d=14})

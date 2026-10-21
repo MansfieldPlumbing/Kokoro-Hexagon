@@ -110,6 +110,7 @@ $script:Instructions = @(
     @{ Op='valign-imm';     Pattern='00011110001tttttPP1sssssiiiddddd'; Rule='Unsigned'; Min=0; Max=7; Message='Valign immediate out of range (0..7)'; Asm='v{d} = valign(v{s},v{t},#{i})'; Source='HVX PRM' }
     @{ Op='vshuff';         Pattern='00011011tttttrrrPP1sssss011ddddd'; Rule='Shuffle'; Asm='v{d1}:{d} = vshuff(v{s},v{t},r{r})'; Source='HVX PRM' }
     @{ Op='trap0';          Pattern='0101010000000000PP0iiiii000iii00'; Rule='Unsigned'; Min=0; Max=255; Message='Trap0 immediate out of range (0..255)'; Asm='trap0(#{i})'; Source='PRM' }
+    @{ Op='pause';          Pattern='0101010001000000PP0iiiii000iii00'; Rule='Unsigned'; Min=0; Max=255; Message='Pause immediate out of range (0..255)'; Asm='pause(#{i})'; Source='LLVM test/MC/Hexagon/instructions/system_user.s: pause(#255) = 0x5440DF1C' }
     @{ Op='pcycle';         Pattern='0110111100011110PP000000000ddddd'; Rule='CounterPair'; Asm='r{d1}:{d} = pcycle'; Source='PRM' }
     @{ Op='hwticks';        Pattern='0110100000011110PP000000000ddddd'; Rule='CounterPair'; Asm='r{d1}:{d} = c31:30'; Source='PRM' }
     @{ Op='upcycle';        Pattern='0110100000001110PP000000000ddddd'; Rule='CounterPair'; Asm='r{d1}:{d} = upcycle'; Source='SDK 6.4.0.2: r7:6 = upcycle -> 0x680EC006; PRM 2.2.9: reads zero unless the RTOS enables user access' }
