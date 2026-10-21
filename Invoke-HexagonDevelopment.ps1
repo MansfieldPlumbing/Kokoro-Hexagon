@@ -1415,7 +1415,7 @@ param(
     [ValidateSet('Accumulate','Export','Constants')][string] $GeneratorMoments = 'Accumulate',
     # KokoroGenerator60x16Run: Layer (each stage over every tile) or Tile (depth-first, resident weights; see -Schedule in
     # src/jobs/Kokoro.Generator60x16Run.ps1).
-    [ValidateSet('Layer','Tile')][string] $GeneratorSchedule = 'Layer',
+    [ValidateSet('Layer','Tile','Backward')][string] $GeneratorSchedule = 'Layer',
     # KokoroGenerator60x16Run tile schedule: 0 runs the convolutions on the main thread, which holds the matrix unit;
     # 1 to 3 run them on that HVX worker, which never takes the matrix lock.
     [ValidateRange(0, 3)][int] $GeneratorMatrixThread = 0,

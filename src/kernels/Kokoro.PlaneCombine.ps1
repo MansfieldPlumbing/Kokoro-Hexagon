@@ -22,9 +22,12 @@ function New-KokoroPlaneCombineSteps {
         [switch] $Group3Shifts,
         [Parameter(Mandatory)][ValidateRange(2048, 1073741824)][long] $PlaneStride,
         [string] $LabelPrefix = 'planecombine',
-        [switch] $NoReturn
+        [switch] $NoReturn,
+        # Residual: read R from r5 instead of the output tiles r1 (the residual of another ring, written to r1).
+        [switch] $SeparateResidual
     )
     if ($PlaneStride % 2048 -ne 0) { throw 'Plane stride must keep 2 KB tile alignment' }
+    if ($SeparateResidual -and $Mode -ne 'Residual') { throw 'A separate residual source is a residual combine option.' }
     $ob = $Channels / 32
     # Per-block vector registers: residual ratios from v20 and group 3 shifts from v16 for up to four blocks; with eight
     # blocks (256 channels) a residual combine keeps ratios in v16..v23 and shifts in v8..v15 (v24, v25 are setup temps).
@@ -81,13 +84,14 @@ function New-KokoroPlaneCombineSteps {
         if ($Groups -eq 3) { $s.Add(@{Op='vadd-h-sat';d=4;s=4;t=6}) }
         if ($Mode -eq 'Residual') {
             $s.Add(@{Op='vmpy-h-rnd-sat';d=4;s=4;t=($ratioBase+$b)})          # O = v * ratio_c
-            $s.Add(@{Op='vload';d=5;s=1;Offset=0})
+            $s.Add(@{Op='vload';d=5;s=$(if ($SeparateResidual) { 5 } else { 1 });Offset=0})
             $s.Add(@{Op='vxor';d=5;s=5;t=29})
             $s.Add(@{Op='vadd-h-sat';d=4;s=5;t=4})                    # R + O
         }
         $s.Add(@{Op='vxor';d=4;s=4;t=29})
         $s.Add(@{Op='vstore';s=1;t=4;Offset=0})
         $s.Add(@{Op='addi';d=0;s=0;i=128}); $s.Add(@{Op='addi';d=1;s=1;i=128})
+        if ($SeparateResidual) { $s.Add(@{Op='addi';d=5;s=5;i=128}) }
         $s.Add(@{Op='addi';d=14;s=14;i=-1})
         $s.Add(@{Op='gtu';d=0;s=14;t=7})
         $s.Add(@{Op='jump-p';u=0;Label=$pair})

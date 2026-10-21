@@ -31,7 +31,11 @@ function New-KokoroHmxConvPlanesSteps {
         [switch] $NoReturn,
         # Column-table stride in accumulator groups (default: this conv's own). 3 lets a one-plane conv read tables laid
         # out for -WeightPlanes 2, using their first two groups.
-        [ValidateRange(0, 3)][int] $TableGroups = 0
+        [ValidateRange(0, 3)][int] $TableGroups = 0,
+        # Rows every tap reads before the centred position: output row m then reads input rows m - TapDelay - reach to
+        # m - TapDelay + reach, so with TapDelay >= reach the convolution reads only rows at or before m (backward).
+        # The products and their order are unchanged; output row m is the centred output at row m - TapDelay.
+        [ValidateRange(0, 32)][int] $TapDelay = 0
     )
     [int]$cb = $InputChannels / 32; [int]$ob = $OutputChannels / 32; [int]$groups = $OutputChannels / 64
     $accGroups = if ($WeightPlanes -eq 2) { 3 } else { 2 }
@@ -51,7 +55,7 @@ function New-KokoroHmxConvPlanesSteps {
     $macs = { param([int]$act,[int]$wt)
         $s.Add(@{Op='addi'; d=12; s=$wt; i=0})
         for ($k = 0; $k -lt $Kernel; $k++) {
-            $shift = $Dilation * ($k - $half)
+            $shift = $Dilation * ($k - $half) - $TapDelay
             [int]$tile = [math]::Floor($shift / 32); [int]$row = $shift - 32 * $tile
             for ($c = 0; $c -lt $cb; $c++) {
                 $offset = (($tile * $cb) + $c) * 2048 + (($row -shr 1) -shl 7) + (($row -band 1) -shl 1)
