@@ -26,6 +26,9 @@ Steps:
             audio and MIDI per contact. Without State, measure deterministic controller coverage and round-trip gates.
   Alignment Align retained Zira audio to human -Recordings by lowered spectral DTW, label typed word occurrences,
             and snap boundaries to the human Listen evidence. No syllabus or Zira durations enter the result.
+  Percepts  Open a live percept image at -ImagePath; -State may supply an Alignment result to observe. The returned
+            image has Observe, Pin, Nearby, Describe and Save methods. Source recordings are stored once.
+  Describe  Describe -State (a live image), or open -ImagePath, including examples, counter-examples and genealogy.
 .PARAMETER Corpus
 Corpus directory for Pronunciation; defaults to the latest build/corpus-* with corpus.clixml.
 .PARAMETER ParagraphLimit
@@ -60,7 +63,7 @@ Run from a PowerShell prompt: pwsh -File passes every argument as a string, so a
 #requires -Version 7.7
 [CmdletBinding()]
 param(
-    [ValidateSet('Console', 'Render', 'Corpus', 'Pronunciation', 'Normalize', 'Syllabus', 'Recordings', 'Listen', 'Stems', 'Alignment')][string] $Step = 'Console',
+    [ValidateSet('Console', 'Render', 'Corpus', 'Pronunciation', 'Normalize', 'Syllabus', 'Recordings', 'Listen', 'Stems', 'Alignment', 'Percepts', 'Describe')][string] $Step = 'Console',
     [ValidateRange(2, 64)][int] $Threads = [Math]::Max(2, [Environment]::ProcessorCount),
     [string] $Text = '',
     [string] $Voice = 'af_heart',
@@ -69,6 +72,7 @@ param(
     [object] $State = $null,
     [switch] $MoreText,
     [string] $SourceIdentity = '',
+    [string] $ImagePath = '',
     [ValidateRange(0, [int]::MaxValue)][int] $ParagraphLimit = 0,
     [ValidateRange(0, [int]::MaxValue)][int] $WindowLimit = 0,
     [string] $Recordings = '',
@@ -2165,6 +2169,242 @@ function Invoke-StudentListen {
     }
 }
 
+function New-StudentImage([string] $Path) {
+    [pscustomobject]@{ PSTypeName = 'Kokoro.StudentImage'; Owner = $ExecutionContext.SessionState.Module; Path = $Path
+        Percepts = [Collections.Generic.Dictionary[string,object]]::new([StringComparer]::Ordinal)
+        Evidence = [Collections.Generic.Dictionary[string,object]]::new([StringComparer]::Ordinal)
+        Performances = [Collections.Generic.Dictionary[string,object]]::new([StringComparer]::Ordinal)
+        Pinned = 'Occurrence'; Changed = $false }
+}
+
+function New-StudentPercept($Image, [string] $Identity, [string] $Kind, [float[]] $Key, $Parent = $null) {
+    if ($Image.Percepts.ContainsKey($Identity)) { return $Image.Percepts[$Identity] }
+    if (-not $Identity -or -not $Kind -or $Key.Length -eq 0 -or @($Key | Where-Object { -not [float]::IsFinite($_) }).Count) { throw 'Percept identity, kind and finite key are required.' }
+    $node = [pscustomobject]@{ PSTypeName = 'Kokoro.StudentPercept'; Image = $Image; Identity = $Identity; Kind = $Kind; Key = $Key; Parent = $Parent
+        State = 'Candidate'; Rules = [Collections.Generic.List[object]]::new(); Directions = [Collections.Generic.List[object]]::new()
+        Children = [Collections.Generic.List[object]]::new(); Examples = [Collections.Generic.List[object]]::new(); CounterExamples = [Collections.Generic.List[object]]::new()
+        Recordings = [Collections.Generic.List[object]]::new(); RecordingEvidence = [Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
+        Progression = [Collections.Generic.List[object]]::new(); Genealogy = [Collections.Generic.List[object]]::new() }
+    $Image.Percepts.Add($Identity, $node)
+    if ($null -ne $Parent) {
+        $Parent.Children.Add($node)
+        $edge = [pscustomobject]@{ PSTypeName = 'Kokoro.StudentProgression'; Kind = 'Specialization'; From = $Parent; To = $node; Admitted = $false }
+        $Parent.Progression.Add($edge); $node.Progression.Add($edge)
+    }
+    $node.Genealogy.Add([pscustomobject]@{ PSTypeName = 'Kokoro.StudentGenealogy'; Operation = 'Born'; Parent = $(if ($null -ne $Parent) { $Parent.Identity }); Evidence = @(); Step = 'Percepts'; MachineSHA256 = $script:StudentMachineSHA256 })
+    $Image.Changed = $true
+    $node
+}
+
+function Add-StudentImageObservation($Image, [string] $Percept, $Observation, [string] $Role) {
+    if ($Role -cnotin 'Example', 'CounterExample') { throw 'Evidence role must be Example or CounterExample.' }
+    if (-not $Image.Percepts.ContainsKey($Percept)) { throw 'Observe needs an existing typed percept.' }
+    foreach ($field in 'Identity', 'Occurrence', 'Provenance', 'Condition', 'Measured') { if (-not $Observation.PSObject.Properties[$field]) { throw "Observation needs $field." } }
+    if (-not $Observation.Identity -or -not $Observation.Occurrence -or -not $Observation.Provenance) { throw 'Observation identity and provenance cannot be empty.' }
+    if ($Image.Evidence.ContainsKey($Observation.Identity)) { $evidence = $Image.Evidence[$Observation.Identity] }
+    else {
+        $evidence = [pscustomobject]@{ PSTypeName = 'Kokoro.StudentEvidence'; Identity = $Observation.Identity; Occurrence = $Observation.Occurrence
+            Provenance = $Observation.Provenance; Condition = $Observation.Condition; Measured = $Observation.Measured }
+        $Image.Evidence.Add($evidence.Identity, $evidence)
+    }
+    $node = $Image.Percepts[$Percept]
+    $collection = $node.Examples
+    if ($Role -ceq 'CounterExample') { $collection = $node.CounterExamples }
+    if (-not $collection.Contains($evidence)) { $collection.Add($evidence); $Image.Changed = $true }
+    if ($node.Genealogy[0].Evidence.Count -eq 0) { $node.Genealogy[0].Evidence = @($evidence.Identity) }
+    $evidence
+}
+
+function Get-StudentImageNeighborhood($Image, [float[]] $Key, [int] $Depth = 2) {
+    if ($Depth -lt 0 -or -not $Image.Percepts.ContainsKey($Image.Pinned)) { throw 'Invalid pin or graph depth.' }
+    $queue = [Collections.Generic.Queue[object]]::new(); $seen = [Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
+    $queue.Enqueue([pscustomobject]@{ Node = $Image.Percepts[$Image.Pinned]; Depth = 0 })
+    $found = @(while ($queue.Count) {
+        $entry = $queue.Dequeue(); $node = $entry.Node
+        if (-not $seen.Add($node.Identity)) { continue }
+        if ($Key.Length -ne $node.Key.Length) { throw 'Likeness keys must have identical dimensions.' }
+        $distance = 0.0
+        for ($axis = 0; $axis -lt $Key.Length; $axis++) { $difference = [double]$Key[$axis] - $node.Key[$axis]; $distance += $difference * $difference }
+        [pscustomobject]@{ PSTypeName = 'Kokoro.StudentPerceptNeighbor'; Percept = $node; KinDistance = $entry.Depth; LikenessDistance = [Math]::Sqrt($distance) }
+        if ($entry.Depth -lt $Depth) {
+            if ($null -ne $node.Parent) { $queue.Enqueue([pscustomobject]@{ Node = $node.Parent; Depth = $entry.Depth + 1 }) }
+            foreach ($child in $node.Children) { $queue.Enqueue([pscustomobject]@{ Node = $child; Depth = $entry.Depth + 1 }) }
+            foreach ($edge in $node.Progression) {
+                $related = $edge.To
+                if ($edge.To.Identity -ceq $node.Identity) { $related = $edge.From }
+                $queue.Enqueue([pscustomobject]@{ Node = $related; Depth = $entry.Depth + 1 })
+            }
+        }
+    })
+    $found | Sort-Object LikenessDistance, KinDistance
+}
+
+function Get-StudentImageDescription($Image) {
+    @($Image.Percepts.Values | Sort-Object Identity | ForEach-Object {
+        [pscustomobject]@{ PSTypeName = 'Kokoro.StudentPerceptDescription'; Identity = $_.Identity; Kind = $_.Kind; State = $_.State
+            Parent = $(if ($null -ne $_.Parent) { $_.Parent.Identity }); Examples = $_.Examples.Count; CounterExamples = $_.CounterExamples.Count
+            Untested = $_.Examples.Count -gt 0 -and $_.CounterExamples.Count -eq 0; MostlyExceptions = $_.CounterExamples.Count -gt $_.Examples.Count
+            Rules = $_.Rules.Count; Recordings = $_.Recordings.Count; Children = $_.Children.Count; Progression = $_.Progression.Count; Genealogy = $_.Genealogy.Count }
+    })
+}
+
+function Add-StudentProgression($Image, [string] $Kind, [string] $From, [string] $To, [bool] $Admitted = $false) {
+    if ($Kind -cnotin 'Prerequisite', 'Specialization' -or $From -ceq $To -or -not $Image.Percepts.ContainsKey($From) -or -not $Image.Percepts.ContainsKey($To)) { throw 'Progression needs a declared kind and two distinct existing percepts.' }
+    $source = $Image.Percepts[$From]; $target = $Image.Percepts[$To]
+    foreach ($edge in $source.Progression) { if ($edge.Kind -ceq $Kind -and $edge.From.Identity -ceq $From -and $edge.To.Identity -ceq $To) { return $edge } }
+    $edge = [pscustomobject]@{ PSTypeName = 'Kokoro.StudentProgression'; Kind = $Kind; From = $source; To = $target; Admitted = $Admitted }
+    $source.Progression.Add($edge); $target.Progression.Add($edge); $Image.Changed = $true
+    $edge
+}
+
+function New-StudentAirLayer($Image, [string] $Parent, [string] $Identity, [float[]] $Key, [string[]] $CounterEvidence) {
+    if (-not $Image.Percepts.ContainsKey($Parent) -or $Image.Percepts.ContainsKey($Identity) -or $CounterEvidence.Count -eq 0) { throw 'A new attached branch needs its parent and the counter-evidence that caused it.' }
+    $parentNode = $Image.Percepts[$Parent]
+    foreach ($evidenceIdentity in $CounterEvidence) { if (-not @($parentNode.CounterExamples | Where-Object Identity -CEQ $evidenceIdentity).Count) { throw 'Air-layer evidence must remain on the parent counter-example roots.' } }
+    $branch = New-StudentPercept $Image $Identity $parentNode.Kind $Key $parentNode
+    $branch.State = 'Attached'
+    $branch.Genealogy.Add([pscustomobject]@{ PSTypeName = 'Kokoro.StudentGenealogy'; Operation = 'AirLayer'; Parent = $Parent; Evidence = $CounterEvidence; Step = 'Percepts'; MachineSHA256 = $script:StudentMachineSHA256 })
+    $branch
+}
+
+function Save-StudentImage($Image, [string] $Path = '') {
+    if (-not $Path) { $Path = $Image.Path }
+    if (-not $Path) { throw 'The live image needs a persistence path.' }
+    $Path = [IO.Path]::GetFullPath($Path); [void][IO.Directory]::CreateDirectory([IO.Path]::GetDirectoryName($Path))
+    # Flatten graph references only at the image boundary. The loader reconstructs one shared live object per identity.
+    $nodes = @(foreach ($node in $Image.Percepts.Values) {
+        [pscustomobject]@{ Identity = $node.Identity; Kind = $node.Kind; Key = $node.Key; State = $node.State
+            Parent = [string]$(if ($null -ne $node.Parent) { $node.Parent.Identity }); Rules = $node.Rules.ToArray(); Directions = $node.Directions.ToArray()
+            Examples = @($node.Examples | ForEach-Object Identity); CounterExamples = @($node.CounterExamples | ForEach-Object Identity)
+            Recordings = @($node.Recordings | ForEach-Object { [pscustomobject]@{ Occurrence = $_.Occurrence; Performance = $_.PerformanceIdentity; Evidence = $_.Evidence.Identity } }); Genealogy = $node.Genealogy.ToArray() }
+    })
+    $seenEdges = [Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
+    $edges = @(foreach ($node in $Image.Percepts.Values) { foreach ($edge in $node.Progression) {
+        $edgeIdentity = '{0}:{1}{2}:{3}{4}:{5}' -f $edge.Kind.Length, $edge.Kind, $edge.From.Identity.Length, $edge.From.Identity, $edge.To.Identity.Length, $edge.To.Identity
+        if ($seenEdges.Add($edgeIdentity)) { [pscustomobject]@{ Kind = $edge.Kind; From = $edge.From.Identity; To = $edge.To.Identity; Admitted = $edge.Admitted } }
+    } })
+    $snapshot = [pscustomobject]@{ PSTypeName = 'Kokoro.StudentImageSnapshot'; Pinned = $Image.Pinned; Percepts = $nodes
+        Evidence = @($Image.Evidence.Values); Progression = $edges; Performances = @($Image.Performances.GetEnumerator() | ForEach-Object { [pscustomobject]@{ Identity = $_.Key; Performance = $_.Value } }) }
+    $pending = $Path + '.pending-' + [Guid]::NewGuid().ToString('N')
+    $serialized = [Management.Automation.PSSerializer]::Serialize($snapshot, 40)
+    $stream = [IO.File]::Open($pending, [IO.FileMode]::CreateNew)
+    $gzip = [IO.Compression.GZipStream]::new($stream, [IO.Compression.CompressionLevel]::Optimal)
+    $writer = [IO.StreamWriter]::new($gzip, [Text.UTF8Encoding]::new($false))
+    try { $writer.Write($serialized) } finally { $writer.Dispose() }
+    if (Test-Path -LiteralPath $Path) { [IO.File]::Replace($pending, $Path, ($Path + '.previous')) } else { [IO.File]::Move($pending, $Path) }
+    $Image.Path = $Path; $Image.Changed = $false
+    [pscustomobject]@{ PSTypeName = 'Kokoro.StudentImageCheckpoint'; Path = $Path; SHA256 = (Get-FileHash -LiteralPath $Path).Hash
+        Percepts = $Image.Percepts.Count; Evidence = $Image.Evidence.Count; Performances = $Image.Performances.Count }
+}
+
+function Open-StudentImage([string] $Path) {
+    $image = New-StudentImage $Path
+    if (-not (Test-Path -LiteralPath $Path)) {
+        $root = New-StudentPercept $image 'Occurrence' 'Occurrence' ([float[]](0, 0, 0, 0))
+        $null = New-StudentPercept $image 'Word' 'Word' ([float[]](1, 0, 0, 0)) $root
+        $null = New-StudentPercept $image 'Boundary' 'Boundary' ([float[]](0, 1, 0, 0)) $root
+        return $image
+    }
+    $stream = [IO.File]::OpenRead($Path)
+    try {
+        $compressed = $stream.ReadByte() -eq 31 -and $stream.ReadByte() -eq 139; $stream.Position = 0
+        if ($compressed) {
+            $gzip = [IO.Compression.GZipStream]::new($stream, [IO.Compression.CompressionMode]::Decompress)
+            $reader = [IO.StreamReader]::new($gzip, [Text.Encoding]::UTF8)
+            try { $snapshot = [Management.Automation.PSSerializer]::Deserialize($reader.ReadToEnd()) } finally { $reader.Dispose() }
+        } else { $snapshot = Import-Clixml -LiteralPath $Path }
+    } finally { $stream.Dispose() }
+    if ($snapshot.PSObject.TypeNames -notcontains 'Deserialized.Kokoro.StudentImageSnapshot') { throw 'File is not a Student percept image.' }
+    foreach ($saved in $snapshot.Percepts) { $null = New-StudentPercept $image $saved.Identity $saved.Kind ([float[]]$saved.Key) }
+    foreach ($saved in $snapshot.Evidence) {
+        $restored = ConvertFrom-StudentStored $saved
+        if ($image.Evidence.ContainsKey($restored.Identity)) { throw 'Duplicate evidence identity in image.' }
+        $image.Evidence.Add($restored.Identity, $restored)
+    }
+    foreach ($saved in $snapshot.Performances) { $image.Performances.Add($saved.Identity, (ConvertFrom-StudentStored $saved.Performance)) }
+    foreach ($saved in $snapshot.Percepts) {
+        $node = $image.Percepts[[string]$saved.Identity]; $node.State = $saved.State
+        $parentIdentity = [string]$saved.Parent
+        if ($parentIdentity) {
+            $parent = $image.Percepts[$parentIdentity]; $node.Parent = $parent; $parent.Children.Add($node)
+            $edge = [pscustomobject]@{ PSTypeName = 'Kokoro.StudentProgression'; Kind = 'Specialization'; From = $parent; To = $node; Admitted = $false }
+            $parent.Progression.Add($edge); $node.Progression.Add($edge)
+        }
+        foreach ($identity in $saved.Examples) { $node.Examples.Add($image.Evidence[[string]$identity]) }
+        foreach ($identity in $saved.CounterExamples) { $node.CounterExamples.Add($image.Evidence[[string]$identity]) }
+        foreach ($item in $saved.Rules) { $node.Rules.Add((ConvertFrom-StudentStored $item)) }
+        foreach ($item in $saved.Directions) { $node.Directions.Add((ConvertFrom-StudentStored $item)) }
+        foreach ($item in $saved.Recordings) {
+            $performanceIdentity = [string]$item.Performance
+            [void]$node.RecordingEvidence.Add([string]$item.Evidence)
+            $node.Recordings.Add([pscustomobject]@{ PSTypeName = 'Kokoro.StudentOccurrencePerformance'; Occurrence = [string]$item.Occurrence
+                PerformanceIdentity = $performanceIdentity; Performance = $image.Performances[$performanceIdentity]; Evidence = $image.Evidence[[string]$item.Evidence] })
+        }
+        $node.Genealogy.Clear(); foreach ($item in $saved.Genealogy) { $node.Genealogy.Add((ConvertFrom-StudentStored $item)) }
+    }
+    if ($snapshot.PSObject.Properties['Progression']) {
+        foreach ($node in $image.Percepts.Values) { $node.Progression.Clear() }
+        foreach ($edge in $snapshot.Progression) { $null = Add-StudentProgression $image $edge.Kind $edge.From $edge.To ([bool]$edge.Admitted) }
+    }
+    $image.Pinned = [string]$snapshot.Pinned; $image.Changed = $false
+    $image
+}
+
+function Invoke-StudentPercepts {
+    $path = if ($ImagePath) { [IO.Path]::GetFullPath($ImagePath) } else { Join-Path $script:StudentBuild 'student/image.clixml.gz' }
+    if ($null -ne $State -and $State.PSObject.TypeNames -contains 'Kokoro.StudentImage') { return $State }
+    $image = Open-StudentImage $path
+    if ($null -ne $State) {
+        if (-not $State.PSObject.Properties['Words'] -or -not $State.PSObject.Properties['NativeRecording']) { throw 'Percepts -State needs a live image or an Alignment result.' }
+        $performance = ConvertFrom-StudentStored (Import-Clixml -LiteralPath $State.NativeRecording)
+        $performanceIdentity = $performance.Provenance.SHA256 + ':' + $performance.MachineSHA256
+        if (-not $image.Performances.ContainsKey($performanceIdentity)) { $image.Performances.Add($performanceIdentity, $performance); $image.Changed = $true }
+        foreach ($word in $State.Words) {
+            $observation = [pscustomobject]@{ Identity = $performanceIdentity + ':' + $word.Identity + ':' + $word.StartSeconds.ToString('R', [Globalization.CultureInfo]::InvariantCulture); Occurrence = $word.Identity; Provenance = $word.Reader
+                Condition = [pscustomobject]@{ Kind = 'Word'; Book = $word.Book; Token = $word.Token; SourceStart = $word.SourceStart; SourceLength = $word.SourceLength }
+                Measured = [pscustomobject]@{ StartSeconds = $word.StartSeconds; EndSeconds = $word.EndSeconds; StartEvidence = $word.StartEvidence; EndEvidence = $word.EndEvidence; StartSnapMs = $word.StartSnapMs; EndSnapMs = $word.EndSnapMs } }
+            $evidence = Add-StudentImageObservation $image 'Word' $observation 'Example'
+            if ($image.Percepts['Word'].RecordingEvidence.Add($evidence.Identity)) {
+                $image.Percepts['Word'].Recordings.Add([pscustomobject]@{ PSTypeName = 'Kokoro.StudentOccurrencePerformance'; Occurrence = $word.Identity
+                    PerformanceIdentity = $performanceIdentity; Performance = $image.Performances[$performanceIdentity]; Evidence = $evidence })
+            }
+        }
+    }
+    $image
+}
+
+Update-TypeData -TypeName 'Kokoro.StudentImage' -MemberType ScriptMethod -MemberName Observe -Value {
+    param([string] $Percept, $Observation, [string] $Role)
+    & $this.Owner { param($Image, $Identity, $Evidence, $EvidenceRole); Add-StudentImageObservation $Image $Identity $Evidence $EvidenceRole } $this $Percept $Observation $Role
+} -Force
+Update-TypeData -TypeName 'Kokoro.StudentImage' -MemberType ScriptMethod -MemberName Pin -Value {
+    param([string] $Identity)
+    if (-not $this.Percepts.ContainsKey($Identity)) { throw 'Cannot pin a missing percept.' }; $this.Pinned = $Identity
+} -Force
+Update-TypeData -TypeName 'Kokoro.StudentImage' -MemberType ScriptMethod -MemberName Nearby -Value {
+    param([float[]] $Key, [int] $Depth = 2)
+    & $this.Owner { param($Image, $Vector, $Reach); Get-StudentImageNeighborhood $Image $Vector $Reach } $this $Key $Depth
+} -Force
+Update-TypeData -TypeName 'Kokoro.StudentImage' -MemberType ScriptMethod -MemberName Describe -Value {
+    & $this.Owner { param($Image); Get-StudentImageDescription $Image } $this
+} -Force
+Update-TypeData -TypeName 'Kokoro.StudentImage' -MemberType ScriptMethod -MemberName Connect -Value {
+    param([string] $Kind, [string] $From, [string] $To)
+    & $this.Owner { param($Image, $EdgeKind, $Source, $Target); Add-StudentProgression $Image $EdgeKind $Source $Target } $this $Kind $From $To
+} -Force
+Update-TypeData -TypeName 'Kokoro.StudentImage' -MemberType ScriptMethod -MemberName AirLayer -Value {
+    param([string] $Parent, [string] $Identity, [float[]] $Key, [string[]] $CounterEvidence)
+    & $this.Owner { param($Image, $ParentIdentity, $BranchIdentity, $Vector, $Evidence); New-StudentAirLayer $Image $ParentIdentity $BranchIdentity $Vector $Evidence } $this $Parent $Identity $Key $CounterEvidence
+} -Force
+Update-TypeData -TypeName 'Kokoro.StudentImage' -MemberType ScriptMethod -MemberName Save -Value {
+    param([string] $Path = '')
+    & $this.Owner { param($Image, $Destination); Save-StudentImage $Image $Destination } $this $Path
+} -Force
+Update-TypeData -TypeName 'Kokoro.StudentPercept' -MemberType ScriptMethod -MemberName Observe -Value {
+    param($Observation, [string] $Role)
+    $this.Image.Observe($this.Identity, $Observation, $Role)
+} -Force
+
 $script:StudentSteps = [ordered]@{
     Console = { Show-StudentConsole }
     Render = { Invoke-StudentRender }
@@ -2176,6 +2416,8 @@ $script:StudentSteps = [ordered]@{
     Listen = { Invoke-StudentListen }
     Stems = { Invoke-StudentStems }
     Alignment = { Invoke-StudentAlignment }
+    Percepts = { Invoke-StudentPercepts }
+    Describe = { $image = Invoke-StudentPercepts; $image.Describe() }
 }
 }
 & $studentOwner { & $script:StudentSteps[$Step] }
