@@ -1520,32 +1520,27 @@ function Test-KokoroGeneratorWeightPrecision {
 }
 
 # Depth-first equivalence for the 128-channel residual section (resblocks 3-5 and their mean): the layer schedule exports
-# the section's exact AdaIN values on the phone; the layer and tile schedules then run with those values and the same
-# input and weights, and their output tensors must be byte-identical.
+# the section's exact AdaIN values on the phone; the layer and backward schedules then run with those values and the same
+# input and weights, and their output tensors must be byte-identical (the backward job writes each output tile at its
+# position).
 function Test-KokoroGeneratorTileEquivalence {
     param([Parameter(Mandatory)][string]$OutputDirectory,[string]$Soc='SM8550',[string]$Package='dev.mansfieldplumbing.kokoro',
         [string]$FixtureDirectory=(Join-Path $Build 'speak-20261010-h0-fast/job-input/generator60x16-fixture-20261008-holdout2'),[ValidateRange(1,21)][int]$Runs=3,
-        [ValidateSet(1,2,4)][int]$TileBlock=4,[ValidateRange(0,3)][int]$MatrixThread=0,[ValidateSet('Main','Worker','Convolution')][string]$MatrixLock='Main',
+        # Tiles per step, one per HVX thread.
+        [ValidateSet(2,4)][int]$TileBlock=4,
         # 1: both jobs run int8 weights q = round(w / 256) (clamped to +-127) stored as 256 q, table biases corrected; the
-        # tile job keeps only the high plane resident.
-        [ValidateSet(1,2)][int]$WeightPlanes=2,
-        # The controller contact proof: the tile job reads per-tile AdaIN as K_base + P * v with fixed pseudo-random P.
+        # backward job keeps only the high plane resident (two planes do not fit its VTCM).
+        [ValidateSet(1,2)][int]$WeightPlanes=1,
+        # The controller contact proof: the backward job reads per-tile AdaIN as K_base + P * v with fixed pseudo-random P.
         # Held: v = 0 against the layer job. Moving: v = V everywhere must differ; a step from 0 to V at ControllerStep
         # must equal the v = 0 run before it and the v = V run after it, outside ControllerMargin tiles; and the step at
-        # blocks of 1 must equal blocks of TileBlock.
+        # blocks of 2 must equal blocks of TileBlock.
         [switch]$ControllerContact,[int]$ControllerStep=160,[int]$ControllerMargin=8,[int]$ControllerValue=8192,[int]$SensitivityRange=1048576,
-        # The tile job's window fill in packets of several instructions.
+        # The backward job's fill in packets of several instructions.
         [switch]$VectorPackets,
-        # The tile job's stages with all three branches together (one fill and one combine dispatch per stage).
-        [ValidateSet(1,3)][int]$BranchesPerStage=1,
-        # The tile job keeps a window per stage and fills each window tile once.
-        [switch]$FillOnce,
-        # Also run the tile job with PMU event sets A and B (output must equal the unprofiled run) and record its
+        # Also run the backward job with PMU event sets A and B (output must equal the unprofiled run) and record its
         # time per category: fill, convolution, combine, mean, DMA, synchronization, tile fixes.
-        [switch]$PmuSplit,
-        # The depth-first schedule under test: Tile (centred convolutions, stage q on block i - q) or Backward (backward
-        # convolutions, every stage on the newest block, output written at its position).
-        [ValidateSet('Tile','Backward')][string]$Schedule='Tile')
+        [switch]$PmuSplit)
     $out=[IO.Path]::GetFullPath($OutputDirectory)
     if(-not $out.StartsWith($Build+[IO.Path]::DirectorySeparatorChar,[StringComparison]::OrdinalIgnoreCase) -or (Test-Path -LiteralPath $out)){throw 'Choose a fresh equivalence directory under build/.'}
     [void][IO.Directory]::CreateDirectory($out)
@@ -1555,7 +1550,7 @@ function Test-KokoroGeneratorTileEquivalence {
     $common=@{ResBlockFrames=[int]$fixture.Frames;ResidentHvxThreads=4}
     $export=Invoke-KokoroEmission -Kernel KokoroGenerator60x16Run -Parameters ($common+@{ResidentBatchTiles=22;GeneratorMoments='Export';GeneratorSchedule='Layer'})
     $layer=Invoke-KokoroEmission -Kernel KokoroGenerator60x16Run -Parameters ($common+@{ResidentBatchTiles=22;GeneratorMoments='Constants';GeneratorSchedule='Layer'})
-    $tileParameters=$common+@{ResidentBatchTiles=$TileBlock;GeneratorMoments='Constants';GeneratorSchedule=$Schedule;GeneratorMatrixThread=$MatrixThread;GeneratorMatrixLock=$MatrixLock;GeneratorWeightPlanes=$WeightPlanes;GeneratorControllerContact=$ControllerContact.IsPresent;GeneratorVectorPackets=$VectorPackets.IsPresent;GeneratorBranchesPerStage=$BranchesPerStage;GeneratorFillOnce=$FillOnce.IsPresent}
+    $tileParameters=$common+@{ResidentBatchTiles=$TileBlock;GeneratorMoments='Constants';GeneratorSchedule='Backward';GeneratorWeightPlanes=$WeightPlanes;GeneratorControllerContact=$ControllerContact.IsPresent;GeneratorVectorPackets=$VectorPackets.IsPresent}
     $tile=Invoke-KokoroEmission -Kernel KokoroGenerator60x16Run -Parameters $tileParameters
     $statistics=[IO.File]::ReadAllBytes((Join-Path $FixtureDirectory 'tables.bin'))
     $weights=[IO.File]::ReadAllBytes((Join-Path $FixtureDirectory 'weights.bin'))
@@ -1624,7 +1619,7 @@ function Test-KokoroGeneratorTileEquivalence {
         $contactRun={param([string]$Name,[int[]]$Values,$Emission) Invoke-KokoroDeviceJob -EmissionDirectory $Emission.Directory -EmissionArtifact $Emission -InputDirectory (& $stage $Name (& $contactTables $Values) $runWeights) -Soc $Soc -Runs $Runs -Package $Package}
         $tileRun=& $contactRun 'contact-held' $held $tile
         $highRun=& $contactRun 'contact-high' $high $tile; $stepRun=& $contactRun 'contact-step' $step $tile
-        $singleParameters=$tileParameters.Clone(); $singleParameters.ResidentBatchTiles=1
+        $singleParameters=$tileParameters.Clone(); $singleParameters.ResidentBatchTiles=2
         $single=Invoke-KokoroEmission -Kernel KokoroGenerator60x16Run -Parameters $singleParameters
         $singleRun=& $contactRun 'contact-step-single' $step $single
         $heldTensor=& $read $tileRun $tile; $highTensor=& $read $highRun $tile; $stepTensor=& $read $stepRun $tile; $singleTensor=& $read $singleRun $single
@@ -1657,7 +1652,7 @@ function Test-KokoroGeneratorTileEquivalence {
     }
     $different=0; $first=-1; $differingTiles=[Collections.Generic.List[int]]::new()
     for($i=0;$i -lt $tensorBytes;$i++){if($layerTensor[$i] -ne $tileTensor[$i]){$different++; if($first -lt 0){$first=$i}; $t=[int][math]::Floor($i/8192); if($differingTiles.Count -eq 0 -or $differingTiles[-1] -ne $t){$differingTiles.Add($t)}}}
-    $report=[pscustomobject]@{Soc=$Soc;Fixture=$FixtureDirectory;Tiles=[int]$fixture.Tiles;TileBlock=$TileBlock;MatrixThread=$MatrixThread;MatrixLock=$MatrixLock;WeightPlanes=$WeightPlanes;TensorBytes=$tensorBytes;ByteIdentical=($different -eq 0);DifferentBytes=$different;FirstDifference=$first;DifferingTiles=$differingTiles.ToArray()
+    $report=[pscustomobject]@{Soc=$Soc;Fixture=$FixtureDirectory;Tiles=[int]$fixture.Tiles;TileBlock=$TileBlock;WeightPlanes=$WeightPlanes;TensorBytes=$tensorBytes;ByteIdentical=($different -eq 0);DifferentBytes=$different;FirstDifference=$first;DifferingTiles=$differingTiles.ToArray()
         LayerDspMs=$layerRun.MedianMs;TileDspMs=$tileRun.MedianMs;LayerVtcmBytes=$layer.Layout.VtcmBytes;TileVtcmBytes=$tile.Layout.VtcmBytes;LayerLibraryBytes=$layer.Bytes;TileLibraryBytes=$tile.Bytes
         LayerLibrarySHA256=$layer.LibrarySHA256;TileLibrarySHA256=$tile.LibrarySHA256;LayerTensorSHA256=[Convert]::ToHexString([Security.Cryptography.SHA256]::HashData($layerTensor))
         TileTensorSHA256=[Convert]::ToHexString([Security.Cryptography.SHA256]::HashData($tileTensor));ControllerContact=$contactProof;PmuSplit=$split}
