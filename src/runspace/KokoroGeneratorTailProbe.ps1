@@ -25,7 +25,9 @@ $mappedWeights = $null
 try {
     $kv = @{}; foreach ($l in [IO.File]::ReadAllLines([IO.Path]::Combine($dir, 'spec.txt'))) { $p = $l.Split('=', 2); if ($p.Count -eq 2) { $kv[$p[0]] = $p[1] } }
     $tiles = [int]$kv.Tiles; $runs = [int]$kv.Runs; $outputBytes = [int]$kv.OutputBytes; $pcmOffset = [int]$kv.PcmOffset; $samples = [int]$kv.Samples
-    if ($tiles -lt 1 -or $tiles -gt 1024 -or $runs -lt 1 -or $runs -gt 121 -or $samples -lt 1 -or $pcmOffset + 2 * $samples -gt $outputBytes) { throw 'Spec out of range' }
+    # Serve=True: the resident job listener below instead of one job; each request carries its own job fields.
+    $serve = $kv.ContainsKey('Serve')
+    if (-not $serve -and ($tiles -lt 1 -or $tiles -gt 1024 -or $runs -lt 1 -or $runs -gt 121 -or $samples -lt 1 -or $pcmOffset + 2 * $samples -gt $outputBytes)) { throw 'Spec out of range' }
     $lines.Add("Tiles=$tiles Runs=$runs Samples=$samples")
     $load = { param([string]$Name, [object[]]$Arguments)
         $ast = [Management.Automation.Language.Parser]::ParseFile([IO.Path]::Combine($root, $Name), [ref]$null, [ref]$null)
@@ -80,6 +82,112 @@ try {
     $lines.Add("OpenRc=$rc"); if ($rc -ne 0) { throw 'Kernel library open failed' }
     $handle = [uint64]$oa[1]; $opened = $true
 
+    if ($serve) {
+        # Resident job listener: this session and handle stay open; requests arrive on the abstract socket kokoro-jobs.
+        # Frames: int32 header length, UTF-8 JSON header, then the header's blobs. Inputs are cached by SHA-256, so
+        # unchanged weights, tables and skel never cross again. A random token in app-private storage must open every
+        # request: any process on the phone can reach an abstract socket, and only the app and run-as can read the token.
+        $token = [Convert]::ToHexString([Security.Cryptography.RandomNumberGenerator]::GetBytes(32))
+        $tokenPath = [IO.Path]::Combine($dir, 'listener-token.txt')
+        [IO.File]::WriteAllText($tokenPath, $token)
+        $skelHash = [Convert]::ToHexString([Security.Cryptography.SHA256]::HashData([IO.File]::ReadAllBytes($so)))
+        $cache = [Collections.Generic.Dictionary[string,byte[]]]::new([StringComparer]::Ordinal)
+        $listener = [Net.Sockets.Socket]::new([Net.Sockets.AddressFamily]::Unix, [Net.Sockets.SocketType]::Stream, [Net.Sockets.ProtocolType]::Unspecified)
+        $respond = { param($Writer, [hashtable]$Header, [byte[]]$Payload)
+            $headerBytes = [Text.Encoding]::UTF8.GetBytes(($Header | ConvertTo-Json -Compress -Depth 4))
+            $Writer.Write([int]$headerBytes.Length); $Writer.Write($headerBytes); if ($null -ne $Payload) { $Writer.Write($Payload) }; $Writer.Flush() }
+        try {
+            $listener.Bind([Net.Sockets.UnixDomainSocketEndPoint]::new([string][char]0 + 'kokoro-jobs')); $listener.Listen(1)
+            $lines.Add('Listening=kokoro-jobs'); [IO.File]::WriteAllLines($receipt, $lines)
+            $serving = $true; $jobs = 0
+            while ($serving) {
+                $client = $listener.Accept()
+                $network = [Net.Sockets.NetworkStream]::new($client, $true)
+                $reader = [IO.BinaryReader]::new($network); $writer = [IO.BinaryWriter]::new($network)
+                try {
+                    while ($serving) {
+                        # Wait for this client's next request or a new connection. A new connection replaces an idle
+                        # one, so a client that went away without closing can never block the listener.
+                        $ready = [Collections.Generic.List[Net.Sockets.Socket]]::new(); $ready.Add($client); $ready.Add($listener)
+                        [Net.Sockets.Socket]::Select($ready, $null, $null, -1)
+                        if ($ready.Contains($listener)) { break }
+                        $length = $reader.ReadInt32()
+                        if ($length -lt 2 -or $length -gt 1048576) { throw 'Request header length out of range.' }
+                        $request = [Text.Encoding]::UTF8.GetString($reader.ReadBytes($length)) | ConvertFrom-Json -AsHashtable
+                        if ([string]$request.Token -cne $token) { & $respond $writer @{ Ok = $false; Error = 'Token mismatch.' } $null; break }
+                        foreach ($blob in @($request.Blobs)) {
+                            $bytes = $reader.ReadBytes([int]$blob.Bytes)
+                            if ($bytes.Length -ne [int]$blob.Bytes -or [Convert]::ToHexString([Security.Cryptography.SHA256]::HashData($bytes)) -cne [string]$blob.Sha256) { throw 'Request blob integrity mismatch.' }
+                            $cache[[string]$blob.Sha256] = $bytes
+                        }
+                        if ($request.Op -ceq 'stop') { & $respond $writer @{ Ok = $true; Jobs = $jobs } $null; $serving = $false; break }
+                        if ($request.Op -ceq 'ping') { & $respond $writer @{ Ok = $true; Jobs = $jobs; Skel = $skelHash; Held = @($cache.Keys) } $null; continue }
+                        if ($request.Op -cne 'job') { & $respond $writer @{ Ok = $false; Error = 'Unknown operation.' } $null; continue }
+                        $keys = @([string]$request.Skel, [string]$request.Activations, [string]$request.Weights, [string]$request.Tables)
+                        $missing = @($keys | Where-Object { -not $cache.ContainsKey($_) })
+                        if ($missing.Count) { & $respond $writer @{ Ok = $false; Missing = $missing } $null; continue }
+                        if ($keys[0] -cne $skelHash) {
+                            # A different kernel: close the handle, replace the skel and open it again.
+                            if ($opened) { $null = $close.DynamicInvoke([object[]]@($handle)); $opened = $false }
+                            [IO.File]::WriteAllBytes($so, $cache[$keys[0]])
+                            $oa = [object[]]@((& $pin $uri), [uint64]0); $rc = [int]$open.DynamicInvoke($oa)
+                            if ($rc -ne 0) { throw "Kernel library open failed: $rc" }
+                            $handle = [uint64]$oa[1]; $opened = $true; $skelHash = $keys[0]
+                        }
+                        $jobTiles = [int]$request.Tiles; $jobRuns = [int]$request.Runs; $jobOutputBytes = [int]$request.OutputBytes; $jobPcmOffset = [int]$request.PcmOffset; $jobSamples = [int]$request.Samples
+                        $act = $cache[$keys[1]]; $wts = $cache[$keys[2]]; $tbl = $cache[$keys[3]]
+                        if ($jobTiles -lt 1 -or $jobTiles -gt 1024 -or $jobRuns -lt 1 -or $jobRuns -gt 121 -or $jobSamples -lt 1 -or $jobPcmOffset + 2 * $jobSamples -gt $jobOutputBytes -or $act.Length -ne [long]$request.InputBytes) { throw 'Job fields out of range.' }
+                        $out = [byte[]]::new($jobOutputBytes)
+                        $bufs = @(([BitConverter]::GetBytes([uint32]$jobTiles)), $act, $wts, $tbl, $out)
+                        $jobPins = [Collections.Generic.List[object]]::new(); $jobBlock = $Marshal::AllocHGlobal(16 * $bufs.Count)
+                        $jobLines = [Collections.Generic.List[string]]::new(); $jobTicks = [Collections.Generic.List[long]]::new(); $jobOk = $true; $firstHash = $null; $firstOutput = $null
+                        try {
+                            for ($i = 0; $i -lt $bufs.Count; $i++) {
+                                $g = [Runtime.InteropServices.GCHandle]::Alloc($bufs[$i], [Runtime.InteropServices.GCHandleType]::Pinned); $jobPins.Add($g)
+                                $Marshal::WriteIntPtr($jobBlock, 16 * $i, $g.AddrOfPinnedObject()); $Marshal::WriteInt64($jobBlock, 16 * $i + 8, [long]$bufs[$i].Length)
+                            }
+                            for ($run = 0; $run -lt $jobRuns; $run++) {
+                                $sw = [Diagnostics.Stopwatch]::StartNew()
+                                $rc = [int]$invoke.DynamicInvoke([object[]]@($handle, [uint32]0x02040100, $jobBlock))
+                                $sw.Stop()
+                                $stage = [BitConverter]::ToInt32($out, 36); $done = [BitConverter]::ToInt32($out, 44)
+                                $dt = [long]([BitConverter]::ToUInt64($out, 8) - [BitConverter]::ToUInt64($out, 0))
+                                $hash = [Convert]::ToHexString([Security.Cryptography.SHA256]::HashData([byte[]]$out[$jobPcmOffset..($jobPcmOffset + 2 * $jobSamples - 1)]))
+                                if ($run -eq 0) { $firstHash = $hash; $firstOutput = [byte[]]$out.Clone() }
+                                if ($rc -ne 0 -or $stage -ne 7 -or $done -ne 1 -or $hash -ne $firstHash) { $jobOk = $false }
+                                if ($rc -eq 0 -and $done -eq 1) { $jobTicks.Add($dt) }
+                                $jobLines.Add("Run=$run InvokeRc=$rc Stage=$stage Done=$done RegionTicks=$dt InvokeMs=$($sw.Elapsed.TotalMilliseconds.ToString('F3', $inv)) PcmSHA256=$hash")
+                                if ($rc -ne 0) { break }
+                            }
+                        }
+                        finally { foreach ($g in $jobPins) { $g.Free() }; $Marshal::FreeHGlobal($jobBlock) }
+                        $medianMs = $null
+                        if ($jobTicks.Count) { $sorted = $jobTicks.ToArray(); [Array]::Sort($sorted); $medianMs = $sorted[[int][math]::Floor($sorted.Count / 2)] / 19200.0 }
+                        $jobs++
+                        # Only the requested ranges of run 0's buffer cross back, concatenated in request order.
+                        $ranges = @(foreach ($range in @($request.Ranges)) { ,([long[]]@($range[0], $range[1])) })
+                        $returned = [IO.MemoryStream]::new()
+                        foreach ($range in $ranges) {
+                            if ($range[0] -lt 0 -or $range[1] -lt 0 -or $range[0] + $range[1] -gt $firstOutput.Length) { throw 'Output range out of bounds.' }
+                            $returned.Write($firstOutput, [int]$range[0], [int]$range[1])
+                        }
+                        $payload = $returned.ToArray()
+                        & $respond $writer @{ Ok = $jobOk; Lines = $jobLines.ToArray(); MedianRegionMs = $medianMs; OutputBytes = $payload.Length; BufferBytes = $firstOutput.Length
+                            OutputSha256 = [Convert]::ToHexString([Security.Cryptography.SHA256]::HashData($payload)) } $payload
+                        # Keep this job's skel, weights and tables; activations change with every job.
+                        foreach ($key in @($cache.Keys)) { if ($key -cne $keys[0] -and $key -cne $keys[2] -and $key -cne $keys[3]) { [void]$cache.Remove($key) } }
+                    }
+                }
+                catch [IO.EndOfStreamException] { }
+                catch { try { & $respond $writer @{ Ok = $false; Error = $_.Exception.Message } $null } catch { } }
+                finally { $client.Dispose() }
+            }
+            $lines.Add("Served=$jobs")
+        }
+        finally { $listener.Dispose(); if ([IO.File]::Exists($tokenPath)) { [IO.File]::Delete($tokenPath) } }
+        $passed = $true
+    }
+    if (-not $serve) {
     $act = [IO.File]::ReadAllBytes([IO.Path]::Combine($dir, 'activations.bin'))
     if ($kv.ContainsKey('WeightAssembly')) {
         if (-not $kv.ContainsKey('ResidentPayloads')) { throw 'Mapped weight assembly requires resident payload transport.' }
@@ -237,6 +345,7 @@ try {
         $lines.Add("Played=True WrittenFrames=$written DrainResult=$drain PlaybackMs=$($clock.Elapsed.TotalMilliseconds.ToString('F1', $inv))")
     }
     $passed = $allOk
+    }
 }
 catch { $lines.Add('Error=' + $_.Exception.Message.Replace("`r", ' ').Replace("`n", ' ')) }
 finally {

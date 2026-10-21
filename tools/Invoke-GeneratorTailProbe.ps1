@@ -25,6 +25,9 @@ param(
     [switch] $AttributeBuffers,
     [switch] $ResidentPayloads,
     [switch] $RequestLifetime,
+    # Start the resident job listener (src/runspace/KokoroGeneratorTailProbe.ps1 Serve mode) instead of one job: wait
+    # for Listening=, then restore the startup files without stopping the app, which keeps serving from memory.
+    [switch] $Serve,
     [pscustomobject] $WeightAssembly
 )
 $ErrorActionPreference = 'Stop'
@@ -71,6 +74,8 @@ $id = [Guid]::NewGuid().ToString('N')
 $spec = Join-Path $emission "tail-spec-$id.txt"
 [IO.File]::WriteAllLines($spec, @("Tiles=$($layout.Tiles)", "Runs=$Runs", "OutputBytes=$($layout.OutputBytes)", "PcmOffset=$($layout.PcmOffset)", "Samples=$($layout.Samples)", "InputBytes=$($layout.InputBytes)"))
 if ($ExpectedPcmSHA256) { [IO.File]::AppendAllText($spec, "ExpectedPcmSHA256=$ExpectedPcmSHA256`n") }
+if ($Serve) { [IO.File]::AppendAllText($spec, "Serve=True`n") }
+$ready = if ($Serve) { '(?m)^(Listening|Passed)=' } else { '(?m)^Passed=' }
 if ($AttributeBuffers) { [IO.File]::AppendAllText($spec, "AttributeBuffers=True`n") }
 if ($ResidentPayloads) {
     if ($AttributeBuffers -or -not $layout.ResidentPayloads) { throw 'Resident payloads require the admitted adapter and no buffer probe.' }
@@ -157,12 +162,12 @@ try {
         Start-Sleep -Seconds 2
         $receipt = (& $run @('shell', 'run-as', $Package, 'cat', "$target/receipt.txt")) -join "`n"
         if (-not $receipt.Trim() -and $watch.Elapsed.TotalSeconds -ge 30) { break }
-        if ($receipt -match '(?m)^Started=' -and $receipt -notmatch '(?m)^Passed=') {
+        if ($receipt -match '(?m)^Started=' -and $receipt -notmatch $ready) {
             $alive = (& $run @('shell', "pidof $Package || true")) -join ''
             if (-not $alive.Trim()) { break }
         }
     }
-    while ($receipt -notmatch '(?m)^Passed=' -and $watch.Elapsed.TotalSeconds -lt $TimeoutSeconds)
+    while ($receipt -notmatch $ready -and $watch.Elapsed.TotalSeconds -lt $TimeoutSeconds)
     $receiptPath = Join-Path $emission "device-receipt-$Soc-$id.txt"
     [IO.File]::WriteAllText($receiptPath, $receipt)
     $hash = [regex]::Match($receipt, '(?m)^OutputSHA256=([0-9A-F]{64})')
@@ -174,7 +179,8 @@ try {
     }
     $receipt
     "ReceiptPath=$receiptPath"
-    if ($receipt -notmatch '(?m)^Passed=') {
+    if ($Serve -and $receipt -notmatch '(?m)^Listening=') { $receipt = $receipt -replace '(?m)^Passed=.*$', '' }
+    if ($receipt -notmatch $ready) {
         $startupMarkers = [Collections.Generic.List[string]]::new()
         foreach ($line in ($receipt -split "`n" | Where-Object { $_ -match '^(Job|Started|ProbeStage)=' })) { $startupMarkers.Add($line) }
         $startupMarkers.Add("DiagnosticStarted=$($receipt -match '(?m)^Started=')")
@@ -210,7 +216,7 @@ try {
 }
 finally {
     if ($changed) {
-        $null = & $run @('shell', 'am', 'force-stop', $Package)
+        if (-not $Serve) { $null = & $run @('shell', 'am', 'force-stop', $Package) }
         foreach ($startupFile in $startupFiles) {
             if ($startupState[$startupFile].Present) {
                 $null = & $run @('shell', "run-as $Package cp $backup/$(Split-Path $startupFile -Leaf) $startupFile")

@@ -5,7 +5,7 @@ Follow [the shared agent rules](../Pwsh-Development/AGENTS.md).
 - PowerShell only. No Python.
 - Work iteratively on single tools. Dogfood each tool, and hill-climb it so each spike makes the next one easier.
 - Run and measure on the phone through the existing emitted DSP path, and lower hot code. Never substitute interpreted host PowerShell or the offline float tools.
-- Entrypoint: `pwsh -NoProfile -File ./Invoke-KokoroDevelopment.ps1`. Run `Verify` before every commit.
+- Entrypoint: `pwsh -NoProfile -File ./Invoke-KokoroDevelopment.ps1`. Run it with `-h` to have it describe its commands before working. Run `Verify` before every commit.
 - Directives live in this file and in [student/AGENTS.md](student/AGENTS.md), which governs Student and generator work. Read it before that work.
 - Handoffs and result records live outside this repository in [../Pwsh-Development/docs/kokoro-hexagon](../Pwsh-Development/docs/kokoro-hexagon). They are historical evidence, not directives; earlier design documents there, including the Student contract, are superseded where they differ from these two files. Write new result records there, never under this repository.
 - New work extends an owning module under `tools/` or `src/` and is reached through an entrypoint command. No standalone one-off scripts, copies of existing files, or work outside this repository.

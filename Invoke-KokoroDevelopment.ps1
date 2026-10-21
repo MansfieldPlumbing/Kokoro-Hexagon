@@ -10,6 +10,8 @@ twice, or written as a scratch script, is a missing command: add it here.
   Status                      Project state, next step, cases, commands (default). Reads the repository only:
                               no adb, no phone, no network. Phone access is only in Run, Ratchet and Compare.
   Verify                      Check tracked source, repository hygiene, handoff, Status, tests and optional case pairs.
+  LineEndings                 Give every modified tracked file back its committed line endings: unchanged lines byte for
+                              byte from HEAD, changed lines in the file's dominant ending; the text is checked unchanged.
   CopySynthesis -OutputDirectory [-Path receipt.clixml]  Offline copy-synthesis; -Path rescoring changes only correlation.
                               -Parameters @{Ladder=$true} -Path run2/receipt.clixml renders R1/R4c and reuses R4.
   BuildHost -OutputDirectory  Build and retain the pinned arm64 diagnostic APK; no phone access.
@@ -104,7 +106,7 @@ pwsh -NoProfile -File ./Invoke-KokoroDevelopment.ps1 Run -Case timing-passage-0-
 [CmdletBinding()]
 param(
     [Parameter(Position = 0)]
-    [ValidateSet('Status', 'Verify', 'BuildHost', 'Ratchet', 'Run', 'Emit', 'Check', 'Compare', 'JobInput', 'Capture', 'MeasureAudio', 'StockCapture', 'Speak', 'FrontEnd', 'PrecomputedDecoder', 'Student', 'Zira', 'Albert', 'AlbertError', 'AlbertLinear', 'AlbertLayerNorm', 'AlbertGelu', 'AlbertAttention', 'AlbertEmbed', 'AlbertJob', 'Api', 'Find', 'Tools', 'StageResidency', 'CopySynthesis', 'WeightAssembly')]
+    [ValidateSet('Status', 'Verify', 'LineEndings', 'BuildHost','Ratchet', 'Run', 'Emit', 'Check', 'Compare', 'JobInput', 'Capture', 'MeasureAudio', 'StockCapture', 'Speak', 'FrontEnd', 'PrecomputedDecoder', 'Student', 'Zira', 'Albert', 'AlbertError', 'AlbertLinear', 'AlbertLayerNorm', 'AlbertGelu', 'AlbertAttention', 'AlbertEmbed', 'AlbertJob', 'Api', 'Find', 'Tools', 'StageResidency', 'CopySynthesis', 'WeightAssembly')]
     [string] $Command = 'Status',
     [string] $Case,
     [string] $Kernel,
@@ -158,7 +160,43 @@ $StockCommit = 'dfb907a02bba8152ca444717ca5d78747ccb4bec'   # lib/manifest.json 
 $Python = $env:KOKORO_PYTHON
 
 
-function Import-Evaluator { Import-Module (Join-Path $Root 'tools/Kokoro.Evaluator.psm1') -Force -Global }
+# Editors rewrite whole files with one line ending; this repository's files mix them. For each modified tracked file,
+# git's hunk map (ignoring carriage returns) says which lines changed: unchanged lines are copied byte for byte from HEAD
+# and changed lines take the file's dominant ending. The resulting text must equal the working text.
+function Restore-KokoroLineEndings {
+    $changed = @(git -C $Root diff --name-only)
+    foreach ($relative in $changed) {
+        $path = Join-Path $Root $relative
+        if (-not (Test-Path -LiteralPath $path -PathType Leaf)) { continue }
+        # The committed bytes, read raw: PowerShell's native-command pipeline would split and re-join the lines.
+        $info = [Diagnostics.ProcessStartInfo]::new('git', "-C `"$Root`" cat-file blob `"HEAD:$relative`""); $info.RedirectStandardOutput = $true; $info.UseShellExecute = $false
+        $process = [Diagnostics.Process]::Start($info); $memory = [IO.MemoryStream]::new(); $process.StandardOutput.BaseStream.CopyTo($memory); $process.WaitForExit()
+        $headText = [Text.Encoding]::UTF8.GetString($memory.ToArray())
+        $headLines = @([regex]::Matches($headText, "[^`n]*`n|[^`n]+$") | ForEach-Object Value)
+        $eol = if (([regex]::Matches($headText, "`r`n")).Count -ge ([regex]::Matches($headText, "(?<!`r)`n")).Count) { "`r`n" } else { "`n" }
+        $workingText = [IO.File]::ReadAllText($path)
+        $newLines = $workingText -split "`r?`n"; if ($newLines[-1] -eq '') { $newLines = $newLines[0..($newLines.Count - 2)] }
+        $hunks = @(git -C $Root diff --ignore-cr-at-eol -U0 -- $relative | Select-String '^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@' | ForEach-Object {
+            $g = $_.Matches[0].Groups
+            [pscustomobject]@{ OldStart = [int]$g[1].Value; OldCount = $(if ($g[2].Success) { [int]$g[2].Value } else { 1 }); NewStart = [int]$g[3].Value; NewCount = $(if ($g[4].Success) { [int]$g[4].Value } else { 1 }) } })
+        $builder = [Text.StringBuilder]::new(); $oldAt = 1
+        foreach ($hunk in $hunks) {
+            $oldFirst = if ($hunk.OldCount -eq 0) { $hunk.OldStart + 1 } else { $hunk.OldStart }
+            while ($oldAt -lt $oldFirst) { $null = $builder.Append($headLines[$oldAt - 1]); $oldAt++ }
+            for ($k = 0; $k -lt $hunk.NewCount; $k++) { $null = $builder.Append($newLines[$hunk.NewStart - 1 + $k] + $eol) }
+            $oldAt += $hunk.OldCount
+        }
+        while ($oldAt -le $headLines.Count) { $null = $builder.Append($headLines[$oldAt - 1]); $oldAt++ }
+        $rebuilt = $builder.ToString()
+        $check = $rebuilt -split "`r?`n"; if ($check[-1] -eq '') { $check = $check[0..($check.Count - 2)] }
+        if (($check -join "`n") -cne ($newLines -join "`n")) { throw "Line-ending restoration would change the text of $relative." }
+        if ($rebuilt -cne $workingText) { [IO.File]::WriteAllText($path, $rebuilt, [Text.UTF8Encoding]::new($false)) }
+        [pscustomobject]@{ Path = $relative; Hunks = $hunks.Count; Rewritten = ($rebuilt -cne $workingText) }
+    }
+}
+
+# Imported once per process: the module holds the resident device session.
+function Import-Evaluator { if (-not (Get-Module Kokoro.Evaluator)) { Import-Module (Join-Path $Root 'tools/Kokoro.Evaluator.psm1') -Global } }
 
 # Every device operation goes through the pinned PowerShell ADB client (lib/manifest.json pwshAdb) with -Api.
 function Get-Adb { Import-Evaluator; Get-KokoroAdbClient }
@@ -537,7 +575,13 @@ function New-KokoroAlbertLinearInput {
 function Invoke-KokoroDeviceJob {
     param([Parameter(Mandatory)][string] $EmissionDirectory, [Parameter(Mandatory)][string] $InputDirectory, [string] $Soc = 'SM8550', [int] $Runs = 3,
         [ValidateSet('dev.mansfieldplumbing.androidsma.preview','dev.mansfieldplumbing.kokoro')][string] $Package = 'dev.mansfieldplumbing.kokoro',
-        [pscustomobject] $EmissionArtifact)
+        [pscustomobject] $EmissionArtifact,
+        # Relaunch the app for this one job instead of using the resident listener.
+        [switch] $OneShot)
+    if ($null -ne $EmissionArtifact -and -not $OneShot) {
+        Import-Evaluator
+        return Invoke-KokoroResidentJob -EmissionArtifact $EmissionArtifact -InputDirectory $InputDirectory -Soc $Soc -Runs $Runs -Package $Package
+    }
     Resume-Phone
     if ($null -ne $EmissionArtifact) {
         $out = & (Join-Path $Root 'tools/Invoke-GeneratorTailProbe.ps1') -EmissionDirectory $EmissionDirectory -EmissionArtifact $EmissionArtifact -FixtureDirectory $InputDirectory -Soc $Soc -Runs $Runs -Package $Package -TimeoutSeconds 300 -Adb (Get-Adb) 2>&1
@@ -2493,6 +2537,7 @@ switch ($Command) {
         if (-not $OutputDirectory) { throw 'BuildHost needs -OutputDirectory under build/.' }
         New-KokoroDiagnosticHost -OutputDirectory $OutputDirectory
     }
+    'LineEndings' { Restore-KokoroLineEndings }
     'Verify' {
         $pwsh = Join-Path $PSHOME $(if ($IsWindows) { 'pwsh.exe' } else { 'pwsh' })
         $commandValues = ($MyInvocation.MyCommand.Parameters['Command'].Attributes |
@@ -2586,6 +2631,10 @@ switch ($Command) {
     }
     'Run' {
         if (-not $Case) { throw 'Run needs -Case (see Status for names).' }
+        # Measurement cases write a fresh receipt directory; without -OutputDirectory it is build/<case>-<UTC time>.
+        if (-not $OutputDirectory -and $Case -cin @('generator-propagation', 'generator-representation', 'generator-weight-precision')) {
+            $OutputDirectory = Join-Path $Build ('{0}-{1:yyyyMMddTHHmmss}' -f $Case, [DateTime]::UtcNow)
+        }
         if($Case -ceq 'decoder-constants'){
             $gateParameters=if($Parameters){$Parameters}else{@{}}
             Test-KokoroDecoderConstants -FixtureDirectory $Path -OutputDirectory $OutputDirectory -BaselineLibrary $Reference -Soc $Soc -Package $HostPackage @gateParameters

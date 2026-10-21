@@ -60,6 +60,105 @@ function Get-KokoroPwshSource {
 # ExitCode; exec-out: bytes); devices are selected by index and their identifiers never leave it.
 function Get-KokoroAdbClient { Join-Path (Get-KokoroPwshSource -Pin pwshAdb) 'scripts/adb.ps1' }
 
+# Resident job session: the phone's job listener (src/runspace/KokoroGeneratorTailProbe.ps1 Serve mode), reached through
+# the pinned ADB client's stream to localabstract:kokoro-jobs. One session per process; inputs the phone already holds
+# (by SHA-256) are not sent again.
+$script:DeviceSession = $null
+# Close the session's stream when the module is removed or the process exits, so the listener sees the client leave.
+$ExecutionContext.SessionState.Module.OnRemove = { if ($null -ne $script:DeviceSession) { try { $script:DeviceSession.Stream.Dispose() } catch { } } }
+$null = Register-EngineEvent -SourceIdentifier PowerShell.Exiting -Action { $module = Get-Module Kokoro.Evaluator; if ($module) { & $module { if ($null -ne $script:DeviceSession) { try { $script:DeviceSession.Stream.Dispose() } catch { } } } } }
+
+function Send-KokoroSessionFrame {
+    param([Parameter(Mandatory)] $Session, [Parameter(Mandatory)] [hashtable] $Header, [object[]] $Blobs = @())
+    $Header.Token = $Session.Token
+    $Header.Blobs = @(foreach ($blob in $Blobs) { @{ Sha256 = $blob.Sha256; Bytes = $blob.Bytes.Length } })
+    $headerBytes = [Text.Encoding]::UTF8.GetBytes(($Header | ConvertTo-Json -Compress -Depth 4))
+    $Session.Writer.Write([int]$headerBytes.Length); $Session.Writer.Write($headerBytes)
+    foreach ($blob in $Blobs) { $Session.Writer.Write($blob.Bytes) }
+    $Session.Writer.Flush()
+    $length = $Session.Reader.ReadInt32()
+    if ($length -lt 2 -or $length -gt 1048576) { throw 'Listener response header length out of range.' }
+    $response = [Text.Encoding]::UTF8.GetString($Session.Reader.ReadBytes($length)) | ConvertFrom-Json -AsHashtable
+    if ($response.Ok -and $response.ContainsKey('OutputBytes')) { $response.Output = $Session.Reader.ReadBytes([int]$response.OutputBytes) }
+    $response
+}
+
+function Connect-KokoroDeviceSession {
+    # Connects to a running listener, or returns $null when none answers with this phone's token.
+    param([Parameter(Mandatory)][string]$Adb, [Parameter(Mandatory)][string]$Device, [Parameter(Mandatory)][string]$Package)
+    $tokenText = ([string](& $Adb shell -Api -Device $Device "run-as $Package cat files/kokoro/generator-tail/listener-token.txt 2>/dev/null").Stdout).Trim()
+    if ($tokenText -cnotmatch '^[0-9A-F]{64}$') { return $null }
+    try { $stream = & $Adb stream -Device $Device 'localabstract:kokoro-jobs' } catch { return $null }
+    $session = [pscustomobject]@{ Device = $Device; Package = $Package; Token = $tokenText; Stream = $stream
+        Reader = [IO.BinaryReader]::new($stream); Writer = [IO.BinaryWriter]::new($stream); Held = [Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal) }
+    try { $ping = Send-KokoroSessionFrame -Session $session -Header @{ Op = 'ping' } } catch { $stream.Dispose(); return $null }
+    if (-not $ping.Ok) { $stream.Dispose(); return $null }
+    [void]$session.Held.Add([string]$ping.Skel)
+    foreach ($held in @($ping.Held)) { [void]$session.Held.Add([string]$held) }
+    $session
+}
+
+function Invoke-KokoroResidentJob {
+    <#
+    .SYNOPSIS
+    Runs an emitted job on the phone's resident listener (starting it when none answers) and returns the same shape as
+    Invoke-KokoroDeviceJob: Output (run 0's whole buffer), OutputPath (beside the emission), MedianMs and Lines.
+    #>
+    param([Parameter(Mandatory)] $EmissionArtifact, [Parameter(Mandatory)][string]$InputDirectory, [ValidateSet('SM8550', 'SM8635')][string]$Soc = 'SM8550',
+        [ValidateRange(1, 121)][int]$Runs = 3, [ValidateSet('dev.mansfieldplumbing.androidsma.preview', 'dev.mansfieldplumbing.kokoro')][string]$Package = 'dev.mansfieldplumbing.kokoro')
+    $layout = $EmissionArtifact.Layout
+    $files = [ordered]@{ Skel = $EmissionArtifact.Path; Activations = (Join-Path $InputDirectory 'activations.bin'); Weights = (Join-Path $InputDirectory 'weights.bin'); Tables = (Join-Path $InputDirectory 'tables.bin') }
+    if ((Get-FileHash -LiteralPath $files.Skel).Hash -cne $EmissionArtifact.LibrarySHA256) { throw 'Typed emission library integrity mismatch.' }
+    $session = $script:DeviceSession
+    if ($null -eq $session -or $session.Package -cne $Package) {
+        $adb = Get-KokoroAdbClient
+        $device = @(& $adb devices -Api | Where-Object { $_.IsAccessible -or $_.Connected } | ForEach-Object { [string]$_.Index } |
+            Where-Object { ([string](& $adb shell -Api -Device $_ 'getprop ro.soc.model').Stdout).Trim() -ceq $Soc })
+        if ($device.Count -ne 1) { throw "Expected exactly one attached $Soc device, found $($device.Count)." }
+        $session = Connect-KokoroDeviceSession -Adb $adb -Device $device[0] -Package $Package
+        if ($null -eq $session) {
+            $start = & (Join-Path $script:Root 'tools/Invoke-GeneratorTailProbe.ps1') -EmissionDirectory $EmissionArtifact.Directory -EmissionArtifact $EmissionArtifact -FixtureDirectory $InputDirectory -Soc $Soc -Runs 1 -Package $Package -TimeoutSeconds 120 -Adb $adb -Serve 2>&1
+            $startText = ($start | ForEach-Object { "$_" }) -join "`n"
+            if ($startText -notmatch '(?m)^Listening=kokoro-jobs' -or $startText -notmatch '(?m)^StartupRestored=True\s*$') { throw "Resident listener did not start: $(($start | Select-Object -Last 3) -join ' | ')" }
+            $session = Connect-KokoroDeviceSession -Adb $adb -Device $device[0] -Package $Package
+            if ($null -eq $session) { throw 'Resident listener started but did not answer.' }
+        }
+        $script:DeviceSession = $session
+    }
+    $blobs = [ordered]@{}
+    foreach ($name in $files.Keys) { $bytes = [IO.File]::ReadAllBytes($files[$name]); $blobs[$name] = [pscustomobject]@{ Sha256 = [Convert]::ToHexString([Security.Cryptography.SHA256]::HashData($bytes)); Bytes = $bytes } }
+    # Callers read the 256-byte header and everything from the PCM to the end (the PCM, then any exported statistics);
+    # only those ranges cross back, into an otherwise zero buffer of the job's full size.
+    $pcmTail = [long]$layout.OutputBytes - [long]$layout.PcmOffset
+    $ranges = @(,([long[]]@(0, 256))) + @(,([long[]]@([long]$layout.PcmOffset, $pcmTail)))
+    $header = @{ Op = 'job'; Skel = $blobs.Skel.Sha256; Activations = $blobs.Activations.Sha256; Weights = $blobs.Weights.Sha256; Tables = $blobs.Tables.Sha256
+        Tiles = [int]$layout.Tiles; Runs = $Runs; OutputBytes = [int]$layout.OutputBytes; PcmOffset = [int]$layout.PcmOffset; Samples = [int]$layout.Samples; InputBytes = [long]$layout.InputBytes
+        Ranges = $ranges }
+    $send = @($blobs.Values | Where-Object { -not $session.Held.Contains($_.Sha256) })
+    try { $response = Send-KokoroSessionFrame -Session $session -Header $header -Blobs $send }
+    catch { $script:DeviceSession = $null; $session.Stream.Dispose(); throw }
+    if (-not $response.Ok -and $response.ContainsKey('Missing')) {
+        # The listener evicted or never held these: send exactly what it names.
+        $resend = @($blobs.Values | Where-Object { $_.Sha256 -cin @($response.Missing) })
+        $response = Send-KokoroSessionFrame -Session $session -Header $header -Blobs $resend
+    }
+    if (-not $response.Ok) { throw "Resident job failed: $(if ($response.Error) { $response.Error } else { ($response.Lines | Select-Object -Last 2) -join ' | ' })" }
+    $session.Held.Clear(); foreach ($name in 'Skel', 'Weights', 'Tables') { [void]$session.Held.Add($blobs[$name].Sha256) }
+    if ([Convert]::ToHexString([Security.Cryptography.SHA256]::HashData([byte[]]$response.Output)) -cne $response.OutputSha256) { throw 'Resident job output integrity mismatch.' }
+    if ([long]$response.BufferBytes -ne [long]$layout.OutputBytes) { throw 'Resident job buffer size differs from the layout.' }
+    $output = [byte[]]::new([long]$layout.OutputBytes); $at = 0
+    foreach ($range in $ranges) { [Array]::Copy([byte[]]$response.Output, $at, $output, $range[0], $range[1]); $at += $range[1] }
+    $outputPath = Join-Path $EmissionArtifact.Directory "device-output-$Soc-$([Guid]::NewGuid().ToString('N')).bin"
+    [IO.File]::WriteAllBytes($outputPath, $output)
+    [pscustomobject]@{ Output = $output; OutputPath = $outputPath; MedianMs = [double]$response.MedianRegionMs; Lines = @($response.Lines) }
+}
+
+function Stop-KokoroDeviceSession {
+    # Ends the phone's resident listener; the app's startup files were restored when it started.
+    if ($null -eq $script:DeviceSession) { return }
+    try { $null = Send-KokoroSessionFrame -Session $script:DeviceSession -Header @{ Op = 'stop' } } finally { $script:DeviceSession.Stream.Dispose(); $script:DeviceSession = $null }
+}
+
 function Get-KokoroSourceKey {
     $files = @(foreach ($d in 'hexagon', 'kernels', 'jobs') { Get-ChildItem (Join-Path $script:Root "src/$d") -Filter '*.ps1' -File }) + @(Get-Item (Join-Path $script:Root 'Invoke-HexagonDevelopment.ps1')) + @(Get-Item (Join-Path $script:Root 'tools/Emit-HexagonProbe.ps1'))
     $lines = foreach ($f in ($files | Sort-Object FullName)) { "$($f.Name)=$((Get-FileHash -LiteralPath $f.FullName).Hash)" }
@@ -356,4 +455,4 @@ function Update-KokoroRatchet {
     Write-Host "Ratchet moved for $($c.Name); commit tools/Kokoro.Ratchet.psd1 with the change and its score line." -ForegroundColor Green
 }
 
-Export-ModuleMember -Function Get-KokoroPwshSource, Get-KokoroAdbClient, Get-KokoroSourceKey,Get-KokoroRatchetCase, Invoke-KokoroEmission, Test-KokoroKernel, New-KokoroJobInput, Invoke-KokoroExperiment, Invoke-KokoroSweep, Compare-KokoroSetup, Test-KokoroRatchet, Update-KokoroRatchet
+Export-ModuleMember -Function Get-KokoroPwshSource, Get-KokoroAdbClient, Invoke-KokoroResidentJob, Stop-KokoroDeviceSession,Get-KokoroSourceKey,Get-KokoroRatchetCase, Invoke-KokoroEmission, Test-KokoroKernel, New-KokoroJobInput, Invoke-KokoroExperiment, Invoke-KokoroSweep, Compare-KokoroSetup, Test-KokoroRatchet, Update-KokoroRatchet
