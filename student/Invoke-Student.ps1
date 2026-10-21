@@ -33,6 +33,8 @@ Steps:
             components only where held-out occurrences improve. The live image also exposes Learn and Apply.
   Audit     From -State Alignment, select boundary review cases without curated text and export audio and a blank
             review CSV. With -State Audit and -Annotations CSV, measure independently reviewed boundary error.
+  Discriminate  From -State Alignment made with -PhoneLabels, fit a small acoustic contrast rule on human audio.
+            Word types are split before fitting; Zira-warped phone labels remain provisional, never gold labels.
 .PARAMETER Corpus
 Corpus directory for Pronunciation; defaults to the latest build/corpus-* with corpus.clixml.
 .PARAMETER ParagraphLimit
@@ -67,7 +69,7 @@ Run from a PowerShell prompt: pwsh -File passes every argument as a string, so a
 #requires -Version 7.7
 [CmdletBinding()]
 param(
-    [ValidateSet('Console', 'Render', 'Corpus', 'Pronunciation', 'Normalize', 'Syllabus', 'Recordings', 'Listen', 'Stems', 'Alignment', 'Percepts', 'Describe', 'Learn', 'Audit')][string] $Step = 'Console',
+    [ValidateSet('Console', 'Render', 'Corpus', 'Pronunciation', 'Normalize', 'Syllabus', 'Recordings', 'Listen', 'Stems', 'Alignment', 'Percepts', 'Describe', 'Learn', 'Audit', 'Discriminate')][string] $Step = 'Console',
     [ValidateRange(2, 64)][int] $Threads = [Math]::Max(2, [Environment]::ProcessorCount),
     [string] $Text = '',
     [string] $Voice = 'af_heart',
@@ -80,6 +82,7 @@ param(
     [string] $RulebookPath = $env:KOKORO_PROSODY_RULEBOOK,
     [string] $Annotations = '',
     [ValidateRange(8, 256)][int] $AuditCount = 32,
+    [switch] $PhoneLabels,
     [ValidateRange(0, [int]::MaxValue)][int] $ParagraphLimit = 0,
     [ValidateRange(0, [int]::MaxValue)][int] $WindowLimit = 0,
     [string] $Recordings = '',
@@ -636,6 +639,54 @@ class StudentTextKernels {
         }
         return $out
     }
+    static [float[]] BandMeans([float[]] $bands, [int[]] $bounds) {
+        $count = $bounds.Length -shr 1; $out = [float[]]::new(5 * $count)
+        for ($item = 0; $item -lt $count; $item++) {
+            $first = $bounds[2 * $item]; $last = $bounds[2 * $item + 1]
+            for ($frame = $first; $frame -lt $last; $frame++) {
+                $mean = 0.0
+                for ($band = 0; $band -lt 5; $band++) { $mean = $mean + [double]$bands[5 * $frame + $band] / 5.0 }
+                for ($band = 0; $band -lt 5; $band++) { $out[5 * $item + $band] = $out[5 * $item + $band] + [float](([double]$bands[5 * $frame + $band] - $mean) / [double]($last - $first)) }
+            }
+        }
+        return $out
+    }
+    static [double[]] ContrastThreshold([float[]] $features, [int[]] $labels, [int[]] $folds) {
+        # Training only (folds 2..4). Development and test values cannot choose a feature or threshold.
+        $out = [double[]]::new(4); $out[3] = -1.0
+        for ($axis = 0; $axis -lt 5; $axis++) {
+            $minimum = [double]::PositiveInfinity; $maximum = [double]::NegativeInfinity; $zeroCount = 0; $oneCount = 0
+            for ($item = 0; $item -lt $labels.Length; $item++) {
+                if ($folds[$item] -lt 2) { continue }
+                $value = [double]$features[5 * $item + $axis]
+                $minimum = [Math]::Min($minimum, $value); $maximum = [Math]::Max($maximum, $value)
+                if ($labels[$item] -eq 0) { $zeroCount++ } else { $oneCount++ }
+            }
+            if ($zeroCount -eq 0 -or $oneCount -eq 0) { continue }
+            for ($step = 1; $step -lt 32; $step++) {
+                $threshold = $minimum + ($maximum - $minimum) * [double]$step / 32.0
+                for ($polarity = -1; $polarity -le 1; $polarity = $polarity + 2) {
+                    $zeroCorrect = 0; $oneCorrect = 0
+                    for ($item = 0; $item -lt $labels.Length; $item++) {
+                        if ($folds[$item] -lt 2) { continue }
+                        $prediction = 0
+                        if (($polarity -eq 1 -and [double]$features[5 * $item + $axis] -ge $threshold) -or ($polarity -eq -1 -and [double]$features[5 * $item + $axis] -lt $threshold)) { $prediction = 1 }
+                        if ($prediction -eq $labels[$item]) { if ($prediction -eq 0) { $zeroCorrect++ } else { $oneCorrect++ } }
+                    }
+                    $score = 0.5 * ([double]$zeroCorrect / [double]$zeroCount + [double]$oneCorrect / [double]$oneCount)
+                    if ($score -gt $out[3]) { $out[0] = [double]$axis; $out[1] = $threshold; $out[2] = [double]$polarity; $out[3] = $score }
+                }
+            }
+        }
+        return $out
+    }
+    static [int[]] ContrastDecisions([float[]] $features, [int] $axis, [double] $threshold, [int] $polarity) {
+        $count = [int][Math]::Floor([double]$features.Length / 5.0); $out = [int[]]::new($count)
+        for ($item = 0; $item -lt $count; $item++) {
+            if (($polarity -eq 1 -and [double]$features[5 * $item + $axis] -ge $threshold) -or ($polarity -eq -1 -and [double]$features[5 * $item + $axis] -lt $threshold)) { $out[$item] = 1 }
+        }
+        return $out
+    }
     static [float[]] SpectralSlope([float[]] $signal, [int] $rate, [int] $hop, [int] $window) {
         $bands = [StudentTextKernels]::SpectralBands($signal, $rate, $hop, $window)
         $frames = [int][Math]::Floor([double]$bands.Length / 5.0); $out = [float[]]::new($frames)
@@ -971,6 +1022,9 @@ function Import-StudentKernels {
         SpectralSlope = $type.GetMethod('SpectralSlope').CreateDelegate([Func[float[],int,int,int,float[]]])
         SpectralBands = $type.GetMethod('SpectralBands').CreateDelegate([Func[float[],int,int,int,float[]]])
         SpectralWarp = $type.GetMethod('SpectralWarp').CreateDelegate([Func[float[],float[],int,int,int[]]])
+        BandMeans = $type.GetMethod('BandMeans').CreateDelegate([Func[float[],int[],float[]]])
+        ContrastThreshold = $type.GetMethod('ContrastThreshold').CreateDelegate([Func[float[],int[],int[],double[]]])
+        ContrastDecisions = $type.GetMethod('ContrastDecisions').CreateDelegate([Func[float[],int,double,int,int[]]])
     }
     $script:StudentContext.Kernels
 }
@@ -1775,7 +1829,44 @@ function Get-StudentZiraAudio([string] $Content, $ZiraModule) {
             AudioSHA256 = $capture.WaveSHA256; EngineSHA256 = $engineHash; OwnerSHA256 = $ownerHash; AssemblySHA256 = $capture.AssemblySha256; Words = $labels }
         $retained | Export-Clixml -LiteralPath $receiptPath
     }
-    [pscustomobject]@{ Capture = $retained; Wav = Join-Path $directory $retained.Audio }
+    $referencePhoneRows = @()
+    if ($script:PhoneLabels) {
+        $phonePath = Join-Path $directory 'phones.clixml'
+        if (Test-Path -LiteralPath $phonePath) {
+            $phoneCapture = Import-Clixml -LiteralPath $phonePath
+            if ($phoneCapture.AudioSHA256 -cne $retained.AudioSHA256 -or $phoneCapture.EngineSHA256 -cne $engineHash -or $phoneCapture.OwnerSHA256 -cne $ownerHash) { throw 'Retained phone labels do not match their reference.' }
+        } else {
+            # Capture on the same native WAV clock. Null-output timing is a different SAPI path.
+            # The temporary WAV is removed only after byte identity with the retained reference is proven.
+            $phoneWavePath = Join-Path $directory 'phone-labels.wav'
+            $capture = & $ZiraModule { param($Words, $Wave); Get-EnglishZiraReference -Text $Words -NoSave -WavePath $Wave } $Content $phoneWavePath
+            if ($capture.WaveSHA256 -cne $retained.AudioSHA256) { throw 'Phone capture changed the retained reference audio.' }
+            if ($capture.Words.Count -ne $retained.Words.Count) { throw 'Phone capture changed the reference word count.' }
+            $phoneIndex = 0; $phoneRows = [Collections.Generic.List[object]]::new()
+            for ($wordIndex = 0; $wordIndex -lt $capture.Words.Count; $wordIndex++) {
+                $word = $capture.Words[$wordIndex]; $referenceWord = $retained.Words[$wordIndex]
+                if ($word.Start -ne $referenceWord.Start -or $word.Length -ne $referenceWord.Length -or [Math]::Abs($word.Ticks / 1e7 - $referenceWord.StartSeconds) -gt 1e-7) { throw 'Label-only capture changed a reference word or its clock.' }
+                $next = if ($wordIndex + 1 -lt $capture.Words.Count) { $capture.Words[$wordIndex + 1].Ticks } else { [long]::MaxValue }
+                while ($phoneIndex -lt $capture.Phones.Count -and $capture.Phones[$phoneIndex].Ticks -lt $word.Ticks) { $phoneIndex++ }
+                $withinWord = 0
+                while ($phoneIndex -lt $capture.Phones.Count -and $capture.Phones[$phoneIndex].Ticks -lt $next) {
+                    $phone = $capture.Phones[$phoneIndex]; $phoneIndex++
+                    if (-not $phone.Phone -or [char]::IsControl($phone.Phone[0])) { continue }
+                    $end = ($phone.Ticks + $phone.DurationTicks) / 1e7
+                    if ($end -gt $referenceWord.EndSeconds + 1e-7) { throw 'Phone label extends beyond its retained reference word.' }
+                    $phoneRows.Add([pscustomobject]@{ PSTypeName = 'Kokoro.StudentReferencePhone'; Phone = $phone.Phone; Next = $phone.Next
+                        Start = $word.Start; Length = $word.Length; Index = $withinWord; StartSeconds = $phone.Ticks / 1e7; EndSeconds = $end; EmphasisBits = $phone.Emphasis })
+                    $withinWord++
+                }
+            }
+            $phoneCapture = [pscustomobject]@{ AudioSHA256 = $retained.AudioSHA256; EngineSHA256 = $engineHash; OwnerSHA256 = $ownerHash; Phones = $phoneRows.ToArray() }
+            $phoneCapture | Export-Clixml -LiteralPath $phonePath
+            Remove-Item -LiteralPath $phoneWavePath
+        }
+        $referencePhoneRows = @($phoneCapture.Phones)
+        if ($referencePhoneRows.Count -eq 0) { throw 'Reference capture has no phone labels.' }
+    }
+    [pscustomobject]@{ Capture = $retained; Wav = Join-Path $directory $retained.Audio; Phones = $referencePhoneRows }
 }
 
 function Get-StudentRecordingText($Recording, [object[]] $Books) {
@@ -1808,7 +1899,7 @@ function Invoke-StudentAlignment {
         $humanController = Import-Clixml -LiteralPath $listenPath
         $humanHash = (Get-FileHash -LiteralPath $recording.Wav).Hash
         if ($humanController.Provenance.Kind -cne 'Human' -or $humanController.Provenance.SHA256 -cne $humanHash) { throw 'Human Listen recording does not match the audio being aligned.' }
-        $samples = [Collections.Generic.List[float]]::new(); $labels = [Collections.Generic.List[object]]::new(); $position = 0
+        $samples = [Collections.Generic.List[float]]::new(); $labels = [Collections.Generic.List[object]]::new(); $referencePhones = [Collections.Generic.List[object]]::new(); $position = 0
         # The API capture bound is only an evidence transport limit. Labels keep global source offsets.
         while ($position -lt $source.Text.Length) {
             $count = [Math]::Min($script:StudentText.ZiraCharacters, $source.Text.Length - $position)
@@ -1821,6 +1912,11 @@ function Invoke-StudentAlignment {
                 foreach ($label in $reference.Capture.Words) {
                     $labels.Add([pscustomobject]@{ Start = $source.Start + $position + $label.Start; Length = $label.Length
                         StartSeconds = $timeOffset + $label.StartSeconds; EndSeconds = $timeOffset + $label.EndSeconds })
+                }
+                foreach ($phone in $reference.Phones) {
+                    $referencePhones.Add([pscustomobject]@{ Start = $source.Start + $position + $phone.Start; Length = $phone.Length; Index = $phone.Index
+                        Phone = $phone.Phone; Next = $phone.Next; EmphasisBits = $phone.EmphasisBits
+                        StartSeconds = $timeOffset + $phone.StartSeconds; EndSeconds = $timeOffset + $phone.EndSeconds })
                 }
                 $samples.AddRange([float[]](Read-StudentAudio $reference.Wav))
             }
@@ -1860,6 +1956,20 @@ function Invoke-StudentAlignment {
                 StartSnapMs = 1000 * ($snapped[0] - $warped[0]); EndSnapMs = 1000 * ($snapped[1] - $warped[1])
                 StartEvidence = $kinds[0]; EndEvidence = $kinds[1]; Reader = $humanController.Provenance; SourceAudioSHA256 = $humanHash })
         }
+        $wordByStart = [Collections.Generic.Dictionary[int,object]]::new()
+        foreach ($word in $words) { if (-not $wordByStart.ContainsKey([int]$word.SourceStart)) { $wordByStart.Add([int]$word.SourceStart, $word) } }
+        $phoneHypotheses = @(foreach ($phone in $referencePhones) {
+            if (-not $wordByStart.ContainsKey([int]$phone.Start)) { continue }
+            $word = $wordByStart[[int]$phone.Start]; $endpoints = @($phone.StartSeconds, $phone.EndSeconds); $mapped = [double[]]::new(2)
+            for ($side = 0; $side -lt 2; $side++) {
+                $frame = [int][Math]::Clamp([Math]::Round(($endpoints[$side] - $settings.Window / (2.0 * $settings.SampleRate)) / $hopSeconds), 0, $map.Length - 1)
+                $mapped[$side] = $map[$frame] * $hopSeconds + $settings.Window / (2.0 * $settings.SampleRate)
+            }
+            [pscustomobject]@{ PSTypeName = 'Kokoro.StudentPhoneHypothesis'; Identity = $word.Identity + ':phone:' + $phone.Index
+                Occurrence = $word.Identity; Phone = $phone.Phone; Next = $phone.Next; StartSeconds = $mapped[0]; EndSeconds = $mapped[1]
+                SourceStart = $word.SourceStart; SourceLength = $word.SourceLength; Book = $word.Book; EmphasisBits = $phone.EmphasisBits
+                TimingSupportSeconds = $hopSeconds; LabelStatus = 'ZiraWarpHypothesis'; IndependentlyReviewed = $false; SourceAudioSHA256 = $humanHash }
+        })
         $destination = New-StudentOutputDirectory 'student-alignment'
         $result = [pscustomobject]@{ PSTypeName = 'Kokoro.StudentAlignment'; Recording = $recording.Wav; Words = $words.ToArray()
             Book = $source.Book; SourceStart = $source.Start; SourceLength = $source.Text.Length; ReferenceFrames = $referenceBands.Length / 5; HumanFrames = $humanBands.Length / 5
@@ -1867,10 +1977,20 @@ function Invoke-StudentAlignment {
             UnsupportedBoundaries = @($words | Where-Object StartEvidence -EQ 0).Count + @($words | Where-Object EndEvidence -EQ 0).Count
             ZeroDurationWords = @($words | Where-Object { $_.EndSeconds -le $_.StartSeconds }).Count
             MaximumSnapMs = (@($words.StartSnapMs) + @($words.EndSnapMs) | ForEach-Object { [Math]::Abs($_) } | Measure-Object -Maximum).Maximum
+            Phones = $phoneHypotheses; PhoneLabelStatus = 'ZiraWarpHypothesis; no independent phone annotation'
             MachineSHA256 = $script:StudentMachineSHA256; KernelSHA256 = $kernels.SHA256; WallSeconds = $watch.Elapsed.TotalSeconds; Directory = $destination }
         $result | Export-Clixml -LiteralPath (Join-Path $destination 'receipt.clixml')
         $result
     } } finally { Remove-Module -ModuleInfo $ziraModule -Force }
+}
+
+function Write-StudentReviewExcerpt([float[]] $Signal, [double] $StartSeconds, [double] $EndSeconds, [string] $Path, [double] $ContextSeconds = 1.0) {
+    $first = [int][Math]::Floor([Math]::Max(0.0, $StartSeconds - $ContextSeconds) * 16000.0)
+    $last = [int][Math]::Min($Signal.Length, [Math]::Ceiling(($EndSeconds + $ContextSeconds) * 16000.0))
+    if ($first -lt 0 -or $first -ge $last -or $last -gt $Signal.Length) { throw 'Review excerpt is outside its source audio.' }
+    $excerpt = [float[]]::new($last - $first); [Array]::Copy($Signal, $first, $excerpt, 0, $excerpt.Length)
+    [IO.File]::WriteAllBytes($Path, (ConvertTo-StudentWave $excerpt 16000))
+    [pscustomobject]@{ StartSeconds = $first / 16000.0; EndSeconds = $last / 16000.0; AudioSHA256 = (Get-FileHash -LiteralPath $Path).Hash }
 }
 
 function Invoke-StudentAlignmentAudit {
@@ -1929,15 +2049,12 @@ function Invoke-StudentAlignmentAudit {
     }
     $destination = New-StudentOutputDirectory 'student-alignment-audit'; $cases = [Collections.Generic.List[object]]::new()
     foreach ($case in $selected) {
-        $first = [int][Math]::Floor([Math]::Max(0.0, $case.PredictedSeconds - 1.0) * 16000.0)
-        $last = [int][Math]::Min($signal.Length, [Math]::Ceiling(($case.PredictedSeconds + 1.0) * 16000.0))
-        $excerpt = [float[]]::new($last - $first); [Array]::Copy($signal, $first, $excerpt, 0, $excerpt.Length)
         $path = Join-Path $destination ('boundary-' + $cases.Count + '.wav')
-        [IO.File]::WriteAllBytes($path, (ConvertTo-StudentWave $excerpt 16000))
+        $excerpt = Write-StudentReviewExcerpt $signal $case.PredictedSeconds $case.PredictedSeconds $path
         $cases.Add([pscustomobject]@{ PSTypeName = 'Kokoro.StudentBoundaryReviewCase'; Identity = $case.Identity; Occurrence = $case.Occurrence
             Side = $case.Side; Text = $case.Text; PredictedSeconds = $case.PredictedSeconds; SnapMs = $case.SnapMs; Evidence = $case.Evidence
-            Stratum = $case.Stratum; ContextStartSeconds = $first / 16000.0; ContextEndSeconds = $last / 16000.0; Audio = $path
-            AudioSHA256 = (Get-FileHash -LiteralPath $path).Hash; ObservedSeconds = ''; Status = 'Unreviewed'; Reviewer = ''; Note = '' })
+            Stratum = $case.Stratum; ContextStartSeconds = $excerpt.StartSeconds; ContextEndSeconds = $excerpt.EndSeconds; Audio = $path
+            AudioSHA256 = $excerpt.AudioSHA256; ObservedSeconds = ''; Status = 'Unreviewed'; Reviewer = ''; Note = '' })
     }
     $reviewPath = Join-Path $destination 'review.csv'; $cases | Export-Csv -LiteralPath $reviewPath
     $result = [pscustomobject]@{ PSTypeName = 'Kokoro.StudentAlignmentAudit'; Recording = $State.Recording; AudioSHA256 = $audioHash
@@ -1946,6 +2063,181 @@ function Invoke-StudentAlignmentAudit {
         MachineSHA256 = $script:StudentMachineSHA256; Directory = $destination }
     $result | Export-Clixml -LiteralPath (Join-Path $destination 'receipt.clixml') -Depth 12
     $result
+}
+
+function Measure-StudentContrast([object[]] $Observations, [int[]] $Predictions, [int] $Partition) {
+    $counts = [int[]]::new(2); $correct = [int[]]::new(2)
+    for ($index = 0; $index -lt $Observations.Count; $index++) {
+        if ($Observations[$index].Fold -ne $Partition) { continue }
+        $label = [int]$Observations[$index].Label; $counts[$label]++
+        if ($Predictions[$index] -eq $label) { $correct[$label]++ }
+    }
+    [pscustomobject]@{ ClassCounts = $counts; Correct = $correct; Count = $counts[0] + $counts[1]
+        BalancedAccuracy = $(if ($counts[0] -gt 0 -and $counts[1] -gt 0) { 0.5 * ($correct[0] / [double]$counts[0] + $correct[1] / [double]$counts[1]) } else { $null }) }
+}
+
+function Fit-StudentContrast([object[]] $Observations) {
+    $features = [float[]]::new(5 * $Observations.Count); $labels = [int[]]::new($Observations.Count); $folds = [int[]]::new($Observations.Count)
+    for ($index = 0; $index -lt $Observations.Count; $index++) {
+        if ($Observations[$index].Features.Count -ne 5 -or $Observations[$index].Label -notin 0,1 -or $Observations[$index].Fold -notin 0,1,2,3,4) { throw 'Contrast observation has invalid dimensions, label or fold.' }
+        for ($axis = 0; $axis -lt 5; $axis++) { $value = [float]$Observations[$index].Features[$axis]; if (-not [float]::IsFinite($value)) { throw 'Contrast feature is not finite.' }; $features[5 * $index + $axis] = $value }
+        $labels[$index] = $Observations[$index].Label; $folds[$index] = $Observations[$index].Fold
+    }
+    $kernels = Import-StudentKernels; $fit = $kernels.ContrastThreshold.Invoke($features, $labels, $folds)
+    if ($fit[3] -lt 0) { throw 'Contrast fitting needs both labels in training.' }
+    $predictions = $kernels.ContrastDecisions.Invoke($features, [int]$fit[0], $fit[1], [int]$fit[2])
+    [pscustomobject]@{ Axis = [int]$fit[0]; ThresholdDb = $fit[1]; Polarity = [int]$fit[2]; TrainingBalancedAccuracy = $fit[3]
+        Development = Measure-StudentContrast $Observations $predictions 1; Test = Measure-StudentContrast $Observations $predictions 0; Predictions = $predictions }
+}
+
+function Invoke-StudentDiscrimination {
+    if ($null -eq $State -or -not $State.PSObject.Properties['Phones'] -or $State.Phones.Count -eq 0) { throw 'Discriminate needs -State Alignment captured with -PhoneLabels.' }
+    $kernels = Import-StudentKernels; $signal = Read-StudentAudio $State.Recording; $audioHash = (Get-FileHash -LiteralPath $State.Recording).Hash
+    $settings = $script:StudentAlignment; $hopSeconds = $settings.Hop / [double]$settings.SampleRate
+    $bands = $kernels.SpectralBands.Invoke($signal, $settings.SampleRate, $settings.Hop, $settings.Window)
+    $frameCount = [int]($bands.Length / 5); $sourceBook = @(Get-StudentBooks -Name $State.Book)
+    if ($sourceBook.Count -ne 1) { throw 'Discrimination needs the aligned typed source book.' }
+    $accepted = [Collections.Generic.List[object]]::new(); $rejected = [Collections.Generic.List[object]]::new(); $bounds = [Collections.Generic.List[int]]::new()
+    foreach ($phone in $State.Phones) {
+        if ($phone.SourceAudioSHA256 -cne $audioHash -or $phone.LabelStatus -cne 'ZiraWarpHypothesis') { throw 'Phone hypothesis does not match the human recording or declared label source.' }
+        # Only include complete spectral supports within the hypothesized phone interval. Require two frames.
+        $first = [int][Math]::Ceiling($phone.StartSeconds / $hopSeconds)
+        $last = [int][Math]::Floor(($phone.EndSeconds - $settings.Window / [double]$settings.SampleRate) / $hopSeconds) + 1
+        if ($first -lt 1 -or $last -ge $frameCount -or $last - $first -lt 2) {
+            $rejected.Add([pscustomobject]@{ Identity = $phone.Identity; Reason = 'Insufficient complete spectral support'; StartSeconds = $phone.StartSeconds; EndSeconds = $phone.EndSeconds }); continue
+        }
+        $spelling = $sourceBook[0].Text.Substring($phone.SourceStart, $phone.SourceLength).ToLowerInvariant()
+        $wordType = [regex]::Replace($spelling, '[^\p{L}]', '')
+        if (-not $wordType) { $rejected.Add([pscustomobject]@{ Identity = $phone.Identity; Reason = 'No lexical word type' }); continue }
+        $fold = [int][Security.Cryptography.SHA256]::HashData([Text.Encoding]::UTF8.GetBytes($wordType))[0] % 5
+        $accepted.Add([pscustomobject]@{ PSTypeName = 'Kokoro.StudentAcousticPhoneEvidence'; Identity = $audioHash + ':' + $phone.Identity; Occurrence = $phone.Occurrence
+            Phone = $phone.Phone; Next = $phone.Next; WordType = $wordType; Fold = $fold; StartSeconds = $phone.StartSeconds; EndSeconds = $phone.EndSeconds
+            LabelStatus = $phone.LabelStatus; IndependentlyReviewed = $false; Features = [float[]]::new(5); EarlyFeatures = [float[]]::new(5); LateFeatures = [float[]]::new(5) })
+        $bounds.Add($first); $bounds.Add($last)
+    }
+    if ($accepted.Count -eq 0) { throw 'No phone hypotheses have sufficient acoustic support.' }
+    $means = $kernels.BandMeans.Invoke($bands, $bounds.ToArray())
+    $earlyBounds = [int[]]::new($bounds.Count); $lateBounds = [int[]]::new($bounds.Count)
+    for ($index = 0; $index -lt $bounds.Count; $index++) { $earlyBounds[$index] = $bounds[$index] - 1; $lateBounds[$index] = $bounds[$index] + 1 }
+    $early = $kernels.BandMeans.Invoke($bands, $earlyBounds); $late = $kernels.BandMeans.Invoke($bands, $lateBounds)
+    for ($index = 0; $index -lt $accepted.Count; $index++) {
+        [Array]::Copy($means, 5 * $index, $accepted[$index].Features, 0, 5)
+        [Array]::Copy($early, 5 * $index, $accepted[$index].EarlyFeatures, 0, 5); [Array]::Copy($late, 5 * $index, $accepted[$index].LateFeatures, 0, 5)
+    }
+    # Candidate inventory is chosen by training coverage alone. Test values cannot select the pair.
+    $inventory = @($accepted | Where-Object Fold -GE 2 | Group-Object Phone | Where-Object Count -GE 20 | Sort-Object @{Expression='Count';Descending=$true},Name | Select-Object -First 12)
+    $candidates = [Collections.Generic.List[object]]::new()
+    for ($left = 0; $left -lt $inventory.Count; $left++) {
+        for ($right = $left + 1; $right -lt $inventory.Count; $right++) {
+            $names = @([string]$inventory[$left].Name, [string]$inventory[$right].Name)
+            $observations = @($accepted | Where-Object Phone -CIn $names | ForEach-Object {
+                [pscustomobject]@{ Identity = $_.Identity; Fold = $_.Fold; Label = [int]($_.Phone -ceq $names[1]); Features = $_.Features; Evidence = $_ }
+            })
+            $fit = Fit-StudentContrast $observations
+            if ($fit.Development.ClassCounts[0] -lt 8 -or $fit.Development.ClassCounts[1] -lt 8) { continue }
+            $candidates.Add([pscustomobject]@{ Phones = $names; Observations = $observations; Fit = $fit })
+        }
+    }
+    if ($candidates.Count -eq 0) { throw 'No training-selected phone pair has sufficient development evidence.' }
+    $winner = @($candidates | Sort-Object @{Expression={$_.Fit.Development.BalancedAccuracy};Descending=$true},@{Expression={$_.Phones -join ':'}})[0]
+    $testWords = [Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
+    foreach ($observation in $winner.Observations | Where-Object Fold -EQ 0) { [void]$testWords.Add($observation.Evidence.WordType) }
+    if (@($winner.Observations | Where-Object { $_.Fold -ne 0 -and $testWords.Contains($_.Evidence.WordType) }).Count) { throw 'A word type crossed the test partition.' }
+    $sensitive = 0; $testCount = 0
+    foreach ($observation in $winner.Observations | Where-Object Fold -EQ 0) {
+        $nominal = $kernels.ContrastDecisions.Invoke([float[]]$observation.Features, $winner.Fit.Axis, $winner.Fit.ThresholdDb, $winner.Fit.Polarity)[0]
+        $before = $kernels.ContrastDecisions.Invoke([float[]]$observation.Evidence.EarlyFeatures, $winner.Fit.Axis, $winner.Fit.ThresholdDb, $winner.Fit.Polarity)[0]
+        $after = $kernels.ContrastDecisions.Invoke([float[]]$observation.Evidence.LateFeatures, $winner.Fit.Axis, $winner.Fit.ThresholdDb, $winner.Fit.Polarity)[0]
+        if ($before -ne $nominal -or $after -ne $nominal) { $sensitive++ }; $testCount++
+    }
+    $destination = New-StudentOutputDirectory 'student-acoustic-contrast'
+    $reviewCases = @(foreach ($label in 0,1) {
+        foreach ($observation in @($winner.Observations | Where-Object { $_.Fold -eq 0 -and $_.Label -eq $label } | Sort-Object Identity | Select-Object -First 16)) {
+            $item = $observation.Evidence; $path = Join-Path $destination ('phone-' + $label + '-' + $item.WordType + '-' + $item.StartSeconds.ToString('F3', [Globalization.CultureInfo]::InvariantCulture) + '.wav')
+            $excerpt = Write-StudentReviewExcerpt $signal $item.StartSeconds $item.EndSeconds $path 0.25
+            [pscustomobject]@{ Identity = $item.Identity; WordType = $item.WordType; ProvisionalPhone = $item.Phone
+                StartSeconds = $item.StartSeconds; EndSeconds = $item.EndSeconds; ContextStartSeconds = $excerpt.StartSeconds; Audio = $path
+                AudioSHA256 = $excerpt.AudioSHA256; ObservedPhone = ''; ObservedStartSeconds = ''; ObservedEndSeconds = ''; Status = 'Unreviewed'; Reviewer = '' }
+        }
+    })
+    $phoneReviewPath = Join-Path $destination 'phone-review.csv'; $reviewCases | Export-Csv -LiteralPath $phoneReviewPath
+    $imagePathForContrast = if ($ImagePath) { [IO.Path]::GetFullPath($ImagePath) } else { Join-Path $destination 'image.clixml.gz' }
+    $image = Open-StudentImage $imagePathForContrast
+    $root = New-StudentPercept $image 'AcousticContrast' 'AcousticContrast' ([float[]](0,0,1,0)) $image.Percepts['Occurrence']
+    $programIdentity = [Convert]::ToHexString([Security.Cryptography.SHA256]::HashData([Text.Encoding]::UTF8.GetBytes(($winner.Phones -join ':') + ':' + $winner.Fit.Axis + ':' + $winner.Fit.ThresholdDb.ToString('R', [Globalization.CultureInfo]::InvariantCulture) + ':' + $winner.Fit.Polarity)))
+    $program = [pscustomobject]@{ PSTypeName = 'Kokoro.StudentAcousticProgram'; Identity = $programIdentity; Kind = 'AcousticThreshold'; State = 'Provisional'
+        Phones = $winner.Phones; Axis = $winner.Fit.Axis; ThresholdDb = $winner.Fit.ThresholdDb; Polarity = $winner.Fit.Polarity
+        Units = 'dB relative to mean octave-band level'; LabelStatus = 'ZiraWarpHypothesis'; HumanValidated = $false
+        TrainingBalancedAccuracy = $winner.Fit.TrainingBalancedAccuracy; Development = $winner.Fit.Development; Test = $winner.Fit.Test }
+    $root.Rules.Add($program)
+    for ($index = 0; $index -lt $winner.Observations.Count; $index++) {
+        $observation = $winner.Observations[$index]; $measured = $observation.Evidence
+        $record = [pscustomobject]@{ Identity = $observation.Identity + ':' + $programIdentity; Occurrence = $measured.Occurrence
+            Provenance = [pscustomobject]@{ Kind = 'Human'; SHA256 = $audioHash; LabelSource = 'ZiraWarpHypothesis'; IndependentlyReviewed = $false }
+            Condition = [pscustomobject]@{ Kind = 'PhoneHypothesis'; Phone = $measured.Phone; Next = $measured.Next; WordType = $measured.WordType; Fold = $measured.Fold }
+            Measured = [pscustomobject]@{ StartSeconds = $measured.StartSeconds; EndSeconds = $measured.EndSeconds; Features = $measured.Features
+                Label = $observation.Label; Prediction = $winner.Fit.Predictions[$index]; Program = $programIdentity; Comparison = 'Agreement with provisional alignment label' } }
+        $role = if ($observation.Label -eq $winner.Fit.Predictions[$index]) { 'Example' } else { 'CounterExample' }
+        $null = Add-StudentImageObservation $image $root.Identity $record $role
+    }
+    $root.Genealogy.Add([pscustomobject]@{ Operation = 'Proposed'; Rule = $programIdentity; Step = 'Discriminate'; Reason = 'Training fit and development pair selection; independent phone review required' })
+    $image.Pin('AcousticContrast'); $checkpoint = $image.Save()
+    $result = [pscustomobject]@{ PSTypeName = 'Kokoro.StudentAcousticDiscrimination'; Program = $program; EligiblePhoneHypotheses = $accepted.Count
+        Rejected = $rejected.ToArray(); CandidatePairs = $candidates.Count; TestWordTypes = $testWords.Count; TestBoundarySensitive = $sensitive; TestCount = $testCount
+        BoundaryPerturbationSeconds = $hopSeconds; Evidence = $winner.Observations; Image = $checkpoint; SourceAudioSHA256 = $audioHash
+        PhoneReviewPath = $phoneReviewPath; PhoneReviewCases = $reviewCases.Count
+        MachineSHA256 = $script:StudentMachineSHA256; KernelSHA256 = $kernels.SHA256; Directory = $destination
+        Acceptance = 'Provisional label agreement only; no independently validated phone discrimination or speech synthesis claim' }
+    $result | Export-Clixml -LiteralPath (Join-Path $destination 'receipt.clixml') -Depth 16
+    $result
+}
+
+function Invoke-StudentAcousticProgram($Image, [float[]] $Features) {
+    if ($Features.Count -ne 5 -or @($Features | Where-Object { -not [float]::IsFinite($_) }).Count) { throw 'Acoustic classification needs five finite relative-band values.' }
+    foreach ($neighbor in @(Get-StudentImageNeighborhood $Image ([float[]](0,0,1,0)) 1)) {
+        foreach ($rule in $neighbor.Percept.Rules) {
+            if ($rule.Kind -ceq 'AcousticThreshold' -and $rule.State -ceq 'Provisional') {
+                $prediction = (Import-StudentKernels).ContrastDecisions.Invoke($Features, [int]$rule.Axis, [double]$rule.ThresholdDb, [int]$rule.Polarity)[0]
+                return [pscustomobject]@{ PSTypeName = 'Kokoro.StudentPhoneDecision'; Phone = $rule.Phones[$prediction]; Rule = $rule.Identity; Status = $rule.State; HumanValidated = $rule.HumanValidated }
+            }
+        }
+    }
+    $null
+}
+
+function Update-StudentAcousticProgram($Image) {
+    if (-not $Image.Percepts.ContainsKey('AcousticContrast')) { throw 'LearnContrast needs its acoustic evidence percept.' }
+    $node = $Image.Percepts['AcousticContrast']
+    $current = @($node.Rules | Where-Object { $_.Kind -ceq 'AcousticThreshold' -and $_.State -ceq 'Provisional' })
+    if ($current.Count -ne 1) { throw 'LearnContrast needs exactly one active provisional contrast.' }
+    $program = $current[0]
+    $observations = @(@($node.Examples) + @($node.CounterExamples) | ForEach-Object {
+        if ($_.Condition.Kind -cne 'PhoneHypothesis' -or $_.Condition.Phone -cnotin $program.Phones) { throw 'Contrast evidence has an incompatible typed condition.' }
+        $expectedFold = [int][Security.Cryptography.SHA256]::HashData([Text.Encoding]::UTF8.GetBytes($_.Condition.WordType))[0] % 5
+        if ($expectedFold -ne $_.Condition.Fold -or [int]($_.Condition.Phone -ceq $program.Phones[1]) -ne $_.Measured.Label) { throw 'Contrast evidence changed its word-type split or label identity.' }
+        [pscustomobject]@{ Identity = $_.Identity; Fold = $_.Condition.Fold; Label = $_.Measured.Label; Features = [float[]]$_.Measured.Features }
+    })
+    $fit = Fit-StudentContrast $observations
+    $features = [float[]]::new(5 * $observations.Count)
+    for ($index = 0; $index -lt $observations.Count; $index++) { [Array]::Copy($observations[$index].Features, 0, $features, 5 * $index, 5) }
+    $predictions = (Import-StudentKernels).ContrastDecisions.Invoke($features, [int]$program.Axis, [double]$program.ThresholdDb, [int]$program.Polarity)
+    $previous = Measure-StudentContrast $observations $predictions 1
+    $changed = $null -ne $fit.Development.BalancedAccuracy -and $fit.Development.BalancedAccuracy -gt $previous.BalancedAccuracy
+    $corrections = @()
+    if ($changed) {
+        $newIdentity = [Convert]::ToHexString([Security.Cryptography.SHA256]::HashData([Text.Encoding]::UTF8.GetBytes($program.Identity + ':' + $observations.Count + ':' + $fit.Axis + ':' + $fit.ThresholdDb.ToString('R', [Globalization.CultureInfo]::InvariantCulture) + ':' + $fit.Polarity)))
+        $replacement = [pscustomobject]@{ PSTypeName = 'Kokoro.StudentAcousticProgram'; Identity = $newIdentity; Kind = 'AcousticThreshold'; State = 'Provisional'
+            Phones = $program.Phones; Axis = $fit.Axis; ThresholdDb = $fit.ThresholdDb; Polarity = $fit.Polarity; Units = $program.Units
+            LabelStatus = $program.LabelStatus; HumanValidated = $false; TrainingBalancedAccuracy = $fit.TrainingBalancedAccuracy; Development = $fit.Development; Test = $fit.Test }
+        $corrections = @(for ($index = 0; $index -lt $observations.Count; $index++) {
+            if ($predictions[$index] -ne $observations[$index].Label -and $fit.Predictions[$index] -eq $observations[$index].Label) { $observations[$index].Identity }
+        })
+        $program.State = 'Superseded'; $node.Rules.Add($replacement)
+        $node.Genealogy.Add([pscustomobject]@{ Operation = 'Refined'; Parent = $program.Identity; Rule = $newIdentity; Evidence = @($observations.Identity); Corrections = $corrections; Step = 'LearnContrast' })
+        $Image.Changed = $true
+    }
+    [pscustomobject]@{ PSTypeName = 'Kokoro.StudentContrastUpdate'; Changed = $changed; PreviousDevelopment = $previous; CandidateDevelopment = $fit.Development
+        Test = $fit.Test; CorrectedEvidence = $corrections; Status = 'Provisional label agreement; no human validation' }
 }
 
 function New-StudentControllerRecording([object[]] $Events, [int] $Ticks, [object] $Provenance, [int] $Seed) {
@@ -2677,6 +2969,13 @@ function Invoke-StudentLearning {
 Update-TypeData -TypeName 'Kokoro.StudentImage' -MemberType ScriptMethod -MemberName Learn -Value {
     & $this.Owner { param($Image); Invoke-StudentRuleLearning $Image } $this
 } -Force
+Update-TypeData -TypeName 'Kokoro.StudentImage' -MemberType ScriptMethod -MemberName Classify -Value {
+    param([float[]] $Features)
+    & $this.Owner { param($Image, $Values); Invoke-StudentAcousticProgram $Image $Values } $this $Features
+} -Force
+Update-TypeData -TypeName 'Kokoro.StudentImage' -MemberType ScriptMethod -MemberName LearnContrast -Value {
+    & $this.Owner { param($Image); Update-StudentAcousticProgram $Image } $this
+} -Force
 Update-TypeData -TypeName 'Kokoro.StudentImage' -MemberType ScriptMethod -MemberName Apply -Value {
     param($Context)
     & $this.Owner { param($Image, $TypedContext); Invoke-StudentProsodyProgram $Image $TypedContext } $this $Context
@@ -2729,6 +3028,7 @@ $script:StudentSteps = [ordered]@{
     Describe = { $image = Invoke-StudentPercepts; $image.Describe() }
     Learn = { Invoke-StudentLearning }
     Audit = { Invoke-StudentAlignmentAudit }
+    Discriminate = { Invoke-StudentDiscrimination }
 }
 }
 & $studentOwner { & $script:StudentSteps[$Step] }
