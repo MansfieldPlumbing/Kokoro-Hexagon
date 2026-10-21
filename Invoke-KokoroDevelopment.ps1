@@ -10,8 +10,8 @@ twice, or written as a scratch script, is a missing command: add it here.
   Status                      Project state, next step, cases, commands (default). Reads the repository only:
                               no adb, no phone, no network. Phone access is only in Run, Ratchet and Compare.
   Verify                      Check tracked source, repository hygiene, handoff, Status, tests and optional case pairs.
-  LineEndings                 Give every modified tracked file back its committed line endings: unchanged lines byte for
-                              byte from HEAD, changed lines in the file's dominant ending; the text is checked unchanged.
+  LineEndings [-Path]         Give every modified tracked file (or the one at -Path) back its committed line endings: unchanged
+                              lines byte for byte from HEAD, changed lines in the file's dominant ending; the text is checked unchanged.
   CopySynthesis -OutputDirectory [-Path receipt.clixml]  Offline copy-synthesis; -Path rescoring changes only correlation.
                               -Parameters @{Ladder=$true} -Path run2/receipt.clixml renders R1/R4c and reuses R4.
   BuildHost -OutputDirectory  Build and retain the pinned arm64 diagnostic APK; no phone access.
@@ -164,7 +164,9 @@ $Python = $env:KOKORO_PYTHON
 # git's hunk map (ignoring carriage returns) says which lines changed: unchanged lines are copied byte for byte from HEAD
 # and changed lines take the file's dominant ending. The resulting text must equal the working text.
 function Restore-KokoroLineEndings {
-    $changed = @(git -C $Root diff --name-only)
+    # File: one repository-relative file instead of every modified one.
+    param([string]$File)
+    $changed = if ($File) { @($File) } else { @(git -C $Root diff --name-only) }
     foreach ($relative in $changed) {
         $path = Join-Path $Root $relative
         if (-not (Test-Path -LiteralPath $path -PathType Leaf)) { continue }
@@ -1533,7 +1535,9 @@ function Test-KokoroGeneratorTileEquivalence {
         # Held: v = 0 against the layer job. Moving: v = V everywhere must differ; a step from 0 to V at ControllerStep
         # must equal the v = 0 run before it and the v = V run after it, outside ControllerMargin tiles; and the step at
         # blocks of 1 must equal blocks of TileBlock.
-        [switch]$ControllerContact,[int]$ControllerStep=160,[int]$ControllerMargin=8,[int]$ControllerValue=8192,[int]$SensitivityRange=1048576)
+        [switch]$ControllerContact,[int]$ControllerStep=160,[int]$ControllerMargin=8,[int]$ControllerValue=8192,[int]$SensitivityRange=1048576,
+        # The tile job's window fill in packets of several instructions.
+        [switch]$VectorPackets)
     $out=[IO.Path]::GetFullPath($OutputDirectory)
     if(-not $out.StartsWith($Build+[IO.Path]::DirectorySeparatorChar,[StringComparison]::OrdinalIgnoreCase) -or (Test-Path -LiteralPath $out)){throw 'Choose a fresh equivalence directory under build/.'}
     [void][IO.Directory]::CreateDirectory($out)
@@ -1543,7 +1547,7 @@ function Test-KokoroGeneratorTileEquivalence {
     $common=@{ResBlockFrames=[int]$fixture.Frames;ResidentHvxThreads=4}
     $export=Invoke-KokoroEmission -Kernel KokoroGenerator60x16Run -Parameters ($common+@{ResidentBatchTiles=22;GeneratorMoments='Export';GeneratorSchedule='Layer'})
     $layer=Invoke-KokoroEmission -Kernel KokoroGenerator60x16Run -Parameters ($common+@{ResidentBatchTiles=22;GeneratorMoments='Constants';GeneratorSchedule='Layer'})
-    $tileParameters=$common+@{ResidentBatchTiles=$TileBlock;GeneratorMoments='Constants';GeneratorSchedule='Tile';GeneratorMatrixThread=$MatrixThread;GeneratorMatrixLock=$MatrixLock;GeneratorWeightPlanes=$WeightPlanes;GeneratorControllerContact=$ControllerContact.IsPresent}
+    $tileParameters=$common+@{ResidentBatchTiles=$TileBlock;GeneratorMoments='Constants';GeneratorSchedule='Tile';GeneratorMatrixThread=$MatrixThread;GeneratorMatrixLock=$MatrixLock;GeneratorWeightPlanes=$WeightPlanes;GeneratorControllerContact=$ControllerContact.IsPresent;GeneratorVectorPackets=$VectorPackets.IsPresent}
     $tile=Invoke-KokoroEmission -Kernel KokoroGenerator60x16Run -Parameters $tileParameters
     $statistics=[IO.File]::ReadAllBytes((Join-Path $FixtureDirectory 'tables.bin'))
     $weights=[IO.File]::ReadAllBytes((Join-Path $FixtureDirectory 'weights.bin'))
@@ -2762,7 +2766,7 @@ switch ($Command) {
         if (-not $OutputDirectory) { throw 'BuildHost needs -OutputDirectory under build/.' }
         New-KokoroDiagnosticHost -OutputDirectory $OutputDirectory
     }
-    'LineEndings' { Restore-KokoroLineEndings }
+    'LineEndings' { Restore-KokoroLineEndings -File $Path }
     'Verify' {
         $pwsh = Join-Path $PSHOME $(if ($IsWindows) { 'pwsh.exe' } else { 'pwsh' })
         $commandValues = ($MyInvocation.MyCommand.Parameters['Command'].Attributes |

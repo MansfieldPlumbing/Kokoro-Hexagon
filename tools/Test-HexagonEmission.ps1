@@ -61,6 +61,9 @@ param(
     [switch] $BypassAdaInCoefficients,
     [switch] $BypassStatisticsAndCoefficients,
     [switch] $BypassHmxCompute,
+    [ValidateSet('Accumulate','Export','Constants')][string] $GeneratorMoments = 'Accumulate',
+    [ValidateSet('Layer','Tile')][string] $GeneratorSchedule = 'Layer',
+    [switch] $GeneratorVectorPackets,
     [switch] $Force
 )
 $ErrorActionPreference='Stop'
@@ -77,6 +80,9 @@ $pmuArgs.TemplateShape=$TemplateShape
 $pmuArgs.TemplateInputChannels=$TemplateInputChannels
 $pmuArgs.TemplateBlockFrames=$TemplateBlockFrames
 $pmuArgs.TemplateInitialFrameOffset=$TemplateInitialFrameOffset
+$pmuArgs.GeneratorMoments=$GeneratorMoments
+$pmuArgs.GeneratorSchedule=$GeneratorSchedule
+$pmuArgs.GeneratorVectorPackets=$GeneratorVectorPackets.IsPresent
 $result=& (Join-Path $PSScriptRoot 'Emit-HexagonProbe.ps1') -OutputDirectory $output -ReferenceAssembly `
     -Kernel $Kernel -ResBlockFrames $ResBlockFrames -ResBlockKernel $ResBlockKernel -IntegerChannels $IntegerChannels -LinearRows $LinearRows -LinearInputChannels $LinearInputChannels `
     -LinearOutputChannels $LinearOutputChannels -LinearVectorOutputTiles:$LinearVectorOutputTiles `
@@ -125,8 +131,23 @@ for($index=0;$index -lt $sectionCount;$index++) {
 if($null -eq $textBytes) { throw 'Reference text section absent' }
 $emitted=[IO.File]::ReadAllBytes((Join-Path $output 'emitted-code.bin'))
 if($emitted.Length -ne $textBytes.Length) { throw 'Reference code size mismatch' }
-for($index=0;$index -lt $emitted.Length;$index++) {
-    if($emitted[$index] -ne $textBytes[$index]) { throw "Reference instruction mismatch at byte $index" }
+# Bytes equal, or packets equal: within a packet the assembler picks its own slot order, so each packet must hold the
+# same instructions (parse bits aside) at the same addresses as the assembler's; the emitted order follows the builder's
+# slot records.
+$bytesMatch=$true
+for($index=0;$index -lt $emitted.Length;$index++) { if($emitted[$index] -ne $textBytes[$index]) { $bytesMatch=$false; break } }
+if(-not $bytesMatch) {
+    $start=0
+    for($index=0;$index -lt $emitted.Length;$index+=4) {
+        $word=[BitConverter]::ToUInt32($emitted,$index); $parse=($word -shr 14) -band 3
+        if((([BitConverter]::ToUInt32($textBytes,$index) -shr 14) -band 3) -eq 3 -ne ($parse -eq 3)) { throw "Reference packet boundary mismatch at byte $index" }
+        if($parse -ne 3) { continue }
+        $mine=[Collections.Generic.List[uint32]]::new(); $theirs=[Collections.Generic.List[uint32]]::new()
+        for($at=$start;$at -le $index;$at+=4) { $mine.Add([BitConverter]::ToUInt32($emitted,$at) -band 0xFFFF3FFF); $theirs.Add([BitConverter]::ToUInt32($textBytes,$at) -band 0xFFFF3FFF) }
+        $mine.Sort(); $theirs.Sort()
+        if(($mine -join ',') -cne ($theirs -join ',')) { throw "Reference instruction mismatch in the packet at byte $start" }
+        $start=$index+4
+    }
 }
 . (Join-Path $PSScriptRoot '..\Invoke-HexagonDevelopment.ps1')
 $badOps = @(
@@ -180,6 +201,6 @@ foreach($wrong in @([uint32]1, [double]1, [decimal]1, [Management.Automation.PSO
 if($strictRejections -ne 6) { throw 'The typed boundary accepted a non-admitted immediate type.' }
 $widened = $stepType::Convert([hashtable[]]@(@{Op='imm';d=0;i=1}))
 if($widened[0].i.GetType() -ne [long] -or $widened[0].i -ne 1L) { throw 'The typed boundary did not widen Int32 to Int64 exactly.' }
-$summary=[ordered]@{LibrarySHA256=$result.SHA256;LibraryBytes=$result.Bytes;CodeBytes=$emitted.Length;AssemblerSHA256=$hash[0];InstructionBytesMatch=$true;InvalidOperandsRejected=$loweredRejections;Imports=$result.Imports;Relocations=$result.Relocations;RegionBodyEncodingOnly=$result.RegionBodyEncodingOnly}
+$summary=[ordered]@{LibrarySHA256=$result.SHA256;LibraryBytes=$result.Bytes;CodeBytes=$emitted.Length;AssemblerSHA256=$hash[0];InstructionBytesMatch=$true;ByteIdentical=$bytesMatch;InvalidOperandsRejected=$loweredRejections;Imports=$result.Imports;Relocations=$result.Relocations;RegionBodyEncodingOnly=$result.RegionBodyEncodingOnly}
 $summary | ConvertTo-Json | Set-Content (Join-Path $check 'verification.json')
 [pscustomobject]$summary

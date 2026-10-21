@@ -15,8 +15,8 @@ kernel in a fresh process against Recipe, Status and EmitterSHA256 baseline colu
 
 Encoding sources: Hexagon V73 PRM 80-N2040-53 Rev. AB (PDF SHA-256
 44EBAFD1119F725BD3C6FFB87499232520DF9A0A6E3E3DC6EA329B15DAED11A8) and V73 HVX PRM 80-N2040-54 Rev. AB, with bit
-patterns checked against Hexagon SDK 6.4.0.2 hexagon-llvm-mc where noted. Each instruction ends its own packet; no
-duplexes, extenders or scheduling except the fixed groups listed.
+patterns checked against Hexagon SDK 6.4.0.2 hexagon-llvm-mc where noted. Each instruction ends its own packet except
+the fixed groups listed and straight-line vector code grouped by Group-HexagonPackets; no duplexes or extenders.
 #>
 [CmdletBinding()]
 param(
@@ -204,6 +204,7 @@ class HexagonStep {
     [string] $Data
     [string] $Act
     [string] $Wt
+    [int] $Pack
     [long] $Present
 
     HexagonStep() { }
@@ -228,6 +229,7 @@ class HexagonStep {
         if ($Name -eq 'Data') { return 16 }
         if ($Name -eq 'Act') { return 17 }
         if ($Name -eq 'Wt') { return 18 }
+        if ($Name -eq 'Pack') { return 19 }
         return -1
     }
 
@@ -279,7 +281,7 @@ class HexagonStep {
                 [string] $typeName = $raw.GetType().FullName
                 [long] $number = 0L
                 [string] $text = ''
-                if ($field -ge 1 -and $field -le 8) {
+                if (($field -ge 1 -and $field -le 8) -or $field -eq 19) {
                     if ($typeName -cne 'System.Int32') { throw [HexagonStep]::Invalid($index, $operation, $key) }
                     $number = [long][int]$raw
                 } elseif ($field -ge 9 -and $field -le 12) {
@@ -309,6 +311,7 @@ class HexagonStep {
                 elseif ($field -eq 16) { $step.Data = $text }
                 elseif ($field -eq 17) { $step.Act = $text }
                 elseif ($field -eq 18) { $step.Wt = $text }
+                elseif ($field -eq 19) { $step.Pack = [int]$number }
                 $step.Present = $step.Present -bor (1L -shl $field)
             }
             $result[$index] = $step
@@ -528,6 +531,8 @@ class HexagonEncoder {
         if ($kind -eq 1) { return [byte[]]::new(0) }
         [HexagonFields] $fields = [HexagonFields]::new()
         $fields.Set('P', 3L)
+        # Pack 1: not the last instruction of its packet (parse bits 01); only single-word plain forms are packed.
+        if ($Step.ContainsKey('Pack') -and $Step.Pack -ne 0) { $fields.Set('P', 1L) }
         foreach ($key in [string[]]@('d','s','t','x','u','e')) { if ($Step.ContainsKey($key)) { $fields.Set($key, $Step.Get($key)) } }
         if ($kind -eq 2) {
             # The required loop-end packet contains only preserving adds.
@@ -728,6 +733,103 @@ function Get-InstructionSet {
         Id='HexagonV73'; Name='Hexagon V73'; StateBit=0
         Length={ param($Step) $record = $byOp[$Step.Op]; if ($record) { $record.Bytes } else { 4 } }.GetNewClosure()
     }
+}
+
+# Packets for straight-line code. Each instruction joins the earliest packet that follows every packet writing a
+# register it reads or writes (a packet reads its registers before writing them, so one instruction may write what
+# another in the same packet reads); vector loads and stores keep their order around stores. A packet holds at most four
+# instructions within the HVX resources in hexagon-v73-notes.md: one vector load, one vector store, one shift, a
+# multiply taking both multiply pipes, four HVX pipes in all, and each instruction's slots (multiplies and splats 2-3,
+# vector loads 0-1, vector stores 0, the rest 0-3), assigned most constrained first, highest slot first, and emitted
+# slot 3 first. Labels, branches and any other operation end a run and stay single.
+$script:PacketClasses = @{}
+foreach ($op in 'vload') { $script:PacketClasses[$op] = @{ Kind='VLoad'; Slots=@(1,0) } }
+foreach ($op in 'vstore') { $script:PacketClasses[$op] = @{ Kind='VStore'; Slots=@(0) } }
+foreach ($op in 'vmpy-h-rnd-sat','vmpye-w-uh','vmpyo-acc-w-h-rnd-sat-shift','vmpyie-w-uh') { $script:PacketClasses[$op] = @{ Kind='Mpy'; Slots=@(3,2) } }
+foreach ($op in 'vasl-w','vasr-w','vlsr-uw','vasl-h') { $script:PacketClasses[$op] = @{ Kind='Shift'; Slots=@(3,2,1,0) } }
+foreach ($op in 'vsplat') { $script:PacketClasses[$op] = @{ Kind='Alu'; Slots=@(3,2) } }
+foreach ($op in 'vadd-w','vadd-h','vadd-h-sat','vsub-h','vand','vor','vxor','vmax-w','vmin-w','vabs-h-sat') { $script:PacketClasses[$op] = @{ Kind='Alu'; Slots=@(3,2,1,0) } }
+foreach ($op in 'addi','add','sub','imm','lo','hi') { $script:PacketClasses[$op] = @{ Kind='Scalar'; Slots=@(3,2,1,0) } }
+
+function Get-HexagonStepRegisters {
+    # Registers a step reads and writes, from its record's assembly template ('v5', 'r3', 'p0').
+    param([Parameter(Mandatory)][hashtable]$Step)
+    $record = $script:InstructionByOp[$Step.Op]
+    if ($Step.Op -eq 'vstore') { return [pscustomobject]@{ Reads=@("r$($Step.s)","v$($Step.t)"); Writes=@() } }
+    if ($Step.Op -eq 'vload') { return [pscustomobject]@{ Reads=@("r$($Step.s)"); Writes=@("v$($Step.d)") } }
+    $asm = [string]$record.Asm; $split = $asm.IndexOf(' = '); $accumulate = $false
+    if ($asm.IndexOf(' += ') -ge 0) { $split = $asm.IndexOf(' += '); $accumulate = $true }
+    if ($split -lt 0) { throw "No assignment in the template of $($Step.Op)." }
+    $reads = [Collections.Generic.List[string]]::new(); $writes = [Collections.Generic.List[string]]::new()
+    foreach ($m in [regex]::Matches($asm, '([vrpq])\{([a-z])\}(?(?<=r\{[a-z]\})(\.[lh]\b)?)')) {
+        $name = $m.Groups[1].Value + $Step[$m.Groups[2].Value]
+        if ($m.Index -lt $split) { $writes.Add($name); if ($accumulate -or $m.Groups[3].Success) { $reads.Add($name) } } else { $reads.Add($name) }
+    }
+    [pscustomobject]@{ Reads=$reads.ToArray(); Writes=$writes.ToArray() }
+}
+
+function Group-HexagonPackets {
+    param([Parameter(Mandatory)][object[]]$Steps)
+    $out = [Collections.Generic.List[hashtable]]::new()
+    $run = [Collections.Generic.List[hashtable]]::new()
+    # Slots as the SDK assembler assigns them: most constrained first in program order, vector loads and stores the
+    # lowest free slot, the rest the highest. Returns slot and step per member, or nothing when the packet has no assignment.
+    $assign = {
+        param([object[]]$Members)
+        $free = [Collections.Generic.HashSet[int]]::new([int[]]@(0,1,2,3)); $ordered = [Collections.Generic.List[object]]::new()
+        foreach ($m in ($Members | Sort-Object -Stable { $_.Class.Slots.Count })) {
+            $memory = $m.Class.Kind -in 'VLoad','VStore'
+            $slot = @($m.Class.Slots | Where-Object { $free.Contains($_) } | Sort-Object -Descending:(-not $memory) | Select-Object -First 1)
+            if (-not $slot.Count) { return }
+            [void]$free.Remove($slot[0]); $ordered.Add(@{ Slot=$slot[0]; Step=$m.Step })
+        }
+        , $ordered.ToArray()
+    }
+    $flush = {
+        if (-not $run.Count) { return }
+        $packets = [Collections.Generic.List[object]]::new(); $lastWrite = @{}; $lastRead = @{}; $lastStore = -1; $lastLoad = -1
+        foreach ($step in $run) {
+            $class = $script:PacketClasses[$step.Op]; $regs = Get-HexagonStepRegisters $step
+            $at = 0
+            foreach ($r in $regs.Reads) { if ($lastWrite.ContainsKey($r)) { $at = [Math]::Max($at, $lastWrite[$r] + 1) } }
+            foreach ($r in $regs.Writes) {
+                if ($lastWrite.ContainsKey($r)) { $at = [Math]::Max($at, $lastWrite[$r] + 1) }
+                if ($lastRead.ContainsKey($r)) { $at = [Math]::Max($at, $lastRead[$r]) }
+            }
+            if ($class.Kind -eq 'VLoad') { $at = [Math]::Max($at, $lastStore + 1) }
+            if ($class.Kind -eq 'VStore') { $at = [Math]::Max($at, [Math]::Max($lastStore, $lastLoad) + 1) }
+            while ($true) {
+                if ($at -ge $packets.Count) { $packets.Add([Collections.Generic.List[object]]::new()) }
+                $members = @($packets[$at]) + @(@{ Step=$step; Class=$class })
+                $kinds = @($members | ForEach-Object { $_.Class.Kind })
+                $count = { param($k) @($kinds | Where-Object { $_ -eq $k }).Count }
+                $fits = $members.Count -le 4 -and (& $count 'VLoad') -le 1 -and (& $count 'VStore') -le 1 -and (& $count 'Shift') -le 1 -and (& $count 'Mpy') -le 1 -and
+                    ((& $count 'Alu') + (& $count 'Shift') + 2 * (& $count 'Mpy')) -le 4
+                if ($fits) { $fits = $null -ne (& $assign $members) }
+                if ($fits) { break }
+                $at++
+            }
+            $packets[$at].Add(@{ Step=$step; Class=$class })
+            foreach ($r in $regs.Reads) { $lastRead[$r] = [Math]::Max($(if ($lastRead.ContainsKey($r)) { $lastRead[$r] } else { -1 }), $at) }
+            foreach ($r in $regs.Writes) { $lastWrite[$r] = $at }
+            if ($class.Kind -eq 'VStore') { $lastStore = [Math]::Max($lastStore, $at) }
+            if ($class.Kind -eq 'VLoad') { $lastLoad = [Math]::Max($lastLoad, $at) }
+        }
+        foreach ($packet in $packets) {
+            $slots = & $assign @($packet); $sorted = @($slots | Sort-Object { $_.Slot } -Descending)
+            for ($k = 0; $k -lt $sorted.Count; $k++) {
+                $copy = $sorted[$k].Step.Clone(); if ($k -lt $sorted.Count - 1) { $copy.Pack = 1 }
+                $out.Add($copy)
+            }
+        }
+        $run.Clear()
+    }
+    foreach ($step in $Steps) {
+        if ($script:PacketClasses.ContainsKey($step.Op) -and -not $step.ContainsKey('Pack')) { $run.Add($step) }
+        else { & $flush; $out.Add($step) }
+    }
+    & $flush
+    , $out.ToArray()
 }
 
 function ConvertTo-HexagonAssembly {
@@ -1138,6 +1240,7 @@ $script:Kernels=@(
             if($GeneratorMatrixThread){ $harness.MatrixThread=$GeneratorMatrixThread; $harness.MatrixLock=$GeneratorMatrixLock }
             if($GeneratorWeightPlanes -ne 2){ $harness.WeightPlanes=$GeneratorWeightPlanes }
             if($GeneratorControllerContact){ $harness.ControllerContact=$true }
+            if($GeneratorVectorPackets){ $harness.VectorPackets=$true }
         $run=New-KokoroGenerator60x16RunSteps -Frames $ResBlockFrames -HvxThreads $ResidentHvxThreads -BatchTiles $ResidentBatchTiles -StopAfterStage $Stage16StopAfter -DumpPoint $Stage16DumpPoint -Kernels $Stage16Kernels -RuntimeFrames:$GeneratorRuntimeFrames @pmu @harness
     $steps=@($run.Steps)
     $symbol='kokoro_resblock_run_skel_handle_invoke'; $soname='libkokoro_resblock_run_skel.so'
@@ -1321,6 +1424,8 @@ param(
     [ValidateSet(1, 2)][int] $GeneratorWeightPlanes = 2,
     # KokoroGenerator60x16Run tile schedule: per-tile AdaIN from the controller contact (K = K_base + P_K * v, M likewise).
     [switch] $GeneratorControllerContact,
+    # KokoroGenerator60x16Run: group the window fill's vector instructions into packets.
+    [switch] $GeneratorVectorPackets,
     # KokoroHarmonicSource16Run: generate the source noise on the DSP from a seed (input holds seed and scale) instead of
     # reading captured draws.
     [switch] $SourceSeededNoise,
@@ -1596,7 +1701,14 @@ if ($ReferenceAssembly) {
         $pcAt+=$lengths[$stepIndex]
     }
     $asm=@('.text','.p2align 2',".global $symbol",".type $symbol,@function","${symbol}:")
-    $asm+=@($steps | ForEach-Object {ConvertTo-HexagonAssembly $_})
+    # Steps marked Pack join the next step's packet.
+    $packet=[Collections.Generic.List[string]]::new()
+    foreach($step in $steps){
+        $text=ConvertTo-HexagonAssembly $step
+        if(-not ($step.ContainsKey('Pack') -and $step.Pack) -and -not $packet.Count){ $asm+=$text; continue }
+        $packet.Add($text.Substring(2,$text.Length-4))
+        if(-not ($step.ContainsKey('Pack') -and $step.Pack)){ $asm+="{`n`t$($packet -join "`n`t")`n}"; $packet.Clear() }
+    }
     Write-NewOrIdenticalFile (Join-Path $OutputDirectory 'probe-reference.s') ([Text.Encoding]::UTF8.GetBytes(($asm -join "`n")+"`n")) -AllowOverwrite:$Force
 }
 $referenceSeconds = $stageClock.Elapsed.TotalSeconds

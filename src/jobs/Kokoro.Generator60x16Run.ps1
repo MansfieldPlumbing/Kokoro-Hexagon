@@ -102,8 +102,12 @@ function New-KokoroGenerator60x16RunSteps {
         # v << 16) and applies K = K_base + P_K * v and M = M_base + P_M * v per channel (Q31 multiply, as K * x), with
         # K_base, M_base and S from the stage's supplied AdaIN values as before and P_K, P_M per stage from the
         # parameters input after the constants table. v = 0 is exactly the constants arithmetic.
-        [switch]$ControllerContact)
+        [switch]$ControllerContact,
+        # Group the window fill's straight-line vector instructions into packets (Group-HexagonPackets) instead of one
+        # instruction per packet.
+        [switch]$VectorPackets)
     if($WeightPlanes -eq 1 -and $Schedule -ne 'Tile'){ throw 'One weight plane is a tile schedule option.' }
+    $packets={ param([object[]]$Steps) $grouped=if($VectorPackets){ Group-HexagonPackets $Steps } else { $Steps }; $grouped }
     if($ControllerContact -and $Schedule -ne 'Tile'){ throw 'The controller contact is a tile schedule option.' }
     if($SeededNoise -and -not $Source){ throw 'Seeded noise is a source option.' }
     if(-not $PoolWait){ $PoolWait=if($Schedule -eq 'Tile'){'Spin'}else{'Futex'} }
@@ -923,7 +927,7 @@ function New-KokoroGenerator60x16RunSteps {
     $bodies=[Collections.Generic.List[object]]::new()
     for($section=0;$section -lt $sections.Count;$section++){
     if($sections.Count -gt 1){ . $bind $section }
-    $bodies.Add(@("body_turns$sfx",@(New-KokoroAdaInSnakeTurnsSteps -TurnsBits 22 -Channels $Channels -LabelPrefix "adainsnaketurns$sfx" -ControllerContact:$ControllerContact)))
+    $bodies.Add(@("body_turns$sfx",@(& $packets @(New-KokoroAdaInSnakeTurnsSteps -TurnsBits 22 -Channels $Channels -LabelPrefix "adainsnaketurns$sfx" -ControllerContact:$ControllerContact))))
     if($AdaInMode -eq 'Constants'){
         $bodies.Add(@("body_constant$sfx",@(New-KokoroAdaInConstantCoefficientsLoopSteps -Channels $Channels -Turns -LabelPrefix "turnsconstant$sfx")))
     } else {
