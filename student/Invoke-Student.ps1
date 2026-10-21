@@ -108,6 +108,7 @@ $script:StudentInputs = [ordered]@{
     Manifest = 'lib/manifest.json'
     Text = 'build/grammar-corpus/raw'
     Pronunciation = 'phonemizer/Invoke-EnglishPhonemizer.ps1'
+    HumanText = 'build/human-recordings/alice-librivox-4139/pg11.txt'
 }
 
 # Text corpus records. Headings are uppercase paragraphs; a counter-example section starts
@@ -582,12 +583,11 @@ class StudentTextKernels {
         }
         return $out
     }
-    static [float[]] SpectralSlope([float[]] $signal, [int] $rate, [int] $hop, [int] $window) {
-        # Least-squares dB/octave across five octave bands. Three complex projections per band
-        # (0.8, 1, 1.25 times its centre), Hamming-weighted. This is an acoustic descriptor, not a vocal-tract model.
+    static [float[]] SpectralBands([float[]] $signal, [int] $rate, [int] $hop, [int] $window) {
+        # Three complex projections per octave band (0.8, 1, 1.25 times its centre), Hamming-weighted.
         $frames = [int][Math]::Floor([double]($signal.Length - $window) / [double]$hop)
         if ($frames -lt 0) { $frames = 0 }
-        $out = [float[]]::new($frames); $weights = [double[]]::new($window)
+        $out = [float[]]::new(5 * $frames); $weights = [double[]]::new($window)
         $cosStep = [double[]]::new(15); $sinStep = [double[]]::new(15)
         for ($j = 0; $j -lt $window; $j++) { $weights[$j] = 0.54 - 0.46 * [Math]::Cos(2.0 * [Math]::PI * [double]$j / [double]($window - 1)) }
         for ($band = 0; $band -lt 5; $band++) {
@@ -598,7 +598,6 @@ class StudentTextKernels {
             }
         }
         for ($f = 0; $f -lt $frames; $f++) {
-            $slope = 0.0
             for ($band = 0; $band -lt 5; $band++) {
                 $power = 0.0
                 for ($bin = 0; $bin -lt 3; $bin++) {
@@ -612,11 +611,64 @@ class StudentTextKernels {
                     }
                     $power = $power + $real * $real + $imaginary * $imaginary
                 }
-                $slope = $slope + [double]($band - 2) * 10.0 * [Math]::Log10($power + 1e-20) / 10.0
+                $out[5 * $f + $band] = [float](10.0 * [Math]::Log10($power + 1e-20))
             }
+        }
+        return $out
+    }
+    static [float[]] SpectralSlope([float[]] $signal, [int] $rate, [int] $hop, [int] $window) {
+        $bands = [StudentTextKernels]::SpectralBands($signal, $rate, $hop, $window)
+        $frames = [int][Math]::Floor([double]$bands.Length / 5.0); $out = [float[]]::new($frames)
+        for ($f = 0; $f -lt $frames; $f++) {
+            $slope = 0.0
+            for ($band = 0; $band -lt 5; $band++) { $slope = $slope + [double]($band - 2) * [double]$bands[5 * $f + $band] / 10.0 }
             $out[$f] = [float]$slope
         }
         return $out
+    }
+    static [int[]] SpectralWarp([float[]] $reference, [float[]] $observed, [int] $radius, [int] $edge) {
+        # Banded DTW over octave spectral frames, with bounded free recording edges.
+        # Output maps each reference frame to a human frame; reference durations are not retained.
+        $rows = [int][Math]::Floor([double]$reference.Length / 5.0)
+        $columns = [int][Math]::Floor([double]$observed.Length / 5.0)
+        if ($rows -eq 0 -or $columns -eq 0 -or $reference.Length % 5 -ne 0 -or $observed.Length % 5 -ne 0 -or $radius -lt 1 -or $edge -lt 0 -or $edge -ge $columns) { throw 'Invalid spectral alignment shape or search bounds.' }
+        if ((2.0 * [double]$radius + 1.0) * [double]$rows -gt 2147483647.0) { throw 'Spectral traceback exceeds the managed array range; increase the analysis hop.' }
+        $width = 2 * $radius + 1; $trace = [byte[]]::new($rows * $width)
+        $previous = [double[]]::new($columns + 1); $current = [double[]]::new($columns + 1)
+        for ($j = 0; $j -le $columns; $j++) { $previous[$j] = [double]::PositiveInfinity; if ($j -le $edge) { $previous[$j] = 0.0 } }
+        $previousLeft = 0; $previousRight = $columns
+        for ($i = 1; $i -le $rows; $i++) {
+            $centre = [int][Math]::Floor([double]$i * [double]$columns / [double]$rows)
+            $left = [Math]::Max(1, $centre - $radius); $right = [Math]::Min($columns, $centre + $radius)
+            $current[$left - 1] = [double]::PositiveInfinity
+            for ($j = $left; $j -le $right; $j++) {
+                $refMean = 0.0; $obsMean = 0.0
+                for ($band = 0; $band -lt 5; $band++) { $refMean = $refMean + [double]$reference[5 * ($i - 1) + $band] / 5.0; $obsMean = $obsMean + [double]$observed[5 * ($j - 1) + $band] / 5.0 }
+                $distance = 0.0
+                for ($band = 0; $band -lt 5; $band++) {
+                    $difference = ([double]$reference[5 * ($i - 1) + $band] - $refMean) - ([double]$observed[5 * ($j - 1) + $band] - $obsMean)
+                    $distance = $distance + $difference * $difference / 5.0
+                }
+                $best = [double]::PositiveInfinity; $direction = 0
+                if ($j - 1 -ge $previousLeft -and $j - 1 -le $previousRight) { $best = $previous[$j - 1] }
+                if ($j -ge $previousLeft -and $j -le $previousRight -and $previous[$j] -lt $best) { $best = $previous[$j]; $direction = 1 }
+                if ($current[$j - 1] -lt $best) { $best = $current[$j - 1]; $direction = 2 }
+                $current[$j] = $best + $distance; $trace[($i - 1) * $width + $j - $left] = [byte]$direction
+            }
+            $swap = $previous; $previous = $current; $current = $swap
+            $previousLeft = $left; $previousRight = $right
+        }
+        $column = $columns; $cost = $previous[$column]
+        for ($j = [Math]::Max(1, $columns - $edge); $j -le $columns; $j++) { if ($previous[$j] -lt $cost) { $column = $j; $cost = $previous[$j] } }
+        if ([double]::IsInfinity($cost)) { throw 'No alignment path fits the declared spectral band.' }
+        $map = [int[]]::new($rows); $row = $rows
+        while ($row -gt 0 -and $column -gt 0) {
+            $centre = [int][Math]::Floor([double]$row * [double]$columns / [double]$rows); $left = [Math]::Max(1, $centre - $radius)
+            $direction = [int]$trace[($row - 1) * $width + $column - $left]
+            if ($direction -eq 2) { $column = $column - 1 }
+            else { $map[$row - 1] = $column - 1; $row = $row - 1; if ($direction -eq 0) { $column = $column - 1 } }
+        }
+        return $map
     }
     static [short[]] Pcm16([float[]] $signal) {
         $out = [short[]]::new($signal.Length)
@@ -881,6 +933,8 @@ function Import-StudentKernels {
         ReadStem = $type.GetMethod('ReadStem').CreateDelegate([Func[byte[],float[]]])
         CoefficientTrack = $type.GetMethod('CoefficientTrack').CreateDelegate([Func[float[],float[]]])
         SpectralSlope = $type.GetMethod('SpectralSlope').CreateDelegate([Func[float[],int,int,int,float[]]])
+        SpectralBands = $type.GetMethod('SpectralBands').CreateDelegate([Func[float[],int,int,int,float[]]])
+        SpectralWarp = $type.GetMethod('SpectralWarp').CreateDelegate([Func[float[],float[],int,int,int[]]])
     }
     $script:StudentContext.Kernels
 }
@@ -920,7 +974,15 @@ function Get-StudentBooks {
     $kernels = Import-StudentKernels
     $directory = Join-Path $script:StudentRoot $script:StudentInputs.Text
     $index = 0
-    foreach ($file in @(Get-ChildItem -LiteralPath $directory -Filter 'pg*.txt' | Sort-Object Name)) {
+    $sources = [Collections.Generic.Dictionary[string,object]]::new([StringComparer]::Ordinal)
+    foreach ($candidate in @(Get-ChildItem -LiteralPath $directory -Filter 'pg*.txt')) { $sources[$candidate.Name] = $candidate }
+    $humanTextPath = Join-Path $script:StudentRoot $script:StudentInputs.HumanText
+    if (-not (Test-Path -LiteralPath $humanTextPath -PathType Leaf)) { throw 'Human corpus text is missing: StudentInputs.HumanText.' }
+    $humanTextFile = Get-Item -LiteralPath $humanTextPath
+    if ($sources.ContainsKey($humanTextFile.Name) -and (Get-FileHash $sources[$humanTextFile.Name].FullName).Hash -cne (Get-FileHash $humanTextFile.FullName).Hash) { throw 'Conflicting corpus sources have the same book name.' }
+    $sources[$humanTextFile.Name] = $humanTextFile
+    # Append the added source so existing corpus book ordinals retain their identities.
+    foreach ($file in @($sources.Values | Sort-Object @{ Expression = { $_.Name -ceq $humanTextFile.Name } }, Name)) {
         $lines = [IO.File]::ReadAllLines($file.FullName)
         $first = -1; $last = $lines.Length
         for ($i = 0; $i -lt $lines.Length; $i++) {
@@ -1695,6 +1757,20 @@ function Export-StudentStemMidi($Performance, [float[]] $Frames, [int] $Contact,
 
 function Invoke-StudentStems($Performance = $State, [string] $Destination = '') {
     $kernels = Import-StudentKernels
+    # Independent known paths guard the alignment primitive before it is used on unlabelled human audio.
+    $referenceBands = [float[]]::new(120); $stretchedBands = [float[]]::new(240)
+    for ($frameIndex = 0; $frameIndex -lt 24; $frameIndex++) {
+        for ($bandIndex = 0; $bandIndex -lt 5; $bandIndex++) {
+            $value = [float](($frameIndex * ($bandIndex + 3) + $bandIndex * $bandIndex) % 31)
+            $referenceBands[5 * $frameIndex + $bandIndex] = $value
+            $stretchedBands[10 * $frameIndex + $bandIndex] = $value; $stretchedBands[10 * $frameIndex + 5 + $bandIndex] = $value
+        }
+    }
+    $identityMap = $kernels.SpectralWarp.Invoke($referenceBands, $referenceBands, 8, 0)
+    $stretchMap = $kernels.SpectralWarp.Invoke($referenceBands, $stretchedBands, 8, 0)
+    for ($frameIndex = 0; $frameIndex -lt 24; $frameIndex++) {
+        if ($identityMap[$frameIndex] -ne $frameIndex -or [Math]::Abs($stretchMap[$frameIndex] - 2 * $frameIndex) -gt 1) { throw 'Spectral warp failed its independently specified paths.' }
+    }
     if ($null -ne $Performance -and $Performance.PSObject.Properties['Controller']) { $Performance = $Performance.Controller }
     if ($null -eq $Performance) {
         # Arithmetic coverage of contacts, modes, pitches and rests; no text selected for the test.
@@ -1773,6 +1849,7 @@ function Invoke-StudentStems($Performance = $State, [string] $Destination = '') 
         Stems = $stems.ToArray(); Ticks = $Performance.Ticks; PitchFrames = $pitchErrors.Count; MaximumPitchCents = $maxCents
         PitchToleranceCents = $Performance.Layout.PitchToleranceCents; StateErrors = $stateErrors; EventErrors = $clickErrors
         BoundaryToleranceTicks = $Performance.Layout.BoundaryToleranceTicks
+        SpectralWarpIdentityFrames = 24; SpectralWarpStretchedFrames = 48
         MaximumAxisError = $axisMaximumError; AxisTolerance = 0.05; MaximumResponseError = $responseMaximumError; ResponseTolerance = 0.1
         GhostReplay = $true; RenderMachineSHA256 = $script:StudentMachineSHA256; RenderKernelSHA256 = $kernels.SHA256
         BiasRow = 'Not supplied'; Binding = 'Diagnostic host contacts; generator contact not exercised' }
