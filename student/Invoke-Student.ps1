@@ -35,6 +35,8 @@ Steps:
             review CSV. With -State Audit and -Annotations CSV, measure independently reviewed boundary error.
   Discriminate  From -State Alignment made with -PhoneLabels, fit a small acoustic contrast rule on human audio.
             Word types are split before fitting; Zira-warped phone labels remain provisional, never gold labels.
+  Reconsider Re-evaluate only remembered decisions whose percept dependencies changed. Missing knowledge stays
+            unresolved; prior interpretations and evidence survive. No audio or source capture is rebuilt.
 .PARAMETER Corpus
 Corpus directory for Pronunciation; defaults to the latest build/corpus-* with corpus.clixml.
 .PARAMETER ParagraphLimit
@@ -69,7 +71,7 @@ Run from a PowerShell prompt: pwsh -File passes every argument as a string, so a
 #requires -Version 7.7
 [CmdletBinding()]
 param(
-    [ValidateSet('Console', 'Render', 'Corpus', 'Pronunciation', 'Normalize', 'Syllabus', 'Recordings', 'Listen', 'Stems', 'Alignment', 'Percepts', 'Describe', 'Learn', 'Audit', 'Discriminate')][string] $Step = 'Console',
+    [ValidateSet('Console', 'Render', 'Corpus', 'Pronunciation', 'Normalize', 'Syllabus', 'Recordings', 'Listen', 'Stems', 'Alignment', 'Percepts', 'Describe', 'Learn', 'Audit', 'Discriminate', 'Reconsider')][string] $Step = 'Console',
     [ValidateRange(2, 64)][int] $Threads = [Math]::Max(2, [Environment]::ProcessorCount),
     [string] $Text = '',
     [string] $Voice = 'af_heart',
@@ -2172,6 +2174,7 @@ function Invoke-StudentDiscrimination {
         Units = 'dB relative to mean octave-band level'; LabelStatus = 'ZiraWarpHypothesis'; HumanValidated = $false
         TrainingBalancedAccuracy = $winner.Fit.TrainingBalancedAccuracy; Development = $winner.Fit.Development; Test = $winner.Fit.Test }
     $root.Rules.Add($program)
+    Publish-StudentPercept $image $root.Identity
     for ($index = 0; $index -lt $winner.Observations.Count; $index++) {
         $observation = $winner.Observations[$index]; $measured = $observation.Evidence
         $record = [pscustomobject]@{ Identity = $observation.Identity + ':' + $programIdentity; Occurrence = $measured.Occurrence
@@ -2181,6 +2184,11 @@ function Invoke-StudentDiscrimination {
                 Label = $observation.Label; Prediction = $winner.Fit.Predictions[$index]; Program = $programIdentity; Comparison = 'Agreement with provisional alignment label' } }
         $role = if ($observation.Label -eq $winner.Fit.Predictions[$index]) { 'Example' } else { 'CounterExample' }
         $null = Add-StudentImageObservation $image $root.Identity $record $role
+    }
+    foreach ($observation in $winner.Observations) {
+        $evidenceId = $observation.Identity + ':' + $programIdentity
+        $decisionId = 'acoustic:' + $evidenceId
+        $null = New-StudentDecision $image $decisionId 'Acoustic' ([pscustomobject]@{ Evidence = $evidenceId }) ([string[]]@('AcousticContrast'))
     }
     $root.Genealogy.Add([pscustomobject]@{ Operation = 'Proposed'; Rule = $programIdentity; Step = 'Discriminate'; Reason = 'Training fit and development pair selection; independent phone review required' })
     $image.Pin('AcousticContrast'); $checkpoint = $image.Save()
@@ -2235,6 +2243,7 @@ function Update-StudentAcousticProgram($Image) {
             if ($predictions[$index] -ne $observations[$index].Label -and $fit.Predictions[$index] -eq $observations[$index].Label) { $observations[$index].Identity }
         })
         $program.State = 'Superseded'; $node.Rules.Add($replacement)
+        Publish-StudentPercept $Image $node.Identity
         $node.Genealogy.Add([pscustomobject]@{ Operation = 'Refined'; Parent = $program.Identity; Rule = $newIdentity; Evidence = @($observations.Identity); Corrections = $corrections; Step = 'LearnContrast' })
         $Image.Changed = $true
     }
@@ -2562,11 +2571,88 @@ function Invoke-StudentListen {
     }
 }
 
+function Publish-StudentPercept($Image, [string] $Identity) {
+    if (-not $Image.Percepts.ContainsKey($Identity)) { throw 'Publish needs an existing percept.' }
+    $node = $Image.Percepts[$Identity]
+    $affected = @($node); if ($null -ne $node.Parent) { $affected += $node.Parent }
+    foreach ($percept in $affected) {
+        $percept.Revision = [int]$percept.Revision + 1
+        if ($Image.Dependents.ContainsKey($percept.Identity)) { foreach ($decisionId in $Image.Dependents[$percept.Identity]) { [void]$Image.Pending.Add([string]$decisionId) } }
+    }
+    $Image.Changed = $true
+}
+
+function Register-StudentDecision($Image, $Decision) {
+    foreach ($dependency in $Decision.Dependencies) {
+        $dependency = [string]$dependency
+        if (-not $Image.Dependents.ContainsKey($dependency)) { $Image.Dependents.Add($dependency, [Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)) }
+        [void]$Image.Dependents[$dependency].Add([string]$Decision.Identity)
+    }
+}
+
+function Get-StudentDecisionRevision($Image, $Decision) {
+    (@($Decision.Dependencies | Sort-Object) | ForEach-Object {
+        $dependencyId = [string]$_; $revision = if ($Image.Percepts.ContainsKey($dependencyId)) { [string]$Image.Percepts[$dependencyId].Revision } else { 'missing' }
+        $dependencyId.Length.ToString() + ':' + $dependencyId + ':' + $revision
+    }) -join '|'
+}
+
+function Invoke-StudentReconsideration($Image) {
+    $updated = [Collections.Generic.List[object]]::new()
+    foreach ($identity in @($Image.Pending)) {
+        $decision = $Image.Decisions[[string]$identity]; $revision = Get-StudentDecisionRevision $Image $decision
+        if ($revision -ceq $decision.Revision) { [void]$Image.Pending.Remove([string]$identity); continue }
+        $previous = $decision.Current; $current = $null; $savedPin = $Image.Pinned
+        try {
+            if ($Image.Percepts.ContainsKey($decision.Anchor)) {
+                $Image.Pinned = $decision.Anchor
+                if ($decision.Kind -ceq 'Acoustic' -and $Image.Evidence.ContainsKey([string]$decision.Context.Evidence)) {
+                    $current = Invoke-StudentAcousticProgram $Image ([float[]]$Image.Evidence[[string]$decision.Context.Evidence].Measured.Features)
+                } elseif ($decision.Kind -ceq 'Prosody') { $current = Invoke-StudentProsodyProgram $Image $decision.Context }
+            }
+        } finally { $Image.Pinned = $savedPin }
+        $decision.History.Add([pscustomobject]@{ PSTypeName = 'Kokoro.StudentInterpretationChange'; Previous = $previous; Current = $current
+            PreviousRevision = $decision.Revision; Revision = $revision; MachineSHA256 = $script:StudentMachineSHA256 })
+        $decision.Current = $current; $decision.Revision = $revision
+        $decision.State = if ($null -eq $current) { 'Unresolved' } elseif ($decision.Kind -ceq 'Acoustic') { [string]$current.Status } else { 'AdmittedDirection' }
+        [void]$Image.Pending.Remove([string]$identity); $Image.Changed = $true; $updated.Add($decision)
+    }
+    $updated.ToArray()
+}
+
+function New-StudentDecision($Image, [string] $Identity, [string] $Kind, $Context, [string[]] $Dependencies) {
+    if (-not $Identity -or $Kind -cnotin 'Acoustic','Prosody' -or $Dependencies.Count -eq 0 -or @($Dependencies | Where-Object { -not $_ }).Count) { throw 'Decide needs a stable identity, supported kind and percept dependencies.' }
+    $storedContext = if ($Kind -ceq 'Acoustic') {
+        if (-not $Context.PSObject.Properties['Evidence'] -or -not $Context.Evidence) { throw 'Acoustic decisions reference a typed evidence identity.' }
+        [pscustomobject]@{ Evidence = [string]$Context.Evidence }
+    } else {
+        if (-not $Context.PSObject.Properties['BoundaryKind']) { throw 'Prosody decisions need a typed boundary context.' }
+        [pscustomobject]@{ BoundaryKind = [string]$Context.BoundaryKind; Style = $(if ($Context.PSObject.Properties['Style']) { [string]$Context.Style } else { $Image.ActiveStyle }) }
+    }
+    if ($Image.Decisions.ContainsKey($Identity)) {
+        $existing = $Image.Decisions[$Identity]
+        $sameContext = if ($Kind -ceq 'Acoustic') { $existing.Context.Evidence -ceq $storedContext.Evidence } else {
+            $existing.Context.BoundaryKind -ceq $storedContext.BoundaryKind -and $existing.Context.Style -ceq $storedContext.Style
+        }
+        if ($existing.Kind -cne $Kind -or -not [Linq.Enumerable]::SequenceEqual[string]([string[]]$existing.Dependencies, $Dependencies, [StringComparer]::Ordinal) -or
+            -not $sameContext) { throw 'A decision identity cannot be reused for different inputs or dependencies.' }
+        $null = Invoke-StudentReconsideration $Image; return $existing
+    }
+    $decision = [pscustomobject]@{ PSTypeName = 'Kokoro.StudentInterpretation'; Identity = $Identity; Kind = $Kind; Anchor = $Dependencies[0]
+        Dependencies = [string[]]$Dependencies.Clone(); Context = $storedContext; Revision = ''; Current = $null; State = 'Unresolved'; History = [Collections.Generic.List[object]]::new() }
+    $Image.Decisions.Add($Identity, $decision); Register-StudentDecision $Image $decision; [void]$Image.Pending.Add($Identity)
+    $null = Invoke-StudentReconsideration $Image
+    $decision
+}
+
 function New-StudentImage([string] $Path) {
     [pscustomobject]@{ PSTypeName = 'Kokoro.StudentImage'; Owner = $ExecutionContext.SessionState.Module; Path = $Path
         Percepts = [Collections.Generic.Dictionary[string,object]]::new([StringComparer]::Ordinal)
         Evidence = [Collections.Generic.Dictionary[string,object]]::new([StringComparer]::Ordinal)
         Performances = [Collections.Generic.Dictionary[string,object]]::new([StringComparer]::Ordinal)
+        Decisions = [Collections.Generic.Dictionary[string,object]]::new([StringComparer]::Ordinal)
+        Dependents = [Collections.Generic.Dictionary[string,object]]::new([StringComparer]::Ordinal)
+        Pending = [Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
         Pinned = 'Occurrence'; ActiveStyle = ''; Changed = $false }
 }
 
@@ -2574,7 +2660,7 @@ function New-StudentPercept($Image, [string] $Identity, [string] $Kind, [float[]
     if ($Image.Percepts.ContainsKey($Identity)) { return $Image.Percepts[$Identity] }
     if (-not $Identity -or -not $Kind -or $Key.Length -eq 0 -or @($Key | Where-Object { -not [float]::IsFinite($_) }).Count) { throw 'Percept identity, kind and finite key are required.' }
     $node = [pscustomobject]@{ PSTypeName = 'Kokoro.StudentPercept'; Image = $Image; Identity = $Identity; Kind = $Kind; Key = $Key; Parent = $Parent
-        State = 'Candidate'; Rules = [Collections.Generic.List[object]]::new(); Directions = [Collections.Generic.List[object]]::new()
+        State = 'Candidate'; Revision = 0; Rules = [Collections.Generic.List[object]]::new(); Directions = [Collections.Generic.List[object]]::new()
         Children = [Collections.Generic.List[object]]::new(); Examples = [Collections.Generic.List[object]]::new(); CounterExamples = [Collections.Generic.List[object]]::new()
         Recordings = [Collections.Generic.List[object]]::new(); RecordingEvidence = [Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
         Progression = [Collections.Generic.List[object]]::new(); Genealogy = [Collections.Generic.List[object]]::new() }
@@ -2586,6 +2672,7 @@ function New-StudentPercept($Image, [string] $Identity, [string] $Kind, [float[]
     }
     $node.Genealogy.Add([pscustomobject]@{ PSTypeName = 'Kokoro.StudentGenealogy'; Operation = 'Born'; Parent = $(if ($null -ne $Parent) { $Parent.Identity }); Evidence = @(); Step = 'Percepts'; MachineSHA256 = $script:StudentMachineSHA256 })
     $Image.Changed = $true
+    Publish-StudentPercept $Image $node.Identity
     $node
 }
 
@@ -2603,7 +2690,7 @@ function Add-StudentImageObservation($Image, [string] $Percept, $Observation, [s
     $node = $Image.Percepts[$Percept]
     $collection = $node.Examples
     if ($Role -ceq 'CounterExample') { $collection = $node.CounterExamples }
-    if (-not $collection.Contains($evidence)) { $collection.Add($evidence); $Image.Changed = $true }
+    if (-not $collection.Contains($evidence)) { $collection.Add($evidence); Publish-StudentPercept $Image $node.Identity }
     if ($node.Genealogy[0].Evidence.Count -eq 0) { $node.Genealogy[0].Evidence = @($evidence.Identity) }
     $evidence
 }
@@ -2666,7 +2753,7 @@ function Save-StudentImage($Image, [string] $Path = '') {
     $Path = [IO.Path]::GetFullPath($Path); [void][IO.Directory]::CreateDirectory([IO.Path]::GetDirectoryName($Path))
     # Flatten graph references only at the image boundary. The loader reconstructs one shared live object per identity.
     $nodes = @(foreach ($node in $Image.Percepts.Values) {
-        [pscustomobject]@{ Identity = $node.Identity; Kind = $node.Kind; Key = $node.Key; State = $node.State
+        [pscustomobject]@{ Identity = $node.Identity; Kind = $node.Kind; Key = $node.Key; State = $node.State; Revision = $node.Revision
             Parent = [string]$(if ($null -ne $node.Parent) { $node.Parent.Identity }); Rules = $node.Rules.ToArray(); Directions = $node.Directions.ToArray()
             Examples = @($node.Examples | ForEach-Object Identity); CounterExamples = @($node.CounterExamples | ForEach-Object Identity)
             Recordings = @($node.Recordings | ForEach-Object { [pscustomobject]@{ Occurrence = $_.Occurrence; Performance = $_.PerformanceIdentity; Evidence = $_.Evidence.Identity } }); Genealogy = $node.Genealogy.ToArray() }
@@ -2677,7 +2764,8 @@ function Save-StudentImage($Image, [string] $Path = '') {
         if ($seenEdges.Add($edgeIdentity)) { [pscustomobject]@{ Kind = $edge.Kind; From = $edge.From.Identity; To = $edge.To.Identity; Admitted = $edge.Admitted } }
     } })
     $snapshot = [pscustomobject]@{ PSTypeName = 'Kokoro.StudentImageSnapshot'; Pinned = $Image.Pinned; ActiveStyle = $Image.ActiveStyle; Percepts = $nodes
-        Evidence = @($Image.Evidence.Values); Progression = $edges; Performances = @($Image.Performances.GetEnumerator() | ForEach-Object { [pscustomobject]@{ Identity = $_.Key; Performance = $_.Value } }) }
+        Evidence = @($Image.Evidence.Values); Progression = $edges; Performances = @($Image.Performances.GetEnumerator() | ForEach-Object { [pscustomobject]@{ Identity = $_.Key; Performance = $_.Value } })
+        Decisions = @($Image.Decisions.Values); Pending = @($Image.Pending) }
     $pending = $Path + '.pending-' + [Guid]::NewGuid().ToString('N')
     $serialized = [Management.Automation.PSSerializer]::Serialize($snapshot, 40)
     $stream = [IO.File]::Open($pending, [IO.FileMode]::CreateNew)
@@ -2740,6 +2828,15 @@ function Open-StudentImage([string] $Path) {
         foreach ($edge in $snapshot.Progression) { $null = Add-StudentProgression $image $edge.Kind $edge.From $edge.To ([bool]$edge.Admitted) }
     }
     $image.Pinned = [string]$snapshot.Pinned; $image.Changed = $false
+    foreach ($saved in $snapshot.Percepts) { if ($saved.PSObject.Properties['Revision']) { $image.Percepts[[string]$saved.Identity].Revision = [int]$saved.Revision } }
+    if ($snapshot.PSObject.Properties['Decisions']) {
+        foreach ($saved in $snapshot.Decisions) {
+            $decision = ConvertFrom-StudentStored $saved; $history = [Collections.Generic.List[object]]::new()
+            foreach ($entry in @($decision.History)) { $history.Add($entry) }; $decision.History = $history
+            $image.Decisions.Add([string]$decision.Identity, $decision); Register-StudentDecision $image $decision
+        }
+        foreach ($identity in $snapshot.Pending) { if (-not $image.Decisions.ContainsKey([string]$identity)) { throw 'Pending interpretation has no stored decision.' }; [void]$image.Pending.Add([string]$identity) }
+    }
     if ($snapshot.PSObject.Properties['ActiveStyle']) { $image.ActiveStyle = [string]$snapshot.ActiveStyle }
     $image
 }
@@ -2924,6 +3021,7 @@ function Invoke-StudentRuleLearning($Image) {
                 if ($rule.State -ceq 'Admitted') { foreach ($old in $existing) { $old.State = 'Superseded' } }
             }
             $node.Rules.Add($rule)
+            Publish-StudentPercept $Image $node.Identity
             $node.Genealogy.Add([pscustomobject]@{ PSTypeName = 'Kokoro.StudentGenealogy'; Operation = $rule.State; Rule = $ruleIdentity; Evidence = @($train.Identity); HeldOut = @($heldOut.Identity); Step = 'Learn' })
             foreach ($observation in $kindGroup.Group) {
                 $agreement = [Math]::Abs($observation.Measured.PauseSeconds - $rule.PauseSeconds) -le 0.05
@@ -2960,6 +3058,7 @@ function Invoke-StudentLearning {
     Add-StudentBoundaryObservations $image
     $programs = @(Invoke-StudentRuleLearning $image)
     $image.Pin('Boundary')
+    $null = Invoke-StudentReconsideration $image
     [pscustomobject]@{ PSTypeName = 'Kokoro.StudentLearning'; Image = $image; Programs = $programs
         SeededRules = @($image.Percepts.Values | Where-Object Kind -CEQ 'ProsodyRule').Count
         BoundaryObservations = $image.Percepts['Boundary'].Examples.Count + $image.Percepts['Boundary'].CounterExamples.Count
@@ -2969,18 +3068,29 @@ function Invoke-StudentLearning {
 }
 
 Update-TypeData -TypeName 'Kokoro.StudentImage' -MemberType ScriptMethod -MemberName Learn -Value {
-    & $this.Owner { param($Image); Invoke-StudentRuleLearning $Image } $this
+    & $this.Owner { param($Image); $result = Invoke-StudentRuleLearning $Image; $null = Invoke-StudentReconsideration $Image; $result } $this
 } -Force
 Update-TypeData -TypeName 'Kokoro.StudentImage' -MemberType ScriptMethod -MemberName Classify -Value {
     param([float[]] $Features)
-    & $this.Owner { param($Image, $Values); Invoke-StudentAcousticProgram $Image $Values } $this $Features
+    & $this.Owner { param($Image, $Values); $null = Invoke-StudentReconsideration $Image; Invoke-StudentAcousticProgram $Image $Values } $this $Features
 } -Force
 Update-TypeData -TypeName 'Kokoro.StudentImage' -MemberType ScriptMethod -MemberName LearnContrast -Value {
-    & $this.Owner { param($Image); Update-StudentAcousticProgram $Image } $this
+    & $this.Owner { param($Image); $result = Update-StudentAcousticProgram $Image; $null = Invoke-StudentReconsideration $Image; $result } $this
 } -Force
 Update-TypeData -TypeName 'Kokoro.StudentImage' -MemberType ScriptMethod -MemberName Apply -Value {
     param($Context)
-    & $this.Owner { param($Image, $TypedContext); Invoke-StudentProsodyProgram $Image $TypedContext } $this $Context
+    & $this.Owner { param($Image, $TypedContext); $null = Invoke-StudentReconsideration $Image; Invoke-StudentProsodyProgram $Image $TypedContext } $this $Context
+} -Force
+Update-TypeData -TypeName 'Kokoro.StudentImage' -MemberType ScriptMethod -MemberName Decide -Value {
+    param([string] $Identity, [string] $Kind, $Context, [string[]] $Dependencies)
+    & $this.Owner { param($Image, $DecisionId, $DecisionKind, $DecisionContext, $Required); New-StudentDecision $Image $DecisionId $DecisionKind $DecisionContext $Required } $this $Identity $Kind $Context $Dependencies
+} -Force
+Update-TypeData -TypeName 'Kokoro.StudentImage' -MemberType ScriptMethod -MemberName Reconsider -Value {
+    & $this.Owner { param($Image); Invoke-StudentReconsideration $Image } $this
+} -Force
+Update-TypeData -TypeName 'Kokoro.StudentImage' -MemberType ScriptMethod -MemberName Publish -Value {
+    param([string] $Identity)
+    & $this.Owner { param($Image, $PerceptId); Publish-StudentPercept $Image $PerceptId } $this $Identity
 } -Force
 
 Update-TypeData -TypeName 'Kokoro.StudentImage' -MemberType ScriptMethod -MemberName Observe -Value {
@@ -3031,6 +3141,7 @@ $script:StudentSteps = [ordered]@{
     Learn = { Invoke-StudentLearning }
     Audit = { Invoke-StudentAlignmentAudit }
     Discriminate = { Invoke-StudentDiscrimination }
+    Reconsider = { $image = Invoke-StudentPercepts; $image.Reconsider() }
 }
 }
 & $studentOwner { & $script:StudentSteps[$Step] }
