@@ -19,8 +19,9 @@ Steps:
             build/student/syllabus, and each resolved token span as a typed occurrence with its ticks.
   Recordings Decode the human recordings under -Recordings (MP3) to WAV beside them (48 kHz, two channels,
             16-bit: the Windows media transcoder's only accepted WAV profile); returns each file's frames and seconds.
-  Listen    From -Recordings alone: pitch, level and voicing per 10 ms as notes and rests, written under its listen
-            subdirectory as an MPE MIDI file and a preview WAV of the tracked melody (-RecordingLimit files).
+  Listen    From -Recordings alone: pitch, level and voicing, exported as MPE MIDI and a native controller recording.
+  Stems     Render -State (a controller recording or Listen result) through the host contact emulator, with synchronized
+            audio and MIDI per contact. Without State, measure deterministic controller coverage and round-trip gates.
 .PARAMETER Corpus
 Corpus directory for Pronunciation; defaults to the latest build/corpus-* with corpus.clixml.
 .PARAMETER ParagraphLimit
@@ -55,7 +56,7 @@ Run from a PowerShell prompt: pwsh -File passes every argument as a string, so a
 #requires -Version 7.7
 [CmdletBinding()]
 param(
-    [ValidateSet('Console', 'Render', 'Corpus', 'Pronunciation', 'Normalize', 'Syllabus', 'Recordings', 'Listen')][string] $Step = 'Console',
+    [ValidateSet('Console', 'Render', 'Corpus', 'Pronunciation', 'Normalize', 'Syllabus', 'Recordings', 'Listen', 'Stems')][string] $Step = 'Console',
     [ValidateRange(2, 64)][int] $Threads = [Math]::Max(2, [Environment]::ProcessorCount),
     [string] $Text = '',
     [string] $Voice = 'af_heart',
@@ -125,6 +126,24 @@ $script:StudentProsodyRules = @(
         Established = 'Subject'; Awaited = 'Predicate'; Preference = 'Continuation'; Confidence = 'Medium' }
 )
 
+# The physical recording is independent of a renderer. Only its wire projection is quantized.
+# Offsets follow the 12-byte controller shape; these mappings are diagnostic contacts pending voice calibration.
+$script:StudentController = [ordered]@{
+    TickSeconds = 0.0125; SampleRate = 24000; SamplesPerTick = 300; RecordBytes = 12
+    WireEncoding = 'Little endian: UInt16 buttons, two UInt8 triggers, four Int16 axes; linear declared ranges'
+    Buttons = [ordered]@{ Active = 1; Voiced = 2; NoteOn = 4; Rest = 8; Normal = 16; Slow = 32; Fast = 64 }
+    Controls = @(
+        [pscustomobject]@{ Name = 'LevelDb'; Unit = 'dBFS'; Offset = 2; Bytes = 1; Minimum = -96.0; Maximum = 0.0 }
+        [pscustomobject]@{ Name = 'Aperiodicity'; Unit = 'ratio'; Offset = 3; Bytes = 1; Minimum = 0.0; Maximum = 1.0 }
+        [pscustomobject]@{ Name = 'PitchHz'; Unit = 'hertz'; Offset = 4; Bytes = 2; Minimum = 0.0; Maximum = 1000.0 }
+        [pscustomobject]@{ Name = 'Coefficient'; Unit = 'coefficient axis'; Offset = 6; Bytes = 2; Minimum = -1.0; Maximum = 1.0 }
+        [pscustomobject]@{ Name = 'TiltDb'; Unit = 'dB/octave'; Offset = 8; Bytes = 2; Minimum = -24.0; Maximum = 0.0 }
+        [pscustomobject]@{ Name = 'TimeSeconds'; Unit = 'seconds (reserved, zero)'; Offset = 10; Bytes = 2; Minimum = 0.0; Maximum = 0.0 }
+    )
+    Contacts = @('Harmonic', 'Noise', 'Events', 'Coefficient')
+    PitchToleranceCents = 35.0; BoundaryToleranceTicks = 0
+}
+
 function New-StudentOutputDirectory([string] $Name) {
     $directory = Join-Path $script:StudentBuild ('{0}-{1:yyyyMMddTHHmmss}' -f $Name, [DateTime]::UtcNow)
     if (Test-Path -LiteralPath $directory) { throw "Output directory already exists: $directory" }
@@ -162,8 +181,7 @@ function Get-StudentVoices {
 
 function ConvertTo-StudentWave([float[]] $Pcm) {
     # 24 kHz mono PCM16, rounded and saturated.
-    $samples = [short[]]::new($Pcm.Length)
-    for ($i = 0; $i -lt $Pcm.Length; $i++) { $samples[$i] = [short][Math]::Clamp([Math]::Round([double]$Pcm[$i] * 32768.0), -32768.0, 32767.0) }
+    $samples = (Import-StudentKernels).Pcm16.Invoke($Pcm)
     $memory = [IO.MemoryStream]::new(); $writer = [IO.BinaryWriter]::new($memory)
     $writer.Write([Text.Encoding]::ASCII.GetBytes('RIFF')); $writer.Write([int](36 + 2 * $samples.Length))
     $writer.Write([Text.Encoding]::ASCII.GetBytes('WAVEfmt ')); $writer.Write([int]16)
@@ -562,91 +580,78 @@ class StudentTextKernels {
         }
         return $out
     }
-    static [float[]] LpcTrack([float[]] $x, [int] $hop, [int] $window, [int] $order) {
-        # Linear prediction per frame (autocorrelation method, Levinson-Durbin) on a pre-emphasized (0.97), Hamming-windowed
-        # frame: order + 1 values per frame, the residual RMS then predictor coefficients a1..ap (y[n] = e[n] - sum a_k y[n-k]).
-        $frames = [int][Math]::Floor([double]($x.Length - $window) / [double]$hop); if ($frames -lt 0) { $frames = 0 }
-        $out = [float[]]::new(($order + 1) * $frames); $frame = [double[]]::new($window); $r = [double[]]::new($order + 1)
-        $a = [double[]]::new($order + 1); $previous = [double[]]::new($order + 1)
+    static [short[]] Pcm16([float[]] $signal) {
+        $out = [short[]]::new($signal.Length)
+        for ($i = 0; $i -lt $signal.Length; $i++) {
+            $value = [Math]::Round([double]$signal[$i] * 32768.0)
+            $out[$i] = [short][Math]::Clamp($value, -32768.0, 32767.0)
+        }
+        return $out
+    }
+    static [float[]] CoefficientTrack([float[]] $signal) {
+        # Recover the fixed tone's first two harmonics in physical units by Fourier projection.
+        # Triangle fundamental amplitude is 8/pi^2; the signed second/fundamental ratio encodes the axis.
+        $frames = [int][Math]::Floor([double]$signal.Length / 300.0); $out = [float[]]::new(2 * $frames)
         for ($f = 0; $f -lt $frames; $f++) {
-            $start = $f * $hop
-            for ($j = 0; $j -lt $window; $j++) {
-                $before = 0.0; if ($start + $j -gt 0) { $before = [double]$x[$start + $j - 1] }
-                $frame[$j] = ([double]$x[$start + $j] - 0.97 * $before) * (0.54 - 0.46 * [Math]::Cos(2.0 * [Math]::PI * [double]$j / [double]($window - 1)))
+            $fundamental = 0.0; $second = 0.0
+            for ($j = 0; $j -lt 300; $j++) {
+                $angle = 2.0 * [Math]::PI * [double](300 * $f + $j + 1) / 24.0
+                $value = [double]$signal[300 * $f + $j]
+                $fundamental = $fundamental - $value * [Math]::Cos($angle) / 150.0
+                $second = $second - $value * [Math]::Cos(2.0 * $angle) / 150.0
             }
-            for ($k = 0; $k -le $order; $k++) { $sum = 0.0; for ($j = $k; $j -lt $window; $j++) { $sum = $sum + $frame[$j] * $frame[$j - $k] }; $r[$k] = $sum }
-            $r[0] = $r[0] * 1.0001 + 1e-9
-            for ($k = 0; $k -le $order; $k++) { $a[$k] = 0.0 }
-            $residual = $r[0]
-            $stable = $true
-            for ($i = 1; $i -le $order -and $stable; $i++) {
-                $acc = $r[$i]; for ($k = 1; $k -lt $i; $k++) { $acc = $acc - $a[$k] * $r[$i - $k] }
-                $reflection = $acc / $residual
-                # A reflection coefficient at +-1 would make the filter unstable: keep the order reached so far.
-                if ([Math]::Abs($reflection) -ge 0.999) { $stable = $false; continue }
-                for ($k = 1; $k -lt $i; $k++) { $previous[$k] = $a[$k] }
-                $a[$i] = $reflection
-                for ($k = 1; $k -lt $i; $k++) { $a[$k] = $previous[$k] - $reflection * $previous[$i - $k] }
-                $residual = $residual * (1.0 - $reflection * $reflection)
+            if ([Math]::Abs($fundamental) -gt 0.00001) {
+                $axis = 2.0 * $second / $fundamental
+                $out[2 * $f] = [float]$axis
+                if ([Math]::Abs($axis) -gt 0.1) { $out[2 * $f + 1] = [float]($fundamental * [Math]::PI * [Math]::PI / (1.6 * [Math]::Abs($axis))) }
             }
-            $out[($order + 1) * $f] = [float][Math]::Sqrt([Math]::Max($residual, 0.0) / [double]$window)
-            for ($k = 1; $k -le $order; $k++) { $out[($order + 1) * $f + $k] = [float](-$a[$k]) }
         }
         return $out
     }
-    static [short[]] LpcRender([float[]] $pitch, [float[]] $lpc, [int] $hop, [int] $rate, [int] $order, [double] $gain, [int] $seed) {
-        # LPC vocoder: per frame, a pulse train at f0 (voiced) or white noise (f0 0) scaled by the residual RMS, through the
-        # frame's all-pole filter, then de-emphasis (0.97). Noise from a sine hash of the sample index plus $seed (floating point only).
-        $frames = [int][Math]::Min([double]$pitch.Length, [double][Math]::Floor([double]$lpc.Length / [double]($order + 1))); $count = $frames * $hop
-        $out = [short[]]::new($count); $y = [double[]]::new($order + 1); $phase = 0.0
-        $emphasis = 0.0; $lastIn = 0.0; $lastOut = 0.0; $peak = 0.0; $buffer = [double[]]::new($count)
-        for ($n = 0; $n -lt $count; $n++) {
-            $f = [int][Math]::Floor([double]$n / [double]$hop)
-            $level = [double]$lpc[($order + 1) * $f]; $f0 = [double]$pitch[$f]; $excitation = 0.0
-            if ($f0 -gt 0.0) {
-                $period = [double]$rate / $f0
-                $phase = $phase + 1.0; if ($phase -ge $period) { $phase = $phase - $period; $excitation = $level * [Math]::Sqrt($period) }
+    static [float[]] ContactStem([float[]] $controls, [int] $contact, [int] $seed) {
+        # Host emulator, not a generator approximation. Eight physical values per tick:
+        # pitch, dBFS, aperiodicity, coefficient, tilt, seconds, buttons, response gain.
+        # Integer phase and counter noise are independent of file and tile boundaries.
+        $frames = [int][Math]::Floor([double]$controls.Length / 8.0)
+        $out = [float[]]::new($frames * 300); $phase = 0; $tonePhase = 0; $previousButtons = 16
+        for ($f = 0; $f -lt $frames; $f++) {
+            $offset = 8 * $f; $buttons = [int]$controls[$offset + 6]
+            $step = [int][Math]::Round([double]$controls[$offset] * 1048576.0 / 24000.0)
+            $gain = [Math]::Pow(10.0, [double]$controls[$offset + 1] / 20.0)
+            $brightness = [Math]::Pow(10.0, [double]$controls[$offset + 4] / 20.0)
+            $axis = [double]$controls[$offset + 3]; $response = [double]$controls[$offset + 7]
+            for ($j = 0; $j -lt 300; $j++) {
+                $position = 300 * $f + $j; $value = 0.0
+                $phase = ($phase + $step) -band 1048575; $tonePhase = ($tonePhase + 1) % 24
+                if ($contact -eq 0 -and ($buttons -band 3) -eq 3) {
+                    $shape = 1.0 - 4.0 * [Math]::Abs([double]$phase / 1048576.0 - 0.5)
+                    $second = 1.0 - 4.0 * [Math]::Abs([double](($phase * 2) -band 1048575) / 1048576.0 - 0.5)
+                    $value = $gain * ($shape + 0.25 * $brightness * $second)
+                }
+                if ($contact -eq 1 -and ($buttons -band 1) -eq 1 -and ($buttons -band 2) -eq 0) {
+                    $counter = (($position % 65521) + ($seed % 65521) + 65521) % 65521
+                    $counter = (($counter * 251) + 13849) % 65521
+                    $counter = ($counter -bxor (($counter -shl 7) -band 65535)) -band 65535
+                    $value = $gain * [double]$controls[$offset + 2] * (2.0 * [double]$counter / 65535.0 - 1.0)
+                }
+                if ($contact -eq 2 -and $j -eq 0 -and (($buttons -band 12) -ne 0 -or ($buttons -band 112) -ne ($previousButtons -band 112))) { $value = 0.5 }
+                if ($contact -eq 3) {
+                    $shape = 1.0 - 4.0 * [Math]::Abs([double]$tonePhase / 24.0 - 0.5)
+                    $second = 1.0 - 4.0 * [Math]::Abs([double](($tonePhase * 2) % 24) / 24.0 - 0.5)
+                    $value = 0.2 * $response * [Math]::Abs($axis) * ($shape + $axis * $second * 0.5)
+                }
+                $out[$position] = [float]$value
             }
-            else {
-                $hash = [Math]::Sin([double]($n + $seed) * 12.9898) * 43758.5453; $excitation = $level * (2.0 * ($hash - [Math]::Floor($hash)) - 1.0) * 1.7320508
-            }
-            $value = $excitation
-            for ($k = 1; $k -le $order; $k++) { $value = $value + [double]$lpc[($order + 1) * $f + $k] * $y[$k] }
-            # Coefficients change between frames; if the filter state ever leaves finite range, start it again.
-            if ([double]::IsNaN($value) -or [double]::IsInfinity($value) -or [Math]::Abs($value) -gt 1000.0) { $value = 0.0; for ($k = 1; $k -le $order; $k++) { $y[$k] = 0.0 }; $emphasis = 0.0 }
-            for ($k = $order; $k -gt 1; $k--) { $y[$k] = $y[$k - 1] }
-            $y[1] = $value
-            $emphasis = $value + 0.97 * $emphasis
-            # DC blocker after de-emphasis, which integrates low frequencies.
-            $blocked = $emphasis - $lastIn + 0.995 * $lastOut; $lastIn = $emphasis; $lastOut = $blocked
-            $buffer[$n] = $blocked; $peak = $peak + $blocked * $blocked
-        }
-        # Normalized to the recording's own RMS: $gain is the target RMS as a fraction of full scale; rare peaks are clamped.
-        $scale = 0.0; if ($peak -gt 0.0) { $scale = $gain * 32767.0 / [Math]::Sqrt($peak / [double]$count) }
-        for ($n = 0; $n -lt $count; $n++) {
-            $sample = $buffer[$n] * $scale; if ($sample -gt 32767.0) { $sample = 32767.0 }; if ($sample -lt -32767.0) { $sample = -32767.0 }
-            $out[$n] = [short][Math]::Round($sample)
+            $previousButtons = $buttons
         }
         return $out
     }
-    static [short[]] RenderTrack([float[]] $track, [int] $hop, [int] $rate, [int] $harmonics, [double] $gain) {
-        # A preview instrument: per frame (f0 Hz, level) pairs played as a harmonic tone (1/h amplitudes, below
-        # Nyquist), both interpolated between frames; silent where f0 is 0.
-        $frames = [int][Math]::Floor([double]$track.Length / 2.0); $count = $frames * $hop
-        $out = [short[]]::new($count); $phase = 0.0; $turn = 2.0 * [Math]::PI
-        for ($n = 0; $n -lt $count; $n++) {
-            $f = [int][Math]::Floor([double]$n / [double]$hop); $w = [double]($n - $f * $hop) / [double]$hop
-            $g = $f + 1; if ($g -ge $frames) { $g = $f }
-            $f0a = [double]$track[2 * $f]; $f0b = [double]$track[2 * $g]
-            $f0 = $f0a; if ($f0a -gt 0.0 -and $f0b -gt 0.0) { $f0 = $f0a + ($f0b - $f0a) * $w }
-            $level = [double]$track[2 * $f + 1] + ([double]$track[2 * $g + 1] - [double]$track[2 * $f + 1]) * $w
-            $value = 0.0
-            if ($f0 -gt 0.0) {
-                $phase = $phase + $turn * $f0 / [double]$rate; if ($phase -gt $turn) { $phase = $phase - $turn }
-                for ($h = 1; $h -le $harmonics; $h++) { if ([double]$h * $f0 -lt [double]$rate / 2.0) { $value = $value + [Math]::Sin([double]$h * $phase) / [double]$h } }
-            }
-            $sample = $value * $level * $gain * 32767.0; if ($sample -gt 32767.0) { $sample = 32767.0 }; if ($sample -lt -32767.0) { $sample = -32767.0 }
-            $out[$n] = [short][Math]::Round($sample)
+    static [float[]] FrameLevels([float[]] $signal, [int] $hop) {
+        $count = [int][Math]::Floor([double]$signal.Length / [double]$hop); $out = [float[]]::new($count)
+        for ($f = 0; $f -lt $count; $f++) {
+            $sum = 0.0
+            for ($j = 0; $j -lt $hop; $j++) { $value = [double]$signal[$f * $hop + $j]; $sum = $sum + $value * $value }
+            $out[$f] = [float][Math]::Sqrt($sum / [double]$hop)
         }
         return $out
     }
@@ -821,9 +826,11 @@ function Import-StudentKernels {
         StressFirstVowel = $type.GetMethod('StressFirstVowel').CreateDelegate([Func[string,string,string]])
         MonoDecimate = $type.GetMethod('MonoDecimate').CreateDelegate([Func[byte[],int,int,float[],int,float[]]])
         PitchTrack = $type.GetMethod('PitchTrack').CreateDelegate([Func[float[],int,int,int,int,int,double,float[]]])
-        RenderTrack = $type.GetMethod('RenderTrack').CreateDelegate([Func[float[],int,int,int,double,short[]]])
-        LpcTrack = $type.GetMethod('LpcTrack').CreateDelegate([Func[float[],int,int,int,float[]]])
-        LpcRender = $type.GetMethod('LpcRender').CreateDelegate([Func[float[],float[],int,int,int,double,int,short[]]]) }
+        ContactStem = $type.GetMethod('ContactStem').CreateDelegate([Func[float[],int,int,float[]]])
+        FrameLevels = $type.GetMethod('FrameLevels').CreateDelegate([Func[float[],int,float[]]])
+        Pcm16 = $type.GetMethod('Pcm16').CreateDelegate([Func[float[],short[]]])
+        CoefficientTrack = $type.GetMethod('CoefficientTrack').CreateDelegate([Func[float[],float[]]])
+    }
     $script:StudentContext.Kernels
 }
 
@@ -1542,11 +1549,192 @@ function Get-StudentWavLayout([string] $Path) {
     [pscustomobject]@{ Data = $data + 8; Frames = [int]([long][BitConverter]::ToUInt32($head, $data + 4) / 4) }
 }
 
+function New-StudentControllerRecording([object[]] $Events, [int] $Ticks, [string] $Provenance, [int] $Seed) {
+    if ($Ticks -le 0 -or $Ticks -gt [int]::MaxValue / 300) { throw 'Controller duration is outside the audio buffer range.' }
+    $previousTick = -1
+    foreach ($event in $Events) {
+        if ($event.Tick -ne [Math]::Truncate([double]$event.Tick) -or $event.Tick -le $previousTick -or $event.Tick -ge $Ticks) { throw 'Controller events must have increasing integer ticks within the performance.' }
+        $previousTick = $event.Tick
+        if ($event.Buttons -lt 0 -or $event.Buttons -gt 127) { throw 'Controller button bits are not declared.' }
+        if (@(16, 32, 64) -notcontains ($event.Buttons -band 112)) { throw 'Select exactly one response mode.' }
+        foreach ($control in $script:StudentController.Controls) {
+            $value = [double]$event.($control.Name)
+            if (-not [double]::IsFinite($value) -or $value -lt $control.Minimum -or $value -gt $control.Maximum) { throw "Controller $($control.Name) is outside its declared physical range." }
+        }
+        if (($event.Buttons -band 2) -ne 0 -and (($event.Buttons -band 1) -eq 0 -or $event.PitchHz -le 0)) { throw 'Voicing requires an active contact and positive pitch.' }
+    }
+    if ($Events.Count -eq 0 -or $Events[0].Tick -ne 0) { throw 'Controller recording needs its initial state at tick zero.' }
+    [pscustomobject]@{ PSTypeName = 'Kokoro.StudentControllerRecording'; Layout = $script:StudentController
+        Ticks = $Ticks; Events = $Events; Seed = $Seed; Provenance = $Provenance
+        MachineSHA256 = (Get-FileHash -LiteralPath $StudentOwnerPath).Hash
+        KernelSHA256 = (Import-StudentKernels).SHA256 }
+}
+
+function Expand-StudentController($Performance) {
+    # Held analog state; note-on and rest are one-tick impulses. The store retains physical values.
+    $frames = [float[]]::new(8 * $Performance.Ticks); $wire = [byte[]]::new(12 * $Performance.Ticks)
+    $index = 0; $held = $Performance.Events[0]
+    for ($tickIndex = 0; $tickIndex -lt $Performance.Ticks; $tickIndex++) {
+        $changed = $index -lt $Performance.Events.Count -and $Performance.Events[$index].Tick -eq $tickIndex
+        if ($changed) { $held = $Performance.Events[$index]; $index++ }
+        $buttons = [int]$held.Buttons; if (-not $changed) { $buttons = $buttons -band 115 }
+        $base = 8 * $tickIndex
+        $frames[$base] = $held.PitchHz; $frames[$base + 1] = $held.LevelDb; $frames[$base + 2] = $held.Aperiodicity
+        $frames[$base + 3] = $held.Coefficient; $frames[$base + 4] = $held.TiltDb; $frames[$base + 5] = $held.TimeSeconds
+        $frames[$base + 6] = $buttons; $frames[$base + 7] = switch ($buttons -band 112) { 32 { 0.25 }; 16 { 0.5 }; 64 { 1.0 } }
+        $wire[12 * $tickIndex] = [byte]$buttons
+        foreach ($control in $Performance.Layout.Controls) {
+            $fraction = 0.0
+            if ($control.Maximum -gt $control.Minimum) { $fraction = ([double]$held.($control.Name) - $control.Minimum) / ($control.Maximum - $control.Minimum) }
+            $offset = 12 * $tickIndex + $control.Offset
+            if ($control.Bytes -eq 1) { $wire[$offset] = [byte][Math]::Round(255 * $fraction) }
+            else {
+                $signed = 0
+                if ($control.Maximum -gt $control.Minimum) { $signed = [int][Math]::Round(65534 * $fraction) - 32767 }
+                $wire[$offset] = [byte]($signed -band 255); $wire[$offset + 1] = [byte](($signed -shr 8) -band 255)
+            }
+        }
+    }
+    [pscustomobject]@{ Frames = $frames; Wire = $wire }
+}
+
+function Export-StudentStemMidi($Performance, [float[]] $Frames, [int] $Contact, [string] $Path) {
+    # MIDI 1.0 inspection only. 80 PPQN at 1 second/quarter makes one MIDI tick one generator tick.
+    $body = [IO.MemoryStream]::new(); $previous = 0; $activeNote = -1
+    $writeEvent = {
+        param([int] $At, [byte[]] $Bytes)
+        $delta = $At - $script:stemMidiTick; $script:stemMidiTick = $At
+        $vlq = [Collections.Generic.List[byte]]::new(); $vlq.Insert(0, [byte]($delta -band 127)); $delta = $delta -shr 7
+        while ($delta -gt 0) { $vlq.Insert(0, [byte](($delta -band 127) -bor 128)); $delta = $delta -shr 7 }
+        $body.Write($vlq.ToArray()); $body.Write($Bytes)
+    }
+    $script:stemMidiTick = 0
+    & $writeEvent 0 ([byte[]](255, 81, 3, 15, 66, 64))
+    # Member channel 2, +-48 semitone pitch-bend range.
+    & $writeEvent 0 ([byte[]](176, 101, 0, 176, 100, 6, 176, 6, 1))
+    & $writeEvent 0 ([byte[]](177, 101, 0, 177, 100, 0, 177, 6, 48, 177, 38, 0))
+    for ($tickIndex = 0; $tickIndex -lt $Performance.Ticks; $tickIndex++) {
+        $offset = 8 * $tickIndex; $buttons = [int]$Frames[$offset + 6]
+        $on = switch ($Contact) {
+            0 { ($buttons -band 3) -eq 3 }
+            1 { ($buttons -band 3) -eq 1 }
+            2 { ($buttons -band 12) -ne 0 -or ($buttons -band 112) -ne $previous }
+            3 { [Math]::Abs($Frames[$offset + 3]) -gt 0 }
+        }
+        if ($activeNote -ge 0 -and (-not $on -or ($buttons -band 4) -ne 0 -or $Contact -eq 2)) { & $writeEvent $tickIndex ([byte[]](129, $activeNote, 0)); $activeNote = -1 }
+        $pitch = if ($Contact -eq 0) { [double]$Frames[$offset] } elseif ($Contact -eq 3) { 1000.0 } else { 440.0 }
+        if ($on -and $pitch -gt 0) {
+            $semitones = 69 + 12 * [Math]::Log($pitch / 440, 2)
+            if ($activeNote -lt 0) { $activeNote = [int][Math]::Clamp([Math]::Round($semitones), 0, 127); & $writeEvent $tickIndex ([byte[]](145, $activeNote, 96)) }
+            $bendValue = [int][Math]::Clamp([Math]::Round(8192 + ($semitones - $activeNote) * 8192 / 48), 0, 16383)
+            & $writeEvent $tickIndex ([byte[]](225, ($bendValue -band 127), ($bendValue -shr 7)))
+            & $writeEvent $tickIndex ([byte[]](177, 74, [int][Math]::Clamp([Math]::Round(127 * ($Frames[$offset + 3] + 1) / 2), 0, 127)))
+            & $writeEvent $tickIndex ([byte[]](209, [int][Math]::Clamp([Math]::Round(127 * ($Frames[$offset + 1] + 96) / 96), 0, 127)))
+            & $writeEvent $tickIndex ([byte[]](177, 71, [int][Math]::Clamp([Math]::Round(127 * ($Frames[$offset + 4] + 24) / 24), 0, 127)))
+            & $writeEvent $tickIndex ([byte[]](177, 1, [int][Math]::Clamp([Math]::Round(127 * $Frames[$offset + 2]), 0, 127)))
+        }
+        $previous = $buttons -band 112
+    }
+    if ($activeNote -ge 0) { & $writeEvent $Performance.Ticks ([byte[]](129, $activeNote, 0)) }
+    & $writeEvent $Performance.Ticks ([byte[]](255, 47, 0))
+    $big = { param([int] $Value, [int] $Count) [byte[]]@(for ($i = $Count - 1; $i -ge 0; $i--) { ($Value -shr (8 * $i)) -band 255 }) }
+    [IO.File]::WriteAllBytes($Path, [byte[]]([Text.Encoding]::ASCII.GetBytes('MThd') + (& $big 6 4) + (& $big 0 2) + (& $big 1 2) + (& $big 80 2) + [Text.Encoding]::ASCII.GetBytes('MTrk') + (& $big $body.Length 4) + $body.ToArray()))
+    $body.Dispose()
+}
+
+function Invoke-StudentStems($Performance = $State, [string] $Destination = '') {
+    $kernels = Import-StudentKernels
+    if ($null -ne $Performance -and $Performance.PSObject.Properties['Controller']) { $Performance = $Performance.Controller }
+    if ($null -eq $Performance) {
+        # Arithmetic coverage of contacts, modes, pitches and rests; no text selected for the test.
+        $events = @(for ($caseIndex = 0; $caseIndex -lt 24; $caseIndex++) {
+            $mode = @(16, 32, 64)[$caseIndex % 3]; $unvoiced = $caseIndex % 4 -eq 3
+            [pscustomobject]@{ PSTypeName = 'Kokoro.StudentControllerEvent'; Tick = 16 * $caseIndex; Buttons = $mode + $(if ($unvoiced) { 5 } else { 7 })
+                PitchHz = $(if ($unvoiced) { 0.0 } else { 80.0 + ($caseIndex * 97 % 400) }); LevelDb = -18.0
+                Aperiodicity = $(if ($unvoiced) { 1.0 } else { 0.0 }); Coefficient = ($caseIndex % 9 - 4) / 4.0; TiltDb = -12.0; TimeSeconds = 0.0 }
+            [pscustomobject]@{ PSTypeName = 'Kokoro.StudentControllerEvent'; Tick = 16 * $caseIndex + 12; Buttons = $mode + 8
+                PitchHz = 0.0; LevelDb = -96.0; Aperiodicity = 0.0; Coefficient = 0.0; TiltDb = -12.0; TimeSeconds = 0.0 }
+        })
+        $Performance = New-StudentControllerRecording $events 384 'Student contact coverage' 1729
+    }
+    # Revalidate incoming physical recordings rather than trusting serialized type names.
+    $validated = New-StudentControllerRecording $Performance.Events $Performance.Ticks $Performance.Provenance $Performance.Seed
+    # Capture provenance stays attached to the original performance when a different renderer plays it.
+    $validated.MachineSHA256 = $Performance.MachineSHA256; $validated.KernelSHA256 = $Performance.KernelSHA256
+    $Performance = $validated
+    if (-not $Destination) { $Destination = New-StudentOutputDirectory 'student-stems' }
+    [void][IO.Directory]::CreateDirectory($Destination)
+    $expanded = Expand-StudentController $Performance
+    $stems = [Collections.Generic.List[object]]::new(); $signals = [Collections.Generic.List[object]]::new()
+    for ($contactIndex = 0; $contactIndex -lt $Performance.Layout.Contacts.Count; $contactIndex++) {
+        $name = $Performance.Layout.Contacts[$contactIndex]
+        $signal = $kernels.ContactStem.Invoke($expanded.Frames, $contactIndex, $Performance.Seed)
+        $replay = $kernels.ContactStem.Invoke($expanded.Frames, $contactIndex, $Performance.Seed)
+        $bytes = [byte[]](ConvertTo-StudentWave $signal); $replayedBytes = [byte[]](ConvertTo-StudentWave $replay)
+        $hash = [Convert]::ToHexString([Security.Cryptography.SHA256]::HashData($bytes))
+        if ($hash -cne [Convert]::ToHexString([Security.Cryptography.SHA256]::HashData($replayedBytes))) { throw 'Stem ghost replay differs.' }
+        $audioPath = Join-Path $Destination "$name.wav"; [IO.File]::WriteAllBytes($audioPath, $bytes)
+        $midiPath = Join-Path $Destination "$name.mpe.mid"; Export-StudentStemMidi $Performance $expanded.Frames $contactIndex $midiPath
+        # Score the quantized PCM actually written, not the unquantized synthesis buffer.
+        $samples = [short[]]::new($signal.Length); [Buffer]::BlockCopy($bytes, 44, $samples, 0, 2 * $samples.Length)
+        for ($sampleIndex = 0; $sampleIndex -lt $signal.Length; $sampleIndex++) { $signal[$sampleIndex] = [float]($samples[$sampleIndex] / 32768.0) }
+        $signals.Add($signal)
+        $stems.Add([pscustomobject]@{ PSTypeName = 'Kokoro.StudentStem'; Contact = $name; Audio = $audioPath; Midi = $midiPath; SHA256 = $hash; Samples = $signal.Length })
+    }
+    $harmonic = [float[]]$signals[0]; $padded = [float[]]::new($harmonic.Length + 1200); $harmonic.CopyTo($padded, 0)
+    $detected = $kernels.PitchTrack.Invoke($padded, 24000, 300, 600, 24, 343, 0.15)
+    $levels = $kernels.FrameLevels.Invoke($harmonic, 300); $noiseLevels = $kernels.FrameLevels.Invoke([float[]]$signals[1], 300)
+    $coefficientTrack = $kernels.CoefficientTrack.Invoke([float[]]$signals[3])
+    $pitchErrors = [Collections.Generic.List[double]]::new(); $stateErrors = 0; $clickErrors = 0; $previousMode = 16
+    $axisMaximumError = 0.0; $responseMaximumError = 0.0
+    for ($tickIndex = 0; $tickIndex -lt $Performance.Ticks; $tickIndex++) {
+        $offset = 8 * $tickIndex; $buttons = [int]$expanded.Frames[$offset + 6]
+        $expectVoice = ($buttons -band 3) -eq 3; $expectNoise = ($buttons -band 3) -eq 1
+        if (($levels[$tickIndex] -gt 0.00002) -ne $expectVoice -or ($noiseLevels[$tickIndex] -gt 0.00002) -ne $expectNoise) { $stateErrors++ }
+        $expectClick = ($buttons -band 12) -ne 0 -or ($buttons -band 112) -ne $previousMode
+        if (([Math]::Abs($signals[2][300 * $tickIndex]) -gt 0.1) -ne $expectClick) { $clickErrors++ }
+        $previousMode = $buttons -band 112
+        $axisExpected = [double]$expanded.Frames[$offset + 3]
+        if ([Math]::Abs($axisExpected) -ge 0.1) {
+            $axisMaximumError = [Math]::Max($axisMaximumError, [Math]::Abs([double]$coefficientTrack[2 * $tickIndex] - $axisExpected))
+            $responseMaximumError = [Math]::Max($responseMaximumError, [Math]::Abs([double]$coefficientTrack[2 * $tickIndex + 1] - [double]$expanded.Frames[$offset + 7]))
+        }
+        # Interior windows only: YIN needs support on both sides. Changes remain in the boundary/level gate.
+        if ($expectVoice -and $tickIndex -ge 2 -and $tickIndex + 2 -lt $Performance.Ticks) {
+            $stable = $true; $expectedPitch = [double]$expanded.Frames[$offset]
+            for ($relative = -2; $relative -le 2; $relative++) {
+                $other = 8 * ($tickIndex + $relative)
+                if (($expanded.Frames[$other + 6] -band 3) -ne 3 -or [Math]::Abs([double]$expanded.Frames[$other] - $expectedPitch) -gt 0.1) { $stable = $false }
+            }
+            if ($stable) {
+                $actualPitch = [double]$detected[3 * ($tickIndex - 1)]
+                $cents = if ($actualPitch -gt 0) { [Math]::Abs(1200 * [Math]::Log($actualPitch / $expectedPitch, 2)) } else { 12000.0 }
+                $pitchErrors.Add($cents)
+            }
+        }
+    }
+    $maxCents = if ($pitchErrors.Count) { ($pitchErrors | Measure-Object -Maximum).Maximum } else { 0.0 }
+    if ($stateErrors -gt 0 -or $clickErrors -gt 0 -or $maxCents -gt $Performance.Layout.PitchToleranceCents -or $axisMaximumError -gt 0.05 -or $responseMaximumError -gt 0.1) {
+        throw "Stem round trip failed: state ticks=$stateErrors, event ticks=$clickErrors, max pitch cents=$maxCents, axis=$axisMaximumError, response=$responseMaximumError."
+    }
+    $controllerPath = Join-Path $Destination 'controller.clixml'; $Performance | Export-Clixml -LiteralPath $controllerPath
+    [IO.File]::WriteAllBytes((Join-Path $Destination 'controller.bin'), $expanded.Wire)
+    $result = [pscustomobject]@{ PSTypeName = 'Kokoro.StudentStems'; Controller = $Performance; ControllerPath = $controllerPath
+        Stems = $stems.ToArray(); Ticks = $Performance.Ticks; PitchFrames = $pitchErrors.Count; MaximumPitchCents = $maxCents
+        PitchToleranceCents = $Performance.Layout.PitchToleranceCents; StateErrors = $stateErrors; EventErrors = $clickErrors
+        BoundaryToleranceTicks = $Performance.Layout.BoundaryToleranceTicks
+        MaximumAxisError = $axisMaximumError; AxisTolerance = 0.05; MaximumResponseError = $responseMaximumError; ResponseTolerance = 0.1
+        GhostReplay = $true; RenderMachineSHA256 = (Get-FileHash -LiteralPath $StudentOwnerPath).Hash; RenderKernelSHA256 = $kernels.SHA256
+        BiasRow = 'Not supplied'; Binding = 'Diagnostic host contacts; generator contact not exercised' }
+    $result | Export-Clixml -LiteralPath (Join-Path $Destination 'receipt.clixml')
+    $result
+}
+
 function Invoke-StudentListen {
     # Listening, first form, from the audio alone (no text, no alignment yet): pitch, level and voicing per 10 ms (YIN at
     # 16 kHz), voiced stretches split at level dips and pitch jumps into notes, the silences between them as rests.
     # Written as an MPE MIDI 1.0 file (member channels 2 to 16, +-48-semitone per-note bend, channel pressure for level;
-    # 1 tick = 1 ms) and as a preview WAV of the tracked melody played by a harmonic tone.
+    # 1 MIDI tick = 1 ms). The native recording uses the generator clock; Stems plays its diagnostic contacts.
     $kernels = Import-StudentKernels
     $decoded = @(Invoke-StudentRecordings); if ($RecordingLimit -gt 0 -and $decoded.Count -gt $RecordingLimit) { $decoded = $decoded[0..($RecordingLimit - 1)] }
     $output = Join-Path ([IO.Path]::GetFullPath($Recordings)) 'listen'; [void][IO.Directory]::CreateDirectory($output)
@@ -1612,31 +1800,36 @@ function Invoke-StudentListen {
         $body = $track_.ToArray(); $big = { param([int] $value, [int] $bytes) [byte[]]@(for ($i = $bytes - 1; $i -ge 0; $i--) { ($value -shr (8 * $i)) -band 255 }) }
         $midiPath = Join-Path $output ([IO.Path]::ChangeExtension((Split-Path -Leaf $recording.Wav), '.mpe.mid'))
         [IO.File]::WriteAllBytes($midiPath, [byte[]]([Text.Encoding]::ASCII.GetBytes('MThd') + (& $big 6 4) + (& $big 0 2) + (& $big 1 2) + (& $big 500 2) + [Text.Encoding]::ASCII.GetBytes('MTrk') + (& $big $body.Length 4) + $body))
-        # Preview: the tracked melody (voiced frames inside notes) at its level.
-        $pairs = [float[]]::new(2 * $n); $inside = [bool[]]::new($n); foreach ($note in $notes) { for ($t = $note.First; $t -lt $note.Last; $t++) { $inside[$t] = $true } }
-        $loud = 0.0; for ($t = 0; $t -lt $n; $t++) { if ($inside[$t]) { $pairs[2 * $t] = $track[3 * $t]; $pairs[2 * $t + 1] = $track[3 * $t + 2]; if ($track[3 * $t + 2] -gt $loud) { $loud = $track[3 * $t + 2] } } }
-        $pcm = $kernels.RenderTrack.Invoke($pairs, $hop, $rate, 12, 0.35 / [Math]::Max($loud, 1e-6))
-        $pcmBytes = [byte[]]::new(2 * $pcm.Length); [Buffer]::BlockCopy($pcm, 0, $pcmBytes, 0, $pcmBytes.Length)
-        $little = { param([int] $value, [int] $bytes) [byte[]]@(for ($i = 0; $i -lt $bytes; $i++) { ($value -shr (8 * $i)) -band 255 }) }
-        $previewPath = Join-Path $output ([IO.Path]::ChangeExtension((Split-Path -Leaf $recording.Wav), '.melody.wav'))
-        [IO.File]::WriteAllBytes($previewPath, [byte[]]([Text.Encoding]::ASCII.GetBytes('RIFF') + (& $little (36 + $pcmBytes.Length) 4) + [Text.Encoding]::ASCII.GetBytes('WAVEfmt ') + (& $little 16 4) + (& $little 1 2) + (& $little 1 2) +
-            (& $little $rate 4) + (& $little (2 * $rate) 4) + (& $little 2 2) + (& $little 16 2) + [Text.Encoding]::ASCII.GetBytes('data') + (& $little $pcmBytes.Length 4) + $pcmBytes))
-        # Vocoder preview: the same pitch track plus the vocal tract's shape per frame (order-16 linear prediction): pulses where
-        # voiced, noise elsewhere, through each frame's all-pole filter.
-        $lpc = $kernels.LpcTrack.Invoke($x, $hop, $window, 16)
-        $excite = [float[]]::new($n); for ($t = 0; $t -lt $n; $t++) { if ($voiced[$t]) { $excite[$t] = $track[3 * $t] } }
-        $speech = $kernels.LpcRender.Invoke($excite, $lpc, $hop, $rate, 16, 0.1, 1)
-        $speechBytes = [byte[]]::new(2 * $speech.Length); [Buffer]::BlockCopy($speech, 0, $speechBytes, 0, $speechBytes.Length)
-        $vocoderPath = Join-Path $output ([IO.Path]::ChangeExtension((Split-Path -Leaf $recording.Wav), '.vocoder.wav'))
-        [IO.File]::WriteAllBytes($vocoderPath, [byte[]]([Text.Encoding]::ASCII.GetBytes('RIFF') + (& $little (36 + $speechBytes.Length) 4) + [Text.Encoding]::ASCII.GetBytes('WAVEfmt ') + (& $little 16 4) + (& $little 1 2) + (& $little 1 2) +
-            (& $little $rate 4) + (& $little (2 * $rate) 4) + (& $little 2 2) + (& $little 16 2) + [Text.Encoding]::ASCII.GetBytes('data') + (& $little $speechBytes.Length 4) + $speechBytes))
+        # Native physical recording on the generator clock. MIDI above remains an inspection export.
+        $noteAt = [int[]]::new($n); [Array]::Fill($noteAt, -1)
+        for ($noteIndex = 0; $noteIndex -lt $notes.Count; $noteIndex++) {
+            for ($t = $notes[$noteIndex].First; $t -lt $notes[$noteIndex].Last; $t++) { $noteAt[$t] = $noteIndex }
+        }
+        $controllerTicks = [int][Math]::Floor(($n * $hop + $window / 2) / 200.0)
+        $priorNote = -1; $priorActive = $false
+        $controllerEvents = @(for ($tickIndex = 0; $tickIndex -lt $controllerTicks; $tickIndex++) {
+            $frame = [int][Math]::Clamp([Math]::Round((200 * $tickIndex + 100 - $window / 2) / $hop), 0, $n - 1)
+            $currentNote = $noteAt[$frame]; $active = $db[$frame] -gt $floor
+            $buttons = 16; if ($active) { $buttons += 1 }; if ($currentNote -ge 0) { $buttons = $buttons -bor 3 }
+            if ($currentNote -ge 0 -and $currentNote -ne $priorNote) { $buttons = $buttons -bor 4 }
+            if (-not $active -and $priorActive) { $buttons = $buttons -bor 8 }
+            [pscustomobject]@{ PSTypeName = 'Kokoro.StudentControllerEvent'; Tick = $tickIndex; Buttons = $buttons
+                PitchHz = $(if ($currentNote -ge 0) { [double]$track[3 * $frame] } else { 0.0 })
+                LevelDb = [Math]::Clamp($db[$frame], -96.0, 0.0); Aperiodicity = [Math]::Clamp([double]$track[3 * $frame + 1], 0.0, 1.0)
+                Coefficient = 0.0; TiltDb = -12.0; TimeSeconds = 0.0; AcousticNote = $currentNote }
+            $priorNote = $currentNote; $priorActive = $active
+        })
+        $performance = New-StudentControllerRecording $controllerEvents $controllerTicks ('Human recording: ' + [IO.Path]::GetRelativePath($script:StudentRoot, $recording.Wav)) 1729
+        $controllerPath = Join-Path $output ([IO.Path]::ChangeExtension((Split-Path -Leaf $recording.Wav), '.controller.clixml'))
+        $performance | Export-Clixml -LiteralPath $controllerPath
         $rests = @(for ($k = 1; $k -lt $notes.Count; $k++) { 10 * ($notes[$k].First - $notes[$k - 1].Last) }) | Sort-Object
         $f0s = @(foreach ($note in $notes) { for ($t = $note.First; $t -lt $note.Last; $t++) { [double]$track[3 * $t] } }) | Sort-Object
         [pscustomobject]@{ PSTypeName = 'Kokoro.StudentListening'; Recording = $recording.Wav; Seconds = $recording.Seconds; Frames = $n
             VoicedShare = [Math]::Round(@($voiced | Where-Object { $_ }).Count / [double]$n, 3); Notes = $notes.Count
             NotesPerSecond = [Math]::Round($notes.Count / $recording.Seconds, 2); MedianF0 = $(if ($f0s.Count) { [Math]::Round($f0s[[int]($f0s.Count / 2)], 1) })
             RestMedianMs = $(if ($rests.Count) { $rests[[int]($rests.Count / 2)] }); RestsOver300Ms = @($rests | Where-Object { $_ -gt 300 }).Count
-            Midi = $midiPath; Melody = $previewPath; Vocoder = $vocoderPath; DecodeSeconds = [Math]::Round($decodeSeconds, 1); TrackSeconds = [Math]::Round($trackSeconds, 1); WallSeconds = [Math]::Round($watch.Elapsed.TotalSeconds, 1) }
+            Midi = $midiPath; Controller = $performance; ControllerPath = $controllerPath
+            DecodeSeconds = [Math]::Round($decodeSeconds, 1); TrackSeconds = [Math]::Round($trackSeconds, 1); WallSeconds = [Math]::Round($watch.Elapsed.TotalSeconds, 1) }
     }
 }
 
@@ -1649,6 +1842,7 @@ $script:StudentSteps = [ordered]@{
     Syllabus = { Invoke-StudentSyllabus }
     Recordings = { Invoke-StudentRecordings }
     Listen = { Invoke-StudentListen }
+    Stems = { Invoke-StudentStems }
 }
 }
 & $studentOwner { & $script:StudentSteps[$Step] }
