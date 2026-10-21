@@ -29,6 +29,8 @@ Steps:
   Percepts  Open a live percept image at -ImagePath; -State may supply an Alignment result to observe. The returned
             image has Observe, Pin, Nearby, Describe and Save methods. Source recordings are stored once.
   Describe  Describe -State (a live image), or open -ImagePath, including examples, counter-examples and genealogy.
+  Learn     Seed -RulebookPath candidates, observe human boundary timing from the image, and admit prosody
+            components only where held-out occurrences improve. The live image also exposes Learn and Apply.
 .PARAMETER Corpus
 Corpus directory for Pronunciation; defaults to the latest build/corpus-* with corpus.clixml.
 .PARAMETER ParagraphLimit
@@ -63,7 +65,7 @@ Run from a PowerShell prompt: pwsh -File passes every argument as a string, so a
 #requires -Version 7.7
 [CmdletBinding()]
 param(
-    [ValidateSet('Console', 'Render', 'Corpus', 'Pronunciation', 'Normalize', 'Syllabus', 'Recordings', 'Listen', 'Stems', 'Alignment', 'Percepts', 'Describe')][string] $Step = 'Console',
+    [ValidateSet('Console', 'Render', 'Corpus', 'Pronunciation', 'Normalize', 'Syllabus', 'Recordings', 'Listen', 'Stems', 'Alignment', 'Percepts', 'Describe', 'Learn')][string] $Step = 'Console',
     [ValidateRange(2, 64)][int] $Threads = [Math]::Max(2, [Environment]::ProcessorCount),
     [string] $Text = '',
     [string] $Voice = 'af_heart',
@@ -73,6 +75,7 @@ param(
     [switch] $MoreText,
     [string] $SourceIdentity = '',
     [string] $ImagePath = '',
+    [string] $RulebookPath = $env:KOKORO_PROSODY_RULEBOOK,
     [ValidateRange(0, [int]::MaxValue)][int] $ParagraphLimit = 0,
     [ValidateRange(0, [int]::MaxValue)][int] $WindowLimit = 0,
     [string] $Recordings = '',
@@ -1465,6 +1468,20 @@ function ConvertFrom-StudentStored([object] $Value) {
     # Inverse of ConvertTo-StudentStored after Import-Clixml.
     if ($null -eq $Value) { return $null }
     $names = $Value.PSObject.TypeNames
+    if ($Value -is [Collections.IDictionary]) {
+        $restoredDictionary = [ordered]@{}
+        foreach ($entry in $Value.GetEnumerator()) { $restoredDictionary[[string]$entry.Key] = ConvertFrom-StudentStored $entry.Value }
+        return $restoredDictionary
+    }
+    # Earlier image checkpoints retyped ordered dictionaries as member bags. Their original keys and values
+    # are still present; recover the dictionary rather than treating Count/Keys/Values as controller fields.
+    if (@($names | Where-Object { $_.EndsWith('System.Collections.Specialized.OrderedDictionary', [StringComparison]::Ordinal) }).Count -and $Value.PSObject.Properties['Keys'] -and $Value.PSObject.Properties['Values']) {
+        $dictionaryKeys = @($Value.Keys); $dictionaryValues = @($Value.Values)
+        if ($dictionaryKeys.Count -ne $dictionaryValues.Count) { throw 'Stored dictionary has mismatched keys and values.' }
+        $restoredDictionary = [ordered]@{}
+        for ($entryIndex = 0; $entryIndex -lt $dictionaryKeys.Count; $entryIndex++) { $restoredDictionary[[string]$dictionaryKeys[$entryIndex]] = ConvertFrom-StudentStored $dictionaryValues[$entryIndex] }
+        return $restoredDictionary
+    }
     if ($names -contains 'Deserialized.Kokoro.StudentStoredArray') {
         $type = [type]$Value.Type; $bytes = [byte[]]$Value.Bytes
         $array = [Array]::CreateInstance($type, $bytes.Length / [Buffer]::ByteLength([Array]::CreateInstance($type, 1))); [Buffer]::BlockCopy($bytes, 0, $array, 0, $bytes.Length)
@@ -1811,7 +1828,7 @@ function Invoke-StudentAlignment {
         $hopSeconds = $settings.Hop / [double]$settings.SampleRate
         $radius = [int][Math]::Ceiling($settings.SearchSeconds / $hopSeconds); $edge = [int][Math]::Ceiling($settings.EdgeSeconds / $hopSeconds)
         $map = $kernels.SpectralWarp.Invoke($referenceBands, $humanBands, $radius, $edge)
-        $levels = (Expand-StudentController $humanController -LevelsOnly).Frames
+        $levels = (Expand-StudentController $humanController -Projection LevelRms).Frames
         $evidence = $kernels.BoundaryEvidence.Invoke($levels)
         $words = [Collections.Generic.List[object]]::new(); $previousEnd = 0.0; $tokenIndex = 0
         foreach ($label in $labels) {
@@ -1873,15 +1890,18 @@ function New-StudentControllerRecording([object[]] $Events, [int] $Ticks, [objec
         KernelSHA256 = (Import-StudentKernels).SHA256 }
 }
 
-function Expand-StudentController($Performance, [switch] $LevelsOnly) {
+function Expand-StudentController($Performance, [ValidateSet('All', 'LevelRms', 'PitchHz', 'Buttons')][string] $Projection = 'All') {
     # Held analog state; note-on and rest are one-tick impulses. The store retains physical values.
-    $frames = [float[]]::new($(if ($LevelsOnly) { $Performance.Ticks } else { 8 * $Performance.Ticks }))
-    $wire = [byte[]]::new($(if ($LevelsOnly) { 0 } else { 12 * $Performance.Ticks }))
+    $frames = [float[]]::new($(if ($Projection -cne 'All') { $Performance.Ticks } else { 8 * $Performance.Ticks }))
+    $wire = [byte[]]::new($(if ($Projection -cne 'All') { 0 } else { 12 * $Performance.Ticks }))
     $index = 0; $held = $Performance.Events[0]
     for ($tickIndex = 0; $tickIndex -lt $Performance.Ticks; $tickIndex++) {
         $changed = $index -lt $Performance.Events.Count -and $Performance.Events[$index].Tick -eq $tickIndex
         if ($changed) { $held = $Performance.Events[$index]; $index++ }
-        if ($LevelsOnly) { $frames[$tickIndex] = [float][Math]::Pow(10.0, $held.LevelDb / 20.0); continue }
+        if ($Projection -cne 'All') {
+            $frames[$tickIndex] = switch ($Projection) { 'LevelRms' { [float][Math]::Pow(10.0, $held.LevelDb / 20.0) }; 'PitchHz' { [float]$held.PitchHz }; 'Buttons' { [float]$held.Buttons } }
+            continue
+        }
         $buttons = [int]$held.Buttons; if (-not $changed) { $buttons = $buttons -band 115 }
         $base = 8 * $tickIndex
         $frames[$base] = $held.PitchHz; $frames[$base + 1] = $held.LevelDb; $frames[$base + 2] = $held.Aperiodicity
@@ -2174,7 +2194,7 @@ function New-StudentImage([string] $Path) {
         Percepts = [Collections.Generic.Dictionary[string,object]]::new([StringComparer]::Ordinal)
         Evidence = [Collections.Generic.Dictionary[string,object]]::new([StringComparer]::Ordinal)
         Performances = [Collections.Generic.Dictionary[string,object]]::new([StringComparer]::Ordinal)
-        Pinned = 'Occurrence'; Changed = $false }
+        Pinned = 'Occurrence'; ActiveStyle = ''; Changed = $false }
 }
 
 function New-StudentPercept($Image, [string] $Identity, [string] $Kind, [float[]] $Key, $Parent = $null) {
@@ -2283,7 +2303,7 @@ function Save-StudentImage($Image, [string] $Path = '') {
         $edgeIdentity = '{0}:{1}{2}:{3}{4}:{5}' -f $edge.Kind.Length, $edge.Kind, $edge.From.Identity.Length, $edge.From.Identity, $edge.To.Identity.Length, $edge.To.Identity
         if ($seenEdges.Add($edgeIdentity)) { [pscustomobject]@{ Kind = $edge.Kind; From = $edge.From.Identity; To = $edge.To.Identity; Admitted = $edge.Admitted } }
     } })
-    $snapshot = [pscustomobject]@{ PSTypeName = 'Kokoro.StudentImageSnapshot'; Pinned = $Image.Pinned; Percepts = $nodes
+    $snapshot = [pscustomobject]@{ PSTypeName = 'Kokoro.StudentImageSnapshot'; Pinned = $Image.Pinned; ActiveStyle = $Image.ActiveStyle; Percepts = $nodes
         Evidence = @($Image.Evidence.Values); Progression = $edges; Performances = @($Image.Performances.GetEnumerator() | ForEach-Object { [pscustomobject]@{ Identity = $_.Key; Performance = $_.Value } }) }
     $pending = $Path + '.pending-' + [Guid]::NewGuid().ToString('N')
     $serialized = [Management.Automation.PSSerializer]::Serialize($snapshot, 40)
@@ -2321,7 +2341,7 @@ function Open-StudentImage([string] $Path) {
         if ($image.Evidence.ContainsKey($restored.Identity)) { throw 'Duplicate evidence identity in image.' }
         $image.Evidence.Add($restored.Identity, $restored)
     }
-    foreach ($saved in $snapshot.Performances) { $image.Performances.Add($saved.Identity, (ConvertFrom-StudentStored $saved.Performance)) }
+    foreach ($saved in $snapshot.Performances) { $image.Performances.Add($saved.Identity, (Restore-StudentPerformance $saved.Performance)) }
     foreach ($saved in $snapshot.Percepts) {
         $node = $image.Percepts[[string]$saved.Identity]; $node.State = $saved.State
         $parentIdentity = [string]$saved.Parent
@@ -2347,16 +2367,33 @@ function Open-StudentImage([string] $Path) {
         foreach ($edge in $snapshot.Progression) { $null = Add-StudentProgression $image $edge.Kind $edge.From $edge.To ([bool]$edge.Admitted) }
     }
     $image.Pinned = [string]$snapshot.Pinned; $image.Changed = $false
+    if ($snapshot.PSObject.Properties['ActiveStyle']) { $image.ActiveStyle = [string]$snapshot.ActiveStyle }
     $image
+}
+
+function Restore-StudentPerformance($Performance) {
+    # Deserialization already made mutable event objects and preserved their values. Rebind their declared
+    # types in place; do not recursively copy every scalar of a recording whenever the image opens.
+    if ($Performance.PSObject.TypeNames[0].StartsWith('Deserialized.', [StringComparison]::Ordinal)) { $Performance.PSObject.TypeNames.Insert(0, $Performance.PSObject.TypeNames[0].Substring(13)) }
+    $Performance.Layout = ConvertFrom-StudentStored $Performance.Layout
+    $Performance.Provenance = ConvertFrom-StudentStored $Performance.Provenance
+    foreach ($event in $Performance.Events) {
+        if ($event.PSObject.TypeNames[0].StartsWith('Deserialized.', [StringComparison]::Ordinal)) { $event.PSObject.TypeNames.Insert(0, $event.PSObject.TypeNames[0].Substring(13)) }
+    }
+    if ($Performance.PSObject.Properties['Occurrences']) {
+        foreach ($occurrence in $Performance.Occurrences) { if ($occurrence.PSObject.TypeNames[0].StartsWith('Deserialized.', [StringComparison]::Ordinal)) { $occurrence.PSObject.TypeNames.Insert(0, $occurrence.PSObject.TypeNames[0].Substring(13)) } }
+    }
+    if (-not $Performance.Layout.Contains('TickSeconds') -or $Performance.Layout.TickSeconds -le 0 -or $Performance.Events.Count -eq 0) { throw 'Image performance is missing its controller clock or events.' }
+    $Performance
 }
 
 function Invoke-StudentPercepts {
     $path = if ($ImagePath) { [IO.Path]::GetFullPath($ImagePath) } else { Join-Path $script:StudentBuild 'student/image.clixml.gz' }
-    if ($null -ne $State -and $State.PSObject.TypeNames -contains 'Kokoro.StudentImage') { return $State }
+    if ($null -ne $State -and $State.PSObject.TypeNames -contains 'Kokoro.StudentImage') { $State.Owner = $ExecutionContext.SessionState.Module; return $State }
     $image = Open-StudentImage $path
     if ($null -ne $State) {
         if (-not $State.PSObject.Properties['Words'] -or -not $State.PSObject.Properties['NativeRecording']) { throw 'Percepts -State needs a live image or an Alignment result.' }
-        $performance = ConvertFrom-StudentStored (Import-Clixml -LiteralPath $State.NativeRecording)
+        $performance = Restore-StudentPerformance (Import-Clixml -LiteralPath $State.NativeRecording)
         $performanceIdentity = $performance.Provenance.SHA256 + ':' + $performance.MachineSHA256
         if (-not $image.Performances.ContainsKey($performanceIdentity)) { $image.Performances.Add($performanceIdentity, $performance); $image.Changed = $true }
         foreach ($word in $State.Words) {
@@ -2372,6 +2409,199 @@ function Invoke-StudentPercepts {
     }
     $image
 }
+
+function Add-StudentProsodyCandidates($Image, [string] $Path) {
+    if (-not $Path) {
+        if ($Image.Percepts.ContainsKey('Prosody.Rule.1')) { return }
+        throw 'Learn needs -RulebookPath or KOKORO_PROSODY_RULEBOOK for the initial candidate import.'
+    }
+    $sourceHash = (Get-FileHash -LiteralPath $Path).Hash; $content = [IO.File]::ReadAllText($Path)
+    $entries = @([regex]::Matches($content, '(?ms)^### ([0-9]+)\. ([^\r\n]+)\r?\n(.*?)(?=^### [0-9]+\.|\z)'))
+    if ($entries.Count -ne 80) { throw 'The declared prosody rulebook must contain all 80 candidate rules.' }
+    foreach ($entry in $entries) {
+        $number = [int]$entry.Groups[1].Value; $body = $entry.Groups[3].Value
+        $confidence = [regex]::Match($body, '(?m)^Confidence: (High|Medium|Low)\b').Groups[1].Value
+        if (-not $confidence) { throw 'Prosody candidate is missing its confidence prior.' }
+        $identity = 'Prosody.Rule.' + $number
+        $prior = switch ($confidence) { High { 3 }; Medium { 2 }; Low { 1 } }
+        $node = New-StudentPercept $Image $identity 'ProsodyRule' ([float[]](0, 1, 0, ($prior / 3.0))) $Image.Percepts['Boundary']
+        if (@($node.Rules | Where-Object SourceSHA256 -CEQ $sourceHash).Count) { continue }
+        $node.State = 'SeededCandidate'
+        $node.Rules.Add([pscustomobject]@{ PSTypeName = 'Kokoro.StudentProsodyCandidate'; Kind = 'Seeded'; State = 'AwaitingTypedCondition'
+            Number = $number; Name = $entry.Groups[2].Value; Confidence = $confidence; PriorSupport = $prior; SourceSHA256 = $sourceHash
+            When = [regex]::Match($body, '(?m)^When: ([^\r\n]+)').Groups[1].Value
+            Direction = [regex]::Match($body, '(?m)^What happens: ([^\r\n]+)').Groups[1].Value })
+        $Image.Changed = $true
+    }
+}
+
+function Add-StudentBoundaryObservations($Image) {
+    $books = [Collections.Generic.Dictionary[string,object]]::new([StringComparer]::Ordinal)
+    $recordings = [Collections.Generic.Dictionary[string,object]]::new([StringComparer]::Ordinal)
+    foreach ($recording in $Image.Percepts['Word'].Recordings) { $recordings[$recording.Evidence.Identity] = $recording }
+    $groups = @($Image.Percepts['Word'].Examples | Group-Object { $_.Provenance.SHA256 })
+    foreach ($group in $groups) {
+        $ordered = @($group.Group | Sort-Object { $_.Condition.SourceStart }, { $_.Measured.StartSeconds })
+        if ($ordered.Count -lt 2) { continue }
+        $performance = $recordings[$ordered[0].Identity].Performance
+        $pitch = (Expand-StudentController $performance -Projection PitchHz).Frames
+        $buttons = (Expand-StudentController $performance -Projection Buttons).Frames
+        $tickSeconds = [double]$performance.Layout.TickSeconds
+        if (-not $Image.ActiveStyle) { $Image.ActiveStyle = [string]$group.Name }
+        for ($occurrenceIndex = 0; $occurrenceIndex + 1 -lt $ordered.Count; $occurrenceIndex++) {
+            $current = $ordered[$occurrenceIndex]; $following = $ordered[$occurrenceIndex + 1]
+            $identity = $current.Identity + ':boundary:' + $following.Occurrence
+            if ($Image.Evidence.ContainsKey($identity)) { continue }
+            $bookName = [string]$current.Condition.Book
+            if (-not $books.ContainsKey($bookName)) {
+                $book = @(Get-StudentBooks -Name $bookName)
+                if ($book.Count -ne 1) { throw 'Boundary observation needs the typed source book.' }
+                $books.Add($bookName, $book[0])
+            }
+            $book = $books[$bookName]
+            # SAPI's word span can include a trailing punctuation mark. Find its last lexical token;
+            # punctuation and paragraph boundaries belong to the typed source, not the voice's span width.
+            $sourceEnd = $current.Condition.SourceStart
+            $scanToken = [int]$current.Condition.Token
+            $labelEnd = $current.Condition.SourceStart + $current.Condition.SourceLength
+            while (4 * $scanToken -lt $book.Tokens.Length -and $book.Tokens[4 * $scanToken + 1] -lt $labelEnd) {
+                if ($book.Tokens[4 * $scanToken] -in 1, 2, 3) { $sourceEnd = $book.Tokens[4 * $scanToken + 1] + $book.Tokens[4 * $scanToken + 2] }
+                $scanToken++
+            }
+            if ($sourceEnd -eq $current.Condition.SourceStart) { continue }
+            if ($following.Condition.SourceStart -lt $sourceEnd) { continue } # more than one spoken object from one source token
+            $between = $book.Text.Substring($sourceEnd, $following.Condition.SourceStart - $sourceEnd)
+            $boundaryKind = if ($between.Contains("`n")) { 'Paragraph' } elseif ($between.Contains('?')) { 'Question' } elseif ($between.Contains('!')) { 'Exclamation' } elseif ($between.Contains('.')) { 'Stop' } elseif ($between.Contains(';') -or $between.Contains(':')) { 'ColonSemicolon' } elseif ($between.Contains(',')) { 'Comma' } elseif ($between.Contains('—') -or $between.Contains('–')) { 'Dash' } else { 'None' }
+            $startTick = [int][Math]::Clamp([Math]::Ceiling($current.Measured.StartSeconds / $tickSeconds), 0, $pitch.Length - 1)
+            $endTick = [int][Math]::Clamp([Math]::Floor($current.Measured.EndSeconds / $tickSeconds), 0, $pitch.Length - 1)
+            $nextTick = [int][Math]::Clamp([Math]::Ceiling($following.Measured.StartSeconds / $tickSeconds), 0, $pitch.Length - 1)
+            $lastPitch = 0.0; $firstPitch = 0.0; $hasRest = $false
+            for ($point = $endTick; $point -ge [Math]::Max($startTick, $endTick - 16); $point--) { if ($pitch[$point] -gt 0) { $lastPitch = $pitch[$point]; break } }
+            $nextEnd = [int][Math]::Min($pitch.Length - 1, [Math]::Floor($following.Measured.EndSeconds / $tickSeconds))
+            for ($point = $nextTick; $point -le [Math]::Min($nextEnd, $nextTick + 16); $point++) { if ($pitch[$point] -gt 0) { $firstPitch = $pitch[$point]; break } }
+            for ($point = $endTick + 1; $point -lt $nextTick; $point++) { if (([int]$buttons[$point] -band 1) -eq 0) { $hasRest = $true; break } }
+            $paragraph = [Array]::BinarySearch([int[]]$book.Paragraphs, [int]$current.Condition.Token)
+            if ($paragraph -lt 0) { $paragraph = -$paragraph - 2 }
+            $negative = $paragraph -ge 0 -and $paragraph -lt $book.CounterExample.Length -and $book.CounterExample[$paragraph]
+            $observation = [pscustomobject]@{ Identity = $identity; Occurrence = $current.Occurrence + ':following:' + $following.Occurrence; Provenance = $current.Provenance
+                Condition = [pscustomobject]@{ Kind = 'Boundary'; BoundaryKind = $boundaryKind; Style = [string]$group.Name; NegativeStructure = $negative }
+                Measured = [pscustomobject]@{ PauseSeconds = [Math]::Max(0.0, $following.Measured.StartSeconds - $current.Measured.EndSeconds)
+                    HasRest = $hasRest; HasPitch = $lastPitch -gt 0 -and $firstPitch -gt 0
+                    PitchResetCents = $(if ($lastPitch -gt 0 -and $firstPitch -gt 0) { 1200 * [Math]::Log($firstPitch / $lastPitch, 2) } else { 0.0 }) } }
+            $role = if ($negative) { 'CounterExample' } else { 'Example' }
+            $null = Add-StudentImageObservation $Image 'Boundary' $observation $role
+        }
+    }
+}
+
+function Get-StudentProsodyEstimate([object[]] $Evidence, [int] $Prior = 0, [bool] $PriorRest = $false) {
+    $pitchEvidence = @($Evidence | Where-Object { $_.Measured.HasPitch })
+    $restVotes = @($Evidence | Where-Object { $_.Measured.HasRest }).Count
+    [pscustomobject]@{ PauseSeconds = $(if ($Evidence.Count) { ($Evidence | ForEach-Object { $_.Measured.PauseSeconds } | Measure-Object -Average).Average } else { 0.0 })
+        PitchResetCents = $(if ($pitchEvidence.Count) { ($pitchEvidence | ForEach-Object { $_.Measured.PitchResetCents } | Measure-Object -Average).Average } else { 0.0 })
+        HasRest = (2 * ($restVotes + $(if ($PriorRest) { $Prior } else { 0 }))) -gt $Evidence.Count + $Prior }
+}
+
+function Measure-StudentProsodyEstimate([object[]] $Evidence, $Estimate) {
+    $pauseError = 0.0; $pitchError = 0.0; $pitchCount = 0; $correct = 0
+    foreach ($observation in $Evidence) {
+        $pauseError += [Math]::Abs($observation.Measured.PauseSeconds - $Estimate.PauseSeconds)
+        if ($observation.Measured.HasPitch) { $pitchError += [Math]::Abs($observation.Measured.PitchResetCents - $Estimate.PitchResetCents); $pitchCount++ }
+        if ($observation.Measured.HasRest -eq $Estimate.HasRest) { $correct++ }
+    }
+    [pscustomobject]@{ Count = $Evidence.Count; PauseErrorMs = $(if ($Evidence.Count) { 1000 * $pauseError / $Evidence.Count } else { 0.0 })
+        PitchCount = $pitchCount; PitchErrorCents = $(if ($pitchCount) { $pitchError / $pitchCount } else { 0.0 })
+        BoundaryAccuracy = $(if ($Evidence.Count) { $correct / [double]$Evidence.Count } else { 0.0 }) }
+}
+
+function Invoke-StudentRuleLearning($Image) {
+    $evidence = @($Image.Percepts['Boundary'].Examples) + @($Image.Percepts['Boundary'].CounterExamples)
+    $folds = [Collections.Generic.Dictionary[string,int]]::new([StringComparer]::Ordinal)
+    foreach ($observation in $evidence) { $folds[$observation.Identity] = [int][Security.Cryptography.SHA256]::HashData([Text.Encoding]::UTF8.GetBytes($observation.Occurrence))[0] % 5 }
+    $results = [Collections.Generic.List[object]]::new()
+    foreach ($styleGroup in @($evidence | Group-Object { $_.Condition.Style })) {
+        $training = @($styleGroup.Group | Where-Object { $folds[$_.Identity] -ne 0 })
+        $baseline = Get-StudentProsodyEstimate $training
+        foreach ($kindGroup in @($styleGroup.Group | Group-Object { $_.Condition.BoundaryKind })) {
+            $train = @($kindGroup.Group | Where-Object { $folds[$_.Identity] -ne 0 }); $heldOut = @($kindGroup.Group | Where-Object { $folds[$_.Identity] -eq 0 })
+            if ($train.Count -lt 8 -or $heldOut.Count -lt 4) { continue }
+            $sourceRule = switch ($kindGroup.Name) { Paragraph { 31 }; Comma { 21 }; Stop { 2 }; default { 17 } }
+            $prior = [int]$Image.Percepts['Prosody.Rule.' + $sourceRule].Rules[-1].PriorSupport
+            $estimate = Get-StudentProsodyEstimate $train $prior ($kindGroup.Name -cnotin 'None', 'Comma')
+            $referenceScore = Measure-StudentProsodyEstimate $heldOut $baseline
+            $candidateScore = Measure-StudentProsodyEstimate $heldOut $estimate
+            $pauseAdmitted = $candidateScore.PauseErrorMs -lt $referenceScore.PauseErrorMs
+            $pitchAdmitted = $candidateScore.PitchCount -ge 4 -and $candidateScore.PitchErrorCents -lt $referenceScore.PitchErrorCents
+            $boundaryAdmitted = $candidateScore.BoundaryAccuracy -gt $referenceScore.BoundaryAccuracy
+            $node = New-StudentPercept $Image ('Boundary.' + $kindGroup.Name) 'Boundary' ([float[]](0, 1, 0, 0)) $Image.Percepts['Boundary']
+            $identityText = $styleGroup.Name + ':' + $kindGroup.Name + ':' + $train.Count + ':' + $estimate.PauseSeconds.ToString('R', [Globalization.CultureInfo]::InvariantCulture) + ':' + $estimate.PitchResetCents.ToString('R', [Globalization.CultureInfo]::InvariantCulture) + ':' + $estimate.HasRest + ':' + $prior
+            $ruleIdentity = [Convert]::ToHexString([Security.Cryptography.SHA256]::HashData([Text.Encoding]::UTF8.GetBytes($identityText)))
+            $existing = @($node.Rules | Where-Object { $_.Kind -ceq 'Prosody' -and $_.Style -ceq $styleGroup.Name -and $_.State -ceq 'Admitted' })
+            if (@($node.Rules | Where-Object Identity -CEQ $ruleIdentity).Count) { continue }
+            $rule = [pscustomobject]@{ PSTypeName = 'Kokoro.StudentProsodyProgram'; Kind = 'Prosody'; Identity = $ruleIdentity; Style = [string]$styleGroup.Name; BoundaryKind = [string]$kindGroup.Name
+                State = 'Rejected'; PauseSeconds = $estimate.PauseSeconds; PitchResetCents = $estimate.PitchResetCents; HasRest = $estimate.HasRest
+                PauseAdmitted = $pauseAdmitted; PitchAdmitted = $pitchAdmitted; BoundaryAdmitted = $boundaryAdmitted
+                Fallback = $baseline; TrainingCount = $train.Count; HeldOutCount = $heldOut.Count; BaselineScore = $referenceScore; HeldOutScore = $candidateScore; PriorRule = $sourceRule; PriorSupport = $prior }
+            if ($pauseAdmitted -or $pitchAdmitted -or $boundaryAdmitted) {
+                $rule.State = 'Admitted'; $node.State = 'Admitted'
+                foreach ($old in $existing) {
+                    $oldScore = Measure-StudentProsodyEstimate $heldOut $old
+                    if (($old.PauseAdmitted -and $oldScore.PauseErrorMs -le $candidateScore.PauseErrorMs) -or ($old.PitchAdmitted -and $oldScore.PitchErrorCents -le $candidateScore.PitchErrorCents)) { $rule.State = 'RetainedExisting'; break }
+                }
+                if ($rule.State -ceq 'Admitted') { foreach ($old in $existing) { $old.State = 'Superseded' } }
+            }
+            $node.Rules.Add($rule)
+            $node.Genealogy.Add([pscustomobject]@{ PSTypeName = 'Kokoro.StudentGenealogy'; Operation = $rule.State; Rule = $ruleIdentity; Evidence = @($train.Identity); HeldOut = @($heldOut.Identity); Step = 'Learn' })
+            foreach ($observation in $kindGroup.Group) {
+                $agreement = [Math]::Abs($observation.Measured.PauseSeconds - $rule.PauseSeconds) -le 0.05
+                $prediction = [pscustomobject]@{ Identity = $observation.Identity + ':program:' + $ruleIdentity; Occurrence = $observation.Occurrence; Provenance = $observation.Provenance
+                    Condition = [pscustomobject]@{ Rule = $ruleIdentity; BoundaryKind = $kindGroup.Name; Style = $styleGroup.Name }
+                    Measured = [pscustomobject]@{ Actual = $observation.Measured; PredictedPauseSeconds = $rule.PauseSeconds; ToleranceSeconds = 0.05; HeldOut = $folds[$observation.Identity] -eq 0 } }
+                $null = Add-StudentImageObservation $Image $node.Identity $prediction $(if ($agreement) { 'Example' } else { 'CounterExample' })
+            }
+            $results.Add($rule); $Image.Changed = $true
+        }
+    }
+    $results.ToArray()
+}
+
+function Invoke-StudentProsodyProgram($Image, $Context) {
+    if (-not $Context.PSObject.Properties['BoundaryKind']) { throw 'Prosody context needs its typed BoundaryKind.' }
+    $style = if ($Context.PSObject.Properties['Style']) { [string]$Context.Style } else { $Image.ActiveStyle }
+    foreach ($neighbor in @(Get-StudentImageNeighborhood $Image ([float[]](0,1,0,0)) 1)) {
+        foreach ($rule in $neighbor.Percept.Rules) {
+            if ($rule.Kind -ceq 'Prosody' -and $rule.State -ceq 'Admitted' -and $rule.Style -ceq $style -and $rule.BoundaryKind -ceq $Context.BoundaryKind) {
+                return [pscustomobject]@{ PSTypeName = 'Kokoro.StudentBoundaryAction'; Rule = $rule.Identity
+                    PauseSeconds = $(if ($rule.PauseAdmitted) { $rule.PauseSeconds } else { $rule.Fallback.PauseSeconds })
+                    PitchResetCents = $(if ($rule.PitchAdmitted) { $rule.PitchResetCents } else { $rule.Fallback.PitchResetCents })
+                    HasRest = $(if ($rule.BoundaryAdmitted) { $rule.HasRest } else { $rule.Fallback.HasRest }) }
+            }
+        }
+    }
+    $null
+}
+
+function Invoke-StudentLearning {
+    $image = Invoke-StudentPercepts
+    Add-StudentProsodyCandidates $image $RulebookPath
+    Add-StudentBoundaryObservations $image
+    $programs = @(Invoke-StudentRuleLearning $image)
+    $image.Pin('Boundary')
+    [pscustomobject]@{ PSTypeName = 'Kokoro.StudentLearning'; Image = $image; Programs = $programs
+        SeededRules = @($image.Percepts.Values | Where-Object Kind -CEQ 'ProsodyRule').Count
+        BoundaryObservations = $image.Percepts['Boundary'].Examples.Count + $image.Percepts['Boundary'].CounterExamples.Count
+        AdmittedPause = @($programs | Where-Object { $_.State -ceq 'Admitted' -and $_.PauseAdmitted }).Count
+        AdmittedPitch = @($programs | Where-Object { $_.State -ceq 'Admitted' -and $_.PitchAdmitted }).Count
+        AdmittedBoundary = @($programs | Where-Object { $_.State -ceq 'Admitted' -and $_.BoundaryAdmitted }).Count }
+}
+
+Update-TypeData -TypeName 'Kokoro.StudentImage' -MemberType ScriptMethod -MemberName Learn -Value {
+    & $this.Owner { param($Image); Invoke-StudentRuleLearning $Image } $this
+} -Force
+Update-TypeData -TypeName 'Kokoro.StudentImage' -MemberType ScriptMethod -MemberName Apply -Value {
+    param($Context)
+    & $this.Owner { param($Image, $TypedContext); Invoke-StudentProsodyProgram $Image $TypedContext } $this $Context
+} -Force
 
 Update-TypeData -TypeName 'Kokoro.StudentImage' -MemberType ScriptMethod -MemberName Observe -Value {
     param([string] $Percept, $Observation, [string] $Role)
@@ -2418,6 +2648,7 @@ $script:StudentSteps = [ordered]@{
     Alignment = { Invoke-StudentAlignment }
     Percepts = { Invoke-StudentPercepts }
     Describe = { $image = Invoke-StudentPercepts; $image.Describe() }
+    Learn = { Invoke-StudentLearning }
 }
 }
 & $studentOwner { & $script:StudentSteps[$Step] }
