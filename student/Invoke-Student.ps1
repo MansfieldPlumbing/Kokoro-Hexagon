@@ -562,6 +562,73 @@ class StudentTextKernels {
         }
         return $out
     }
+    static [float[]] LpcTrack([float[]] $x, [int] $hop, [int] $window, [int] $order) {
+        # Linear prediction per frame (autocorrelation method, Levinson-Durbin) on a pre-emphasized (0.97), Hamming-windowed
+        # frame: order + 1 values per frame, the residual RMS then predictor coefficients a1..ap (y[n] = e[n] - sum a_k y[n-k]).
+        $frames = [int][Math]::Floor([double]($x.Length - $window) / [double]$hop); if ($frames -lt 0) { $frames = 0 }
+        $out = [float[]]::new(($order + 1) * $frames); $frame = [double[]]::new($window); $r = [double[]]::new($order + 1)
+        $a = [double[]]::new($order + 1); $previous = [double[]]::new($order + 1)
+        for ($f = 0; $f -lt $frames; $f++) {
+            $start = $f * $hop
+            for ($j = 0; $j -lt $window; $j++) {
+                $before = 0.0; if ($start + $j -gt 0) { $before = [double]$x[$start + $j - 1] }
+                $frame[$j] = ([double]$x[$start + $j] - 0.97 * $before) * (0.54 - 0.46 * [Math]::Cos(2.0 * [Math]::PI * [double]$j / [double]($window - 1)))
+            }
+            for ($k = 0; $k -le $order; $k++) { $sum = 0.0; for ($j = $k; $j -lt $window; $j++) { $sum = $sum + $frame[$j] * $frame[$j - $k] }; $r[$k] = $sum }
+            $r[0] = $r[0] * 1.0001 + 1e-9
+            for ($k = 0; $k -le $order; $k++) { $a[$k] = 0.0 }
+            $residual = $r[0]
+            $stable = $true
+            for ($i = 1; $i -le $order -and $stable; $i++) {
+                $acc = $r[$i]; for ($k = 1; $k -lt $i; $k++) { $acc = $acc - $a[$k] * $r[$i - $k] }
+                $reflection = $acc / $residual
+                # A reflection coefficient at +-1 would make the filter unstable: keep the order reached so far.
+                if ([Math]::Abs($reflection) -ge 0.999) { $stable = $false; continue }
+                for ($k = 1; $k -lt $i; $k++) { $previous[$k] = $a[$k] }
+                $a[$i] = $reflection
+                for ($k = 1; $k -lt $i; $k++) { $a[$k] = $previous[$k] - $reflection * $previous[$i - $k] }
+                $residual = $residual * (1.0 - $reflection * $reflection)
+            }
+            $out[($order + 1) * $f] = [float][Math]::Sqrt([Math]::Max($residual, 0.0) / [double]$window)
+            for ($k = 1; $k -le $order; $k++) { $out[($order + 1) * $f + $k] = [float](-$a[$k]) }
+        }
+        return $out
+    }
+    static [short[]] LpcRender([float[]] $pitch, [float[]] $lpc, [int] $hop, [int] $rate, [int] $order, [double] $gain, [int] $seed) {
+        # LPC vocoder: per frame, a pulse train at f0 (voiced) or white noise (f0 0) scaled by the residual RMS, through the
+        # frame's all-pole filter, then de-emphasis (0.97). Noise from a sine hash of the sample index plus $seed (floating point only).
+        $frames = [int][Math]::Min([double]$pitch.Length, [double][Math]::Floor([double]$lpc.Length / [double]($order + 1))); $count = $frames * $hop
+        $out = [short[]]::new($count); $y = [double[]]::new($order + 1); $phase = 0.0
+        $emphasis = 0.0; $lastIn = 0.0; $lastOut = 0.0; $peak = 0.0; $buffer = [double[]]::new($count)
+        for ($n = 0; $n -lt $count; $n++) {
+            $f = [int][Math]::Floor([double]$n / [double]$hop)
+            $level = [double]$lpc[($order + 1) * $f]; $f0 = [double]$pitch[$f]; $excitation = 0.0
+            if ($f0 -gt 0.0) {
+                $period = [double]$rate / $f0
+                $phase = $phase + 1.0; if ($phase -ge $period) { $phase = $phase - $period; $excitation = $level * [Math]::Sqrt($period) }
+            }
+            else {
+                $hash = [Math]::Sin([double]($n + $seed) * 12.9898) * 43758.5453; $excitation = $level * (2.0 * ($hash - [Math]::Floor($hash)) - 1.0) * 1.7320508
+            }
+            $value = $excitation
+            for ($k = 1; $k -le $order; $k++) { $value = $value + [double]$lpc[($order + 1) * $f + $k] * $y[$k] }
+            # Coefficients change between frames; if the filter state ever leaves finite range, start it again.
+            if ([double]::IsNaN($value) -or [double]::IsInfinity($value) -or [Math]::Abs($value) -gt 1000.0) { $value = 0.0; for ($k = 1; $k -le $order; $k++) { $y[$k] = 0.0 }; $emphasis = 0.0 }
+            for ($k = $order; $k -gt 1; $k--) { $y[$k] = $y[$k - 1] }
+            $y[1] = $value
+            $emphasis = $value + 0.97 * $emphasis
+            # DC blocker after de-emphasis, which integrates low frequencies.
+            $blocked = $emphasis - $lastIn + 0.995 * $lastOut; $lastIn = $emphasis; $lastOut = $blocked
+            $buffer[$n] = $blocked; $peak = $peak + $blocked * $blocked
+        }
+        # Normalized to the recording's own RMS: $gain is the target RMS as a fraction of full scale; rare peaks are clamped.
+        $scale = 0.0; if ($peak -gt 0.0) { $scale = $gain * 32767.0 / [Math]::Sqrt($peak / [double]$count) }
+        for ($n = 0; $n -lt $count; $n++) {
+            $sample = $buffer[$n] * $scale; if ($sample -gt 32767.0) { $sample = 32767.0 }; if ($sample -lt -32767.0) { $sample = -32767.0 }
+            $out[$n] = [short][Math]::Round($sample)
+        }
+        return $out
+    }
     static [short[]] RenderTrack([float[]] $track, [int] $hop, [int] $rate, [int] $harmonics, [double] $gain) {
         # A preview instrument: per frame (f0 Hz, level) pairs played as a harmonic tone (1/h amplitudes, below
         # Nyquist), both interpolated between frames; silent where f0 is 0.
@@ -754,7 +821,9 @@ function Import-StudentKernels {
         StressFirstVowel = $type.GetMethod('StressFirstVowel').CreateDelegate([Func[string,string,string]])
         MonoDecimate = $type.GetMethod('MonoDecimate').CreateDelegate([Func[byte[],int,int,float[],int,float[]]])
         PitchTrack = $type.GetMethod('PitchTrack').CreateDelegate([Func[float[],int,int,int,int,int,double,float[]]])
-        RenderTrack = $type.GetMethod('RenderTrack').CreateDelegate([Func[float[],int,int,int,double,short[]]]) }
+        RenderTrack = $type.GetMethod('RenderTrack').CreateDelegate([Func[float[],int,int,int,double,short[]]])
+        LpcTrack = $type.GetMethod('LpcTrack').CreateDelegate([Func[float[],int,int,int,float[]]])
+        LpcRender = $type.GetMethod('LpcRender').CreateDelegate([Func[float[],float[],int,int,int,double,int,short[]]]) }
     $script:StudentContext.Kernels
 }
 
@@ -1552,13 +1621,22 @@ function Invoke-StudentListen {
         $previewPath = Join-Path $output ([IO.Path]::ChangeExtension((Split-Path -Leaf $recording.Wav), '.melody.wav'))
         [IO.File]::WriteAllBytes($previewPath, [byte[]]([Text.Encoding]::ASCII.GetBytes('RIFF') + (& $little (36 + $pcmBytes.Length) 4) + [Text.Encoding]::ASCII.GetBytes('WAVEfmt ') + (& $little 16 4) + (& $little 1 2) + (& $little 1 2) +
             (& $little $rate 4) + (& $little (2 * $rate) 4) + (& $little 2 2) + (& $little 16 2) + [Text.Encoding]::ASCII.GetBytes('data') + (& $little $pcmBytes.Length 4) + $pcmBytes))
+        # Vocoder preview: the same pitch track plus the vocal tract's shape per frame (order-16 linear prediction): pulses where
+        # voiced, noise elsewhere, through each frame's all-pole filter.
+        $lpc = $kernels.LpcTrack.Invoke($x, $hop, $window, 16)
+        $excite = [float[]]::new($n); for ($t = 0; $t -lt $n; $t++) { if ($voiced[$t]) { $excite[$t] = $track[3 * $t] } }
+        $speech = $kernels.LpcRender.Invoke($excite, $lpc, $hop, $rate, 16, 0.1, 1)
+        $speechBytes = [byte[]]::new(2 * $speech.Length); [Buffer]::BlockCopy($speech, 0, $speechBytes, 0, $speechBytes.Length)
+        $vocoderPath = Join-Path $output ([IO.Path]::ChangeExtension((Split-Path -Leaf $recording.Wav), '.vocoder.wav'))
+        [IO.File]::WriteAllBytes($vocoderPath, [byte[]]([Text.Encoding]::ASCII.GetBytes('RIFF') + (& $little (36 + $speechBytes.Length) 4) + [Text.Encoding]::ASCII.GetBytes('WAVEfmt ') + (& $little 16 4) + (& $little 1 2) + (& $little 1 2) +
+            (& $little $rate 4) + (& $little (2 * $rate) 4) + (& $little 2 2) + (& $little 16 2) + [Text.Encoding]::ASCII.GetBytes('data') + (& $little $speechBytes.Length 4) + $speechBytes))
         $rests = @(for ($k = 1; $k -lt $notes.Count; $k++) { 10 * ($notes[$k].First - $notes[$k - 1].Last) }) | Sort-Object
         $f0s = @(foreach ($note in $notes) { for ($t = $note.First; $t -lt $note.Last; $t++) { [double]$track[3 * $t] } }) | Sort-Object
         [pscustomobject]@{ PSTypeName = 'Kokoro.StudentListening'; Recording = $recording.Wav; Seconds = $recording.Seconds; Frames = $n
             VoicedShare = [Math]::Round(@($voiced | Where-Object { $_ }).Count / [double]$n, 3); Notes = $notes.Count
             NotesPerSecond = [Math]::Round($notes.Count / $recording.Seconds, 2); MedianF0 = $(if ($f0s.Count) { [Math]::Round($f0s[[int]($f0s.Count / 2)], 1) })
             RestMedianMs = $(if ($rests.Count) { $rests[[int]($rests.Count / 2)] }); RestsOver300Ms = @($rests | Where-Object { $_ -gt 300 }).Count
-            Midi = $midiPath; Melody = $previewPath; DecodeSeconds = [Math]::Round($decodeSeconds, 1); TrackSeconds = [Math]::Round($trackSeconds, 1); WallSeconds = [Math]::Round($watch.Elapsed.TotalSeconds, 1) }
+            Midi = $midiPath; Melody = $previewPath; Vocoder = $vocoderPath; DecodeSeconds = [Math]::Round($decodeSeconds, 1); TrackSeconds = [Math]::Round($trackSeconds, 1); WallSeconds = [Math]::Round($watch.Elapsed.TotalSeconds, 1) }
     }
 }
 
