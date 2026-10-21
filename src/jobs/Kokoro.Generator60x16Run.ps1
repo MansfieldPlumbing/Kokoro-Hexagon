@@ -85,8 +85,16 @@ function New-KokoroGenerator60x16RunSteps {
         [ValidateSet('Layer','Tile')][string]$Schedule='Layer',
         # How HVX workers wait for work and the main thread waits for them: QuRT futex traps, or polling the pool
         # with pause. Default: Spin for the tile schedule (dispatches microseconds apart), Futex otherwise.
-        [ValidateSet('','Futex','Spin')][string]$PoolWait='')
+        [ValidateSet('','Futex','Spin')][string]$PoolWait='',
+        # Tile schedule: 0 runs every convolution on the main thread, which holds the matrix unit; 1 to 3 run them on
+        # that HVX worker, which never takes the matrix lock.
+        [ValidateRange(0,3)][int]$MatrixThread=0,
+        # With MatrixThread: Main leaves the matrix lock with the main thread; Worker hands it to that worker for the
+        # job (QuRT unlock on main before the workers start, try-lock in the worker, and the reverse at the end);
+        # Convolution has the worker take and release it around every convolution.
+        [ValidateSet('Main','Worker','Convolution')][string]$MatrixLock='Main')
     if(-not $PoolWait){ $PoolWait=if($Schedule -eq 'Tile'){'Spin'}else{'Futex'} }
+    if($MatrixThread -and ($Schedule -ne 'Tile' -or $MatrixThread -ge $HvxThreads)){ throw 'MatrixThread names an HVX worker of the tile schedule.' }
     if($Schedule -eq 'Tile' -and ($Whole -or $Source -or $Decoder -or $Front -or $Tail -or $RuntimeFrames -or $StopAfterStage -ge 0 -or
         $Kernels.Count -ne 3 -or $AdaInMode -ne 'Constants' -or ($BatchTiles -band ($BatchTiles-1)) -or $Channels -ne 128 -or $PmuEvents)) {
         throw 'The tile schedule runs one 128-channel section of three kernels and their mean with supplied AdaIN values, a power-of-two block of tiles per step.'
@@ -382,8 +390,13 @@ function New-KokoroGenerator60x16RunSteps {
             }
         }
     }
+    # QuRT matrix lock traps (as Kokoro.HmxMatrixProbe.ps1): unlock2(0) is r0 = 0, r5 = 1; try-lock is r5 = 2.
+    $matrixUnlock={ $s.Add(@{Op='imm';d=0;i=0}); $s.Add(@{Op='imm';d=5;i=1}); $s.Add(@{Op='trap0';i=0x1d}) }
+    $matrixTryLock={ $s.Add(@{Op='imm';d=5;i=2}); $s.Add(@{Op='trap0';i=0x1d}) }
+    $handOffMatrix=$MatrixThread -and $MatrixLock -ne 'Main'
     $poolStart={
         if($HvxThreads -eq 1){return}
+        if($handOffMatrix){ & $matrixUnlock }
         & $ptr 4 25 $poolOffset; $s.Add(@{Op='vxor';d=0;s=0;t=0}); for($k=0;$k -lt 8;$k++){$s.Add(@{Op='vstore';s=4;t=0;Offset=(128*$k)})}
         & $ptr 6 25 $poolOffset; & $imm 0 0x4C4F4F50L; $s.Add(@{Op='store';s=6;t=0;Offset=8}); & $imm 0 $HvxThreads; $s.Add(@{Op='store';s=6;t=0;Offset=12})
         for($k=1;$k -lt $HvxThreads;$k++){
@@ -405,6 +418,7 @@ function New-KokoroGenerator60x16RunSteps {
             & $ptr 6 25 ($poolOffset+64*$k); $s.Add(@{Op='load';d=0;s=6;Offset=24}); $s.Add(@{Op='addi';d=1;s=6;i=36})
             $s.Add(@{Op='got-call';Import='qurt_thread_join';d=14})
             & $ptr 6 25 ($poolOffset+64*$k); $s.Add(@{Op='store';s=6;t=0;Offset=40})
+            if($handOffMatrix -and $k -eq $HvxThreads-1){ & $matrixTryLock }
         }
     }
 
@@ -673,8 +687,24 @@ function New-KokoroGenerator60x16RunSteps {
             if($position -ge 0 -and $position -le $count+1){ & $padRows ($tileRegions.Window+$position*[long]$tileBytes) 0x8000; & $padRows ($tileRegions.WindowLow+$position*[long]$tileBytes) 0 }
         }
         & $sync
-        & $ptr 0 18 ($tileRegions.Window+$tileBytes); & $ptr 1 18 ($tileRegions.WindowLow+$tileBytes); & $ptr 2 18 $tileWeightAt[$index]; & $ptr 3 18 ($rAt+$tablesAt); & $imm 4 $count; & $ptr 5 18 $tileRegions.Planes
-        & $call "body_conv_b$($g.Branch)_d$(if($g.Half -eq 0){$g.Dilation}else{1})$sfx"
+        $convBody="body_conv_b$($g.Branch)_d$(if($g.Half -eq 0){$g.Dilation}else{1})$sfx"
+        if($MatrixThread){
+            # The worker's pool record: r0 to r4 in slots 0 to 16, r5 in slot 56; every other worker gets no work.
+            for($k=1;$k -lt $HvxThreads;$k++){
+                & $ptr 6 25 ($poolOffset+64*$k)
+                if($k -eq $MatrixThread){
+                    $slots=@(@(0,($tileRegions.Window+$tileBytes)),@(4,($tileRegions.WindowLow+$tileBytes)),@(8,$tileWeightAt[$index]),@(12,($rAt+$tablesAt)),@(56,$tileRegions.Planes))
+                    foreach($slot in $slots){ & $ptr 0 18 $slot[1]; $s.Add(@{Op='store';s=6;t=0;Offset=$slot[0]}) }
+                    & $imm 0 $count; $s.Add(@{Op='store';s=6;t=0;Offset=16})
+                    & $addr 0 $convBody; $s.Add(@{Op='store';s=6;t=0;Offset=44})
+                }
+                & $imm 0 $(if($k -ne $MatrixThread){0}elseif($MatrixLock -eq 'Convolution'){2}else{1}); $s.Add(@{Op='store';s=6;t=0;Offset=48})
+            }
+            & $wake; & $join
+        } else {
+            & $ptr 0 18 ($tileRegions.Window+$tileBytes); & $ptr 1 18 ($tileRegions.WindowLow+$tileBytes); & $ptr 2 18 $tileWeightAt[$index]; & $ptr 3 18 ($rAt+$tablesAt); & $imm 4 $count; & $ptr 5 18 $tileRegions.Planes
+            & $call $convBody
+        }
         & $sync
         $targetBase=if($g.Half -eq 0){$stageBase}else{$residualBase}; $targetBlocks=if($g.Half -eq 0){4}else{8}
         & $parallel $(if($g.Half -eq 0){"body_combine_conv$sfx"}else{"body_combine_residual$sfx"}) @($tileRegions.Planes,(& $ring $targetBase $targetBlocks $block (& $delta 0) 0),($rAt+$ratiosAt)) @($true,$true,$false) $count
@@ -905,14 +935,28 @@ function New-KokoroGenerator60x16RunSteps {
         $s.Add(@{Op='addi';d=16;s=0;i=0}); $s.Add(@{Op='load';d=17;s=16;Offset=32}); $s.Add(@{Op='imm';d=18;i=0}); $s.Add(@{Op='imm';d=19;i=0})
         $s.Add(@{Op='imm';d=0;i=1}); $s.Add(@{Op='imm';d=5;i=0}); $s.Add(@{Op='trap0';i=0x55})
         $s.Add(@{Op='store';s=16;t=0;Offset=52})
+        # The matrix worker (slot = pool + 64 * MatrixThread) takes or releases the matrix lock; the others skip it.
+        $matrixWorker={param([scriptblock]$trap) $mine=& $label; $past=& $label
+            $s.Add(@{Op='addi';d=1;s=17;i=(64*$MatrixThread)}); $s.Add(@{Op='eq';d=0;s=16;t=1}); $s.Add(@{Op='jump-p';u=0;Label=$mine}); & $jump $past
+            $s.Add(@{Op='label';Name=$mine}); & $trap; $s.Add(@{Op='store';s=16;t=0;Offset=60})
+            $s.Add(@{Op='label';Name=$past}) }
+        if($handOffMatrix -and $MatrixLock -eq 'Worker'){ & $matrixWorker $matrixTryLock }
+        # Convolution: a pool count of 2 marks matrix work, bracketed by try-lock and unlock.
+        $aroundMatrix={param([scriptblock]$trap) $now=& $label; $skip=& $label
+            $s.Add(@{Op='load';d=5;s=16;Offset=48}); $s.Add(@{Op='imm';d=1;i=2}); $s.Add(@{Op='eq';d=0;s=5;t=1}); $s.Add(@{Op='jump-p';u=0;Label=$now}); & $jump $skip
+            $s.Add(@{Op='label';Name=$now}); & $trap; $s.Add(@{Op='store';s=16;t=0;Offset=60})
+            $s.Add(@{Op='label';Name=$skip}) }
         $s.Add(@{Op='label';Name=$loop})
         $s.Add(@{Op='load';d=0;s=17;Offset=0}); $s.Add(@{Op='eq';d=0;s=0;t=18}); $s.Add(@{Op='jump-p';u=0;Label=$idle})
         $s.Add(@{Op='addi';d=18;s=0;i=0})
         $s.Add(@{Op='load';d=1;s=17;Offset=4}); $s.Add(@{Op='gtu';d=0;s=1;t=19}); $s.Add(@{Op='jump-p';u=0;Label=$quit})
         $s.Add(@{Op='load';d=5;s=16;Offset=48}); $s.Add(@{Op='eq';d=0;s=5;t=19}); $s.Add(@{Op='jump-p';u=0;Label=$done})
+        if($MatrixLock -eq 'Convolution'){ & $aroundMatrix $matrixTryLock }
         foreach($k in 0..4){ $s.Add(@{Op='load';d=$k;s=16;Offset=(4*$k)}) }
+        if($MatrixThread){ $s.Add(@{Op='load';d=5;s=16;Offset=56}) }
         $s.Add(@{Op='load';d=20;s=16;Offset=44}); $s.Add(@{Op='callr';s=20})
         $s.Add(@{Op='syncht'})
+        if($MatrixLock -eq 'Convolution'){ & $aroundMatrix $matrixUnlock }
         $s.Add(@{Op='label';Name=$done})
         $s.Add(@{Op='store';s=16;t=18;Offset=20})
         if($PoolWait -eq 'Futex'){ $s.Add(@{Op='addi';d=0;s=16;i=20}); $s.Add(@{Op='imm';d=1;i=1}); $s.Add(@{Op='trap0';i=0x11}) }
@@ -921,6 +965,7 @@ function New-KokoroGenerator60x16RunSteps {
         if($PoolWait -eq 'Futex'){ & $futexWait 17 18 } else { $s.Add(@{Op='pause';i=$poolPause}) }
         & $jump $loop
         $s.Add(@{Op='label';Name=$quit})
+        if($handOffMatrix -and $MatrixLock -eq 'Worker'){ & $matrixWorker $matrixUnlock }
         $s.Add(@{Op='imm';d=0;i=3}); $s.Add(@{Op='imm';d=5;i=0}); $s.Add(@{Op='trap0';i=0x55})
         $s.Add(@{Op='imm';d=0;i=0}); $s.Add(@{Op='got-call';Import='qurt_thread_exit';d=14})
     }

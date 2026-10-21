@@ -1134,6 +1134,7 @@ $script:Kernels=@(
     # its completion word and the tail skel's name. The defaults emit exactly as before.
     $phoneHarness=$GeneratorSchedule -ne 'Layer' -or $GeneratorMoments -ne 'Accumulate'
     $harness=if($phoneHarness){@{AdaInMode=$GeneratorMoments;Schedule=$GeneratorSchedule;GenericHarness=$true}}else{@{}}
+            if($GeneratorMatrixThread){ $harness.MatrixThread=$GeneratorMatrixThread; $harness.MatrixLock=$GeneratorMatrixLock }
         $run=New-KokoroGenerator60x16RunSteps -Frames $ResBlockFrames -HvxThreads $ResidentHvxThreads -BatchTiles $ResidentBatchTiles -StopAfterStage $Stage16StopAfter -DumpPoint $Stage16DumpPoint -Kernels $Stage16Kernels -RuntimeFrames:$GeneratorRuntimeFrames @pmu @harness
     $steps=@($run.Steps)
     $symbol='kokoro_resblock_run_skel_handle_invoke'; $soname='libkokoro_resblock_run_skel.so'
@@ -1307,6 +1308,12 @@ param(
     # KokoroGenerator60x16Run: Layer (each stage over every tile) or Tile (depth-first, resident weights; see -Schedule in
     # src/jobs/Kokoro.Generator60x16Run.ps1).
     [ValidateSet('Layer','Tile')][string] $GeneratorSchedule = 'Layer',
+    # KokoroGenerator60x16Run tile schedule: 0 runs the convolutions on the main thread, which holds the matrix unit;
+    # 1 to 3 run them on that HVX worker, which never takes the matrix lock.
+    [ValidateRange(0, 3)][int] $GeneratorMatrixThread = 0,
+    # With GeneratorMatrixThread: Main keeps the matrix lock on the main thread; Worker hands it to that worker for the
+    # job; Convolution has that worker take and release it around every convolution.
+    [ValidateSet('Main','Worker','Convolution')][string] $GeneratorMatrixLock = 'Main',
     [ValidateSet(1, 3, 5)][int] $ConvDilation = 1,
     [ValidateSet(1,3)][int] $TemplateBranches = 1,
     [switch] $TemplateAddResidual,
