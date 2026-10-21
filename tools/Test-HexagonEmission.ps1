@@ -64,6 +64,7 @@ param(
     [ValidateSet('Accumulate','Export','Constants')][string] $GeneratorMoments = 'Accumulate',
     [ValidateSet('Layer','Tile')][string] $GeneratorSchedule = 'Layer',
     [switch] $GeneratorVectorPackets,
+    [ValidateSet(1,3)][int] $GeneratorBranchesPerStage = 1,
     [switch] $Force
 )
 $ErrorActionPreference='Stop'
@@ -83,6 +84,7 @@ $pmuArgs.TemplateInitialFrameOffset=$TemplateInitialFrameOffset
 $pmuArgs.GeneratorMoments=$GeneratorMoments
 $pmuArgs.GeneratorSchedule=$GeneratorSchedule
 $pmuArgs.GeneratorVectorPackets=$GeneratorVectorPackets.IsPresent
+$pmuArgs.GeneratorBranchesPerStage=$GeneratorBranchesPerStage
 $result=& (Join-Path $PSScriptRoot 'Emit-HexagonProbe.ps1') -OutputDirectory $output -ReferenceAssembly `
     -Kernel $Kernel -ResBlockFrames $ResBlockFrames -ResBlockKernel $ResBlockKernel -IntegerChannels $IntegerChannels -LinearRows $LinearRows -LinearInputChannels $LinearInputChannels `
     -LinearOutputChannels $LinearOutputChannels -LinearVectorOutputTiles:$LinearVectorOutputTiles `

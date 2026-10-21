@@ -1537,7 +1537,9 @@ function Test-KokoroGeneratorTileEquivalence {
         # blocks of 1 must equal blocks of TileBlock.
         [switch]$ControllerContact,[int]$ControllerStep=160,[int]$ControllerMargin=8,[int]$ControllerValue=8192,[int]$SensitivityRange=1048576,
         # The tile job's window fill in packets of several instructions.
-        [switch]$VectorPackets)
+        [switch]$VectorPackets,
+        # The tile job's stages with all three branches together (one fill and one combine dispatch per stage).
+        [ValidateSet(1,3)][int]$BranchesPerStage=1)
     $out=[IO.Path]::GetFullPath($OutputDirectory)
     if(-not $out.StartsWith($Build+[IO.Path]::DirectorySeparatorChar,[StringComparison]::OrdinalIgnoreCase) -or (Test-Path -LiteralPath $out)){throw 'Choose a fresh equivalence directory under build/.'}
     [void][IO.Directory]::CreateDirectory($out)
@@ -1547,7 +1549,7 @@ function Test-KokoroGeneratorTileEquivalence {
     $common=@{ResBlockFrames=[int]$fixture.Frames;ResidentHvxThreads=4}
     $export=Invoke-KokoroEmission -Kernel KokoroGenerator60x16Run -Parameters ($common+@{ResidentBatchTiles=22;GeneratorMoments='Export';GeneratorSchedule='Layer'})
     $layer=Invoke-KokoroEmission -Kernel KokoroGenerator60x16Run -Parameters ($common+@{ResidentBatchTiles=22;GeneratorMoments='Constants';GeneratorSchedule='Layer'})
-    $tileParameters=$common+@{ResidentBatchTiles=$TileBlock;GeneratorMoments='Constants';GeneratorSchedule='Tile';GeneratorMatrixThread=$MatrixThread;GeneratorMatrixLock=$MatrixLock;GeneratorWeightPlanes=$WeightPlanes;GeneratorControllerContact=$ControllerContact.IsPresent;GeneratorVectorPackets=$VectorPackets.IsPresent}
+    $tileParameters=$common+@{ResidentBatchTiles=$TileBlock;GeneratorMoments='Constants';GeneratorSchedule='Tile';GeneratorMatrixThread=$MatrixThread;GeneratorMatrixLock=$MatrixLock;GeneratorWeightPlanes=$WeightPlanes;GeneratorControllerContact=$ControllerContact.IsPresent;GeneratorVectorPackets=$VectorPackets.IsPresent;GeneratorBranchesPerStage=$BranchesPerStage}
     $tile=Invoke-KokoroEmission -Kernel KokoroGenerator60x16Run -Parameters $tileParameters
     $statistics=[IO.File]::ReadAllBytes((Join-Path $FixtureDirectory 'tables.bin'))
     $weights=[IO.File]::ReadAllBytes((Join-Path $FixtureDirectory 'weights.bin'))
