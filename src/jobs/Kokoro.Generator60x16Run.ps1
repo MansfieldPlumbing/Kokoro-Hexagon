@@ -109,8 +109,13 @@ function New-KokoroGenerator60x16RunSteps {
         # Tile schedule: branches per stage. 3 runs a stage of all three branches together: one window fill dispatch and
         # one combine dispatch, each body repeated over the branches at fixed VTCM strides, and the three convolutions back
         # to back; each branch has its own windows and planes. 1 runs the 18 stages one at a time.
-        [ValidateSet(1,3)][int]$BranchesPerStage=1)
+        [ValidateSet(1,3)][int]$BranchesPerStage=1,
+        # Tile schedule: every stage keeps its own window, so each window tile is filled once. Consecutive blocks' windows
+        # share two tiles (the last tile of block j and the first of block j + 1); they move from the end of the previous
+        # window to its start, and the fill computes only the block's other tiles and the next block's first.
+        [switch]$FillOnce)
     if($WeightPlanes -eq 1 -and $Schedule -ne 'Tile'){ throw 'One weight plane is a tile schedule option.' }
+    if($FillOnce -and $Schedule -ne 'Tile'){ throw 'Filling each window tile once is a tile schedule option.' }
     $packets={ param([object[]]$Steps) $grouped=if($VectorPackets){ Group-HexagonPackets $Steps } else { $Steps }; $grouped }
     if($ControllerContact -and $Schedule -ne 'Tile'){ throw 'The controller contact is a tile schedule option.' }
     if($BranchesPerStage -ne 1 -and ($Schedule -ne 'Tile' -or $MatrixThread)){ throw 'Three branches per stage is a tile schedule option with the convolutions on the main thread.' }
@@ -277,13 +282,23 @@ function New-KokoroGenerator60x16RunSteps {
         $tilePlanes=4L+2*($WeightPlanes-1)
         # With three branches per stage, branch b's windows and planes are b strides after branch 0's.
         $windowStride=& $al (($batch+2L)*$tileBytes); $planesStride=& $al ($tilePlanes*$batch*$tileBytes)
+        # With FillOnce, stage s of branch b has window 3 s + b, so a stage's three branches are still one stride apart.
+        $windowCount=if($FillOnce){18}else{$BranchesPerStage}
         $tileRegions=[ordered]@{}; $at=0L
-        foreach($r in @(@('Window',($BranchesPerStage*$windowStride)),@('WindowLow',($BranchesPerStage*$windowStride)),@('Planes',($BranchesPerStage*$planesStride)),@('Moments',(16L*$Channels)),@('Mean',([long]$batch*$tileBytes)),
-            @('ResidualRings',(3L*8*$batch*$tileBytes)),@('StageRings',(9L*4*$batch*$tileBytes)),@('Kms',(18L*$kmsBytes)),@('Records',(18L*$recordBytes)),@('Controller',$(if($ControllerContact){$controllerBytes}else{0L})))){ $tileRegions[$r[0]]=$at; $at+=& $al $r[1] }
+        $hmxRegions=@(@('Window',($windowCount*$windowStride)),@('WindowLow',($windowCount*$windowStride)),@('Planes',($BranchesPerStage*$planesStride)))
+        if($FillOnce){ $hmxRegions=@($hmxRegions[2],$hmxRegions[0],$hmxRegions[1]) }
+        foreach($r in @($hmxRegions+@(@('Moments',(16L*$Channels)),@('Mean',([long]$batch*$tileBytes)),
+            @('ResidualRings',(3L*8*$batch*$tileBytes)),@('StageRings',(9L*4*$batch*$tileBytes)),@('Kms',(18L*$kmsBytes)),@('Records',(18L*$recordBytes)),@('Controller',$(if($ControllerContact){$controllerBytes}else{0L}))))){ $tileRegions[$r[0]]=$at; $at+=& $al $r[1] }
         $tileWeightAt=[long[]]::new(18); foreach($g in $tileStages){ $tileWeightAt[6*$g.Branch+$g.Stage]=$at; $at+=$g.WeightBytes }
         $vtcmTotal=& $al $at
         if($vtcmTotal -gt 8388608){throw 'The tile schedule does not fit VTCM.'}
-        if($tileRegions.Planes+($BranchesPerStage-1)*$planesStride+$tilePlanes*$batch*$tileBytes -gt 1048576){throw 'HMX windows and planes must lie in the first 1 MiB of VTCM.'}
+        if($FillOnce){
+            # Eighteen windows do not fit the first 1 MiB; each lies inside one 1 MiB page (hexagon-v73-notes.md).
+            if($tileRegions.Planes+($BranchesPerStage-1)*$planesStride+$tilePlanes*$batch*$tileBytes -gt 1048576){throw 'HMX planes must lie in the first 1 MiB of VTCM.'}
+            foreach($name in 'Window','WindowLow'){ for($k=0;$k -lt 18;$k++){ $first=$tileRegions[$name]+$k*$windowStride; $last=$first+($batch+2L)*$tileBytes-1
+                if([math]::Floor($first/1048576) -ne [math]::Floor($last/1048576)){throw 'A conv-input window crosses a 1 MiB VTCM boundary.'} } }
+        }
+        elseif($tileRegions.Planes+($BranchesPerStage-1)*$planesStride+$tilePlanes*$batch*$tileBytes -gt 1048576){throw 'HMX windows and planes must lie in the first 1 MiB of VTCM.'}
     }
     . $bind 0
     $vtcmBytes=$vtcmTotal
@@ -462,6 +477,14 @@ function New-KokoroGenerator60x16RunSteps {
     $fill={param([long]$off,[int]$count,[long]$pattern)
         & $ptr 4 18 $off; & $imm 6 $pattern; $s.Add(@{Op='vsplat';d=0;s=6}); & $imm 5 ($count*$tileBytes/128); $s.Add(@{Op='imm';d=7;i=0})
         $n=& $label; $s.Add(@{Op='label';Name=$n});$s.Add(@{Op='vstore';s=4;t=0;Offset=0});$s.Add(@{Op='addi';d=4;s=4;i=128});$s.Add(@{Op='addi';d=5;s=5;i=-1});$s.Add(@{Op='gtu';d=0;s=5;t=7});$s.Add(@{Op='jump-p';u=0;Label=$n})
+        & $mark 'TileFix'
+    }
+    # VTCM tiles at destOff <- the tiles at srcOff, eight vectors at a time.
+    $copyTiles={param([long]$destOff,[long]$srcOff,[int]$count)
+        & $ptr 4 18 $srcOff; & $ptr 5 18 $destOff; & $imm 6 ($count*$tileBytes/1024); $s.Add(@{Op='imm';d=7;i=0})
+        $n=& $label; $s.Add(@{Op='label';Name=$n})
+        for($k=0;$k -lt 8;$k++){$s.Add(@{Op='vload';d=$k;s=4;Offset=(128*$k)})}; for($k=0;$k -lt 8;$k++){$s.Add(@{Op='vstore';s=5;t=$k;Offset=(128*$k)})}
+        $s.Add(@{Op='addi';d=4;s=4;i=1024});$s.Add(@{Op='addi';d=5;s=5;i=1024});$s.Add(@{Op='addi';d=6;s=6;i=-1});$s.Add(@{Op='gtu';d=0;s=6;t=7});$s.Add(@{Op='jump-p';u=0;Label=$n})
         & $mark 'TileFix'
     }
     $zeroRecord={param([long]$off) & $ptr 4 18 $off; $s.Add(@{Op='vxor';d=0;s=0;t=0}); for($k=0;$k -lt $momentVectors;$k++){$s.Add(@{Op='vstore';s=4;t=0;Offset=(128*($k%8))}); if($k%8 -eq 7 -and $k -lt $momentVectors-1){$s.Add(@{Op='addi';d=4;s=4;i=1024})}} }
@@ -713,28 +736,36 @@ function New-KokoroGenerator60x16RunSteps {
         $delta={param([int]$k) if($null -ne $block){$k}else{$k-$q}}
         $count=if($null -ne $block){& $blockTiles $block}else{$batch}
         $isFirst=$null -ne $block -and $block -eq 0; $isLast=$null -ne $block -and $block -eq $blockCount-1
+        $winAt=$tileRegions.Window; $lowAt=$tileRegions.WindowLow
+        if($FillOnce){ $winAt+=(3L*$g.Stage+$g.Branch)*$windowStride; $lowAt+=(3L*$g.Stage+$g.Branch)*$windowStride }
+        # FillOnce after the first block: positions 0 and 1 are the previous window's positions batch and batch + 1.
+        $carry=$FillOnce -and -not $isFirst
         for($b=0;$b -lt $BranchesPerStage;$b++){
             $w=$b*$windowStride
-            if($isFirst){ & $fill ($tileRegions.Window+$w) 1 0x80008000L; & $fill ($tileRegions.WindowLow+$w) 1 0 }
-            if($isLast){ & $fill ($tileRegions.Window+$w+($count+1)*[long]$tileBytes) 1 0x80008000L; & $fill ($tileRegions.WindowLow+$w+($count+1)*[long]$tileBytes) 1 0 }
+            if($isFirst){ & $fill ($winAt+$w) 1 0x80008000L; & $fill ($lowAt+$w) 1 0 }
+            if($carry){ & $copyTiles ($winAt+$w) ($winAt+$w+$batch*[long]$tileBytes) 2; & $copyTiles ($lowAt+$w) ($lowAt+$w+$batch*[long]$tileBytes) 2 }
+            if($isLast){ & $fill ($winAt+$w+($count+1)*[long]$tileBytes) 1 0x80008000L; & $fill ($lowAt+$w+($count+1)*[long]$tileBytes) 1 0 }
         }
         # Window positions: 0 the previous block's last tile, 1..count this block, count + 1 the next block's first tile.
         # One dispatch fills the window: each halo tile is its own segment, the block's tiles split over the other threads.
         $fillSegment={param([int]$k,[int]$within,[int]$position,[int]$tilesInSegment)
-            $segment=@{Count=$tilesInSegment;Arguments=@((& $ring $sourceBase $sourceBlocks $block (& $delta $k) $within),($tileRegions.Window+$position*[long]$tileBytes),($tileRegions.WindowLow+$position*[long]$tileBytes),$kAt)}
+            $segment=@{Count=$tilesInSegment;Arguments=@((& $ring $sourceBase $sourceBlocks $block (& $delta $k) $within),($winAt+$position*[long]$tileBytes),($lowAt+$position*[long]$tileBytes),$kAt)}
             if($ControllerContact){ $segment.Extra=@{Controller=$true;Block=$block;Delta=(& $delta $k);Within=$within} }
             $segment }
         $segments=[Collections.Generic.List[object]]::new()
-        if(-not $isFirst){ $segments.Add((& $fillSegment -1 ($batch-1) 0 1)) }
-        $parts=$HvxThreads-$(if($isFirst){0}else{1})-$(if($isLast){0}else{1}); $chunk=[int][math]::Ceiling($count/$parts)
-        for($o=0;$o -lt $count;$o+=$chunk){ $segments.Add((& $fillSegment 0 $o (1+$o) ([math]::Min($chunk,$count-$o)))) }
+        if(-not $isFirst -and -not $carry){ $segments.Add((& $fillSegment -1 ($batch-1) 0 1)) }
+        $from=if($carry){1}else{0}
+        if($count -gt $from){
+            $parts=$HvxThreads-$(if($isFirst -or $carry){0}else{1})-$(if($isLast){0}else{1}); $chunk=[int][math]::Ceiling(($count-$from)/$parts)
+            for($o=$from;$o -lt $count;$o+=$chunk){ $segments.Add((& $fillSegment 0 $o (1+$o) ([math]::Min($chunk,$count-$o)))) }
+        }
         if(-not $isLast){ $segments.Add((& $fillSegment 1 0 ($count+1) 1)) }
         & $dispatch $(if($grouped){"body_turns3_h$($g.Half)$sfx"}else{"body_turns$sfx"}) $segments.ToArray()
         if($null -ne $block){
             $position=($tiles-1)-$block*$batch+1
             for($b=0;$b -lt $BranchesPerStage;$b++){
                 $w=$b*$windowStride
-                if($position -ge 0 -and $position -le $count+1){ & $padRows ($tileRegions.Window+$w+$position*[long]$tileBytes) 0x8000; & $padRows ($tileRegions.WindowLow+$w+$position*[long]$tileBytes) 0 }
+                if($position -ge 0 -and $position -le $count+1){ & $padRows ($winAt+$w+$position*[long]$tileBytes) 0x8000; & $padRows ($lowAt+$w+$position*[long]$tileBytes) 0 }
             }
         }
         & $sync
@@ -742,7 +773,7 @@ function New-KokoroGenerator60x16RunSteps {
         if($grouped){
             for($b=0;$b -lt 3;$b++){
                 $at=$index+6*$b; $w=$b*$windowStride
-                & $ptr 0 18 ($tileRegions.Window+$w+$tileBytes); & $ptr 1 18 ($tileRegions.WindowLow+$w+$tileBytes); & $ptr 2 18 $tileWeightAt[$at]; & $ptr 3 18 ($tileRegions.Records+$at*$recordBytes+$tablesAt); & $imm 4 $count; & $ptr 5 18 ($tileRegions.Planes+$b*$planesStride)
+                & $ptr 0 18 ($winAt+$w+$tileBytes); & $ptr 1 18 ($lowAt+$w+$tileBytes); & $ptr 2 18 $tileWeightAt[$at]; & $ptr 3 18 ($tileRegions.Records+$at*$recordBytes+$tablesAt); & $imm 4 $count; & $ptr 5 18 ($tileRegions.Planes+$b*$planesStride)
                 & $call "body_conv_b$($g.Branch+$b)_d$(if($g.Half -eq 0){$g.Dilation}else{1})$sfx"
             }
         } elseif($MatrixThread){
@@ -750,7 +781,7 @@ function New-KokoroGenerator60x16RunSteps {
             for($k=1;$k -lt $HvxThreads;$k++){
                 & $ptr 6 25 ($poolOffset+64*$k)
                 if($k -eq $MatrixThread){
-                    $slots=@(@(0,($tileRegions.Window+$tileBytes)),@(4,($tileRegions.WindowLow+$tileBytes)),@(8,$tileWeightAt[$index]),@(12,($rAt+$tablesAt)),@(56,$tileRegions.Planes))
+                    $slots=@(@(0,($winAt+$tileBytes)),@(4,($lowAt+$tileBytes)),@(8,$tileWeightAt[$index]),@(12,($rAt+$tablesAt)),@(56,$tileRegions.Planes))
                     foreach($slot in $slots){ & $ptr 0 18 $slot[1]; $s.Add(@{Op='store';s=6;t=0;Offset=$slot[0]}) }
                     & $imm 0 $count; $s.Add(@{Op='store';s=6;t=0;Offset=16})
                     & $addr 0 $convBody; $s.Add(@{Op='store';s=6;t=0;Offset=44})
@@ -759,7 +790,7 @@ function New-KokoroGenerator60x16RunSteps {
             }
             & $wake; & $join
         } else {
-            & $ptr 0 18 ($tileRegions.Window+$tileBytes); & $ptr 1 18 ($tileRegions.WindowLow+$tileBytes); & $ptr 2 18 $tileWeightAt[$index]; & $ptr 3 18 ($rAt+$tablesAt); & $imm 4 $count; & $ptr 5 18 $tileRegions.Planes
+            & $ptr 0 18 ($winAt+$tileBytes); & $ptr 1 18 ($lowAt+$tileBytes); & $ptr 2 18 $tileWeightAt[$index]; & $ptr 3 18 ($rAt+$tablesAt); & $imm 4 $count; & $ptr 5 18 $tileRegions.Planes
             & $call $convBody
         }
         & $sync

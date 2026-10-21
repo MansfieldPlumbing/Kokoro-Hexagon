@@ -1242,6 +1242,7 @@ $script:Kernels=@(
             if($GeneratorControllerContact){ $harness.ControllerContact=$true }
             if($GeneratorVectorPackets){ $harness.VectorPackets=$true }
             if($GeneratorBranchesPerStage -ne 1){ $harness.BranchesPerStage=$GeneratorBranchesPerStage }
+            if($GeneratorFillOnce){ $harness.FillOnce=$true }
         $run=New-KokoroGenerator60x16RunSteps -Frames $ResBlockFrames -HvxThreads $ResidentHvxThreads -BatchTiles $ResidentBatchTiles -StopAfterStage $Stage16StopAfter -DumpPoint $Stage16DumpPoint -Kernels $Stage16Kernels -RuntimeFrames:$GeneratorRuntimeFrames @pmu @harness
     $steps=@($run.Steps)
     $symbol='kokoro_resblock_run_skel_handle_invoke'; $soname='libkokoro_resblock_run_skel.so'
@@ -1430,6 +1431,8 @@ param(
     # KokoroGenerator60x16Run tile schedule: 3 runs each stage of all three branches together (one fill and one combine
     # dispatch per stage).
     [ValidateSet(1, 3)][int] $GeneratorBranchesPerStage = 1,
+    # KokoroGenerator60x16Run tile schedule: a window per stage, each window tile filled once.
+    [switch] $GeneratorFillOnce,
     # KokoroHarmonicSource16Run: generate the source noise on the DSP from a seed (input holds seed and scale) instead of
     # reading captured draws.
     [switch] $SourceSeededNoise,
