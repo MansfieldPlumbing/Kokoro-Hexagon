@@ -48,6 +48,7 @@ $script:Instructions = @(
     @{ Op='sfinvsqrta';     Pattern='10001011111sssssPP------0eeddddd'; Asm='r{d},p{e} = sfinvsqrta(r{s})'; Source='PRM p.470' }
     @{ Op='and';            Pattern='11110001000sssssPP0ttttt000ddddd'; Asm='r{d} = and(r{s},r{t})'; Source='PRM p.304' }
     @{ Op='xor';            Pattern='11110001011sssssPP0ttttt000ddddd'; Asm='r{d} = xor(r{s},r{t})'; Source='PRM p.304' }
+    @{ Op='mpyi';           Pattern='11101101000sssssPP0ttttt000ddddd'; Asm='r{d} = mpyi(r{s},r{t})'; Source='V73 PRM 80-N2040-53 Rev. AB, Multiply and use lower result (p. 480)' }
     @{ Op='or';             Pattern='11110001001sssssPP0ttttt000ddddd'; Asm='r{d} = or(r{s},r{t})'; Source='SDK 6.4.0.2 hexagon-llvm-mc: r24 = or(r24,r0) = 0xF138C018' }
     @{ Op='conv-sf2w-chop'; Pattern='10001011100sssssPP000000001ddddd'; Asm='r{d} = convert_sf2w(r{s}):chop'; Source='PRM p.242' }
     @{ Op='conv-w2sf';      Pattern='10001011010sssssPP000000000ddddd'; Asm='r{d} = convert_w2sf(r{s})'; Source='PRM p.242' }
@@ -1041,7 +1042,7 @@ $script:Kernels=@(
     @{ Names=@('KokoroHarmonicSource16Run'); Build={
     # The harmonic source and STFT (f0 -> har planes, signal copy) under the generic tail harness (completion word 1).
     . (Join-Path $script:HexagonToolsRoot '..\src\jobs\Kokoro.HarmonicSource16Run.ps1')
-    $run=New-KokoroHarmonicSource16RunSteps -Frames $ResBlockFrames
+    $run=New-KokoroHarmonicSource16RunSteps -Frames $ResBlockFrames -SeededNoise:$SourceSeededNoise
     $steps=@($run.Steps)
     $symbol='kokoro_generator_tail_skel_handle_invoke'; $soname='libkokoro_generator_tail_skel.so'
     # Layout and link state are returned with the emitted artifact, without JSON interchange.
@@ -1320,6 +1321,9 @@ param(
     [ValidateSet(1, 2)][int] $GeneratorWeightPlanes = 2,
     # KokoroGenerator60x16Run tile schedule: per-tile AdaIN from the controller contact (K = K_base + P_K * v, M likewise).
     [switch] $GeneratorControllerContact,
+    # KokoroHarmonicSource16Run: generate the source noise on the DSP from a seed (input holds seed and scale) instead of
+    # reading captured draws.
+    [switch] $SourceSeededNoise,
     [ValidateSet(1, 3, 5)][int] $ConvDilation = 1,
     [ValidateSet(1,3)][int] $TemplateBranches = 1,
     [switch] $TemplateAddResidual,

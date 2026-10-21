@@ -1638,6 +1638,63 @@ function Test-KokoroGeneratorTileEquivalence {
     $report
 }
 
+function Test-KokoroSourceSeededNoise {
+    # Seeded source noise against its host reference: the host's Get-KokoroSourceNoise values fed to the captured-noise
+    # source job must give the same output bytes (har and signal) as the seeded job generating them on the DSP from the
+    # same seed. Also reports the noise statistics against the target and against the captured draws.
+    param([Parameter(Mandatory)][string]$OutputDirectory,[string]$Soc='SM8550',[string]$Package='dev.mansfieldplumbing.kokoro',
+        [string]$FixtureDirectory=(Join-Path $Build 'speak-20261010-h0-fast/job-input/harmonic-source-fixture-20261008'),
+        [uint32]$Seed=1,[ValidateRange(1,21)][int]$Runs=3)
+    $out=[IO.Path]::GetFullPath($OutputDirectory)
+    if(-not $out.StartsWith($Build+[IO.Path]::DirectorySeparatorChar,[StringComparison]::OrdinalIgnoreCase) -or (Test-Path -LiteralPath $out)){throw 'Choose a fresh directory under build/.'}
+    [void][IO.Directory]::CreateDirectory($out)
+    Import-Evaluator
+    . (Join-Path $Root 'src/kernels/Kokoro.HarmonicSource16.ps1')
+    $fixture=Get-Content -LiteralPath (Join-Path $FixtureDirectory 'fixture.json') -Raw | ConvertFrom-Json
+    $activations=[IO.File]::ReadAllBytes((Join-Path $FixtureDirectory 'activations.bin'))
+    $f0Bytes=[int]([math]::Ceiling(4*[int]$fixture.F0Frames/128)*128); $count=($activations.Length-$f0Bytes)/2
+    # c_h = 0.1 w_h in Q15, so sigma = sqrt(sum_h w_h^2) for z = sum_h w_h g_h.
+    $sum=0.0; foreach($c in $fixture.HarmonicCoefficients){ $w=[double]$c/(0.1*32768); $sum+=$w*$w }; $sigma=[math]::Sqrt($sum)
+    $scale=[int][math]::Round($sigma*4096*65536/37837.2)
+    $noise=Get-KokoroSourceNoise -Seed $Seed -Scale $scale -Count $count
+    $stage={param([string]$Name,[byte[]]$Activations)
+        $directory=Join-Path $out $Name; [void][IO.Directory]::CreateDirectory($directory)
+        [IO.File]::WriteAllBytes((Join-Path $directory 'activations.bin'),$Activations)
+        foreach($file in 'weights.bin','tables.bin'){ [IO.File]::Copy((Join-Path $FixtureDirectory $file),(Join-Path $directory $file)) }
+        $directory}
+    $referenceInput=[byte[]]$activations.Clone(); [Buffer]::BlockCopy($noise,0,$referenceInput,$f0Bytes,2*$count)
+    $seededInput=[byte[]]$activations.Clone(); [Array]::Clear($seededInput,$f0Bytes,2*$count)
+    [Array]::Copy([BitConverter]::GetBytes($Seed),0,$seededInput,$f0Bytes,4); [Array]::Copy([BitConverter]::GetBytes([int]$scale),0,$seededInput,$f0Bytes+4,4)
+    $frames=[int]$fixture.Frames
+    $plain=Invoke-KokoroEmission -Kernel KokoroHarmonicSource16Run -Parameters @{ResBlockFrames=$frames}
+    $seeded=Invoke-KokoroEmission -Kernel KokoroHarmonicSource16Run -Parameters @{ResBlockFrames=$frames;SourceSeededNoise=$true}
+    $referenceRun=Invoke-KokoroDeviceJob -EmissionDirectory $plain.Directory -EmissionArtifact $plain -InputDirectory (& $stage 'host-noise' $referenceInput) -Soc $Soc -Runs $Runs -Package $Package
+    $seededRun=Invoke-KokoroDeviceJob -EmissionDirectory $seeded.Directory -EmissionArtifact $seeded -InputDirectory (& $stage 'seeded' $seededInput) -Soc $Soc -Runs $Runs -Package $Package
+    # Regions of the output: har planes from 256, then the signal copy (sample j at halfword 64 + j); bytes outside the
+    # signal's samples are padding the job never defines.
+    $harEnd=[long]$plain.Layout.SignalOutOffset; $samplesFrom=$harEnd+128; $samplesTo=$samplesFrom+2L*[int]$fixture.Samples
+    $different=0; $first=-1; $harDifferent=0; $sampleDifferent=0; $paddingDifferent=0
+    for($i=256;$i -lt $referenceRun.Output.Length;$i++){
+        if($referenceRun.Output[$i] -ne $seededRun.Output[$i]){
+            $different++; if($first -lt 0){$first=$i}
+            if($i -lt $harEnd){ $harDifferent++ } elseif($i -ge $samplesFrom -and $i -lt $samplesTo){ $sampleDifferent++ } else { $paddingDifferent++ }
+        }
+    }
+    $stats={param([int16[]]$Values)
+        $n=$Values.Length; $mean=0.0; foreach($v in $Values){ $mean+=$v }; $mean/=$n
+        $m2=0.0; $m4=0.0; $lag=0.0
+        for($i=0;$i -lt $n;$i++){ $d=$Values[$i]-$mean; $m2+=$d*$d; $m4+=$d*$d*$d*$d; if($i -gt 0){ $lag+=($Values[$i]-$mean)*($Values[$i-1]-$mean) } }
+        [pscustomobject]@{Mean=[math]::Round($mean/4096,5);Std=[math]::Round([math]::Sqrt($m2/$n)/4096,5);Kurtosis=[math]::Round(($m4/$n)/[math]::Pow($m2/$n,2),3);Lag1Correlation=[math]::Round($lag/$m2,5)}}
+    $captured=[int16[]]::new($count); [Buffer]::BlockCopy($activations,$f0Bytes,$captured,0,2*$count)
+    $report=[pscustomobject]@{Soc=$Soc;Fixture=$FixtureDirectory;Seed=$Seed;Scale=$scale;TargetStd=[math]::Round($sigma,5);Samples=$count
+        ByteIdentical=($different -eq 0);DifferentBytes=$different;FirstDifference=$first
+        DefinedBytesIdentical=($harDifferent -eq 0 -and $sampleDifferent -eq 0)
+        HarDifferentBytes=$harDifferent;SignalSampleDifferentBytes=$sampleDifferent;PaddingDifferentBytes=$paddingDifferent;SeededStatistics=(& $stats $noise);CapturedStatistics=(& $stats $captured)
+        CapturedDspMs=$referenceRun.MedianMs;SeededDspMs=$seededRun.MedianMs;SeededLibrarySHA256=$seeded.LibrarySHA256}
+    $report | Export-Clixml -LiteralPath (Join-Path $out 'seeded-noise.clixml') -Depth 4
+    $report
+}
+
 # Emits a diagnostic tensor job, runs it on the phone with a job input directory, and returns the output tensor bytes
 # (from runner-layout.json OutputOffset), the count of halfwords at the int16 limits, DSP time and the skel identity.
 function Invoke-KokoroTensorJob {
@@ -2752,7 +2809,7 @@ switch ($Command) {
     'Run' {
         if (-not $Case) { throw 'Run needs -Case (see Status for names).' }
         # Measurement cases write a fresh receipt directory; without -OutputDirectory it is build/<case>-<UTC time>.
-        if (-not $OutputDirectory -and $Case -cin @('generator-propagation', 'generator-representation', 'generator-weight-precision', 'generator-tile-equivalence')) {
+        if (-not $OutputDirectory -and $Case -cin @('generator-propagation', 'generator-representation', 'generator-weight-precision', 'generator-tile-equivalence', 'source-seeded-noise')) {
             $OutputDirectory = Join-Path $Build ('{0}-{1:yyyyMMddTHHmmss}' -f $Case, [DateTime]::UtcNow)
         }
         if($Case -ceq 'decoder-constants'){
@@ -2763,6 +2820,11 @@ switch ($Command) {
         if($Case -ceq 'generator-pmu'){
             $profileParameters=if($Parameters){$Parameters}else{@{}}
             Test-KokoroGeneratorPmu -OutputDirectory $OutputDirectory -Soc $Soc -Package $HostPackage @profileParameters
+            break
+        }
+        if($Case -ceq 'source-seeded-noise'){
+            $noiseParameters=if($Parameters){$Parameters}else{@{}}
+            Test-KokoroSourceSeededNoise -OutputDirectory $OutputDirectory -Soc $Soc -Package $HostPackage @noiseParameters
             break
         }
         if($Case -ceq 'generator-tile-equivalence'){

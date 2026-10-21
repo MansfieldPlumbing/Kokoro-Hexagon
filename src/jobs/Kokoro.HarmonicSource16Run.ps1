@@ -30,7 +30,10 @@ function Add-KokoroHarmonicSource16JobSteps {
     param([Parameter(Mandatory)][AllowEmptyCollection()][Collections.Generic.List[hashtable]]$Steps,[Parameter(Mandatory)][AllowEmptyCollection()][Collections.Generic.List[object]]$Calls,
         [ValidateRange(2,32768)][int]$Frames=7801,[ValidateRange(2,64)][int]$BatchTiles=16,
         [int]$InputBase=20,[long]$InputOffset=0,[int]$WeightsBase=21,[long]$WeightsOffset=0,[int]$TablesBase=22,[long]$TablesOffset=0,
-        [int]$HarBase=23,[long]$HarOffset=256,[int]$SignalBase=-1,[long]$SignalOffset=0)
+        [int]$HarBase=23,[long]$HarOffset=256,[int]$SignalBase=-1,[long]$SignalOffset=0,
+        # -SeededNoise: the input holds the noise seed (uint32) and scale (int32) where z would be; the noise is generated on
+        # the DSP (New-KokoroSourceNoiseSteps) into the same VTCM region, from sample 0.
+        [switch]$SeededNoise)
     $layout=Get-KokoroHarmonicSource16Layout -Frames $Frames -BatchTiles $BatchTiles
     $reg=$layout.Regions
     $s=$Steps; $calls=$Calls
@@ -43,7 +46,12 @@ function Add-KokoroHarmonicSource16JobSteps {
         foreach($step in @(New-KokoroDmaCopySteps -NoReturn)){$s.Add($step)}
     }
     & $dma 18 $reg.F0.Offset $InputBase $InputOffset $layout.F0Bytes
-    & $dma 18 $reg.Noise.Offset $InputBase ($InputOffset+$layout.F0Bytes) $layout.HalfwordBytes
+    if($SeededNoise){
+        & $ptr 5 $InputBase ($InputOffset+$layout.F0Bytes); $s.Add(@{Op='load';d=2;s=5;Offset=0}); $s.Add(@{Op='load';d=3;s=5;Offset=4})
+        & $ptr 0 18 $reg.Noise.Offset; & $imm 1 ($layout.HalfwordBytes/2); $s.Add(@{Op='imm';d=4;i=0})
+        & $call 'body_source_noise'
+    }
+    else { & $dma 18 $reg.Noise.Offset $InputBase ($InputOffset+$layout.F0Bytes) $layout.HalfwordBytes }
     & $dma 18 $reg.SourceConstants.Offset $TablesBase ($TablesOffset+$layout.Stft.ParameterBytes) 4096
     $s.Add(@{Op='syncht'})
     & $ptr 0 18 $reg.F0.Offset; & $imm 1 $layout.F0Frames; & $ptr 2 18 $reg.PsiEven.Offset; & $ptr 3 18 $reg.PsiOdd.Offset; & $ptr 4 18 $reg.Masks.Offset; & $imm 5 $layout.HalfwordBytes; & $ptr 6 18 $reg.SourceConstants.Offset
@@ -63,16 +71,17 @@ function Add-KokoroHarmonicSource16JobSteps {
 }
 
 function Get-KokoroHarmonicSource16Bodies {
-    param([Parameter(Mandatory)][long]$PlaneStride)
+    param([Parameter(Mandatory)][long]$PlaneStride,[switch]$SeededNoise)
+    $noise=@(); if($SeededNoise){ $noise=@(,@('body_source_noise',@(New-KokoroSourceNoiseSteps))) }
     @(
         @('body_source_phase',@(New-KokoroSourcePhaseSteps)),
         @('body_source_voicing',@(New-KokoroSourceVoicingSteps)),
         @('body_source_merge',@(New-KokoroSourceMergeSteps)),
-        @('body_source_reflect',@(New-KokoroSourceReflectSteps))) + @(Get-KokoroHarmonicStft16Bodies -PlaneStride $PlaneStride)
+        @('body_source_reflect',@(New-KokoroSourceReflectSteps))) + $noise + @(Get-KokoroHarmonicStft16Bodies -PlaneStride $PlaneStride)
 }
 
 function New-KokoroHarmonicSource16RunSteps {
-    param([ValidateRange(2,32768)][int]$Frames=7801,[ValidateRange(2,64)][int]$BatchTiles=16)
+    param([ValidateRange(2,32768)][int]$Frames=7801,[ValidateRange(2,64)][int]$BatchTiles=16,[switch]$SeededNoise)
     . (Join-Path $PSScriptRoot 'Kokoro.ResBlockRun.ps1')
     foreach($file in '../kernels/Kokoro.HmxConvPlanes.ps1','../kernels/Kokoro.PlaneCombine.ps1','../kernels/Kokoro.StftWindow16.ps1','../kernels/Kokoro.StftPolar16.ps1','Kokoro.HarmonicStft16Run.ps1','../kernels/Kokoro.HarmonicSource16.ps1','../hexagon/Kokoro.DmaCopy.ps1') { . (Join-Path $PSScriptRoot $file) }
     $layout=Get-KokoroHarmonicSource16Layout -Frames $Frames -BatchTiles $BatchTiles
@@ -101,12 +110,12 @@ function New-KokoroHarmonicSource16RunSteps {
     foreach($r in 16,18,20,22,24,26){$s.Add(@{Op='store-d';s=29;t=$r;Offset=(($r-16)*4)})}
     $s.Add(@{Op='addi';d=24;s=29;i=(64+63)}); & $imm 0 -64; $s.Add(@{Op='and';d=24;s=24;t=0})
     $s.Add(@{Op='hwticks';d=26})
-    Add-KokoroHarmonicSource16JobSteps -Steps $s -Calls $calls -Frames $Frames -BatchTiles $BatchTiles -SignalBase 23 -SignalOffset $layout.SignalOutOffset
+    Add-KokoroHarmonicSource16JobSteps -Steps $s -Calls $calls -Frames $Frames -BatchTiles $BatchTiles -SignalBase 23 -SignalOffset $layout.SignalOutOffset -SeededNoise:$SeededNoise
     $s.Add(@{Op='hwticks';d=0});$s.Add(@{Op='store-d';s=23;t=26;Offset=0});$s.Add(@{Op='store-d';s=23;t=0;Offset=8})
     $s.Add(@{Op='imm';d=0;i=1});$s.Add(@{Op='store';s=23;t=0;Offset=44})
     foreach($r in 16,18,20,22,24,26){$s.Add(@{Op='load-d';d=$r;s=29;Offset=(($r-16)*4)})}
     $s.Add(@{Op='dealloc-return'})
-    foreach($pair in (Get-KokoroHarmonicSource16Bodies -PlaneStride $layout.Stft.PlaneStride)){$s.Add(@{Op='label';Name=$pair[0]});foreach($step in $pair[1]){$s.Add($step)}}
+    foreach($pair in (Get-KokoroHarmonicSource16Bodies -PlaneStride $layout.Stft.PlaneStride -SeededNoise:$SeededNoise)){$s.Add(@{Op='label';Name=$pair[0]});foreach($step in $pair[1]){$s.Add($step)}}
     $labels=@{};$pcs=[Collections.Generic.Dictionary[object,long]]::new();$pc=0L;$isa=Get-InstructionSet
     foreach($step in $s){if($step.Op -eq 'label'){if($labels.ContainsKey($step.Name)){throw "Duplicate label $($step.Name)"};$labels[$step.Name]=$pc};$pcs[$step]=$pc;$pc+=& $isa.Length $step}
     foreach($c in $calls){$delta=[long]([uint32](($labels[$c.label]-$pcs[$c.pc]) -band 0xffffffffL));$c.low.i=$delta -band 65535;$c.high.i=$delta -shr 16}

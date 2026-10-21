@@ -162,6 +162,60 @@ function New-KokoroSourceMergeSteps {
 
 # Scalar: the reflect padding of the signal buffer (sample j at halfword 64 + j): halfword 64 - k <- 64 + k and
 # 63 + N + k <- 63 + N - k, k = 1..10. r0 buffer, r1 N. Halfwords are read as two bytes (no halfword load encoded).
+# Seeded noise for the source, in place of captured draws: a counter-based Gaussian per sample, a function of the seed
+# and the sample's position only, so any stretch is generated independently and every render replays exactly.
+#   x_k = seed xor ((2 i + k) * 0x9E3779B9), k = 0, 1; h_k = lowbias32(x_k): x ^= x >> 16; x *= 0x7FEB352D;
+#   x ^= x >> 15; x *= 0x846CA68B; x ^= x >> 16 (32-bit wrapping); u = sum of the four 16-bit halves of h_0 and h_1
+#   (Irwin-Hall, mean 131070, standard deviation 37837.2); z = ((u - 131070) * scale) >> 16 (arithmetic), Q12.
+# scale = round(sigma * 4096 * 65536 / 37837.2) for the noise term's standard deviation sigma = sqrt(sum_h w_h^2).
+# r0 output (halfword per sample, natural order), r1 samples >= 1, r2 seed, r3 scale (at most 16384), r4 first sample
+# index. Uses r5..r15.
+function New-KokoroSourceNoiseSteps {
+    param([string]$LabelPrefix='sourcenoise')
+    $s=[Collections.Generic.List[hashtable]]::new()
+    $imm={param([int]$r,[long]$v) $u=[long]([uint32]($v -band 0xffffffffL)); $s.Add(@{Op='lo';x=$r;i=($u -band 65535)}); $s.Add(@{Op='hi';x=$r;i=($u -shr 16)}) }
+    & $imm 10 0x9E3779B9L; & $imm 11 0x7FEB352DL; & $imm 12 0x846CA68BL; & $imm 13 131070; & $imm 15 65535; $s.Add(@{Op='imm';d=14;i=0})
+    # Hash of index register $index into register $out (r8 and r9 as temporaries).
+    $hash={param([int]$index,[int]$out)
+        $s.Add(@{Op='mpyi';d=$out;s=$index;t=10}); $s.Add(@{Op='xor';d=$out;s=$out;t=2})
+        $s.Add(@{Op='lsr-i';d=9;s=$out;i=16}); $s.Add(@{Op='xor';d=$out;s=$out;t=9}); $s.Add(@{Op='mpyi';d=$out;s=$out;t=11})
+        $s.Add(@{Op='lsr-i';d=9;s=$out;i=15}); $s.Add(@{Op='xor';d=$out;s=$out;t=9}); $s.Add(@{Op='mpyi';d=$out;s=$out;t=12})
+        $s.Add(@{Op='lsr-i';d=9;s=$out;i=16}); $s.Add(@{Op='xor';d=$out;s=$out;t=9}) }
+    $loop="${LabelPrefix}_sample"
+    $s.Add(@{Op='label';Name=$loop})
+    $s.Add(@{Op='add';d=5;s=4;t=4}); & $hash 5 6
+    $s.Add(@{Op='addi';d=5;s=5;i=1}); & $hash 5 7
+    $s.Add(@{Op='and';d=8;s=6;t=15}); $s.Add(@{Op='lsr-i';d=9;s=6;i=16}); $s.Add(@{Op='add';d=8;s=8;t=9})
+    $s.Add(@{Op='and';d=9;s=7;t=15}); $s.Add(@{Op='add';d=8;s=8;t=9}); $s.Add(@{Op='lsr-i';d=9;s=7;i=16}); $s.Add(@{Op='add';d=8;s=8;t=9})
+    $s.Add(@{Op='sub';d=8;s=8;t=13}); $s.Add(@{Op='mpyi';d=8;s=8;t=3}); $s.Add(@{Op='asr-i';d=8;s=8;i=16})
+    $s.Add(@{Op='store-h';s=0;t=8;Offset=0})
+    $s.Add(@{Op='addi';d=0;s=0;i=2}); $s.Add(@{Op='addi';d=4;s=4;i=1}); $s.Add(@{Op='addi';d=1;s=1;i=-1})
+    $s.Add(@{Op='gtu';d=0;s=1;t=14}); $s.Add(@{Op='jump-p';u=0;Label=$loop})
+    $s.Add(@{Op='return'})
+    $s.ToArray()
+}
+
+# The same seeded noise on the host (the reference the DSP output is checked against): Q12 values for samples First
+# to First + Count - 1.
+function Get-KokoroSourceNoise {
+    param([Parameter(Mandatory)][uint32]$Seed,[Parameter(Mandatory)][ValidateRange(1,16384)][int]$Scale,[Parameter(Mandatory)][int]$Count,[long]$First=0)
+    $mask=[uint64]0xFFFFFFFFL
+    $mix={param([uint64]$x)
+        $x=$x -bxor ($x -shr 16); $x=($x*[uint64]0x7FEB352DL) -band $mask
+        $x=$x -bxor ($x -shr 15); $x=($x*[uint64]0x846CA68BL) -band $mask
+        $x -bxor ($x -shr 16) }
+    $out=[int16[]]::new($Count)
+    for($n=0;$n -lt $Count;$n++){
+        $i=[uint64]($First+$n); $u=[long]0
+        foreach($k in 0,1){
+            $h=& $mix ((((2*$i+[uint64]$k)*[uint64]0x9E3779B9L) -band $mask) -bxor [uint64]$Seed)
+            $u+=[long]($h -band 65535)+[long]($h -shr 16)
+        }
+        $out[$n]=[int16][Math]::Floor(($u-131070)*$Scale/65536.0)
+    }
+    , $out
+}
+
 function New-KokoroSourceReflectSteps {
     param([string]$LabelPrefix='sourcereflect',[switch]$NoReturn)
     $s = [Collections.Generic.List[hashtable]]::new()
