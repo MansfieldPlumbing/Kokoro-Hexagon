@@ -75,7 +75,17 @@ function New-KokoroGenerator60x16RunSteps {
         # With -Whole -Source: the decoder first (Kokoro.DecoderRun16.ps1, from asr, F0_curve and N_curve after the source's inputs),
         # its output written to the DDR workspace where the 10x front reads it instead of the input buffer.
         [switch]$Decoder,
-        [ValidateSet('Accumulate','Constants')][string]$DecoderMoments='Accumulate')
+        [ValidateSet('Accumulate','Constants')][string]$DecoderMoments='Accumulate',
+        # Tile: depth-first. Every stage's weights, record and K/M/S stay resident in VTCM, and each tile runs through all
+        # 18 stages before the next: at step i, stage q of every branch processes tile i - q, so each stage reads exactly
+        # what the layer schedule gives it. Residual rings of 8 tiles and stage rings of 4; interior steps run in a loop1
+        # hardware loop with ring slots computed in registers, the six steps at each end unrolled. One section without
+        # fronts or tail, three kernels and their mean, supplied AdaIN values, one tile per batch.
+        [ValidateSet('Layer','Tile')][string]$Schedule='Layer')
+    if($Schedule -eq 'Tile' -and ($Whole -or $Source -or $Decoder -or $Front -or $Tail -or $RuntimeFrames -or $StopAfterStage -ge 0 -or
+        $Kernels.Count -ne 3 -or $AdaInMode -ne 'Constants' -or $BatchTiles -ne 1 -or $Channels -ne 128 -or $PmuEvents)) {
+        throw 'The tile schedule runs one 128-channel section of three kernels and their mean with supplied AdaIN values, one tile per batch.'
+    }
     if($RuntimeFrames -and ($Whole -or $Source -or $Decoder -or $Front -or $Tail -or $StopAfterStage -ge 0)) {
         throw 'Runtime frames currently admit complete residual stages only.'
     }
@@ -219,6 +229,21 @@ function New-KokoroGenerator60x16RunSteps {
     $exportOffset=[long]([math]::Ceiling($totalOutput/128)*128)
     if($AdaInMode -eq 'Export'){$totalOutput=$exportOffset+$momentAt+$kmsAt}
     if($AdaInMode -eq 'Constants'){$totalParameters+=$momentAt}
+    if($Schedule -eq 'Tile'){
+        # VTCM for the tile schedule: HMX windows and planes first (inside the first 1 MiB), then the rings, K/M/S and
+        # records of all 18 stages, then their weights, resident for the whole job.
+        $al={param([long]$v) [long]([math]::Ceiling($v/65536)*65536)}
+        $tileStages=@(for($bb=0;$bb -lt 3;$bb++){for($st=0;$st -lt 6;$st++){
+            [pscustomobject]@{Branch=$bb;Stage=$st;Pair=[int][math]::Floor($st/2);Half=$st%2;Dilation=@(1,3,5)[[int][math]::Floor($st/2)]
+                WeightOffset=$branchWeights[$bb]+$st*2L*$Channels*$Channels*$Kernels[$bb];WeightBytes=2L*$Channels*$Channels*$Kernels[$bb];RecordOffset=$pBase+(6L*$bb+$st)*$recordBytes}}})
+        $tileRegions=[ordered]@{}; $at=0L
+        foreach($r in @(@('Window',(3L*$tileBytes)),@('WindowLow',(3L*$tileBytes)),@('Planes',(6L*$tileBytes)),@('Moments',(16L*$Channels)),@('Mean',[long]$tileBytes),
+            @('ResidualRings',(3L*8*$tileBytes)),@('StageRings',(9L*4*$tileBytes)),@('Kms',(18L*$kmsBytes)),@('Records',(18L*$recordBytes)))){ $tileRegions[$r[0]]=$at; $at+=& $al $r[1] }
+        $tileWeightAt=[long[]]::new(18); foreach($g in $tileStages){ $tileWeightAt[6*$g.Branch+$g.Stage]=$at; $at+=$g.WeightBytes }
+        $vtcmTotal=& $al $at
+        if($vtcmTotal -gt 8388608){throw 'The tile schedule does not fit VTCM.'}
+        if($tileRegions.Planes+6L*$tileBytes -gt 1048576){throw 'HMX windows and planes must lie in the first 1 MiB of VTCM.'}
+    }
     . $bind 0
     $vtcmBytes=$vtcmTotal
 
@@ -569,9 +594,94 @@ function New-KokoroGenerator60x16RunSteps {
         & $dma 25 $harPmAt 18 $gPmHi ($tiles10*16384L); & $dma 25 ($harPmAt+$tiles10*16384L) 18 $gPmLo ($tiles10*16384L)
         & $mark 'Unmarked' -site 34; & $sync
     }
+    # Tile schedule (see -Schedule). A tile operand is either a constant tile index (the unrolled end steps) or $null, the
+    # runtime step in r17; ring slots are tile & (ring - 1). r17 is free in every body this schedule calls.
+    $tileShift=[int][math]::Round([math]::Log($tileBytes,2))
+    $ringPointer={param([int]$r,[long]$ringBase,[int]$ringTiles,$tile,[int]$delta)
+        if($null -ne $tile){ & $ptr $r 18 ($ringBase+(($tile+$delta) -band ($ringTiles-1))*[long]$tileBytes); return }
+        $s.Add(@{Op='addi';d=$r;s=17;i=$delta}); & $imm 15 ($ringTiles-1); $s.Add(@{Op='and';d=$r;s=$r;t=15})
+        $s.Add(@{Op='asl-i';d=$r;s=$r;i=$tileShift}); & $imm 15 $ringBase; $s.Add(@{Op='add';d=$r;s=$r;t=15}); $s.Add(@{Op='add';d=$r;s=$r;t=18})
+    }
+    $dmaRegisters={param([long]$length) & $imm 3 $length; $s.Add(@{Op='addi';d=0;s=24;i=0}); foreach($step in @(New-KokoroDmaCopySteps -NoReturn)){$s.Add($step)} }
+    # Stage q of a branch at step i processes tile i - q: a constant tile, or at run time r17 + (k - q) for its tile + k.
+    $tileStage={param($g,[int]$q,$tile)
+        $index=6*$g.Branch+$g.Stage
+        $kAt=$tileRegions.Kms+$index*$kmsBytes; $rAt=$tileRegions.Records+$index*$recordBytes
+        $residualBase=$tileRegions.ResidualRings+$g.Branch*8L*$tileBytes; $stageBase=$tileRegions.StageRings+(3L*$g.Branch+$g.Pair)*4*$tileBytes
+        $sourceBase=if($g.Half -eq 0){$residualBase}else{$stageBase}; $sourceTiles=if($g.Half -eq 0){8}else{4}
+        $delta={param([int]$k) if($null -ne $tile){$k}else{$k-$q}}
+        if($null -ne $tile -and $tile -eq 0){ & $fill $tileRegions.Window 1 0x80008000L; & $fill $tileRegions.WindowLow 1 0 }
+        if($null -ne $tile -and $tile -eq $tiles-1){ & $fill ($tileRegions.Window+2L*$tileBytes) 1 0x80008000L; & $fill ($tileRegions.WindowLow+2L*$tileBytes) 1 0 }
+        foreach($k in -1,0,1){
+            if($null -ne $tile -and ($tile+$k -lt 0 -or $tile+$k -ge $tiles)){continue}
+            & $ringPointer 0 $sourceBase $sourceTiles $tile (& $delta $k)
+            & $ptr 1 18 ($tileRegions.Window+($k+1)*[long]$tileBytes); & $ptr 2 18 ($tileRegions.WindowLow+($k+1)*[long]$tileBytes); & $ptr 3 18 $kAt; & $imm 4 1
+            & $call "body_turns$sfx"
+        }
+        if($null -ne $tile -and $tile -ge $tiles-2){
+            $position=$tiles-$tile; & $padRows ($tileRegions.Window+$position*[long]$tileBytes) 0x8000; & $padRows ($tileRegions.WindowLow+$position*[long]$tileBytes) 0
+        }
+        & $sync
+        & $ptr 0 18 ($tileRegions.Window+$tileBytes); & $ptr 1 18 ($tileRegions.WindowLow+$tileBytes); & $ptr 2 18 $tileWeightAt[$index]; & $ptr 3 18 ($rAt+$tablesAt); & $imm 4 1; & $ptr 5 18 $tileRegions.Planes
+        & $call "body_conv_b$($g.Branch)_d$(if($g.Half -eq 0){$g.Dilation}else{1})$sfx"
+        & $sync
+        $targetBase=if($g.Half -eq 0){$stageBase}else{$residualBase}; $targetTiles=if($g.Half -eq 0){4}else{8}
+        & $ptr 0 18 $tileRegions.Planes; & $ringPointer 1 $targetBase $targetTiles $tile (& $delta 0); & $ptr 2 18 ($rAt+$ratiosAt); & $imm 3 1
+        & $call $(if($g.Half -eq 0){"body_combine_conv$sfx"}else{"body_combine_residual$sfx"})
+        if($null -ne $tile -and $tile -eq $tiles-1){ & $padRows ($targetBase+(($tiles-1) -band ($targetTiles-1))*[long]$tileBytes) 0x8000 }
+    }
+    # Step i: load input tile i + 1 into every branch's residual ring, run every branch's stages, then the mean of tile i - 5.
+    $tileStep={param($step)
+        if($null -eq $step -or $step+1 -lt $tiles){
+            for($bb=0;$bb -lt 3;$bb++){
+                if($null -ne $step){ & $dma 18 ($tileRegions.ResidualRings+$bb*8L*$tileBytes+(($step+1) -band 7)*[long]$tileBytes) 20 ($r0Offset+($step+1)*[long]$tileBytes) $tileBytes }
+                else {
+                    $s.Add(@{Op='addi';d=1;s=17;i=1}); $s.Add(@{Op='asl-i';d=1;s=1;i=$tileShift}); & $imm 15 $r0Offset; $s.Add(@{Op='add';d=1;s=1;t=15}); $s.Add(@{Op='add';d=1;s=1;t=20})
+                    & $ringPointer 2 ($tileRegions.ResidualRings+$bb*8L*$tileBytes) 8 $null 1
+                    & $dmaRegisters $tileBytes
+                }
+            }
+        }
+        for($bb=0;$bb -lt 3;$bb++){ for($q=0;$q -lt 6;$q++){
+            $tile=if($null -ne $step){$step-$q}else{$null}
+            if($null -ne $tile -and ($tile -lt 0 -or $tile -ge $tiles)){continue}
+            & $tileStage $tileStages[6*$bb+$q] $q $tile
+        }}
+        $tile=if($null -ne $step){$step-5}else{$null}
+        if($null -ne $tile -and ($tile -lt 0 -or $tile -ge $tiles)){return}
+        for($bb=0;$bb -lt 3;$bb++){ & $ringPointer $bb ($tileRegions.ResidualRings+$bb*8L*$tileBytes) 8 $tile $(if($null -ne $tile){0}else{-5}) }
+        & $ptr 3 18 $tileRegions.Mean; & $imm 4 1; & $call "body_mean$sfx"
+        & $sync
+        if($null -ne $tile){ & $dma 25 ($finalOffset+$tile*[long]$tileBytes) 18 $tileRegions.Mean $tileBytes }
+        else {
+            & $ptr 1 18 $tileRegions.Mean
+            $s.Add(@{Op='addi';d=2;s=17;i=-5}); $s.Add(@{Op='asl-i';d=2;s=2;i=$tileShift}); & $imm 15 $finalOffset; $s.Add(@{Op='add';d=2;s=2;t=15}); $s.Add(@{Op='add';d=2;s=2;t=25})
+            & $dmaRegisters $tileBytes
+        }
+    }
+    $tileSection={
+        # Setup: every stage's record, weights and supplied AdaIN values, its K/M/S computed once.
+        foreach($g in $tileStages){
+            $index=6*$g.Branch+$g.Stage; $rAt=$tileRegions.Records+$index*$recordBytes
+            & $dma 18 $rAt 22 $g.RecordOffset $recordBytes
+            & $dma 18 $tileWeightAt[$index] 21 $g.WeightOffset $g.WeightBytes
+            $site=$siteByRecord[[long]$g.RecordOffset]
+            & $dma 18 $tileRegions.Moments 22 ($constantsTableOffset+$site.Offset) $site.Bytes
+            & $ptr 0 18 $tileRegions.Moments; & $ptr 1 18 $rAt; & $ptr 2 18 ($tileRegions.Kms+$index*$kmsBytes); & $call "body_constant$sfx"
+        }
+        for($bb=0;$bb -lt 3;$bb++){ & $dma 18 ($tileRegions.ResidualRings+$bb*8L*$tileBytes) 20 $r0Offset $tileBytes }
+        for($step=0;$step -lt 6;$step++){ & $tileStep $step }
+        & $imm 17 6; & $imm 5 ($tiles-8)
+        $s.Add(@{Op='loop1-r';s=5;Label='tile_steps'}); $s.Add(@{Op='label';Name='tile_steps'})
+        & $tileStep $null
+        $s.Add(@{Op='addi';d=17;s=17;i=1})
+        $s.Add(@{Op='endloop1'})
+        for($step=$tiles-2;$step -lt $tiles+5;$step++){ & $tileStep $step }
+    }
     for($section=0;$section -lt $sections.Count;$section++){
     if($section -gt 0){ $chainOffset=$finalOffset; $chainTiles=$tiles; . $bind $section }
     & $mark 'Boundary' "Front$Channels"
+    if($Schedule -eq 'Tile'){ . $tileSection; continue }
     # Blocks: noise_res[1] first with -Front (index -1: its own weights and records, input computed in VTCM, kernel 11
     # bodies of branch 2), then the stage's branches.
     $blocks=[Collections.Generic.List[object]]::new()

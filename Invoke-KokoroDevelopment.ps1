@@ -1518,6 +1518,46 @@ function Test-KokoroGeneratorWeightPrecision {
     $report
 }
 
+# Depth-first equivalence for the 128-channel residual section (resblocks 3-5 and their mean): the layer schedule exports
+# the section's exact AdaIN values on the phone; the layer and tile schedules then run with those values and the same
+# input and weights, and their output tensors must be byte-identical.
+function Test-KokoroGeneratorTileEquivalence {
+    param([Parameter(Mandatory)][string]$OutputDirectory,[string]$Soc='SM8550',[string]$Package='dev.mansfieldplumbing.kokoro',
+        [string]$FixtureDirectory=(Join-Path $Build 'speak-20261010-h0-fast/job-input/generator60x16-fixture-20261008-holdout2'),[ValidateRange(1,21)][int]$Runs=3)
+    $out=[IO.Path]::GetFullPath($OutputDirectory)
+    if(-not $out.StartsWith($Build+[IO.Path]::DirectorySeparatorChar,[StringComparison]::OrdinalIgnoreCase) -or (Test-Path -LiteralPath $out)){throw 'Choose a fresh equivalence directory under build/.'}
+    [void][IO.Directory]::CreateDirectory($out)
+    Import-Evaluator
+    $fixture=Get-Content -LiteralPath (Join-Path $FixtureDirectory 'fixture.json') -Raw | ConvertFrom-Json
+    if($fixture.Graph -cne 'Generator60x16' -or [int]$fixture.Frames -ne 10201){throw 'The fixture is not the 128-channel residual section.'}
+    $common=@{ResBlockFrames=[int]$fixture.Frames;ResidentHvxThreads=4}
+    $export=Invoke-KokoroEmission -Kernel KokoroGenerator60x16Run -Parameters ($common+@{ResidentBatchTiles=22;GeneratorMoments='Export';GeneratorSchedule='Layer'})
+    $layer=Invoke-KokoroEmission -Kernel KokoroGenerator60x16Run -Parameters ($common+@{ResidentBatchTiles=22;GeneratorMoments='Constants';GeneratorSchedule='Layer'})
+    $tile=Invoke-KokoroEmission -Kernel KokoroGenerator60x16Run -Parameters ($common+@{ResidentBatchTiles=1;GeneratorMoments='Constants';GeneratorSchedule='Tile'})
+    $statistics=[IO.File]::ReadAllBytes((Join-Path $FixtureDirectory 'tables.bin'))
+    $stage={param([string]$Name,[byte[]]$Tables)
+        $directory=Join-Path $out $Name; [void][IO.Directory]::CreateDirectory($directory)
+        foreach($file in 'activations.bin','weights.bin'){[IO.File]::Copy((Join-Path $FixtureDirectory $file),(Join-Path $directory $file))}
+        [IO.File]::WriteAllBytes((Join-Path $directory 'tables.bin'),$Tables); $directory}
+    $exportRun=Invoke-KokoroDeviceJob -EmissionDirectory $export.Directory -EmissionArtifact $export -InputDirectory (& $stage 'export' $statistics) -Soc $Soc -Runs 1 -Package $Package
+    $exact=New-KokoroDecoderConstantsTables -Layout $export.Layout.ConstantPacking -Tables $statistics -Observation $exportRun.Output -OutputOffset 0 -Contracts @(1)
+    $constantsInput=& $stage 'constants' $exact.Tables
+    $layerRun=Invoke-KokoroDeviceJob -EmissionDirectory $layer.Directory -EmissionArtifact $layer -InputDirectory $constantsInput -Soc $Soc -Runs $Runs -Package $Package
+    $tileRun=Invoke-KokoroDeviceJob -EmissionDirectory $tile.Directory -EmissionArtifact $tile -InputDirectory $constantsInput -Soc $Soc -Runs $Runs -Package $Package
+    # The DDR workspace starts at the first 128-byte boundary at least 64 bytes into the output buffer.
+    $tensorBytes=[long]$fixture.Tiles*8192
+    $read={param($Run,$Emission) $at=128+[long]$Emission.Layout.FinalWorkspaceOffset; [byte[]]$Run.Output[$at..($at+$tensorBytes-1)]}
+    $layerTensor=& $read $layerRun $layer; $tileTensor=& $read $tileRun $tile
+    $different=0; $first=-1
+    for($i=0;$i -lt $tensorBytes;$i++){if($layerTensor[$i] -ne $tileTensor[$i]){$different++; if($first -lt 0){$first=$i}}}
+    $report=[pscustomobject]@{Soc=$Soc;Fixture=$FixtureDirectory;Tiles=[int]$fixture.Tiles;TensorBytes=$tensorBytes;ByteIdentical=($different -eq 0);DifferentBytes=$different;FirstDifference=$first
+        LayerDspMs=$layerRun.MedianMs;TileDspMs=$tileRun.MedianMs;LayerVtcmBytes=$layer.Layout.VtcmBytes;TileVtcmBytes=$tile.Layout.VtcmBytes;LayerLibraryBytes=$layer.Bytes;TileLibraryBytes=$tile.Bytes
+        LayerLibrarySHA256=$layer.LibrarySHA256;TileLibrarySHA256=$tile.LibrarySHA256;LayerTensorSHA256=[Convert]::ToHexString([Security.Cryptography.SHA256]::HashData($layerTensor))
+        TileTensorSHA256=[Convert]::ToHexString([Security.Cryptography.SHA256]::HashData($tileTensor))}
+    $report | Export-Clixml -LiteralPath (Join-Path $out 'equivalence.clixml') -Depth 4
+    $report
+}
+
 # Emits a diagnostic tensor job, runs it on the phone with a job input directory, and returns the output tensor bytes
 # (from runner-layout.json OutputOffset), the count of halfwords at the int16 limits, DSP time and the skel identity.
 function Invoke-KokoroTensorJob {
@@ -2632,7 +2672,7 @@ switch ($Command) {
     'Run' {
         if (-not $Case) { throw 'Run needs -Case (see Status for names).' }
         # Measurement cases write a fresh receipt directory; without -OutputDirectory it is build/<case>-<UTC time>.
-        if (-not $OutputDirectory -and $Case -cin @('generator-propagation', 'generator-representation', 'generator-weight-precision')) {
+        if (-not $OutputDirectory -and $Case -cin @('generator-propagation', 'generator-representation', 'generator-weight-precision', 'generator-tile-equivalence')) {
             $OutputDirectory = Join-Path $Build ('{0}-{1:yyyyMMddTHHmmss}' -f $Case, [DateTime]::UtcNow)
         }
         if($Case -ceq 'decoder-constants'){
@@ -2643,6 +2683,11 @@ switch ($Command) {
         if($Case -ceq 'generator-pmu'){
             $profileParameters=if($Parameters){$Parameters}else{@{}}
             Test-KokoroGeneratorPmu -OutputDirectory $OutputDirectory -Soc $Soc -Package $HostPackage @profileParameters
+            break
+        }
+        if($Case -ceq 'generator-tile-equivalence'){
+            $equivalenceParameters=if($Parameters){$Parameters}else{@{}}
+            Test-KokoroGeneratorTileEquivalence -OutputDirectory $OutputDirectory -Soc $Soc -Package $HostPackage @equivalenceParameters
             break
         }
         if($Case -ceq 'generator-weight-precision'){

@@ -1129,9 +1129,14 @@ $script:Kernels=@(
     @{ Names=@('KokoroGenerator60x16Run'); Build={
     . (Join-Path $script:HexagonToolsRoot '..\src\jobs\Kokoro.Generator60x16Run.ps1')
     $pmu=if($ResidentPmuEvents){@{PmuEvents=$ResidentPmuEvents}}else{@{}}
-        $run=New-KokoroGenerator60x16RunSteps -Frames $ResBlockFrames -HvxThreads $ResidentHvxThreads -BatchTiles $ResidentBatchTiles -StopAfterStage $Stage16StopAfter -DumpPoint $Stage16DumpPoint -Kernels $Stage16Kernels -RuntimeFrames:$GeneratorRuntimeFrames @pmu
+    # A schedule or AdaIN mode other than the defaults runs under the phone harness (tools/Invoke-GeneratorTailProbe.ps1):
+    # its completion word and the tail skel's name. The defaults emit exactly as before.
+    $phoneHarness=$GeneratorSchedule -ne 'Layer' -or $GeneratorMoments -ne 'Accumulate'
+    $harness=if($phoneHarness){@{AdaInMode=$GeneratorMoments;Schedule=$GeneratorSchedule;GenericHarness=$true}}else{@{}}
+        $run=New-KokoroGenerator60x16RunSteps -Frames $ResBlockFrames -HvxThreads $ResidentHvxThreads -BatchTiles $ResidentBatchTiles -StopAfterStage $Stage16StopAfter -DumpPoint $Stage16DumpPoint -Kernels $Stage16Kernels -RuntimeFrames:$GeneratorRuntimeFrames @pmu @harness
     $steps=@($run.Steps)
     $symbol='kokoro_resblock_run_skel_handle_invoke'; $soname='libkokoro_resblock_run_skel.so'
+    if($phoneHarness){ $symbol='kokoro_generator_tail_skel_handle_invoke'; $soname='libkokoro_generator_tail_skel.so' }
     Write-NewOrIdenticalFile (Join-Path $OutputDirectory 'runner-layout.json') ([Text.Encoding]::UTF8.GetBytes(($run.Layout | ConvertTo-Json -Depth 6))) -AllowOverwrite:$Force
 } }
     @{ Names=@('KokoroGenerator60xResidentRun'); Build={
@@ -1298,6 +1303,9 @@ param(
     # from the input) or Corrected (coefficient deltas from the input added to the accumulated coefficients).
     [ValidateSet('Accumulate','Export','Supplied','SuppliedExport','Corrected','Direct','Constants')][string] $DecoderMoments = 'Accumulate',
     [ValidateSet('Accumulate','Export','Constants')][string] $GeneratorMoments = 'Accumulate',
+    # KokoroGenerator60x16Run: Layer (each stage over every tile) or Tile (depth-first, resident weights; see -Schedule in
+    # src/jobs/Kokoro.Generator60x16Run.ps1).
+    [ValidateSet('Layer','Tile')][string] $GeneratorSchedule = 'Layer',
     [ValidateSet(1, 3, 5)][int] $ConvDilation = 1,
     [ValidateSet(1,3)][int] $TemplateBranches = 1,
     [switch] $TemplateAddResidual,
@@ -1587,7 +1595,8 @@ $emissionResult=[pscustomobject]@{PSTypeName='Kokoro.Hexagon.Emission';Kernel=$K
     Timings=[pscustomobject]@{SetupSeconds=$setupSeconds;StepsSeconds=$stepSeconds;ConversionSeconds=$conversionSeconds;
         LibrarySeconds=$librarySeconds;LayoutSeconds=$library.LayoutSeconds;EncodeSeconds=$library.EncodeSeconds;
         ReferenceSeconds=$referenceSeconds;CodeSeconds=$stageClock.Elapsed.TotalSeconds;TotalSeconds=$emissionClock.Elapsed.TotalSeconds}}
-if ($Kernel -cin 'KokoroGeneratorTemplate1Run','KokoroHarmonicSource16Run','KokoroDecoder16Run','KokoroGeneratorWholeSource16Run','KokoroDecoderGenerator16Run') {
+if (($Kernel -ceq 'KokoroGenerator60x16Run' -and ($GeneratorSchedule -ne 'Layer' -or $GeneratorMoments -ne 'Accumulate')) -or
+    $Kernel -cin 'KokoroGeneratorTemplate1Run','KokoroHarmonicSource16Run','KokoroDecoder16Run','KokoroGeneratorWholeSource16Run','KokoroDecoderGenerator16Run') {
     $emissionResult | Add-Member -NotePropertyMembers @{
         Layout=$run.Layout;Steps=$steps;Link=[pscustomobject]@{Entry=$library.Exports[$symbol];Got=$library.GotSlots}
         Buffers=[pscustomobject]@{Library=$library.Bytes;Code=$code}
