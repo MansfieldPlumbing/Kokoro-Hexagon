@@ -2379,7 +2379,9 @@ function Get-EnglishZiraReference {
             $WavePath=[IO.Path]::GetFullPath($WavePath)
             if(Test-Path -LiteralPath $WavePath){throw 'Zira WavePath already exists; choose a new output or reuse the existing capture.'}
             if(-not(Test-Path -LiteralPath ([IO.Path]::GetDirectoryName($WavePath)) -PathType Container)){throw 'Zira WavePath parent directory is missing.'}
-            $waveFormat=[System.Speech.AudioFormat.SpeechAudioFormatInfo]::new(48000,[System.Speech.AudioFormat.AudioBitsPerSample]::Sixteen,[System.Speech.AudioFormat.AudioChannel]::Stereo)
+            # Keep Zira's native PCM format. This System.Speech build counts converted output bytes
+            # against the input byte rate in AudioFileOut.Duration; resampling corrupts event times.
+            $waveFormat=[System.Speech.AudioFormat.SpeechAudioFormatInfo]::new(16000,[System.Speech.AudioFormat.AudioBitsPerSample]::Sixteen,[System.Speech.AudioFormat.AudioChannel]::Mono)
             $synth.SetOutputToWaveFile($WavePath,$waveFormat)
         }else{$synth.SetOutputToNull()}
         $null=Register-ObjectEvent $synth PhonemeReached -SourceIdentifier $sources[0]
