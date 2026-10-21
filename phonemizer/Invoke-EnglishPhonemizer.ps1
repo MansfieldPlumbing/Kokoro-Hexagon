@@ -2362,7 +2362,7 @@ function Import-EnglishCorrections {
 
 function Get-EnglishZiraReference {
     [CmdletBinding()]
-    param([Parameter(Mandatory)][ValidateLength(1,8192)][string]$Text,[string]$Path=$SpeechAssemblyPath,[switch]$NoSave)
+    param([Parameter(Mandatory)][ValidateLength(1,8192)][string]$Text,[string]$Path=$SpeechAssemblyPath,[switch]$NoSave,[string]$WavePath='')
     if(-not $IsWindows){throw 'Zira reference capture requires Windows; inference does not.'}
     $Path=[IO.Path]::GetFullPath($Path)
     if(-not(Test-Path -LiteralPath $Path -PathType Leaf)){throw 'Installed System.Speech assembly is missing.'}
@@ -2374,7 +2374,14 @@ function Get-EnglishZiraReference {
         $inventory=@($synth.GetInstalledVoices())
         $installed=@($inventory | Where-Object {$_.Enabled -and $_.VoiceInfo.Name -ceq 'Microsoft Zira Desktop' -and $_.VoiceInfo.Culture.Name -ceq 'en-US'})
         if($installed.Count -ne 1){throw 'Microsoft Zira Desktop en-US is required for reproducible reference capture.'}
-        $synth.SelectVoice($installed[0].VoiceInfo.Name);$synth.Rate=0;$synth.SetOutputToNull()
+        $synth.SelectVoice($installed[0].VoiceInfo.Name);$synth.Rate=0
+        if($WavePath){
+            $WavePath=[IO.Path]::GetFullPath($WavePath)
+            if(Test-Path -LiteralPath $WavePath){throw 'Zira WavePath already exists; choose a new output or reuse the existing capture.'}
+            if(-not(Test-Path -LiteralPath ([IO.Path]::GetDirectoryName($WavePath)) -PathType Container)){throw 'Zira WavePath parent directory is missing.'}
+            $waveFormat=[System.Speech.AudioFormat.SpeechAudioFormatInfo]::new(48000,[System.Speech.AudioFormat.AudioBitsPerSample]::Sixteen,[System.Speech.AudioFormat.AudioChannel]::Stereo)
+            $synth.SetOutputToWaveFile($WavePath,$waveFormat)
+        }else{$synth.SetOutputToNull()}
         $null=Register-ObjectEvent $synth PhonemeReached -SourceIdentifier $sources[0]
         $null=Register-ObjectEvent $synth SpeakProgress -SourceIdentifier $sources[1]
         $null=Register-ObjectEvent $synth SpeakCompleted -SourceIdentifier $sources[2]
@@ -2382,6 +2389,8 @@ function Get-EnglishZiraReference {
         $done=Wait-Event -SourceIdentifier $sources[2] -Timeout 60
         if($null -eq $done){$synth.SpeakAsyncCancelAll();throw 'Zira reference capture timed out.'}
         if($null -ne $done.SourceEventArgs.Error){throw $done.SourceEventArgs.Error}
+        # Close the WAV before hashing or returning it; event positions describe this same rendering.
+        if($WavePath){$synth.SetOutputToNull()}
         $phones=@(Get-Event -SourceIdentifier $sources[0] -ErrorAction SilentlyContinue | Sort-Object EventIdentifier | ForEach-Object {
             $e=$_.SourceEventArgs
             $phone=[EnglishZiraPhone]::new();$phone.Phone=$e.Phoneme;$phone.Next=$e.NextPhoneme;$phone.Ticks=$e.AudioPosition.Ticks;$phone.DurationTicks=$e.Duration.Ticks;$phone.Emphasis=[int]$e.Emphasis;$phone.Event=$_.EventIdentifier;$phone
@@ -2410,6 +2419,7 @@ function Get-EnglishZiraReference {
             $aligned.Add($word)
         }
         if($valid -and $alignedCount -eq $audible.Count){$capture.AlignedWords=$aligned.ToArray();$capture.Alignment='ExactSourceSpansAndWordOnsets'}
+        if($WavePath){$capture | Add-Member -NotePropertyName WavePath -NotePropertyValue $WavePath;$capture | Add-Member -NotePropertyName WaveSHA256 -NotePropertyValue (Get-FileHash -LiteralPath $WavePath).Hash}
         if(-not $NoSave){$null=Save-EnglishZiraObservation -Capture $capture}
         $capture
     }finally{
