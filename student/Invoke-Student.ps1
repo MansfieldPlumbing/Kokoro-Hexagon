@@ -35,6 +35,9 @@ Steps:
             review CSV. With -State Audit and -Annotations CSV, measure independently reviewed boundary error.
   Discriminate  From -State Alignment made with -PhoneLabels, fit a small acoustic contrast rule on human audio.
             Word types are split before fitting; Zira-warped phone labels remain provisional, never gold labels.
+  Review    Native waveform review of -Annotations CSV, or the latest boundary and phone review sets. Drag
+            boundaries, label sounds and save before revealing predictions. Resumes from an annotation journal.
+            -ReviewAction Check exercises an isolated interface fixture and renders a preview without human labels.
 .PARAMETER Corpus
 Corpus directory for Pronunciation; defaults to the latest build/corpus-* with corpus.clixml.
 .PARAMETER ParagraphLimit
@@ -69,7 +72,7 @@ Run from a PowerShell prompt: pwsh -File passes every argument as a string, so a
 #requires -Version 7.7
 [CmdletBinding()]
 param(
-    [ValidateSet('Console', 'Render', 'Corpus', 'Pronunciation', 'Normalize', 'Syllabus', 'Recordings', 'Listen', 'Stems', 'Alignment', 'Percepts', 'Describe', 'Learn', 'Audit', 'Discriminate')][string] $Step = 'Console',
+    [ValidateSet('Console', 'Render', 'Corpus', 'Pronunciation', 'Normalize', 'Syllabus', 'Recordings', 'Listen', 'Stems', 'Alignment', 'Percepts', 'Describe', 'Learn', 'Audit', 'Discriminate', 'Review')][string] $Step = 'Console',
     [ValidateRange(2, 64)][int] $Threads = [Math]::Max(2, [Environment]::ProcessorCount),
     [string] $Text = '',
     [string] $Voice = 'af_heart',
@@ -83,6 +86,7 @@ param(
     [string] $Annotations = '',
     [ValidateRange(8, 256)][int] $AuditCount = 32,
     [switch] $PhoneLabels,
+    [ValidateSet('Open', 'Check')][string] $ReviewAction = 'Open',
     [ValidateRange(0, [int]::MaxValue)][int] $ParagraphLimit = 0,
     [ValidateRange(0, [int]::MaxValue)][int] $WindowLimit = 0,
     [string] $Recordings = '',
@@ -812,6 +816,17 @@ class StudentTextKernels {
         }
         return $out
     }
+    static [float[]] WaveEnvelope([float[]] $signal, [int] $columns) {
+        $out = [float[]]::new(2 * $columns)
+        for ($column = 0; $column -lt $columns; $column++) {
+            $first = [int][Math]::Floor([double]$column * [double]$signal.Length / [double]$columns)
+            $last = [int][Math]::Floor([double]($column + 1) * [double]$signal.Length / [double]$columns)
+            $minimum = [float]0; $maximum = [float]0
+            for ($sample = $first; $sample -lt $last; $sample++) { $minimum = [Math]::Min($minimum, $signal[$sample]); $maximum = [Math]::Max($maximum, $signal[$sample]) }
+            $out[2 * $column] = $minimum; $out[2 * $column + 1] = $maximum
+        }
+        return $out
+    }
     static [float[]] FrameLevels([float[]] $signal, [int] $hop) {
         $count = [int][Math]::Floor([double]$signal.Length / [double]$hop); $out = [float[]]::new($count)
         for ($f = 0; $f -lt $count; $f++) {
@@ -1014,6 +1029,7 @@ function Import-StudentKernels {
         PitchTrack = $type.GetMethod('PitchTrack').CreateDelegate([Func[float[],int,int,int,int,int,double,float[]]])
         ContactStem = $type.GetMethod('ContactStem').CreateDelegate([Func[float[],int,int,float[]]])
         FrameLevels = $type.GetMethod('FrameLevels').CreateDelegate([Func[float[],int,float[]]])
+        WaveEnvelope = $type.GetMethod('WaveEnvelope').CreateDelegate([Func[float[],int,float[]]])
         MonoPcm16 = $type.GetMethod('MonoPcm16').CreateDelegate([Func[byte[],int,int,float[]]])
         BoundaryEvidence = $type.GetMethod('BoundaryEvidence').CreateDelegate([Func[float[],int[]]])
         Pcm16 = $type.GetMethod('Pcm16').CreateDelegate([Func[float[],short[]]])
@@ -1984,6 +2000,389 @@ function Invoke-StudentAlignment {
     } } finally { Remove-Module -ModuleInfo $ziraModule -Force }
 }
 
+function Write-StudentReviewCheckpoint([string] $Destination, [string] $Content) {
+    $temporary = $Destination + '.new'
+    [IO.File]::WriteAllText($temporary, $Content, [Text.UTF8Encoding]::new($false))
+    if (Test-Path -LiteralPath $Destination) { [IO.File]::Replace($temporary, $Destination, $Destination + '.previous', $true) }
+    else { [IO.File]::Move($temporary, $Destination) }
+}
+
+function New-StudentReviewSession([string[]] $Sources, [string] $JournalDirectory, [bool] $Fixture) {
+    $cases = [Collections.Generic.List[object]]::new(); $tables = [Collections.Generic.Dictionary[string,object]]::new([StringComparer]::Ordinal)
+    foreach ($sourcePath in $Sources) {
+        $fullPath = [IO.Path]::GetFullPath($sourcePath); $rows = @(Import-Csv -LiteralPath $fullPath)
+        if ($rows.Count -eq 0) { throw 'Review CSV is empty.' }
+        $seen = [Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
+        foreach ($row in $rows) {
+            foreach ($field in @('Identity','Audio','AudioSHA256','ContextStartSeconds','Status','Reviewer')) { if (-not $row.PSObject.Properties[$field]) { throw "Review CSV is missing $field." } }
+            if (-not $seen.Add($row.Identity)) { throw 'Review CSV repeats a case identity.' }
+            if (-not $Fixture -and $row.PSObject.Properties['ReviewDataStatus'] -and $row.ReviewDataStatus -ceq 'SyntheticInterfaceCheck') { throw 'Interface-check annotations cannot be opened as human review material.' }
+            if ((Get-FileHash -LiteralPath $row.Audio).Hash -cne $row.AudioSHA256) { throw 'Review audio changed after case selection.' }
+            $layout = Get-StudentWavLayout $row.Audio
+            if ($layout.Rate -ne 16000 -or $layout.Channels -ne 1) { throw 'Review excerpts must be 16 kHz mono PCM16.' }
+            $kind = if ($row.PSObject.Properties['ObservedPhone']) { 'Phone' } elseif ($row.PSObject.Properties['ObservedSeconds']) { 'Boundary' } else { throw 'Review CSV has no supported annotation fields.' }
+            foreach ($addition in @('PredictionRevealedBeforeSave','ReviewDataStatus')) { if (-not $row.PSObject.Properties[$addition]) { $row | Add-Member -NotePropertyName $addition -NotePropertyValue '' } }
+            $key = $fullPath + ':' + $row.Identity
+            $order = [Convert]::ToHexString([Security.Cryptography.SHA256]::HashData([Text.Encoding]::UTF8.GetBytes($key)))
+            $cases.Add([pscustomobject]@{ Key = $key; Row = $row; Kind = $kind; Source = $fullPath; Order = $order; Duration = $layout.Frames / 16000.0 })
+        }
+        $tables.Add($fullPath, $rows)
+    }
+    $ordered = @($cases | Sort-Object Order); $items = [Collections.Generic.List[object]]::new()
+    for ($index = 0; $index -lt $ordered.Count; $index++) {
+        $items.Add([pscustomobject]@{ Id = 'primary:' + $ordered[$index].Key; Case = $ordered[$index]; Repeat = $false })
+        if (($index + 1) % 8 -eq 0) {
+            $repeatIndex = [int](($index + 1) / 8) - 1
+            $items.Add([pscustomobject]@{ Id = 'repeat:' + $ordered[$repeatIndex].Key; Case = $ordered[$repeatIndex]; Repeat = $true })
+        }
+    }
+    $manifestRecords = @($ordered | ForEach-Object {
+        [pscustomobject]@{ Key = $_.Key; Kind = $_.Kind; AudioSHA256 = $_.Row.AudioSHA256; ContextStart = $_.Row.ContextStartSeconds; Duration = $_.Duration
+            Target = $(if ($_.Kind -ceq 'Phone') { $_.Row.WordType } else { $_.Row.Text + ':' + $_.Row.Side })
+            Prediction = $(if ($_.Kind -ceq 'Phone') { $_.Row.ProvisionalPhone + ':' + $_.Row.StartSeconds + ':' + $_.Row.EndSeconds } else { $_.Row.PredictedSeconds }) }
+    })
+    $manifestText = [Management.Automation.PSSerializer]::Serialize($manifestRecords, 6)
+    $manifest = [Convert]::ToHexString([Security.Cryptography.SHA256]::HashData([Text.Encoding]::UTF8.GetBytes($manifestText)))
+    [void][IO.Directory]::CreateDirectory($JournalDirectory)
+    $journalPath = Join-Path $JournalDirectory ($manifest + '.clixml')
+    $events = [Collections.Generic.List[object]]::new(); $answers = [Collections.Generic.Dictionary[string,object]]::new([StringComparer]::Ordinal); $revealed = [Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
+    if (Test-Path -LiteralPath $journalPath) {
+        $saved = Import-Clixml -LiteralPath $journalPath
+        if ($saved.ManifestSHA256 -cne $manifest -or $saved.Fixture -ne $Fixture) { throw 'Review journal belongs to a different case manifest.' }
+        foreach ($entry in $saved.Events) { $events.Add($entry); if ($entry.Kind -ceq 'Annotation') { $answers[[string]$entry.Presentation] = $entry } elseif ($entry.Kind -ceq 'Reveal') { [void]$revealed.Add([string]$entry.Presentation) } }
+    }
+    $cursor = 0
+    while ($cursor -lt $items.Count - 1 -and $answers.ContainsKey($items[$cursor].Id)) { $cursor++ }
+    [pscustomobject]@{ PSTypeName = 'Kokoro.StudentReviewSession'; Cases = $cases.ToArray(); Items = $items.ToArray(); Tables = $tables
+        JournalPath = $journalPath; ManifestSHA256 = $manifest; Events = $events; Answers = $answers; Revealed = $revealed; Fixture = $Fixture
+        Cursor = $cursor; Start = $null; End = $null; Drag = ''; Loading = $false; Signal = $null; Player = $null; PlaybackStream = $null
+        Controls = @{}; Window = $null; LastSave = ''; PlaybackStart = 0.0 }
+}
+
+function Save-StudentReviewSession($Session) {
+    $snapshot = [pscustomobject]@{ PSTypeName = 'Kokoro.StudentReviewJournal'; ManifestSHA256 = $Session.ManifestSHA256; Fixture = $Session.Fixture
+        MachineSHA256 = $script:StudentMachineSHA256; Events = $Session.Events.ToArray() }
+    Write-StudentReviewCheckpoint $Session.JournalPath ([Management.Automation.PSSerializer]::Serialize($snapshot, 14))
+    # The journal is authoritative. Rebuild canonical CSV rows after every confirmed annotation and on resume.
+    foreach ($item in $Session.Items) {
+        if ($item.Repeat -or -not $Session.Answers.ContainsKey($item.Id)) { continue }
+        $answer = $Session.Answers[$item.Id]; $row = $item.Case.Row
+        $row.Status = $answer.Status; $row.Reviewer = $answer.Reviewer
+        $row.PredictionRevealedBeforeSave = [string]$answer.PredictionRevealedBeforeSave
+        $row.ReviewDataStatus = if ($Session.Fixture) { 'SyntheticInterfaceCheck' } else { 'HumanAnnotation' }
+        if ($item.Case.Kind -ceq 'Boundary') { $row.ObservedSeconds = $answer.Start }
+        else { $row.ObservedPhone = $answer.Phone; $row.ObservedStartSeconds = $answer.Start; $row.ObservedEndSeconds = $answer.End }
+    }
+    foreach ($sourcePath in $Session.Tables.Keys) { Write-StudentReviewCheckpoint $sourcePath (($Session.Tables[$sourcePath] | ConvertTo-Csv) -join "`r`n") }
+}
+
+function Stop-StudentReviewAudio($Session) {
+    if ($null -ne $Session.Player) { $Session.Player.Stop(); $Session.Player.Dispose(); $Session.Player = $null }
+    if ($null -ne $Session.PlaybackStream) { $Session.PlaybackStream.Dispose(); $Session.PlaybackStream = $null }
+}
+
+function Play-StudentReviewAudio($Session, [bool] $Selection) {
+    Stop-StudentReviewAudio $Session
+    $item = $Session.Items[$Session.Cursor]; $first = 0; $last = $Session.Signal.Length
+    if ($Selection) {
+        $start = $Session.Start; $end = $Session.End
+        if ($null -eq $start -and $item.Case.Kind -ceq 'Phone') { $start = [double]$item.Case.Row.StartSeconds - [double]$item.Case.Row.ContextStartSeconds; $end = [double]$item.Case.Row.EndSeconds - [double]$item.Case.Row.ContextStartSeconds }
+        if ($null -eq $start) { $Session.Controls.Message.Text = 'Mark a boundary first, or play the full clip.'; return }
+        if ($item.Case.Kind -ceq 'Boundary' -or $null -eq $end) { $end = $start + 0.15; $start -= 0.15 }
+        $first = [int][Math]::Floor([Math]::Max(0.0, $start) * 16000.0); $last = [int][Math]::Min($last, [Math]::Ceiling($end * 16000.0))
+    }
+    if ($last -le $first) { $Session.Controls.Message.Text = 'Set a valid selection first.'; return }
+    $samples = [float[]]::new($last - $first); [Array]::Copy($Session.Signal, $first, $samples, 0, $samples.Length)
+    $Session.PlaybackStream = [IO.MemoryStream]::new([byte[]](ConvertTo-StudentWave $samples 16000))
+    $Session.Player = [Media.SoundPlayer]::new($Session.PlaybackStream); $Session.Player.Load()
+    if (-not $Session.Fixture) { $Session.Player.Play() }
+}
+
+function Update-StudentReviewMarkers($Session) {
+    $controls = $Session.Controls; $duration = $Session.Items[$Session.Cursor].Case.Duration; $width = [Math]::Max(1.0, $controls.Wave.ActualWidth)
+    foreach ($name in @('Start','End')) {
+        $value = $Session.$name; $line = $controls[$name + 'Line']; $line.Visibility = if ($null -eq $value) { 'Collapsed' } else { 'Visible' }
+        if ($null -ne $value) { $line.X1 = $value / $duration * $width; $line.X2 = $line.X1; $line.Y2 = $controls.Wave.ActualHeight }
+    }
+    $controls.WavePath.RenderTransform = [Windows.Media.ScaleTransform]::new($width / 1000.0, [Math]::Max(1.0, $controls.Wave.ActualHeight) / 200.0)
+}
+
+function Read-StudentReviewTimes($Session) {
+    if ($Session.Loading) { return }
+    foreach ($name in @('Start','End')) {
+        $number = 0.0; $field = $Session.Controls[$name + 'Time'].Text
+        $Session.$name = if ([double]::TryParse($field, [Globalization.NumberStyles]::Float, [Globalization.CultureInfo]::InvariantCulture, [ref]$number) -and [double]::IsFinite($number) -and $number -ge 0 -and $number -le $Session.Items[$Session.Cursor].Case.Duration) { $number } else { $null }
+    }
+    Update-StudentReviewMarkers $Session
+}
+
+function Set-StudentReviewMarker($Session, [double] $X, [string] $Which = '') {
+    $width = [Math]::Max(1.0, $Session.Controls.Wave.ActualWidth); $duration = $Session.Items[$Session.Cursor].Case.Duration
+    if (-not $Which) {
+        $Which = if ($Session.Items[$Session.Cursor].Case.Kind -ceq 'Boundary' -or $null -eq $Session.Start) { 'Start' } elseif ($null -eq $Session.End) { 'End' } elseif ([Math]::Abs($X - $Session.Start / $duration * $width) -le [Math]::Abs($X - $Session.End / $duration * $width)) { 'Start' } else { 'End' }
+    }
+    $Session.Drag = $Which; $value = [Math]::Clamp($X / $width * $duration, 0.0, $duration)
+    $Session.Controls[$Which + 'Time'].Text = $value.ToString('F4', [Globalization.CultureInfo]::InvariantCulture)
+}
+
+function Show-StudentReviewCase($Session, [int] $Index) {
+    Stop-StudentReviewAudio $Session
+    $Session.Cursor = [Math]::Clamp($Index, 0, $Session.Items.Count - 1); $item = $Session.Items[$Session.Cursor]; $row = $item.Case.Row; $controls = $Session.Controls
+    $Session.Loading = $true; $Session.Start = $null; $Session.End = $null; $Session.Drag = ''
+    $controls.StartTime.Text = ''; $controls.EndTime.Text = ''; $controls.SoundA.IsChecked = $false; $controls.SoundS.IsChecked = $false; $controls.SoundOther.IsChecked = $false; $controls.OtherPhone.Text = ''
+    $controls.Progress.Text = 'Clip ' + ($Session.Cursor + 1) + ' of ' + $Session.Items.Count + '   ·   ' + $Session.Answers.Count + ' saved'
+    $controls.Task.Text = if ($item.Case.Kind -ceq 'Boundary') { 'Mark the ' + $row.Side.ToLowerInvariant() + ' of “' + $row.Text + '”' } else { 'Identify the sound in “' + $row.WordType + '”' }
+    $controls.Instruction.Text = if ($item.Case.Kind -ceq 'Boundary') { 'Listen, then click the waveform to mark the word boundary. Drag to refine it. Times below are seconds within this clip.' } else { 'The shaded region locates the sound under review. Choose its identity; click for a start, then an end. Drag either line or enter clip seconds.' }
+    $controls.PhonePanel.Visibility = if ($item.Case.Kind -ceq 'Phone') { 'Visible' } else { 'Collapsed' }
+    $controls.EndPanel.Visibility = if ($item.Case.Kind -ceq 'Phone') { 'Visible' } else { 'Collapsed' }
+    $controls.StartCaption.Text = if ($item.Case.Kind -ceq 'Boundary') { 'Boundary (clip seconds)' } else { 'Start (clip seconds)' }
+    $controls.Prediction.Text = 'Prediction hidden until you save this presentation.'; $controls.Reveal.IsEnabled = $Session.Answers.ContainsKey($item.Id)
+    $controls.Message.Text = if ($Session.LastSave) { $Session.LastSave } else { 'Nothing is recorded until you choose Save or Uncertain.' }
+    $Session.Signal = Read-StudentAudio $row.Audio
+    $envelope = (Import-StudentKernels).WaveEnvelope.Invoke($Session.Signal, 1000)
+    $geometry = [Windows.Media.StreamGeometry]::new(); $drawing = $geometry.Open()
+    try { for ($column = 0; $column -lt 1000; $column++) { $drawing.BeginFigure([Windows.Point]::new($column, 100.0 - 90.0 * $envelope[2 * $column]), $false, $false); $drawing.LineTo([Windows.Point]::new($column, 100.0 - 90.0 * $envelope[2 * $column + 1]), $true, $false) } } finally { $drawing.Close() }
+    $geometry.Freeze(); $controls.WavePath.Data = $geometry
+    $controls.Scope.Visibility = if ($item.Case.Kind -ceq 'Phone') { 'Visible' } else { 'Collapsed' }
+    if ($item.Case.Kind -ceq 'Phone') {
+        $relativeStart = [double]$row.StartSeconds - [double]$row.ContextStartSeconds; $relativeEnd = [double]$row.EndSeconds - [double]$row.ContextStartSeconds
+        $controls.Scope.Tag = [double[]]@(($relativeStart / $item.Case.Duration), ($relativeEnd / $item.Case.Duration))
+    }
+    if ($Session.Answers.ContainsKey($item.Id)) {
+        $answer = $Session.Answers[$item.Id]; $offset = [double]$row.ContextStartSeconds
+        if ($null -ne $answer.Start -and [string]$answer.Start -ne '') { $controls.StartTime.Text = ([double]$answer.Start - $offset).ToString('F4', [Globalization.CultureInfo]::InvariantCulture) }
+        if ($null -ne $answer.End -and [string]$answer.End -ne '') { $controls.EndTime.Text = ([double]$answer.End - $offset).ToString('F4', [Globalization.CultureInfo]::InvariantCulture) }
+        if ($answer.Phone -ceq 'æ') { $controls.SoundA.IsChecked = $true } elseif ($answer.Phone -ceq 's') { $controls.SoundS.IsChecked = $true } elseif ($answer.Phone) { $controls.SoundOther.IsChecked = $true; $controls.OtherPhone.Text = $answer.Phone }
+        if (-not $controls.Reviewer.Text) { $controls.Reviewer.Text = $answer.Reviewer }
+    }
+    $controls.Duration.Text = $item.Case.Duration.ToString('F3', [Globalization.CultureInfo]::InvariantCulture) + ' s'
+    $Session.Loading = $false; Read-StudentReviewTimes $Session
+    Update-StudentReviewLayout $Session
+}
+
+function Update-StudentReviewLayout($Session) {
+    Update-StudentReviewMarkers $Session
+    if ($Session.Controls.Scope.Visibility -eq 'Visible') {
+        $fractions = [double[]]$Session.Controls.Scope.Tag; $width = $Session.Controls.Wave.ActualWidth
+        [Windows.Controls.Canvas]::SetLeft($Session.Controls.Scope, $fractions[0] * $width)
+        $Session.Controls.Scope.Width = [Math]::Max(0.0, ($fractions[1] - $fractions[0]) * $width); $Session.Controls.Scope.Height = $Session.Controls.Wave.ActualHeight
+    }
+}
+
+function Confirm-StudentReview($Session, [string] $Status) {
+    $item = $Session.Items[$Session.Cursor]; $controls = $Session.Controls; $reviewerName = $controls.Reviewer.Text.Trim()
+    if (-not $reviewerName) { $controls.Message.Text = 'Enter your reviewer name before saving.'; return $false }
+    $phoneValue = ''; $first = $null; $last = $null
+    if ($Status -ceq 'Reviewed') {
+        Read-StudentReviewTimes $Session
+        if ($null -eq $Session.Start) { $controls.Message.Text = 'Mark a boundary on the waveform, or enter clip seconds.'; return $false }
+        if ($item.Case.Kind -ceq 'Phone') {
+            if ($null -eq $Session.End -or $Session.End -le $Session.Start) { $controls.Message.Text = 'Set an end after the start of the sound.'; return $false }
+            $phoneValue = if ($controls.SoundA.IsChecked) { 'æ' } elseif ($controls.SoundS.IsChecked) { 's' } elseif ($controls.SoundOther.IsChecked) { $controls.OtherPhone.Text.Trim() } else { '' }
+            if (-not $phoneValue -or $phoneValue.Length -gt 32) { $controls.Message.Text = 'Choose a sound, enter another sound, or mark this uncertain.'; return $false }
+            $last = ([double]$item.Case.Row.ContextStartSeconds + $Session.End).ToString('F7', [Globalization.CultureInfo]::InvariantCulture)
+        }
+        $first = ([double]$item.Case.Row.ContextStartSeconds + $Session.Start).ToString('F7', [Globalization.CultureInfo]::InvariantCulture)
+    }
+    $exposed = @($Session.Items | Where-Object { $_.Case.Key -ceq $item.Case.Key -and $Session.Revealed.Contains($_.Id) }).Count -gt 0
+    $entry = [pscustomobject]@{ Kind = 'Annotation'; Presentation = $item.Id; CaseKey = $item.Case.Key; Repeat = $item.Repeat; Status = $Status
+        Reviewer = $reviewerName; Start = $first; End = $last; Phone = $phoneValue; PredictionRevealedBeforeSave = $exposed
+        ReviewDataStatus = $(if ($Session.Fixture) { 'SyntheticInterfaceCheck' } else { 'HumanAnnotation' }); AtUtc = [DateTime]::UtcNow.ToString('O') }
+    $Session.Events.Add($entry); $Session.Answers[$item.Id] = $entry; Save-StudentReviewSession $Session
+    $Session.LastSave = 'Saved. You can go back to inspect or reveal the prediction.'
+    return $true
+}
+
+function Reveal-StudentReviewPrediction($Session) {
+    $item = $Session.Items[$Session.Cursor]
+    if (-not $Session.Answers.ContainsKey($item.Id)) { return }
+    [void]$Session.Revealed.Add($item.Id)
+    $Session.Events.Add([pscustomobject]@{ Kind = 'Reveal'; Presentation = $item.Id; AtUtc = [DateTime]::UtcNow.ToString('O') }); Save-StudentReviewSession $Session
+    $row = $item.Case.Row
+    $Session.Controls.Prediction.Text = if ($item.Case.Kind -ceq 'Phone') { 'Provisional label: ' + $row.ProvisionalPhone + '. This is an alignment hypothesis, not confirmed ground truth.' } else { 'Automatic boundary: ' + ([double]$row.PredictedSeconds - [double]$row.ContextStartSeconds).ToString('F4', [Globalization.CultureInfo]::InvariantCulture) + ' clip seconds.' }
+}
+
+$script:StudentReviewMarkup = @'
+<Window xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation" xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+ Title="Student audio review" Width="1160" Height="830" MinWidth="900" MinHeight="720" WindowStartupLocation="CenterScreen" Background="#101A24" Foreground="#EDF3F7" FontFamily="Segoe UI" FontSize="15">
+ <Window.Resources>
+  <Style TargetType="Button"><Setter Property="Margin" Value="0,0,10,0"/><Setter Property="Padding" Value="17,10"/><Setter Property="Background" Value="#DFE9EF"/><Setter Property="Foreground" Value="#122230"/><Setter Property="BorderThickness" Value="0"/></Style>
+  <Style TargetType="TextBox"><Setter Property="Padding" Value="9,7"/><Setter Property="Background" Value="#223442"/><Setter Property="Foreground" Value="#FFFFFF"/><Setter Property="BorderBrush" Value="#506575"/></Style>
+  <Style TargetType="RadioButton"><Setter Property="Margin" Value="0,0,24,0"/><Setter Property="VerticalContentAlignment" Value="Center"/><Setter Property="Foreground" Value="#EDF3F7"/></Style>
+ </Window.Resources>
+ <Grid x:Name="Root" Margin="28" Background="#101A24">
+  <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/><RowDefinition Height="*"/><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
+  <DockPanel Grid.Row="0" Margin="0,0,0,22"><StackPanel DockPanel.Dock="Right" Orientation="Horizontal"><TextBlock Text="Reviewer" VerticalAlignment="Center" Margin="0,0,10,0"/><TextBox x:Name="Reviewer" Width="180" AutomationProperties.Name="Reviewer name"/></StackPanel><TextBlock Text="STUDENT  /  AUDIO REVIEW" FontSize="15" Foreground="#7FD6CC" VerticalAlignment="Center"/></DockPanel>
+  <StackPanel Grid.Row="1" Margin="0,0,0,14"><TextBlock x:Name="Progress" Foreground="#9DB0BE"/><TextBlock x:Name="Task" FontSize="29" Margin="0,8,0,10" TextWrapping="Wrap"/><TextBlock x:Name="Instruction" Foreground="#C3D1DA" TextWrapping="Wrap"/></StackPanel>
+  <StackPanel Grid.Row="2" Orientation="Horizontal" Margin="0,0,0,16"><Button x:Name="Play" Content="▶  Play clip"/><Button x:Name="Selection" Content="Play marked / target"/><Button x:Name="Stop" Content="Stop"/></StackPanel>
+  <Border Grid.Row="3" Background="#182936" BorderBrush="#3A5363" BorderThickness="1" MinHeight="180">
+   <Canvas x:Name="Wave" Background="Transparent" ClipToBounds="True" Focusable="True" AutomationProperties.Name="Waveform. Click or drag to mark boundaries; numeric fields provide keyboard entry.">
+    <Rectangle x:Name="Scope" Fill="#254C5C" IsHitTestVisible="False"/>
+    <Path x:Name="WavePath" Stroke="#7DD8CD" StrokeThickness="0.85" IsHitTestVisible="False"/>
+    <Line x:Name="StartLine" Stroke="#FFCC80" StrokeThickness="3" IsHitTestVisible="False"/>
+    <Line x:Name="EndLine" Stroke="#97BFFF" StrokeThickness="3" IsHitTestVisible="False"/>
+   </Canvas>
+  </Border>
+  <Grid Grid.Row="4" Margin="0,7,0,14"><TextBlock Text="0.000 s" Foreground="#9DB0BE"/><TextBlock x:Name="Duration" Foreground="#9DB0BE" HorizontalAlignment="Right"/></Grid>
+  <StackPanel Grid.Row="5" Orientation="Horizontal" Margin="0,0,0,17">
+   <StackPanel Margin="0,0,20,0"><TextBlock x:Name="StartCaption" Foreground="#FFCC80" Margin="0,0,0,5"/><TextBox x:Name="StartTime" Width="175" AutomationProperties.Name="Boundary or start time in clip seconds"/></StackPanel>
+   <StackPanel x:Name="EndPanel"><TextBlock Text="End (clip seconds)" Foreground="#97BFFF" Margin="0,0,0,5"/><TextBox x:Name="EndTime" Width="175" AutomationProperties.Name="End time in clip seconds"/></StackPanel>
+  </StackPanel>
+  <StackPanel Grid.Row="6" x:Name="PhonePanel" Margin="0,0,0,20"><TextBlock Text="Which sound is inside your marked interval?" Margin="0,0,0,12"/><StackPanel Orientation="Horizontal"><RadioButton x:Name="SoundA" GroupName="Phone" Content="æ — as in cat"/><RadioButton x:Name="SoundS" GroupName="Phone" Content="s — as in see"/><RadioButton x:Name="SoundOther" GroupName="Phone" Content="Another sound"/><TextBox x:Name="OtherPhone" Width="140" AutomationProperties.Name="Another sound label"/></StackPanel></StackPanel>
+  <StackPanel Grid.Row="7"><StackPanel Orientation="Horizontal" Margin="0,0,0,13"><Button x:Name="Back" Content="Back"/><Button x:Name="Skip" Content="Skip"/><Button x:Name="Save" Content="Save &amp; next" Background="#7FD6CC"/><Button x:Name="Uncertain" Content="Uncertain &amp; next"/><Button x:Name="Reveal" Content="Reveal prediction"/></StackPanel><TextBlock x:Name="Prediction" Foreground="#AEC3D2" TextWrapping="Wrap" Margin="0,0,0,12"/><TextBlock x:Name="Message" Foreground="#FFCC80" TextWrapping="Wrap"/></StackPanel>
+  <TextBlock Grid.Row="8" x:Name="Location" Foreground="#7E96A8" FontSize="12" Margin="0,18,0,0" TextWrapping="Wrap"/>
+ </Grid>
+</Window>
+'@
+
+$script:StudentReviewActions = [ordered]@{
+    Play = { param($Session); Play-StudentReviewAudio $Session $false }
+    Selection = { param($Session); Play-StudentReviewAudio $Session $true }
+    Stop = { param($Session); Stop-StudentReviewAudio $Session }
+    Back = { param($Session); Show-StudentReviewCase $Session ($Session.Cursor - 1) }
+    Skip = { param($Session); Show-StudentReviewCase $Session ($Session.Cursor + 1) }
+    Save = { param($Session); if (Confirm-StudentReview $Session 'Reviewed') { Move-StudentReviewNext $Session } }
+    Uncertain = { param($Session); if (Confirm-StudentReview $Session 'Ambiguous') { Move-StudentReviewNext $Session } }
+    Reveal = { param($Session); Reveal-StudentReviewPrediction $Session }
+}
+
+function Move-StudentReviewNext($Session) {
+    if ($Session.Cursor + 1 -lt $Session.Items.Count) { Show-StudentReviewCase $Session ($Session.Cursor + 1); return }
+    for ($index = 0; $index -lt $Session.Items.Count; $index++) { if (-not $Session.Answers.ContainsKey($Session.Items[$index].Id)) { Show-StudentReviewCase $Session $index; return } }
+    $Session.Controls.Message.Text = 'All presentations saved. You can revisit them, or close the window.'; $Session.Controls.Reveal.IsEnabled = $true
+}
+
+function New-StudentReviewWindow($Session) {
+    if (-not $IsWindows -or [Threading.Thread]::CurrentThread.ApartmentState -ne 'STA') { throw 'Review requires Windows and an STA PowerShell process; start pwsh -STA.' }
+    Add-Type -AssemblyName PresentationFramework,PresentationCore,WindowsBase
+    $Session.Window = [Windows.Markup.XamlReader]::Parse($script:StudentReviewMarkup)
+    foreach ($name in @('Root','Reviewer','Progress','Task','Instruction','Play','Selection','Stop','Wave','Scope','WavePath','StartLine','EndLine','Duration','StartTime','EndTime','StartCaption','EndPanel','PhonePanel','SoundA','SoundS','SoundOther','OtherPhone','Back','Skip','Save','Uncertain','Reveal','Prediction','Message','Location')) { $Session.Controls[$name] = $Session.Window.FindName($name) }
+    $script:StudentReviewContext = $Session
+    foreach ($name in $script:StudentReviewActions.Keys) {
+        $Session.Controls[$name].Tag = $name
+        $Session.Controls[$name].Add_Click({ param($sender, $eventData)
+            try { & $script:StudentReviewActions[[string]$sender.Tag] $script:StudentReviewContext }
+            catch { $script:StudentReviewContext.Controls.Message.Text = 'Could not complete action: ' + $_.Exception.Message }
+        })
+    }
+    $Session.Controls.StartTime.Add_TextChanged({ Read-StudentReviewTimes $script:StudentReviewContext })
+    $Session.Controls.EndTime.Add_TextChanged({ Read-StudentReviewTimes $script:StudentReviewContext })
+    $Session.Controls.Wave.Add_SizeChanged({ if ($null -ne $script:StudentReviewContext.Signal) { Update-StudentReviewLayout $script:StudentReviewContext } })
+    $Session.Controls.Wave.Add_MouseLeftButtonDown({ param($sender, $eventData)
+        $s = $script:StudentReviewContext; Set-StudentReviewMarker $s $eventData.GetPosition($sender).X
+        [void]$sender.CaptureMouse(); $eventData.Handled = $true
+    })
+    $Session.Controls.Wave.Add_MouseMove({ param($sender, $eventData)
+        $s = $script:StudentReviewContext
+        if ($sender.IsMouseCaptured -and $eventData.LeftButton -eq [Windows.Input.MouseButtonState]::Pressed) { Set-StudentReviewMarker $s $eventData.GetPosition($sender).X $s.Drag }
+    })
+    $Session.Controls.Wave.Add_MouseLeftButtonUp({ param($sender, $eventData); $sender.ReleaseMouseCapture(); $script:StudentReviewContext.Drag = '' })
+    $Session.Window.Add_Closed({ Stop-StudentReviewAudio $script:StudentReviewContext })
+    $Session.Controls.Location.Text = 'Answers save as you go. Close this window at any time and resume later. Prediction reveals are recorded.'
+    Show-StudentReviewCase $Session $Session.Cursor
+}
+
+function Get-StudentReviewSummary($Session) {
+    $pairs = 0; $phonePairs = 0; $phoneMatches = 0; $errors = [Collections.Generic.List[double]]::new()
+    foreach ($item in $Session.Items | Where-Object Repeat) {
+        $primaryId = 'primary:' + $item.Case.Key
+        if (-not $Session.Answers.ContainsKey($primaryId) -or -not $Session.Answers.ContainsKey($item.Id)) { continue }
+        $primary = $Session.Answers[$primaryId]; $repeatAnswer = $Session.Answers[$item.Id]
+        if ($primary.Status -cne 'Reviewed' -or $repeatAnswer.Status -cne 'Reviewed' -or $primary.PredictionRevealedBeforeSave -or $repeatAnswer.PredictionRevealedBeforeSave -or $primary.Reviewer -ine $repeatAnswer.Reviewer) { continue }
+        $pairs++
+        if ($item.Case.Kind -ceq 'Phone') { $phonePairs++; if ($primary.Phone -ceq $repeatAnswer.Phone) { $phoneMatches++ } }
+        if ($null -ne $primary.Start -and $null -ne $repeatAnswer.Start) { $errors.Add(1000 * [Math]::Abs([double]$primary.Start - [double]$repeatAnswer.Start)) }
+    }
+    [pscustomobject]@{ PSTypeName = 'Kokoro.StudentReviewSummary'; Journal = $Session.JournalPath; Fixture = $Session.Fixture
+        Cases = $Session.Cases.Count; Presentations = $Session.Items.Count; SavedPresentations = $Session.Answers.Count; BlindRepeatPairs = $pairs
+        PhoneRepeatPairs = $phonePairs; PhoneRepeatAgreement = $(if ($phonePairs) { $phoneMatches / [double]$phonePairs } else { $null })
+        MeanRepeatBoundaryDifferenceMs = $(if ($errors.Count) { ($errors | Measure-Object -Average).Average } else { $null }) }
+}
+
+function Export-StudentReviewPreview($Session, [string] $Destination) {
+    $root = $Session.Controls.Root; $root.Measure([Windows.Size]::new(1100,760)); $root.Arrange([Windows.Rect]::new(0,0,1100,760)); $root.UpdateLayout(); Update-StudentReviewLayout $Session
+    $bitmap = [Windows.Media.Imaging.RenderTargetBitmap]::new(1100,760,96,96,[Windows.Media.PixelFormats]::Pbgra32); $bitmap.Render($root)
+    $encoder = [Windows.Media.Imaging.PngBitmapEncoder]::new(); $encoder.Frames.Add([Windows.Media.Imaging.BitmapFrame]::Create($bitmap))
+    $stream = [IO.File]::Create($Destination); try { $encoder.Save($stream) } finally { $stream.Dispose() }
+}
+
+function Invoke-StudentReview {
+    $sources = @(if ($Annotations) { (Resolve-Path -LiteralPath $Annotations).Path } else {
+        foreach ($record in @(@{ Pattern = 'student-alignment-audit-*'; File = 'review.csv' }, @{ Pattern = 'student-acoustic-contrast-*'; File = 'phone-review.csv' })) {
+            $latest = @(Get-ChildItem -LiteralPath $script:StudentBuild -Directory -Filter $record.Pattern | Where-Object { Test-Path -LiteralPath (Join-Path $_.FullName $record.File) } | Sort-Object Name)
+            if ($latest.Count) { Join-Path $latest[-1].FullName $record.File }
+        }
+    })
+    if (-not $sources.Count) { throw 'No review sets found; pass -Annotations CSV or generate Audit/Discriminate review material.' }
+    $journalDirectory = Join-Path $script:StudentBuild 'student/review'
+    $fixture = $ReviewAction -ceq 'Check'
+    if ($fixture) {
+        $journalDirectory = New-StudentOutputDirectory 'student-review-check'
+        $sources = @(for ($index = 0; $index -lt $sources.Count; $index++) {
+            $copy = Join-Path $journalDirectory ('source-' + $index + '.csv'); $rows = @(Import-Csv -LiteralPath $sources[$index])
+            foreach ($row in $rows) {
+                foreach ($property in $row.PSObject.Properties) { if ($property.Name -like 'Observed*' -or $property.Name -in 'Reviewer','PredictionRevealedBeforeSave') { $property.Value = '' } }
+                $row.Status = 'Unreviewed'
+                $row | Add-Member -NotePropertyName ReviewDataStatus -NotePropertyValue 'SyntheticInterfaceCheck' -Force
+            }
+            $rows | Export-Csv -LiteralPath $copy; $copy
+        })
+    }
+    $session = New-StudentReviewSession $sources $journalDirectory $fixture
+    New-StudentReviewWindow $session
+    if ($fixture) {
+        $session.Controls.Reviewer.Text = 'Interface fixture'
+        Export-StudentReviewPreview $session (Join-Path $journalDirectory 'initial.png')
+        if ($session.Controls.Reveal.IsEnabled -or $session.Answers.Count -ne 0) { throw 'Prediction was available before annotation.' }
+        $session.Controls.Save.RaiseEvent([Windows.RoutedEventArgs]::new([Windows.Controls.Button]::ClickEvent))
+        if ($session.Answers.Count -ne 0) { throw 'Incomplete annotation was accepted.' }
+        $boundaryIndex = -1; $phoneIndex = -1
+        for ($index = 0; $index -lt $session.Items.Count; $index++) {
+            if ($session.Items[$index].Repeat) { continue }
+            if ($boundaryIndex -lt 0 -and $session.Items[$index].Case.Kind -ceq 'Boundary') { $boundaryIndex = $index }
+            if ($phoneIndex -lt 0 -and $session.Items[$index].Case.Kind -ceq 'Phone') { $phoneIndex = $index }
+        }
+        foreach ($index in @($boundaryIndex,$phoneIndex) | Where-Object { $_ -ge 0 }) {
+            Show-StudentReviewCase $session $index
+            $session.Controls.Reviewer.Text = 'Interface fixture'; Set-StudentReviewMarker $session (0.4 * $session.Controls.Wave.ActualWidth) 'Start'
+            if ($session.Items[$index].Case.Kind -ceq 'Phone') { Set-StudentReviewMarker $session (0.6 * $session.Controls.Wave.ActualWidth) 'End'; $session.Controls.SoundS.IsChecked = $true; Export-StudentReviewPreview $session (Join-Path $journalDirectory 'phone.png') }
+            if (-not (Confirm-StudentReview $session 'Reviewed')) { throw 'Valid fixture annotation was rejected.' }
+            Show-StudentReviewCase $session $index
+            $session.Controls.Reveal.RaiseEvent([Windows.RoutedEventArgs]::new([Windows.Controls.Button]::ClickEvent))
+            if (-not $session.Revealed.Contains($session.Items[$index].Id)) { throw 'Prediction reveal did not enter the journal.' }
+        }
+        $session.Controls.Selection.RaiseEvent([Windows.RoutedEventArgs]::new([Windows.Controls.Button]::ClickEvent))
+        if ($null -eq $session.Player -or -not $session.Player.IsLoadCompleted) { throw 'Selected review audio did not load.' }
+        Stop-StudentReviewAudio $session
+        $repeatIndex = -1
+        for ($index = 0; $index -lt $session.Items.Count; $index++) { if ($session.Items[$index].Repeat -and $session.Answers.ContainsKey('primary:' + $session.Items[$index].Case.Key)) { $repeatIndex = $index; break } }
+        if ($repeatIndex -ge 0) {
+            Show-StudentReviewCase $session $repeatIndex; $session.Controls.Reviewer.Text = 'Interface fixture'
+            Set-StudentReviewMarker $session (0.4 * $session.Controls.Wave.ActualWidth) 'Start'
+            if ($session.Items[$repeatIndex].Case.Kind -ceq 'Phone') { Set-StudentReviewMarker $session (0.6 * $session.Controls.Wave.ActualWidth) 'End'; $session.Controls.SoundS.IsChecked = $true }
+            if (-not (Confirm-StudentReview $session 'Reviewed') -or -not $session.Answers[$session.Items[$repeatIndex].Id].PredictionRevealedBeforeSave) { throw 'Cross-presentation prediction exposure was not retained.' }
+        }
+        $uncertainIndex = @((0..($session.Items.Count - 1)) | Where-Object { -not $session.Answers.ContainsKey($session.Items[$_].Id) })[0]
+        Show-StudentReviewCase $session $uncertainIndex; $session.Controls.Reviewer.Text = 'Interface fixture'
+        $session.Controls.Uncertain.RaiseEvent([Windows.RoutedEventArgs]::new([Windows.Controls.Button]::ClickEvent))
+        if ($session.Answers[$session.Items[$uncertainIndex].Id].Status -cne 'Ambiguous') { throw 'Uncertain answer was not preserved.' }
+        $restored = New-StudentReviewSession $sources $journalDirectory $true
+        if ($restored.Answers.Count -ne $session.Answers.Count -or $restored.Events.Count -ne $session.Events.Count) { throw 'Annotation journal did not resume exactly.' }
+        foreach ($table in $restored.Tables.Values) { foreach ($row in $table) { if ($row.Status -ceq 'Reviewed' -and $row.ReviewDataStatus -cne 'SyntheticInterfaceCheck') { throw 'Interface fixture was exported as human evidence.' } } }
+        $result = [pscustomobject]@{ PSTypeName = 'Kokoro.StudentReviewCheck'; Directory = $journalDirectory; Sources = $sources.Count; Cases = $session.Cases.Count
+            Presentations = $session.Items.Count; SavedFixturePresentations = $session.Answers.Count; PredictionGated = $true; IncompleteRejected = $true; ResumeExact = $true
+            SyntheticOnly = $true; SelectionAudioLoaded = $true; CrossPresentationExposureTracked = $true; UncertainPreserved = $true
+            InitialPreview = Join-Path $journalDirectory 'initial.png'; MachineSHA256 = $script:StudentMachineSHA256 }
+        $result | Export-Clixml -LiteralPath (Join-Path $journalDirectory 'receipt.clixml')
+        Stop-StudentReviewAudio $session; $result; return
+    }
+    if ($session.Events.Count) { Save-StudentReviewSession $session }
+    [void]$session.Window.ShowDialog()
+    $summary = Get-StudentReviewSummary $session
+    $summary | Export-Clixml -LiteralPath ($session.JournalPath + '.summary.clixml')
+    $summary
+}
+
 function Write-StudentReviewExcerpt([float[]] $Signal, [double] $StartSeconds, [double] $EndSeconds, [string] $Path, [double] $ContextSeconds = 1.0) {
     $first = [int][Math]::Floor([Math]::Max(0.0, $StartSeconds - $ContextSeconds) * 16000.0)
     $last = [int][Math]::Min($Signal.Length, [Math]::Ceiling(($EndSeconds + $ContextSeconds) * 16000.0))
@@ -2001,12 +2400,14 @@ function Invoke-StudentAlignmentAudit {
         $casesById = [Collections.Generic.Dictionary[string,object]]::new([StringComparer]::Ordinal)
         foreach ($case in $State.Cases) { $casesById.Add([string]$case.Identity, $case) }
         $seen = [Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
-        $reviewed = [Collections.Generic.List[object]]::new(); $ambiguous = 0
+        $reviewed = [Collections.Generic.List[object]]::new(); $ambiguous = 0; $exposed = 0
         foreach ($row in @(Import-Csv -LiteralPath $Annotations)) {
             if (-not $casesById.ContainsKey($row.Identity) -or -not $seen.Add($row.Identity)) { throw 'Review contains an unknown or duplicate case.' }
+            if ($row.PSObject.Properties['ReviewDataStatus'] -and $row.ReviewDataStatus -and $row.ReviewDataStatus -cne 'HumanAnnotation') { throw 'Nonhuman interface fixtures cannot enter alignment accuracy measurements.' }
             if ($row.Status -ceq 'Unreviewed') { continue }
             if ($row.Status -cnotin 'Reviewed', 'Ambiguous' -or -not $row.Reviewer.Trim()) { throw 'Review needs Reviewed/Ambiguous status and an independent reviewer identity.' }
             if ($row.Status -ceq 'Ambiguous') { $ambiguous++; continue }
+            if ($row.PSObject.Properties['PredictionRevealedBeforeSave'] -and $row.PredictionRevealedBeforeSave -ieq 'True') { $exposed++; continue }
             $seconds = 0.0
             if (-not [double]::TryParse($row.ObservedSeconds, [Globalization.NumberStyles]::Float, [Globalization.CultureInfo]::InvariantCulture, [ref]$seconds) -or -not [double]::IsFinite($seconds)) { throw 'ObservedSeconds must be finite seconds from the recording start.' }
             $case = $casesById[$row.Identity]
@@ -2016,7 +2417,7 @@ function Invoke-StudentAlignmentAudit {
         }
         return [pscustomobject]@{ PSTypeName = 'Kokoro.StudentAlignmentReview'; AudioSHA256 = $State.AudioSHA256
             AnnotationSHA256 = (Get-FileHash -LiteralPath $Annotations).Hash; Reviewed = $reviewed.Count; Ambiguous = $ambiguous
-            Unreviewed = $State.Cases.Count - $reviewed.Count - $ambiguous; Boundaries = $reviewed.ToArray()
+            Unreviewed = $State.Cases.Count - $reviewed.Count - $ambiguous - $exposed; ExposedExcluded = $exposed; Boundaries = $reviewed.ToArray()
             MeanAbsoluteErrorMs = $(if ($reviewed.Count) { ($reviewed.ErrorMs | Measure-Object -Average).Average } else { $null }) }
     }
     if (-not $State.PSObject.Properties['Words'] -or -not $State.PSObject.Properties['Recording']) { throw 'Audit needs an Alignment result.' }
@@ -3029,6 +3430,7 @@ $script:StudentSteps = [ordered]@{
     Learn = { Invoke-StudentLearning }
     Audit = { Invoke-StudentAlignmentAudit }
     Discriminate = { Invoke-StudentDiscrimination }
+    Review = { Invoke-StudentReview }
 }
 }
 & $studentOwner { & $script:StudentSteps[$Step] }
