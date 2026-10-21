@@ -31,6 +31,8 @@ Steps:
   Describe  Describe -State (a live image), or open -ImagePath, including examples, counter-examples and genealogy.
   Learn     Seed -RulebookPath candidates, observe human boundary timing from the image, and admit prosody
             components only where held-out occurrences improve. The live image also exposes Learn and Apply.
+  Audit     From -State Alignment, select boundary review cases without curated text and export audio and a blank
+            review CSV. With -State Audit and -Annotations CSV, measure independently reviewed boundary error.
 .PARAMETER Corpus
 Corpus directory for Pronunciation; defaults to the latest build/corpus-* with corpus.clixml.
 .PARAMETER ParagraphLimit
@@ -65,7 +67,7 @@ Run from a PowerShell prompt: pwsh -File passes every argument as a string, so a
 #requires -Version 7.7
 [CmdletBinding()]
 param(
-    [ValidateSet('Console', 'Render', 'Corpus', 'Pronunciation', 'Normalize', 'Syllabus', 'Recordings', 'Listen', 'Stems', 'Alignment', 'Percepts', 'Describe', 'Learn')][string] $Step = 'Console',
+    [ValidateSet('Console', 'Render', 'Corpus', 'Pronunciation', 'Normalize', 'Syllabus', 'Recordings', 'Listen', 'Stems', 'Alignment', 'Percepts', 'Describe', 'Learn', 'Audit')][string] $Step = 'Console',
     [ValidateRange(2, 64)][int] $Threads = [Math]::Max(2, [Environment]::ProcessorCount),
     [string] $Text = '',
     [string] $Voice = 'af_heart',
@@ -76,6 +78,8 @@ param(
     [string] $SourceIdentity = '',
     [string] $ImagePath = '',
     [string] $RulebookPath = $env:KOKORO_PROSODY_RULEBOOK,
+    [string] $Annotations = '',
+    [ValidateRange(8, 256)][int] $AuditCount = 32,
     [ValidateRange(0, [int]::MaxValue)][int] $ParagraphLimit = 0,
     [ValidateRange(0, [int]::MaxValue)][int] $WindowLimit = 0,
     [string] $Recordings = '',
@@ -198,13 +202,13 @@ function Get-StudentVoices {
         Where-Object { Test-Path -LiteralPath (Join-Path $script:StudentBuild "inputs/kokoro/$($manifest.model.revision)/voices/$_.pt") })
 }
 
-function ConvertTo-StudentWave([float[]] $Pcm) {
-    # 24 kHz mono PCM16, rounded and saturated.
+function ConvertTo-StudentWave([float[]] $Pcm, [ValidateSet(16000,24000)][int] $SampleRate = 24000) {
+    # Mono PCM16 at its declared rate, rounded and saturated.
     $samples = (Import-StudentKernels).Pcm16.Invoke($Pcm)
     $memory = [IO.MemoryStream]::new(); $writer = [IO.BinaryWriter]::new($memory)
     $writer.Write([Text.Encoding]::ASCII.GetBytes('RIFF')); $writer.Write([int](36 + 2 * $samples.Length))
     $writer.Write([Text.Encoding]::ASCII.GetBytes('WAVEfmt ')); $writer.Write([int]16)
-    $writer.Write([short]1); $writer.Write([short]1); $writer.Write([int]24000); $writer.Write([int]48000)
+    $writer.Write([short]1); $writer.Write([short]1); $writer.Write($SampleRate); $writer.Write([int](2 * $SampleRate))
     $writer.Write([short]2); $writer.Write([short]16); $writer.Write([Text.Encoding]::ASCII.GetBytes('data')); $writer.Write([int](2 * $samples.Length))
     $raw = [byte[]]::new(2 * $samples.Length); [Buffer]::BlockCopy($samples, 0, $raw, 0, $raw.Length); $writer.Write($raw); $writer.Flush()
     $memory.ToArray()
@@ -1869,6 +1873,81 @@ function Invoke-StudentAlignment {
     } } finally { Remove-Module -ModuleInfo $ziraModule -Force }
 }
 
+function Invoke-StudentAlignmentAudit {
+    if ($null -eq $State) { throw 'Audit needs -State Alignment or a previous Audit result.' }
+    if ($Annotations) {
+        if (-not $State.PSObject.Properties['Cases'] -or -not $State.PSObject.Properties['AudioSHA256']) { throw 'Annotations need the original Audit result.' }
+        if ((Get-FileHash -LiteralPath $State.Recording).Hash -cne $State.AudioSHA256) { throw 'Review recording changed.' }
+        $casesById = [Collections.Generic.Dictionary[string,object]]::new([StringComparer]::Ordinal)
+        foreach ($case in $State.Cases) { $casesById.Add([string]$case.Identity, $case) }
+        $seen = [Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
+        $reviewed = [Collections.Generic.List[object]]::new(); $ambiguous = 0
+        foreach ($row in @(Import-Csv -LiteralPath $Annotations)) {
+            if (-not $casesById.ContainsKey($row.Identity) -or -not $seen.Add($row.Identity)) { throw 'Review contains an unknown or duplicate case.' }
+            if ($row.Status -ceq 'Unreviewed') { continue }
+            if ($row.Status -cnotin 'Reviewed', 'Ambiguous' -or -not $row.Reviewer.Trim()) { throw 'Review needs Reviewed/Ambiguous status and an independent reviewer identity.' }
+            if ($row.Status -ceq 'Ambiguous') { $ambiguous++; continue }
+            $seconds = 0.0
+            if (-not [double]::TryParse($row.ObservedSeconds, [Globalization.NumberStyles]::Float, [Globalization.CultureInfo]::InvariantCulture, [ref]$seconds) -or -not [double]::IsFinite($seconds)) { throw 'ObservedSeconds must be finite seconds from the recording start.' }
+            $case = $casesById[$row.Identity]
+            if ($seconds -lt $case.ContextStartSeconds -or $seconds -gt $case.ContextEndSeconds) { throw 'Reviewed boundary is outside its supplied audio context.' }
+            $reviewed.Add([pscustomobject]@{ Identity = $row.Identity; Reviewer = $row.Reviewer; ObservedSeconds = $seconds
+                ErrorMs = 1000 * [Math]::Abs($seconds - $case.PredictedSeconds); SignedErrorMs = 1000 * ($case.PredictedSeconds - $seconds) })
+        }
+        return [pscustomobject]@{ PSTypeName = 'Kokoro.StudentAlignmentReview'; AudioSHA256 = $State.AudioSHA256
+            AnnotationSHA256 = (Get-FileHash -LiteralPath $Annotations).Hash; Reviewed = $reviewed.Count; Ambiguous = $ambiguous
+            Unreviewed = $State.Cases.Count - $reviewed.Count - $ambiguous; Boundaries = $reviewed.ToArray()
+            MeanAbsoluteErrorMs = $(if ($reviewed.Count) { ($reviewed.ErrorMs | Measure-Object -Average).Average } else { $null }) }
+    }
+    if (-not $State.PSObject.Properties['Words'] -or -not $State.PSObject.Properties['Recording']) { throw 'Audit needs an Alignment result.' }
+    $audioHash = (Get-FileHash -LiteralPath $State.Recording).Hash
+    $wordList = @($State.Words)
+    if ($wordList.Count -eq 0 -or @($wordList | Where-Object SourceAudioSHA256 -CNE $audioHash).Count) { throw 'Alignment and source audio do not agree.' }
+    $signal = Read-StudentAudio $State.Recording; $duration = $signal.Length / 16000.0
+    $sourceBook = @(Get-StudentBooks -Name $State.Book)
+    if ($sourceBook.Count -ne 1) { throw 'Audit needs its typed source book.' }
+    $pool = @(foreach ($word in $wordList) {
+        foreach ($side in @('Start', 'End')) {
+            $at = [double]$word.($side + 'Seconds'); $snap = [double]$word.($side + 'SnapMs')
+            if ($at -lt 0 -or $at -gt $duration -or $word.EndSeconds -le $word.StartSeconds) { throw 'Alignment boundary is outside its recording or has nonpositive duration.' }
+            $identity = $word.Identity + ':' + $side
+            $order = [Convert]::ToHexString([Security.Cryptography.SHA256]::HashData([Text.Encoding]::UTF8.GetBytes($identity)))
+            $bucket = [int][Math]::Min(3, [Math]::Floor([Math]::Abs($snap) / (1000.0 * $State.SnapSeconds / 4.0)))
+            [pscustomobject]@{ Identity = $identity; Occurrence = $word.Identity; Side = $side; PredictedSeconds = $at; SnapMs = $snap
+                Evidence = $word.($side + 'Evidence'); Stratum = $side + ':' + $bucket; Order = $order
+                Text = $sourceBook[0].Text.Substring($word.SourceStart, $word.SourceLength) }
+        }
+    })
+    $groups = @($pool | Group-Object Stratum | Sort-Object Name)
+    $selected = [Collections.Generic.List[object]]::new(); $rank = 0
+    while ($selected.Count -lt [Math]::Min($AuditCount, $pool.Count)) {
+        foreach ($group in $groups) {
+            $orderedCases = @($group.Group | Sort-Object Order)
+            if ($rank -lt $orderedCases.Count -and $selected.Count -lt $AuditCount) { $selected.Add($orderedCases[$rank]) }
+        }
+        $rank++
+    }
+    $destination = New-StudentOutputDirectory 'student-alignment-audit'; $cases = [Collections.Generic.List[object]]::new()
+    foreach ($case in $selected) {
+        $first = [int][Math]::Floor([Math]::Max(0.0, $case.PredictedSeconds - 1.0) * 16000.0)
+        $last = [int][Math]::Min($signal.Length, [Math]::Ceiling(($case.PredictedSeconds + 1.0) * 16000.0))
+        $excerpt = [float[]]::new($last - $first); [Array]::Copy($signal, $first, $excerpt, 0, $excerpt.Length)
+        $path = Join-Path $destination ('boundary-' + $cases.Count + '.wav')
+        [IO.File]::WriteAllBytes($path, (ConvertTo-StudentWave $excerpt 16000))
+        $cases.Add([pscustomobject]@{ PSTypeName = 'Kokoro.StudentBoundaryReviewCase'; Identity = $case.Identity; Occurrence = $case.Occurrence
+            Side = $case.Side; Text = $case.Text; PredictedSeconds = $case.PredictedSeconds; SnapMs = $case.SnapMs; Evidence = $case.Evidence
+            Stratum = $case.Stratum; ContextStartSeconds = $first / 16000.0; ContextEndSeconds = $last / 16000.0; Audio = $path
+            AudioSHA256 = (Get-FileHash -LiteralPath $path).Hash; ObservedSeconds = ''; Status = 'Unreviewed'; Reviewer = ''; Note = '' })
+    }
+    $reviewPath = Join-Path $destination 'review.csv'; $cases | Export-Csv -LiteralPath $reviewPath
+    $result = [pscustomobject]@{ PSTypeName = 'Kokoro.StudentAlignmentAudit'; Recording = $State.Recording; AudioSHA256 = $audioHash
+        PopulationBoundaries = $pool.Count; Cases = $cases.ToArray(); Reviewed = 0; MeanAbsoluteErrorMs = $null; ReviewPath = $reviewPath
+        Instructions = 'Review source-relative boundary time independently in each excerpt; ObservedSeconds uses recording start, not excerpt start. Status Reviewed or Ambiguous needs Reviewer. Sampling is stratified by side and snap magnitude; aggregate error is not population-weighted.'
+        MachineSHA256 = $script:StudentMachineSHA256; Directory = $destination }
+    $result | Export-Clixml -LiteralPath (Join-Path $destination 'receipt.clixml') -Depth 12
+    $result
+}
+
 function New-StudentControllerRecording([object[]] $Events, [int] $Ticks, [object] $Provenance, [int] $Seed) {
     if ($Ticks -le 0 -or $Ticks -gt [int]::MaxValue / 300) { throw 'Controller duration is outside the audio buffer range.' }
     $previousTick = -1
@@ -2649,6 +2728,7 @@ $script:StudentSteps = [ordered]@{
     Percepts = { Invoke-StudentPercepts }
     Describe = { $image = Invoke-StudentPercepts; $image.Describe() }
     Learn = { Invoke-StudentLearning }
+    Audit = { Invoke-StudentAlignmentAudit }
 }
 }
 & $studentOwner { & $script:StudentSteps[$Step] }
