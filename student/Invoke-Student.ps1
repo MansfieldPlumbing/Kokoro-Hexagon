@@ -17,12 +17,16 @@ Steps:
   Syllabus   Host syllabus evidence up to the generator boundary for -Voice: per corpus window, the
             lowered syllabus's durations, f0 and x (decoder output), cached by phoneme content under
             build/student/syllabus, and each resolved token span as a typed occurrence with its ticks.
+  Recordings Decode the human recordings under -Recordings (MP3) to WAV beside them (48 kHz, two channels,
+            16-bit: the Windows media transcoder's only accepted WAV profile); returns each file's frames and seconds.
 .PARAMETER Corpus
 Corpus directory for Pronunciation; defaults to the latest build/corpus-* with corpus.clixml.
 .PARAMETER ParagraphLimit
 Corpus: read at most this many paragraphs per book (0 reads all).
 .PARAMETER WindowLimit
 Syllabus: process at most this many windows in corpus order (0 processes all).
+.PARAMETER Recordings
+Recordings: a directory of human recordings (MP3) under build/; WAV files go to its wav subdirectory.
 .PARAMETER Step
 The step to run.
 .PARAMETER Text
@@ -49,7 +53,7 @@ Run from a PowerShell prompt: pwsh -File passes every argument as a string, so a
 #requires -Version 7.7
 [CmdletBinding()]
 param(
-    [ValidateSet('Console', 'Render', 'Corpus', 'Pronunciation', 'Normalize', 'Syllabus')][string] $Step = 'Console',
+    [ValidateSet('Console', 'Render', 'Corpus', 'Pronunciation', 'Normalize', 'Syllabus', 'Recordings')][string] $Step = 'Console',
     [ValidateRange(2, 64)][int] $Threads = [Math]::Max(2, [Environment]::ProcessorCount),
     [string] $Text = '',
     [string] $Voice = 'af_heart',
@@ -59,7 +63,8 @@ param(
     [switch] $MoreText,
     [string] $SourceIdentity = '',
     [ValidateRange(0, [int]::MaxValue)][int] $ParagraphLimit = 0,
-    [ValidateRange(0, [int]::MaxValue)][int] $WindowLimit = 0
+    [ValidateRange(0, [int]::MaxValue)][int] $WindowLimit = 0,
+    [string] $Recordings = ''
 )
 $studentInvocation = @{}
 foreach ($parameterName in $MyInvocation.MyCommand.Parameters.Keys) {
@@ -1319,6 +1324,66 @@ function Invoke-StudentSyllabus {
         RenderRealTimeFactor = if ($renderedAudio) { $renderSeconds / $renderedAudio } else { $null }; WallSeconds = $watch.Elapsed.TotalSeconds }
 }
 
+function Invoke-StudentRecordings {
+    # Human recordings for listening mode, decoded to PCM WAV. The Windows media transcoder is a WinRT API, reachable
+    # only from Windows PowerShell 5.1, so the decode runs there.
+    if (-not $Recordings) { throw 'Name a recordings directory with -Recordings.' }
+    $source = [IO.Path]::GetFullPath($Recordings)
+    if (-not $source.StartsWith([IO.Path]::GetFullPath($script:StudentBuild) + [IO.Path]::DirectorySeparatorChar, [StringComparison]::OrdinalIgnoreCase) -or -not (Test-Path -LiteralPath $source -PathType Container)) { throw 'Recordings must be an existing directory under build/.' }
+    $files = @(Get-ChildItem -LiteralPath $source -Recurse -File -Filter *.mp3 | Sort-Object FullName)
+    if (-not $files.Count) { throw "No MP3 recordings under $source." }
+    $wav = Join-Path $source 'wav'; [void][IO.Directory]::CreateDirectory($wav)
+    $jobs = @(foreach ($file in $files) { [pscustomobject]@{ Mp3 = $file.FullName; Wav = Join-Path $wav ([IO.Path]::ChangeExtension($file.Name, '.wav')) } })
+    $pending = @($jobs | Where-Object { -not (Test-Path -LiteralPath $_.Wav) -or (Get-Item -LiteralPath $_.Wav).Length -le 44 })
+    if ($pending.Count) {
+        $decoder = @'
+$ErrorActionPreference = 'Stop'
+Add-Type -AssemblyName System.Runtime.WindowsRuntime
+$null = [Windows.Storage.StorageFile, Windows.Storage, ContentType = WindowsRuntime]
+$null = [Windows.Media.Transcoding.MediaTranscoder, Windows.Media.Transcoding, ContentType = WindowsRuntime]
+$null = [Windows.Media.MediaProperties.MediaEncodingProfile, Windows.Media.MediaProperties, ContentType = WindowsRuntime]
+$methods = [System.WindowsRuntimeSystemExtensions].GetMethods() | Where-Object { $_.Name -eq 'AsTask' -and $_.GetParameters().Count -eq 1 }
+function Wait-Operation($operation, [type] $result) {
+    $method = $methods | Where-Object { $_.GetParameters()[0].ParameterType.Name -eq 'IAsyncOperation`1' } | Select-Object -First 1
+    $task = $method.MakeGenericMethod($result).Invoke($null, @($operation)); [void]$task.Wait(-1); $task.Result }
+function Wait-Action($action) {
+    $method = $methods | Where-Object { $_.GetParameters()[0].ParameterType.Name -eq 'IAsyncActionWithProgress`1' } | Select-Object -First 1
+    $task = $method.MakeGenericMethod([double]).Invoke($null, @($action)); [void]$task.Wait(-1) }
+foreach ($job in (ConvertFrom-Json (Get-Content -Raw -LiteralPath $env:KOKORO_RECORDING_JOBS))) {
+    $input_ = Wait-Operation ([Windows.Storage.StorageFile]::GetFileFromPathAsync($job.Mp3)) ([Windows.Storage.StorageFile])
+    $folder = Wait-Operation ([Windows.Storage.StorageFolder]::GetFolderFromPathAsync([IO.Path]::GetDirectoryName($job.Wav))) ([Windows.Storage.StorageFolder])
+    $output = Wait-Operation ($folder.CreateFileAsync([IO.Path]::GetFileName($job.Wav), [Windows.Storage.CreationCollisionOption]::ReplaceExisting)) ([Windows.Storage.StorageFile])
+    # The WAV encoder accepts only its default profile here (48 kHz, two channels, 16-bit); 24 kHz or one channel
+    # makes PrepareFileTranscodeAsync refuse with FailureReason Unknown.
+    $profile_ = [Windows.Media.MediaProperties.MediaEncodingProfile]::CreateWav([Windows.Media.MediaProperties.AudioEncodingQuality]::High)
+    $prepared = Wait-Operation ((New-Object Windows.Media.Transcoding.MediaTranscoder).PrepareFileTranscodeAsync($input_, $output, $profile_)) ([Windows.Media.Transcoding.PrepareTranscodeResult])
+    if (-not $prepared.CanTranscode) { [IO.File]::Delete($job.Wav); throw ('Cannot decode ' + $job.Mp3 + ': ' + $prepared.FailureReason) }
+    Wait-Action $prepared.TranscodeAsync()
+}
+'@
+        $encoded = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($decoder))
+        $list = Join-Path $wav 'decode-jobs.json'
+        [IO.File]::WriteAllText($list, (ConvertTo-Json -InputObject @($pending)))
+        $env:KOKORO_RECORDING_JOBS = $list
+        try { & powershell.exe -NoProfile -NonInteractive -EncodedCommand $encoded }
+        finally { Remove-Item Env:KOKORO_RECORDING_JOBS; [IO.File]::Delete($list) }
+        if ($LASTEXITCODE) { throw "Recording decode failed with exit code $LASTEXITCODE." }
+    }
+    foreach ($job in $jobs) {
+        # RIFF chunks in order (Windows writes JUNK before fmt); only the header is read.
+        $head = [byte[]]::new(4096); $stream = [IO.File]::OpenRead($job.Wav); try { $read = $stream.Read($head, 0, $head.Length) } finally { $stream.Dispose() }
+        $format = -1; $data = -1
+        for ($at = 12; $at + 8 -le $read -and $data -lt 0; $at += 8 + [BitConverter]::ToInt32($head, $at + 4)) {
+            $id = [Text.Encoding]::ASCII.GetString($head, $at, 4)
+            if ($id -ceq 'fmt ') { $format = $at + 8 } elseif ($id -ceq 'data') { $data = $at }
+        }
+        if ($format -lt 0 -or $data -lt 0 -or [BitConverter]::ToUInt16($head, $format) -ne 1 -or [BitConverter]::ToInt16($head, $format + 2) -ne 2 -or
+            [BitConverter]::ToInt32($head, $format + 4) -ne 48000 -or [BitConverter]::ToInt16($head, $format + 14) -ne 16) { throw "$($job.Wav) is not 48 kHz two-channel 16-bit PCM." }
+        $frames = [long][BitConverter]::ToUInt32($head, $data + 4) / 4
+        [pscustomobject]@{ PSTypeName = 'Kokoro.StudentRecording'; Source = $job.Mp3; Wav = $job.Wav; Frames = [long]$frames; Seconds = $frames / 48000.0 }
+    }
+}
+
 $script:StudentSteps = [ordered]@{
     Console = { Show-StudentConsole }
     Render = { Invoke-StudentRender }
@@ -1326,6 +1391,7 @@ $script:StudentSteps = [ordered]@{
     Pronunciation = { Invoke-StudentPronunciation }
     Normalize = { Invoke-StudentNormalization }
     Syllabus = { Invoke-StudentSyllabus }
+    Recordings = { Invoke-StudentRecordings }
 }
 }
 & $studentOwner { & $script:StudentSteps[$Step] }
