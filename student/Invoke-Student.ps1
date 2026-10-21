@@ -12,7 +12,8 @@ Steps:
             with Zira (joined by source span), learn Zira-to-Kokoro symbol correspondences, and
             pack continuous windows of at most 510 phonemes as token ranges. Writes corpus.clixml.
   Pronunciation  Counter-examples from a corpus (-Corpus, default the latest): words where Zira's
-            form differs from ours, by word, with recurring symbol differences.
+            form differs from ours, by word, with recurring symbol differences. With -Text, inspect live Zira
+            per-phone stress/emphasis flags with source positions; no first-vowel stress is inserted in this check.
   Normalize Source-aligned front-end decisions for -Text, or replay stored -Corpus decisions as typed behaviours.
   Syllabus   Host syllabus evidence up to the generator boundary for -Voice: per corpus window, the
             lowered syllabus's durations, f0 and x (decoder output), cached by phoneme content under
@@ -23,6 +24,8 @@ Steps:
             exported as MPE MIDI and a physical controller recording on the generator tick clock.
   Stems     Render -State (a controller recording or Listen result) through the host contact emulator, with synchronized
             audio and MIDI per contact. Without State, measure deterministic controller coverage and round-trip gates.
+  Alignment Align retained Zira audio to human -Recordings by lowered spectral DTW, label typed word occurrences,
+            and snap boundaries to the human Listen evidence. No syllabus or Zira durations enter the result.
 .PARAMETER Corpus
 Corpus directory for Pronunciation; defaults to the latest build/corpus-* with corpus.clixml.
 .PARAMETER ParagraphLimit
@@ -57,7 +60,7 @@ Run from a PowerShell prompt: pwsh -File passes every argument as a string, so a
 #requires -Version 7.7
 [CmdletBinding()]
 param(
-    [ValidateSet('Console', 'Render', 'Corpus', 'Pronunciation', 'Normalize', 'Syllabus', 'Recordings', 'Listen', 'Stems')][string] $Step = 'Console',
+    [ValidateSet('Console', 'Render', 'Corpus', 'Pronunciation', 'Normalize', 'Syllabus', 'Recordings', 'Listen', 'Stems', 'Alignment')][string] $Step = 'Console',
     [ValidateRange(2, 64)][int] $Threads = [Math]::Max(2, [Environment]::ProcessorCount),
     [string] $Text = '',
     [string] $Voice = 'af_heart',
@@ -145,6 +148,12 @@ $script:StudentController = [ordered]@{
     )
     Contacts = @('Harmonic', 'Noise', 'Events', 'Coefficient')
     PitchToleranceCents = 35.0; BoundaryToleranceTicks = 0
+}
+
+$script:StudentAlignment = [ordered]@{
+    SampleRate = 16000; Hop = 320; Window = 400; Bands = 5
+    SearchSeconds = 40.0; EdgeSeconds = 40.0; SnapSeconds = 0.25
+    RecordingPattern = '_([0-9]+)_'; Book = 'pg11'; ChapterPattern = '(?m)^CHAPTER [IVXLCDM]+\.[^\n]*$'
 }
 
 function New-StudentOutputDirectory([string] $Name) {
@@ -680,13 +689,8 @@ class StudentTextKernels {
     }
     static [float[]] ReadStem([byte[]] $wav) {
         # Stems writes its own fixed PCM16 mono header; the caller never routes external WAVs here.
-        $count = [int][Math]::Floor([double]($wav.Length - 44) / 2.0); $out = [float[]]::new($count)
-        for ($i = 0; $i -lt $count; $i++) {
-            $value = [int]$wav[44 + 2 * $i] -bor ([int]$wav[45 + 2 * $i] -shl 8)
-            if ($value -ge 32768) { $value = $value - 65536 }
-            $out[$i] = [float]([double]$value / 32768.0)
-        }
-        return $out
+        $count = [int][Math]::Floor([double]($wav.Length - 44) / 2.0)
+        return [StudentTextKernels]::MonoPcm16($wav, 44, $count)
     }
     static [float[]] CoefficientTrack([float[]] $signal) {
         # Recover the fixed tone's first two harmonics in physical units by Fourier projection.
@@ -752,6 +756,25 @@ class StudentTextKernels {
             $sum = 0.0
             for ($j = 0; $j -lt $hop; $j++) { $value = [double]$signal[$f * $hop + $j]; $sum = $sum + $value * $value }
             $out[$f] = [float][Math]::Sqrt($sum / [double]$hop)
+        }
+        return $out
+    }
+    static [float[]] MonoPcm16([byte[]] $wav, [int] $data, [int] $frames) {
+        $out = [float[]]::new($frames)
+        for ($i = 0; $i -lt $frames; $i++) {
+            $value = [int]$wav[$data + 2 * $i] -bor ([int]$wav[$data + 2 * $i + 1] -shl 8)
+            if ($value -ge 32768) { $value = $value - 65536 }
+            $out[$i] = [float]([double]$value / 32768.0)
+        }
+        return $out
+    }
+    static [int[]] BoundaryEvidence([float[]] $levels) {
+        $count = $levels.Length; $out = [int[]]::new($count); $db = [double[]]::new($count); $peak = -200.0
+        for ($i = 0; $i -lt $count; $i++) { $db[$i] = 20.0 * [Math]::Log10([double]$levels[$i] + 1e-12); $peak = [Math]::Max($peak, $db[$i]) }
+        for ($i = 1; $i + 1 -lt $count; $i++) {
+            if (($db[$i] -gt $peak - 35.0) -ne ($db[$i - 1] -gt $peak - 35.0)) { $out[$i] = $out[$i] -bor 1 }
+            if ($db[$i] -le $db[$i - 1] -and $db[$i] -lt $db[$i + 1]) { $out[$i] = $out[$i] -bor 2 }
+            if ($db[$i] - $db[$i - 1] -ge 3.0) { $out[$i] = $out[$i] -bor 4 }
         }
         return $out
     }
@@ -929,6 +952,8 @@ function Import-StudentKernels {
         PitchTrack = $type.GetMethod('PitchTrack').CreateDelegate([Func[float[],int,int,int,int,int,double,float[]]])
         ContactStem = $type.GetMethod('ContactStem').CreateDelegate([Func[float[],int,int,float[]]])
         FrameLevels = $type.GetMethod('FrameLevels').CreateDelegate([Func[float[],int,float[]]])
+        MonoPcm16 = $type.GetMethod('MonoPcm16').CreateDelegate([Func[byte[],int,int,float[]]])
+        BoundaryEvidence = $type.GetMethod('BoundaryEvidence').CreateDelegate([Func[float[],int[]]])
         Pcm16 = $type.GetMethod('Pcm16').CreateDelegate([Func[float[],short[]]])
         ReadStem = $type.GetMethod('ReadStem').CreateDelegate([Func[byte[],float[]]])
         CoefficientTrack = $type.GetMethod('CoefficientTrack').CreateDelegate([Func[float[],float[]]])
@@ -967,7 +992,7 @@ function Invoke-StudentPhonemize([Func[string,object]] $Phonemize, [string] $Tex
     try { $Phonemize.Invoke($Text) } catch { $null }
 }
 
-function Get-StudentBooks {
+function Get-StudentBooks([string] $Name = '') {
     # Each pinned Project Gutenberg book without its header and footer, as one packed record: its
     # paragraphs joined by line feeds, its tokens (starts index that text), the first token of each
     # paragraph, per-paragraph heading and counter-example flags, and its sentence token ranges.
@@ -983,6 +1008,7 @@ function Get-StudentBooks {
     $sources[$humanTextFile.Name] = $humanTextFile
     # Append the added source so existing corpus book ordinals retain their identities.
     foreach ($file in @($sources.Values | Sort-Object @{ Expression = { $_.Name -ceq $humanTextFile.Name } }, Name)) {
+        if ($Name -and $file.BaseName -cne $Name) { $index++; continue }
         $lines = [IO.File]::ReadAllLines($file.FullName)
         $first = -1; $last = $lines.Length
         for ($i = 0; $i -lt $lines.Length; $i++) {
@@ -1471,6 +1497,25 @@ function Get-StudentCorpusPath {
 }
 
 function Invoke-StudentPronunciation {
+    if ($Text) {
+        $ziraModule = Import-StudentZira
+        try {
+            $capture = & $ziraModule { param($Content); Get-EnglishZiraReference -Text $Content -NoSave } $Text
+            $wordIndex = -1
+            $features = @(foreach ($phone in $capture.Phones) {
+                while ($wordIndex + 1 -lt $capture.Words.Count -and $capture.Words[$wordIndex + 1].Ticks -le $phone.Ticks) { $wordIndex++ }
+                [pscustomobject]@{ PSTypeName = 'Kokoro.StudentPronunciationFeature'; Phone = $phone.Phone; EmphasisBits = $phone.Emphasis
+                    Stressed = ($phone.Emphasis -band 1) -ne 0; Emphasized = ($phone.Emphasis -band 2) -ne 0
+                    SourceStart = $(if ($wordIndex -ge 0) { $capture.Words[$wordIndex].Start } else { -1 })
+                    SourceLength = $(if ($wordIndex -ge 0) { $capture.Words[$wordIndex].Length } else { 0 }) }
+            })
+            [pscustomobject]@{ PSTypeName = 'Kokoro.StudentPronunciationFeatures'; Source = $SourceIdentity; PhoneCount = $features.Count; WordCount = $capture.Words.Count
+                Stressed = @($features | Where-Object Stressed).Count; Emphasized = @($features | Where-Object Emphasized).Count
+                Features = $features; EngineSHA256 = $capture.EngineSha256; AssemblySHA256 = $capture.AssemblySha256
+                MachineSHA256 = $script:StudentMachineSHA256; TextSHA256 = [Convert]::ToHexString([Security.Cryptography.SHA256]::HashData([Text.Encoding]::UTF8.GetBytes($Text))) }
+        } finally { Remove-Module -ModuleInfo $ziraModule -Force }
+        return
+    }
     # Counter-examples from a corpus: words both pronounce where Zira's form, after the learned
     # correspondences, differs from ours; grouped by word with their recurring symbol differences.
     $path = Get-StudentCorpusPath
@@ -1645,7 +1690,7 @@ foreach ($job in (ConvertFrom-Json (Get-Content -Raw -LiteralPath $env:KOKORO_RE
     }
     foreach ($job in $jobs) {
         $layout = Get-StudentWavLayout $job.Wav
-        [pscustomobject]@{ PSTypeName = 'Kokoro.StudentRecording'; Source = $job.Mp3; Wav = $job.Wav; Data = $layout.Data; Frames = $layout.Frames; Seconds = $layout.Frames / 48000.0 }
+        [pscustomobject]@{ PSTypeName = 'Kokoro.StudentRecording'; Source = $job.Mp3; Wav = $job.Wav; Data = $layout.Data; Frames = $layout.Frames; Seconds = $layout.Frames / [double]$layout.Rate }
     }
 }
 
@@ -1657,9 +1702,150 @@ function Get-StudentWavLayout([string] $Path) {
         $id = [Text.Encoding]::ASCII.GetString($head, $at, 4)
         if ($id -ceq 'fmt ') { $format = $at + 8 } elseif ($id -ceq 'data') { $data = $at }
     }
-    if ($format -lt 0 -or $data -lt 0 -or [BitConverter]::ToUInt16($head, $format) -ne 1 -or [BitConverter]::ToInt16($head, $format + 2) -ne 2 -or
-        [BitConverter]::ToInt32($head, $format + 4) -ne 48000 -or [BitConverter]::ToInt16($head, $format + 14) -ne 16) { throw "$Path is not 48 kHz two-channel 16-bit PCM." }
-    [pscustomobject]@{ Data = $data + 8; Frames = [int]([long][BitConverter]::ToUInt32($head, $data + 4) / 4) }
+    if ($format -lt 0 -or $data -lt 0 -or [BitConverter]::ToUInt16($head, $format) -ne 1 -or [BitConverter]::ToInt16($head, $format + 14) -ne 16) { throw "$Path is not supported PCM16 audio." }
+    $rate = [BitConverter]::ToInt32($head, $format + 4); $channels = [BitConverter]::ToInt16($head, $format + 2)
+    if (-not (($rate -eq 48000 -and $channels -eq 2) -or ($rate -eq 16000 -and $channels -eq 1))) { throw "$Path needs 48 kHz stereo or 16 kHz mono PCM16." }
+    $dataBytes = [long][BitConverter]::ToUInt32($head, $data + 4)
+    if ($dataBytes % (2 * $channels) -ne 0 -or $dataBytes + $data + 8 -gt (Get-Item -LiteralPath $Path).Length) { throw 'PCM data extends outside the WAV or contains a partial frame.' }
+    [pscustomobject]@{ Data = $data + 8; Frames = [int]($dataBytes / (2 * $channels)); Rate = $rate; Channels = $channels }
+}
+
+function Read-StudentAudio([string] $Path) {
+    $kernels = Import-StudentKernels; $layout = Get-StudentWavLayout $Path; $bytes = [IO.File]::ReadAllBytes($Path)
+    if ($layout.Rate -eq 16000) { return ,$kernels.MonoPcm16.Invoke($bytes, $layout.Data, $layout.Frames) }
+    # Shared 63-tap low-pass at 7 kHz for the human recordings' 48 kHz to 16 kHz conversion.
+    $taps = [float[]]::new(63); $sum = 0.0
+    for ($k = 0; $k -lt 63; $k++) { $m = $k - 31; $cut = 7000.0 / 48000.0; $value = if ($m -eq 0) { 2 * $cut } else { [Math]::Sin(2 * [Math]::PI * $cut * $m) / ([Math]::PI * $m) }; $value *= 0.54 - 0.46 * [Math]::Cos(2 * [Math]::PI * $k / 62); $taps[$k] = $value; $sum += $value }
+    for ($k = 0; $k -lt 63; $k++) { $taps[$k] = $taps[$k] / $sum }
+    ,$kernels.MonoDecimate.Invoke($bytes, $layout.Data, $layout.Frames, $taps, 3)
+}
+
+function Get-StudentZiraAudio([string] $Content, $ZiraModule) {
+    $enginePath = Join-Path $env:WINDIR 'System32/speech/engines/tts/MSTTSEngine.dll'
+    $engineHash = (Get-FileHash -LiteralPath $enginePath).Hash
+    $ownerHash = (Get-FileHash -LiteralPath (Join-Path $script:StudentRoot $script:StudentInputs.Pronunciation)).Hash
+    $key = [Convert]::ToHexString([Security.Cryptography.SHA256]::HashData([Text.Encoding]::UTF8.GetBytes($Content + $engineHash + $ownerHash)))
+    $directory = Join-Path $script:StudentBuild ('student/zira-audio/' + $key); [void][IO.Directory]::CreateDirectory($directory)
+    $receiptPath = Join-Path $directory 'capture.clixml'
+    if (Test-Path -LiteralPath $receiptPath) {
+        $retained = Import-Clixml -LiteralPath $receiptPath
+        if ($retained.EngineSHA256 -cne $engineHash -or $retained.OwnerSHA256 -cne $ownerHash -or $retained.Text -cne $Content -or
+            (Get-FileHash -LiteralPath (Join-Path $directory $retained.Audio)).Hash -cne $retained.AudioSHA256) { throw 'Retained Zira audio integrity mismatch.' }
+    } else {
+        $wavePath = Join-Path $directory 'reference.wav'
+        $capture = & $ZiraModule { param($Words, $Audio); Get-EnglishZiraReference -Text $Words -NoSave -WavePath $Audio } $Content $wavePath
+        $layout = Get-StudentWavLayout $wavePath; $seconds = $layout.Frames / [double]$layout.Rate
+        $phones = @($capture.Phones | Where-Object { $_.Phone.Length -gt 0 -and -not [char]::IsControl($_.Phone[0]) }); $phoneIndex = 0
+        $labels = @(for ($wordIndex = 0; $wordIndex -lt $capture.Words.Count; $wordIndex++) {
+            $word = $capture.Words[$wordIndex]
+            $next = if ($wordIndex + 1 -lt $capture.Words.Count) { $capture.Words[$wordIndex + 1].Ticks } else { [long]::MaxValue }
+            $end = $word.Ticks
+            while ($phoneIndex -lt $phones.Count -and $phones[$phoneIndex].Ticks -lt $word.Ticks) { $phoneIndex++ }
+            while ($phoneIndex -lt $phones.Count -and $phones[$phoneIndex].Ticks -lt $next) { $end = [Math]::Max($end, $phones[$phoneIndex].Ticks + $phones[$phoneIndex].DurationTicks); $phoneIndex++ }
+            if ($word.Ticks -lt 0 -or $end / 1e7 -gt $seconds + 0.001 -or $word.Start -lt 0 -or $word.Length -le 0 -or $word.Start + $word.Length -gt $Content.Length) { throw 'Zira word events are outside their source text or retained audio.' }
+            [pscustomobject]@{ PSTypeName = 'Kokoro.StudentReferenceLabel'; Start = $word.Start; Length = $word.Length
+                StartSeconds = $word.Ticks / 1e7; EndSeconds = $end / 1e7 }
+        })
+        $retained = [pscustomobject]@{ PSTypeName = 'Kokoro.StudentZiraAudio'; Text = $Content; Audio = 'reference.wav'
+            AudioSHA256 = $capture.WaveSHA256; EngineSHA256 = $engineHash; OwnerSHA256 = $ownerHash; AssemblySHA256 = $capture.AssemblySha256; Words = $labels }
+        $retained | Export-Clixml -LiteralPath $receiptPath
+    }
+    [pscustomobject]@{ Capture = $retained; Wav = Join-Path $directory $retained.Audio }
+}
+
+function Get-StudentRecordingText($Recording, [object[]] $Books) {
+    if ($Text) {
+        if (-not $SourceIdentity) { throw 'Alignment -Text needs a stable -SourceIdentity.' }
+        return [pscustomobject]@{ Book = $SourceIdentity; Text = $Text; Start = 0; Tokens = (Import-StudentKernels).Tokenize.Invoke($Text, 0) }
+    }
+    $book = @($Books | Where-Object Name -CEQ $script:StudentAlignment.Book)
+    if ($book.Count -ne 1) { throw 'Alignment book is missing from the declared corpus sources.' }
+    $number = [regex]::Match([IO.Path]::GetFileName($Recording.Source), $script:StudentAlignment.RecordingPattern)
+    $chapters = @([regex]::Matches($book[0].Text, $script:StudentAlignment.ChapterPattern) | Where-Object { [regex]::Matches($_.Value, '\bCHAPTER ').Count -eq 1 })
+    if (-not $number.Success) { throw 'Recording has no chapter index; supply -Text and -SourceIdentity.' }
+    $chapterIndex = [int]$number.Groups[1].Value - 1
+    if ($chapterIndex -lt 0 -or $chapterIndex -ge $chapters.Count) { throw 'Recording chapter index is outside its corpus book.' }
+    $first = $chapters[$chapterIndex].Index
+    $last = if ($chapterIndex + 1 -lt $chapters.Count) { $chapters[$chapterIndex + 1].Index } else { $book[0].Text.Length }
+    [pscustomobject]@{ Book = $book[0].Name; Text = $book[0].Text.Substring($first, $last - $first); Start = $first; Tokens = $book[0].Tokens }
+}
+
+function Invoke-StudentAlignment {
+    $kernels = Import-StudentKernels; $settings = $script:StudentAlignment
+    $decoded = @(Invoke-StudentRecordings)
+    if ($RecordingLimit -gt 0) { $decoded = @($decoded | Select-Object -First $RecordingLimit) }
+    $books = @(if (-not $Text) { Get-StudentBooks -Name $settings.Book })
+    $ziraModule = Import-StudentZira
+    try { foreach ($recording in $decoded) {
+        $watch = [Diagnostics.Stopwatch]::StartNew(); $source = Get-StudentRecordingText $recording $books
+        $listenPath = Join-Path ([IO.Path]::GetFullPath($Recordings)) ('listen/' + [IO.Path]::ChangeExtension([IO.Path]::GetFileName($recording.Wav), '.controller.clixml'))
+        if (-not (Test-Path -LiteralPath $listenPath)) { throw 'Alignment needs the human native recording; run Listen first.' }
+        $humanController = Import-Clixml -LiteralPath $listenPath
+        $humanHash = (Get-FileHash -LiteralPath $recording.Wav).Hash
+        if ($humanController.Provenance.Kind -cne 'Human' -or $humanController.Provenance.SHA256 -cne $humanHash) { throw 'Human Listen recording does not match the audio being aligned.' }
+        $samples = [Collections.Generic.List[float]]::new(); $labels = [Collections.Generic.List[object]]::new(); $position = 0
+        # The API capture bound is only an evidence transport limit. Labels keep global source offsets.
+        while ($position -lt $source.Text.Length) {
+            $count = [Math]::Min($script:StudentText.ZiraCharacters, $source.Text.Length - $position)
+            if ($position + $count -lt $source.Text.Length) { while ($count -gt 0 -and -not [char]::IsWhiteSpace($source.Text[$position + $count - 1])) { $count-- } }
+            if ($count -eq 0) { throw 'A source token exceeds the Zira audio capture bound.' }
+            $content = $source.Text.Substring($position, $count)
+            if (-not [string]::IsNullOrWhiteSpace($content)) {
+                $reference = Get-StudentZiraAudio $content $ziraModule
+                $timeOffset = $samples.Count / [double]$settings.SampleRate
+                foreach ($label in $reference.Capture.Words) {
+                    $labels.Add([pscustomobject]@{ Start = $source.Start + $position + $label.Start; Length = $label.Length
+                        StartSeconds = $timeOffset + $label.StartSeconds; EndSeconds = $timeOffset + $label.EndSeconds })
+                }
+                $samples.AddRange([float[]](Read-StudentAudio $reference.Wav))
+            }
+            $position += $count
+        }
+        $human = Read-StudentAudio $recording.Wav
+        $referenceBands = $kernels.SpectralBands.Invoke($samples.ToArray(), $settings.SampleRate, $settings.Hop, $settings.Window)
+        $humanBands = $kernels.SpectralBands.Invoke($human, $settings.SampleRate, $settings.Hop, $settings.Window)
+        $hopSeconds = $settings.Hop / [double]$settings.SampleRate
+        $radius = [int][Math]::Ceiling($settings.SearchSeconds / $hopSeconds); $edge = [int][Math]::Ceiling($settings.EdgeSeconds / $hopSeconds)
+        $map = $kernels.SpectralWarp.Invoke($referenceBands, $humanBands, $radius, $edge)
+        $levels = (Expand-StudentController $humanController -LevelsOnly).Frames
+        $evidence = $kernels.BoundaryEvidence.Invoke($levels)
+        $words = [Collections.Generic.List[object]]::new(); $previousEnd = 0.0; $tokenIndex = 0
+        foreach ($label in $labels) {
+            $warped = [double[]]::new(2); $snapped = [double[]]::new(2); $kinds = [int[]]::new(2)
+            $endpoints = @($label.StartSeconds, $label.EndSeconds)
+            for ($side = 0; $side -lt 2; $side++) {
+                $frame = [int][Math]::Clamp([Math]::Round(($endpoints[$side] - $settings.Window / (2.0 * $settings.SampleRate)) / $hopSeconds), 0, $map.Length - 1)
+                $warped[$side] = $map[$frame] * $hopSeconds + $settings.Window / (2.0 * $settings.SampleRate)
+                $minimum = $previousEnd
+                if ($side -eq 1) { $minimum += $humanController.Layout.TickSeconds }
+                $snapped[$side] = [Math]::Max($minimum, $warped[$side]); $nearest = [double]::PositiveInfinity
+                $tickIndex = [int][Math]::Round($warped[$side] / $humanController.Layout.TickSeconds)
+                $reach = [int][Math]::Ceiling($settings.SnapSeconds / $humanController.Layout.TickSeconds)
+                for ($candidate = [Math]::Max(0, $tickIndex - $reach); $candidate -le [Math]::Min($evidence.Length - 1, $tickIndex + $reach); $candidate++) {
+                    $candidateSeconds = $candidate * $humanController.Layout.TickSeconds
+                    $distance = [Math]::Abs($candidateSeconds - $warped[$side])
+                    if ($evidence[$candidate] -ne 0 -and $candidateSeconds -ge $minimum -and $distance -lt $nearest) { $nearest = $distance; $snapped[$side] = $candidateSeconds; $kinds[$side] = $evidence[$candidate] }
+                }
+                $previousEnd = $snapped[$side]
+            }
+            while ($tokenIndex + 1 -lt $source.Tokens.Length / 4 -and $source.Tokens[4 * $tokenIndex + 1] + $source.Tokens[4 * $tokenIndex + 2] -le $label.Start) { $tokenIndex++ }
+            $words.Add([pscustomobject]@{ PSTypeName = 'Kokoro.StudentAlignedOccurrence'; Identity = $source.Book + ':' + $label.Start + ':' + $label.Length
+                Book = $source.Book; Token = $tokenIndex; SourceStart = $label.Start; SourceLength = $label.Length
+                StartSeconds = $snapped[0]; EndSeconds = $snapped[1]; WarpedStartSeconds = $warped[0]; WarpedEndSeconds = $warped[1]
+                StartSnapMs = 1000 * ($snapped[0] - $warped[0]); EndSnapMs = 1000 * ($snapped[1] - $warped[1])
+                StartEvidence = $kinds[0]; EndEvidence = $kinds[1]; Reader = $humanController.Provenance; SourceAudioSHA256 = $humanHash })
+        }
+        $destination = New-StudentOutputDirectory 'student-alignment'
+        $result = [pscustomobject]@{ PSTypeName = 'Kokoro.StudentAlignment'; Recording = $recording.Wav; Words = $words.ToArray()
+            Book = $source.Book; SourceStart = $source.Start; SourceLength = $source.Text.Length; ReferenceFrames = $referenceBands.Length / 5; HumanFrames = $humanBands.Length / 5
+            NativeRecording = $listenPath; SearchSeconds = $settings.SearchSeconds; SnapSeconds = $settings.SnapSeconds
+            UnsupportedBoundaries = @($words | Where-Object StartEvidence -EQ 0).Count + @($words | Where-Object EndEvidence -EQ 0).Count
+            ZeroDurationWords = @($words | Where-Object { $_.EndSeconds -le $_.StartSeconds }).Count
+            MaximumSnapMs = (@($words.StartSnapMs) + @($words.EndSnapMs) | ForEach-Object { [Math]::Abs($_) } | Measure-Object -Maximum).Maximum
+            MachineSHA256 = $script:StudentMachineSHA256; KernelSHA256 = $kernels.SHA256; WallSeconds = $watch.Elapsed.TotalSeconds; Directory = $destination }
+        $result | Export-Clixml -LiteralPath (Join-Path $destination 'receipt.clixml')
+        $result
+    } } finally { Remove-Module -ModuleInfo $ziraModule -Force }
 }
 
 function New-StudentControllerRecording([object[]] $Events, [int] $Ticks, [object] $Provenance, [int] $Seed) {
@@ -1683,13 +1869,15 @@ function New-StudentControllerRecording([object[]] $Events, [int] $Ticks, [objec
         KernelSHA256 = (Import-StudentKernels).SHA256 }
 }
 
-function Expand-StudentController($Performance) {
+function Expand-StudentController($Performance, [switch] $LevelsOnly) {
     # Held analog state; note-on and rest are one-tick impulses. The store retains physical values.
-    $frames = [float[]]::new(8 * $Performance.Ticks); $wire = [byte[]]::new(12 * $Performance.Ticks)
+    $frames = [float[]]::new($(if ($LevelsOnly) { $Performance.Ticks } else { 8 * $Performance.Ticks }))
+    $wire = [byte[]]::new($(if ($LevelsOnly) { 0 } else { 12 * $Performance.Ticks }))
     $index = 0; $held = $Performance.Events[0]
     for ($tickIndex = 0; $tickIndex -lt $Performance.Ticks; $tickIndex++) {
         $changed = $index -lt $Performance.Events.Count -and $Performance.Events[$index].Tick -eq $tickIndex
         if ($changed) { $held = $Performance.Events[$index]; $index++ }
+        if ($LevelsOnly) { $frames[$tickIndex] = [float][Math]::Pow(10.0, $held.LevelDb / 20.0); continue }
         $buttons = [int]$held.Buttons; if (-not $changed) { $buttons = $buttons -band 115 }
         $base = 8 * $tickIndex
         $frames[$base] = $held.PitchHz; $frames[$base + 1] = $held.LevelDb; $frames[$base + 2] = $held.Aperiodicity
@@ -1865,14 +2053,10 @@ function Invoke-StudentListen {
     $kernels = Import-StudentKernels
     $decoded = @(Invoke-StudentRecordings); if ($RecordingLimit -gt 0 -and $decoded.Count -gt $RecordingLimit) { $decoded = $decoded[0..($RecordingLimit - 1)] }
     $output = Join-Path ([IO.Path]::GetFullPath($Recordings)) 'listen'; [void][IO.Directory]::CreateDirectory($output)
-    # 63-tap Hamming-windowed sinc low-pass at 7 kHz for 48 kHz to 16 kHz.
-    $taps = [float[]]::new(63); $sum = 0.0
-    for ($k = 0; $k -lt 63; $k++) { $m = $k - 31; $cut = 7000.0 / 48000.0; $v = if ($m -eq 0) { 2 * $cut } else { [Math]::Sin(2 * [Math]::PI * $cut * $m) / ([Math]::PI * $m) }; $v *= 0.54 - 0.46 * [Math]::Cos(2 * [Math]::PI * $k / 62); $taps[$k] = $v; $sum += $v }
-    for ($k = 0; $k -lt 63; $k++) { $taps[$k] = $taps[$k] / $sum }
     $rate = 16000; $hop = 160; $window = 400
     foreach ($recording in $decoded) {
         $watch = [Diagnostics.Stopwatch]::StartNew()
-        $x = $kernels.MonoDecimate.Invoke([IO.File]::ReadAllBytes($recording.Wav), $recording.Data, $recording.Frames, $taps, 3)
+        $x = Read-StudentAudio $recording.Wav
         $decodeSeconds = $watch.Elapsed.TotalSeconds
         $track = $kernels.PitchTrack.Invoke($x, $rate, $hop, $window, 32, 229, 0.15)
         $tilt = $kernels.SpectralSlope.Invoke($x, $rate, $hop, $window)
@@ -1991,6 +2175,7 @@ $script:StudentSteps = [ordered]@{
     Recordings = { Invoke-StudentRecordings }
     Listen = { Invoke-StudentListen }
     Stems = { Invoke-StudentStems }
+    Alignment = { Invoke-StudentAlignment }
 }
 }
 & $studentOwner { & $script:StudentSteps[$Step] }
