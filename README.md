@@ -79,9 +79,9 @@ Each subsystem is one file of declared records and steps, reached through
 | File | Subsystem |
 |---|---|
 | `Invoke-HexagonDevelopment.ps1` | Hexagon instruction records, encoder, kernels and emission |
-| `student/Invoke-Student.ps1` | The Student: text corpus, pronunciations, teacher and training |
+| `student/Invoke-Student.ps1` | The Student: text corpus, pronunciations, syllabus and training |
 | `phonemizer/Invoke-EnglishPhonemizer.ps1` | The English phonemizer and its compiled driver |
-| `tools/Invoke-KokoroPrecomputedDecoder.ps1` | The lowered host port of stock Kokoro used as the teacher |
+| `tools/Invoke-KokoroPrecomputedDecoder.ps1` | The lowered host port of stock Kokoro used as the syllabus |
 
 Kernels and jobs under `src/` are being folded into the Hexagon file.
 

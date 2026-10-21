@@ -45,14 +45,14 @@ twice, or written as a scratch script, is a missing command: add it here.
                               weights (W8), 16-bit per-tensor activations (A16), both, and A8W8 for contrast.
   Speak [-HeldOutIndex 0] [-Soc SM8550] [-Runs 3] [-OutputDirectory]
                               First bank-input sentence (at most 96 decoder frames): verify/restore the working
-                              bank, select units in PowerShell, assemble table prosody, capture the stock teacher on those
+                              bank, select units in PowerShell, assemble table prosody, capture the stock syllabus on those
                               inputs, pack the existing job, run and play through AAudio. Generated files stay under build/.
   Zira -Text <sentence> [-OutputDirectory]  Windows speech API reference; returns typed phoneme/word events and a WAV.
   FrontEnd -Parameters <typed bank inputs> -OutputDirectory
   PrecomputedDecoder -Parameters @{ Mode = 'Gate' } (offline decoder/generator experiment)
                               Manufacture and gate the compact prosody bank on the laptop; no phone access.
   Student -Parameters @{ Step = 'Console' }
-    Host text-to-speech console (student/Invoke-Student.ps1): our phonemizer and the lowered teacher; plays and saves WAVs under build/.
+    Host text-to-speech console (student/Invoke-Student.ps1): our phonemizer and the lowered syllabus; plays and saves WAVs under build/.
   AlbertLinear -Linear name[,name...] [-Path] [-Soc] [-Runs]
                               One ALBERT linear (mapping_in, query.0 .. ffn_output.11, bert_encoder) on the phone: job input
                               from the capture, emit, run, decode, SNR against stock. Default capture stock-albert-capture-hello.
@@ -155,7 +155,7 @@ $Shared = if ($SharedRoot) { [IO.Path]::GetFullPath($SharedRoot) } else { [IO.Pa
 $StockSource = if ($env:KOKORO_STOCK_SOURCE) { $env:KOKORO_STOCK_SOURCE } else { Join-Path (Split-Path $Root) '.vendor/kokoro' }
 
 $StockCommit = 'dfb907a02bba8152ca444717ca5d78747ccb4bec'   # lib/manifest.json kokoroSource.commit
-# StockCapture runs stock PyTorch Kokoro from the reference folder to record teacher tensors; nothing else uses Python.
+# StockCapture runs stock PyTorch Kokoro from the reference folder to record syllabus tensors; nothing else uses Python.
 # KOKORO_PYTHON names the interpreter with stock PyTorch Kokoro installed.
 $Python = $env:KOKORO_PYTHON
 
@@ -1276,7 +1276,7 @@ function Test-KokoroGeneratorPropagation {
     $report
 }
 
-# Representation of generator AdaIN constants as a voice base plus k components. 170-tick segments of Student teacher
+# Representation of generator AdaIN constants as a voice base plus k components. 170-tick segments of Student syllabus
 # evidence (-Corpus, its cached windows) run through the export generator on the phone; each segment's exported 1/std and
 # mean per site channel become ln(1/std) and mean/std coordinates. Principal components of the training segments give
 # base + P v; each held-out segment (windows with index 7 mod 8) receives its own least-squares v for each k and runs
@@ -1339,11 +1339,11 @@ function Test-KokoroGeneratorRepresentation {
     $decoderInputSnr=[double](@($prior.Gate.Variants | Where-Object Variant -CEQ 'A')[0].PcmSnrDb)
     if($report.PeachRebuiltStockSnrDb -lt $decoderInputSnr){throw "Rebuilt peach input scores $($report.PeachRebuiltStockSnrDb) dB against stock, below the DSP decoder input's $decoderInputSnr dB; the input encoding is wrong."}
 
-    # Segments from cached teacher evidence; held-out segments come only from held-out windows.
-    $teacher=& (Join-Path $Root 'student/Invoke-Student.ps1') -Step Teacher -Corpus $Corpus
-    if($teacher.Rendered){throw 'Representation segments must come from cached teacher evidence; run the Student Teacher step first.'}
+    # Segments from cached syllabus evidence; held-out segments come only from held-out windows.
+    $syllabus=& (Join-Path $Root 'student/Invoke-Student.ps1') -Step Syllabus -Corpus $Corpus
+    if($syllabus.Rendered){throw 'Representation segments must come from cached syllabus evidence; run the Student Syllabus step first.'}
     $training=[Collections.Generic.List[object]]::new(); $heldOut=[Collections.Generic.List[object]]::new()
-    foreach($window in $teacher.Windows){
+    foreach($window in $syllabus.Windows){
         $list=$training; $limit=$TrainingSegments
         if($window.Index%8 -eq 7){$list=$heldOut; $limit=$HeldOutSegments}
         for($start=0;$start+$ticks -le $window.Ticks -and $list.Count -lt $limit;$start+=$ticks){
@@ -2317,7 +2317,7 @@ function New-KokoroBankDecoderInput {
     [void][IO.Directory]::CreateDirectory($Directory)
     $selectionDir = Join-Path $Directory 'selection'; [void][IO.Directory]::CreateDirectory($selectionDir)
     ConvertTo-Json -InputObject @($held) -Depth 5 | Set-Content (Join-Path $selectionDir 'heldout.json') -Encoding utf8NoBOM
-    # Regenerate selections, never teacher captures. Match the full-bank baseline's measured right-weighted cost
+    # Regenerate selections, never syllabus captures. Match the full-bank baseline's measured right-weighted cost
     # (unit-bank curve, 2026-10-10); restore the caller's experiment setting afterward.
 
     $previousWeights = $env:KOKORO_TARGETW
@@ -2332,7 +2332,7 @@ function New-KokoroBankDecoderInput {
     $picks = $selected.picks[0].path
     if ($picks.Count -ne $count) { throw 'Selection token count mismatch.' }
     $order = @(Get-Content (Join-Path $Bank.Directory 'order.json') -Raw | ConvertFrom-Json)
-    if (@($order | Where-Object { $_.text -ceq $held.text -or $_.phonemes -ceq $held.phonemes }).Count) { throw 'Held-out sentence occurs in the teacher bank.' }
+    if (@($order | Where-Object { $_.text -ceq $held.text -or $_.phonemes -ceq $held.phonemes }).Count) { throw 'Held-out sentence occurs in the syllabus bank.' }
 
     function Read-BankNpy([IO.Compression.ZipArchive] $Zip, [string] $ArrayName) {
         $entry = $Zip.GetEntry("$ArrayName.npy"); if (-not $entry -or $entry.Length -gt 512MB) { throw "Missing/oversized bank array: $ArrayName" }
@@ -2927,7 +2927,7 @@ switch ($Command) {
             $captured = Get-Content -LiteralPath (Join-Path $capDir 'capture.json') -Raw | ConvertFrom-Json
             $tensorIndex = 0
             foreach ($name in 'asr', 'F0', 'N') {
-                if ($captured.tensors.PSObject.Properties["decoder.input.$tensorIndex"].Value.sha256 -cne $front.tensors.$name.sha256) { throw "Teacher did not consume the assembled $name." }
+                if ($captured.tensors.PSObject.Properties["decoder.input.$tensorIndex"].Value.sha256 -cne $front.tensors.$name.sha256) { throw "Syllabus did not consume the assembled $name." }
                 $tensorIndex++
             }
         }

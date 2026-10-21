@@ -31,7 +31,7 @@ items below move that work out of the audio-rate path.
 ### This is not stock Kokoro
 
 At run time only Kokoro's frozen generator weights and voice records are used. Kokoro is
-the teacher for local sound, not the design. Do not reason about this system
+the syllabus for local sound, not the design. Do not reason about this system
 as if it were stock Kokoro with faster kernels.
 
 | Stock Kokoro (upstream `pipeline.py`, `model.py`) | This system |
@@ -43,7 +43,7 @@ as if it were stock Kokoro with faster kernels.
 | Audio is returned per chunk, after the chunk is complete | The generator runs continuously on its cadence with resident weights; audio starts at the first controller state and has no utterance boundary |
 
 The 510-phoneme window appears in this project only as the scope of the
-evidence Kokoro can supply as a teacher (see Teacher data).
+evidence Kokoro can supply as a syllabus (see Syllabus data).
 
 The Student's source is `student/Invoke-Student.ps1`, reached through
 `Invoke-KokoroDevelopment.ps1 Student`. Extend that owner.
@@ -161,13 +161,13 @@ and supplying coefficients directly cut a decoder chunk from about 13.4 to
 `decoder-direct-coefficients-sm8550-20261010.md`). The generator sites have
 not been measured. Order:
 
-1. Teacher capture: the coefficients each generator site applies, recorded
-   by the lowered teacher as evidence for the controller state that
-   reproduces them. Supplying them back must reproduce the teacher's PCM
-   exactly. The window is only the teacher's evidence scope; no moments over
+1. Syllabus capture: the coefficients each generator site applies, recorded
+   by the lowered syllabus as evidence for the controller state that
+   reproduces them. Supplying them back must reproduce the syllabus's PCM
+   exactly. The window is only the syllabus's evidence scope; no moments over
    a span are carried into the Student.
 2. Representation: the smallest k for which fitted `base` and `P` reproduce
-   the captured coefficients, scored by generator PCM SNR against the teacher.
+   the captured coefficients, scored by generator PCM SNR against the syllabus.
 3. Learnability: the Student's control stream predicts `v(t)` on held-out
    text, scored the same way.
 
@@ -177,7 +177,7 @@ not been measured. Order:
 American English phrasing, timing, pitch, focus, lists, questions and
 quotation, each with a confidence rating. They are candidate closure types and
 expected directions of effect, not targets: each becomes a typed object or a
-closure type whose behaviour is learned from teacher evidence and kept only
+closure type whose behaviour is learned from syllabus evidence and kept only
 where held-out evidence supports it. Their effects map to the control stream
 (boundaries and closures to buttons, prominence to triggers, pitch and timing
 movement to sticks).
@@ -187,7 +187,7 @@ activation conditions, state effects, pending expectations and completion.
 Resolve their interactions using the rulebook's precedence and confidence
 distinctions. Accent, boundary pitch and boundary timing remain distinct
 decisions; overlapping rules describing one boundary produce one coordinated
-action. Teacher evidence calibrates the realization and supports contextual
+action. Syllabus evidence calibrates the realization and supports contextual
 exceptions; acoustic similarity alone does not establish a semantic or
 structural correction.
 
@@ -224,20 +224,20 @@ or of evaluation, and no special or hand-picked sentences are used.
   syllable, word, phrase and so on). Each type carries ETS-bound behaviours
   (members and bindings added with `Update-TypeData`), such as timing, pitch,
   loudness and the stretch of `x` it produces, learned from every occurrence
-  of that type in the teacher evidence.
-- Teacher evidence is grouped by type, never by sentence: each occurrence
+  of that type in the syllabus evidence.
+- Syllabus evidence is grouped by type, never by sentence: each occurrence
   contributes its aligned stretch of `x` and `f0` to its type.
 - Interpretation is incremental, through closures: each word is a closure over
   what it still awaits; the next word applies it, extends it or opens a new
   one. Prosody reads the open-closure state (an unapplied expectation means a
   continuing contour; a satisfied one makes closure available; terminal
   punctuation closes it).
-- Closures are not limited to the teacher's window. Stock Kokoro sees at most
+- Closures are not limited to the syllabus's window. Stock Kokoro sees at most
   510 phonemes; an open closure (an enumeration, a quotation or parenthesis,
   a contrast, a counter-example section, an unresolved heteronym, a name and
   its pronunciation) carries typed state across any distance. Its behaviour
-  is learned from teacher windows that contain both ends and applied at any
-  span, so prosody and pronunciation can use context the teacher never sees.
+  is learned from syllabus windows that contain both ends and applied at any
+  span, so prosody and pronunciation can use context the syllabus never sees.
 - Each closure type also learns its lifetime: how far it usually stays open
   and which boundaries end it (paragraph, section, heading). An expectation
   never satisfied within that lifetime is closed by the Student with the
@@ -317,7 +317,7 @@ observations retain each voice's actual durations, with phone correspondence
 used to compare local trajectories. Adding a voice extends its record and
 evidence rather than generating another corpus.
 
-The first voice is `af_heart`: all teacher evidence is rendered with it until
+The first voice is `af_heart`: all syllabus evidence is rendered with it until
 the Student meets its goals on held-out text with that voice. The second voice
 is then added to measure how much of each percept is shared.
 
@@ -325,7 +325,7 @@ The Student learns several voices and switches between them. Storage differs
 from Kokoro, where each voice is 510 rows of 256 values used through the
 predictors and decoder on every utterance:
 
-- Percepts are shared across voices and trained on all voices' teacher output.
+- Percepts are shared across voices and trained on all voices' syllabus output.
 - Each voice is a record:
   - each AdaIN site's `base` and `P`: how the voice responds to the
     controller, in place of the generator style rows (`ref_s[:, :128]`)
@@ -339,30 +339,30 @@ predictors and decoder on every utterance:
 Measure before building: the fraction of the difference in `x` between voices
 explained by a per-channel scale and bias.
 
-### Teachers are adapters
+### Syllabi are adapters
 
-The Student's core is teacher-neutral: typed layers, closures, pronunciation,
+The Student's core is syllabus-neutral: typed layers, closures, pronunciation,
 and prosody behaviours in physical units (durations in seconds, pitch in hertz,
-energy, emphasis). Nothing in the core refers to a teacher's frames, token IDs
-or channels. Each teacher has an adapter that converts its evidence into those
+energy, emphasis). Nothing in the core refers to a syllabus's frames, token IDs
+or channels. Each syllabus has an adapter that converts its evidence into those
 units and binds the Student's neutral output to its renderer's input (for
 Kokoro: `x`, `f0` and the controller's expansion into each AdaIN site). Only the renderer binding is
-teacher-specific and is retrained per teacher. Evidence records which teacher
-produced it, so evidence from several teachers for the same typed objects
-coexists. A later teacher (for example Chatterbox Turbo) is added as a lowered
+syllabus-specific and is retrained per syllabus. Evidence records which syllabus
+produced it, so evidence from several syllabi for the same typed objects
+coexists. A later syllabus (for example Chatterbox Turbo) is added as a lowered
 port and an adapter, specified from its source at a pinned commit, without
 changing the core.
 
-The core stays open to what later teachers add, by extension, not by
+The core stays open to what later syllabi add, by extension, not by
 redesign: new token kinds (for example non-verbal events such as laughter
 or breaths) are new typed objects; new continuous expressive controls are new
 control-stream axes or records; a voice estimated from reference audio is a
-voice record produced by listening mode. Each later teacher is specified from
+voice record produced by listening mode. Each later syllabus is specified from
 its own source at a pinned commit before its adapter is built.
 
-### Teacher data
+### Syllabus data
 
-Teacher data comes from our own port of stock Kokoro in lowered PowerShell,
+Syllabus data comes from our own port of stock Kokoro in lowered PowerShell,
 compiled through PSLowering and run on the host CPU (CoreCLR). It does not run
 on Hexagon. Its purpose is that this project never needs Python again.
 
@@ -370,12 +370,12 @@ on Hexagon. Its purpose is that this project never needs Python again.
   and reproduce stock PCM at 80 dB or better with matched draws.
 - ALBERT, `bert_encoder`, the duration and F0/N predictors and the text
   encoder are ported the same way and checked against stored stock outputs.
-  Until they are, teacher evidence comes from the stock outputs stored in
+  Until they are, syllabus evidence comes from the stock outputs stored in
   `build/unit-bank` (text-encoder output, durations, F0 and N). Once they are,
   `StockCapture` is retired.
 - Training and evaluation use arbitrary content only: no curated, named or
   hand-picked sentences or captures, in training, evaluation or checks.
-- The teacher's input unit is a window of continuous text, never a sentence.
+- The syllabus's input unit is a window of continuous text, never a sentence.
   Stock Kokoro's PL-BERT attends across its whole input (up to 510 phonemes),
   so prosody depends on neighbouring sentences. Windows run through the
   source text in order across sentence and paragraph boundaries, overlap so
@@ -421,20 +421,20 @@ on Hexagon. Its purpose is that this project never needs Python again.
   first vowel until stress is learned. Context-dependent differences (Kokoro's
   flap `ɾ` for Zira's `t` and `d` between vowels) need correspondences
   conditioned on neighbouring symbols. Windows are token ranges, assembled
-  from the tokens' resolved phonemes and passed to the teacher as phonemes;
+  from the tokens' resolved phonemes and passed to the syllabus as phonemes;
   for sentences our phonemizer accepts whole, the assembled phonemes equal
   its output.
-- Teacher evidence passes validity gates before the Student learns from it:
+- Syllabus evidence passes validity gates before the Student learns from it:
   complete, aligned with Zira by source span, and agreeing with the resolved
   pronunciation. Where the resolved pronunciation differs from what stock
-  Kokoro's front end would produce, the teacher is run on the resolved
+  Kokoro's front end would produce, the syllabus is run on the resolved
   phonemes, so the Student learns Kokoro's sound for the corrected
   pronunciation. Zira's word and phone events
   (timing, emphasis, source character spans) supply the typed linguistic
   structure; Kokoro supplies the acoustics.
-- The teacher decodes each stored utterance with its own voice row,
+- The syllabus decodes each stored utterance with its own voice row,
   `pack[len(phonemes) - 1]`, as the stock captures did, then splits the result
-  into typed occurrences. Utterances stay inside the teacher; the Student
+  into typed occurrences. Utterances stay inside the syllabus; the Student
   receives only typed evidence.
 
 ### Training and evaluation
@@ -479,13 +479,13 @@ is reached.
 | 3. Phrases | Containment edges; phrase closures; duration and `f0` contours | Medium windows | Held-out phrases |
 | 4. Long-range context | Closures at any distance, across paragraphs and sections, with lifetimes, expiry and reopening; prosody-rulebook candidate types; counter-examples | Windows up to 510 phonemes and long-horizon sources | Held-out paragraphs; closure expiry and reopening rates |
 | 5. Consolidation | Merge, split, prune and lay out; training against the on-device generator | All earlier evidence | Same SNR with fewer percepts and lower production cost |
-| 6. Extension | A second voice, further teachers, listening mode | New teacher adapters | Each new gate passes without an earlier gate regressing |
+| 6. Extension | A second voice, further syllabi, listening mode | New syllabus adapters | Each new gate passes without an earlier gate regressing |
 
 Plasticity is scheduled: early stages admit new types and edges readily;
 later stages require more held-out support for a change, so learned behaviour
-stays stable. Consolidation runs between stages. Reliance on the teacher
+stays stable. Consolidation runs between stages. Reliance on the syllabus
 narrows as stages advance: stages 1 to 3 learn local sound from Kokoro, stage 4
-carries context beyond the teacher's window, and stage 6 corrects the teacher
+carries context beyond the syllabus's window, and stage 6 corrects the syllabus
 where other evidence shows it wrong.
 
 ### Amortization
@@ -506,7 +506,7 @@ by type and context, and the DSP's phase and noise counters persist. Time to
 first audio is the first token's controller state plus one generator tile.
 
 Development is amortized the same way, so the training loop stays fast:
-teacher evidence is computed once, filed by type and cached by phoneme
+syllabus evidence is computed once, filed by type and cached by phoneme
 content; Zira captures are cached by text; the propagation measurement lets
 most experiments be scored from boundary error without running the
 generator; a host emulator of the quantized generator, bit-exact with the
@@ -658,7 +658,7 @@ v1 Student becomes the v2 Student; it is not rebuilt.
   stream it plays, not to stored units: phone onsets and offsets, pitch as a
   continuous pitch-bend control, emphasis as velocity, and the other controls
   as controller changes. Speaking turns events into audio; listening turns
-  audio into events. Teacher renders are labelled audio (Kokoro's per-token
+  audio into events. Syllabus renders are labelled audio (Kokoro's per-token
   durations, Zira's per-phone timing), so listening trains on the same
   evidence. Uses: resolving pronunciation disagreements by what was actually
   spoken, and checking the Student's own output against the events it
@@ -716,7 +716,7 @@ v1 Student becomes the v2 Student; it is not rebuilt.
   against the resident generator. The goal is natural human voice produced
   procedurally, with no learned generator weights.
 - Knowledge transfer from simulation: the physical instrument is also a
-  teacher. The Student learns reusable control programs from its responses,
+  syllabus. The Student learns reusable control programs from its responses,
   including excitation, resonance, transitions and their dependence on
   context. Consolidation may replace repeated simulation work with a cheaper
   typed program where measured acoustic fidelity and responses to controls

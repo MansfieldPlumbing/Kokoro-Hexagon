@@ -62,7 +62,7 @@ function Get-KokoroDecoder16Layout {
     # Normalization direction (2026-10-11): runtime synthesis computes and
     # supplies no AdaIN statistics. The front end emits scalar streams; each site's K and M are expanded from them through
     # the existing style projections and arrive through the direct-coefficient input. The
-    # moments records below remain for stock-reference comparison and teacher observation, staged for removal from the
+    # moments records below remain for stock-reference comparison and syllabus observation, staged for removal from the
     # runtime path; do not build new runtime work on them.
     # AdaIN moments records in run order (per block AdaIN1 over its input, AdaIN2 over conv1's output; decode.3's AdaIN2 runs
     # at 2F frames): the AdaInMoments16 record (S1, A2, AB, B2 int32 per channel, 16 bytes per channel). Exported after the

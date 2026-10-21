@@ -4,25 +4,25 @@ The Student and its host tools: one file of declared records, one shared context
 .DESCRIPTION
 Steps:
   Console   Interactive text-to-speech console on the host. Type text, press Enter to render it
-            with the lowered teacher (our phonemizer and our port of stock Kokoro), save it as a
+            with the lowered syllabus (our phonemizer and our port of stock Kokoro), save it as a
             WAV under build/ and play it. Keys: Enter speak, F2 voice, F3/F4 speed, F5 replay,
             F6 toggle playback, Esc quit.
-  Render    Render -Text with the lowered teacher to a WAV under build/ and return a typed result.
+  Render    Render -Text with the lowered syllabus to a WAV under build/ and return a typed result.
   Corpus    Tokenize the pinned Project Gutenberg text, pronounce every word with our phonemizer and
             with Zira (joined by source span), learn Zira-to-Kokoro symbol correspondences, and
             pack continuous windows of at most 510 phonemes as token ranges. Writes corpus.clixml.
   Pronunciation  Counter-examples from a corpus (-Corpus, default the latest): words where Zira's
             form differs from ours, by word, with recurring symbol differences.
   Normalize Source-aligned front-end decisions for -Text, or replay stored -Corpus decisions as typed behaviours.
-  Teacher   Host teacher evidence up to the generator boundary for -Voice: per corpus window, the
-            lowered teacher's durations, f0 and x (decoder output), cached by phoneme content under
-            build/student/teacher, and each resolved token span as a typed occurrence with its ticks.
+  Syllabus   Host syllabus evidence up to the generator boundary for -Voice: per corpus window, the
+            lowered syllabus's durations, f0 and x (decoder output), cached by phoneme content under
+            build/student/syllabus, and each resolved token span as a typed occurrence with its ticks.
 .PARAMETER Corpus
 Corpus directory for Pronunciation; defaults to the latest build/corpus-* with corpus.clixml.
 .PARAMETER ParagraphLimit
 Corpus: read at most this many paragraphs per book (0 reads all).
 .PARAMETER WindowLimit
-Teacher: process at most this many windows in corpus order (0 processes all).
+Syllabus: process at most this many windows in corpus order (0 processes all).
 .PARAMETER Step
 The step to run.
 .PARAMETER Text
@@ -38,7 +38,7 @@ Voice pack for Render; any voice pinned in lib/manifest.json.
 .PARAMETER Speed
 Speaking rate for Render.
 .PARAMETER Threads
-Worker threads for the teacher's kernels.
+Worker threads for the syllabus's kernels.
 .EXAMPLE
 ./student/Invoke-Student.ps1 -Step Console
 .EXAMPLE
@@ -49,7 +49,7 @@ Run from a PowerShell prompt: pwsh -File passes every argument as a string, so a
 #requires -Version 7.7
 [CmdletBinding()]
 param(
-    [ValidateSet('Console', 'Render', 'Corpus', 'Pronunciation', 'Normalize', 'Teacher')][string] $Step = 'Console',
+    [ValidateSet('Console', 'Render', 'Corpus', 'Pronunciation', 'Normalize', 'Syllabus')][string] $Step = 'Console',
     [ValidateRange(2, 64)][int] $Threads = [Math]::Max(2, [Environment]::ProcessorCount),
     [string] $Text = '',
     [string] $Voice = 'af_heart',
@@ -75,7 +75,7 @@ $ErrorActionPreference = 'Stop'
 $script:StudentRoot = [IO.Path]::GetFullPath((Join-Path $StudentOwnerRoot '..'))
 $script:StudentBuild = Join-Path $script:StudentRoot 'build'
 $script:StudentContext = [ordered]@{
-    Teacher = $null          # in-memory module exporting Invoke-OfflineSpeech
+    Syllabus = $null          # in-memory module exporting Invoke-OfflineSpeech
     Phonemize = $null        # compiled English phonemizer: Func[string,object]
     Voices = @()
     OutputDirectory = $null
@@ -87,13 +87,13 @@ $script:StudentContext = [ordered]@{
 }
 
 # Pinned inputs. The phonemizer is the compiled English driver built by
-# phonemizer/Invoke-EnglishPhonemizer.ps1; the teacher is tools/Invoke-KokoroPrecomputedDecoder.ps1.
+# phonemizer/Invoke-EnglishPhonemizer.ps1; the syllabus is tools/Invoke-KokoroPrecomputedDecoder.ps1.
 $script:StudentInputs = [ordered]@{
     Phonemizer = [ordered]@{
         Directory = 'build/phonemizer/english/driver/27394F8EE7C83EA37142C313813931AF2D9B4FA2E4679BB200804BA7759D6558-library-dll'
         SHA256 = '865C1DB6C5F0B5A95BED00CD33B6E9859726F0B64376D28FB60152601D3AF226'
     }
-    Teacher = 'tools/Invoke-KokoroPrecomputedDecoder.ps1'
+    Syllabus = 'tools/Invoke-KokoroPrecomputedDecoder.ps1'
     Manifest = 'lib/manifest.json'
     Text = 'build/grammar-corpus/raw'
     Pronunciation = 'phonemizer/Invoke-EnglishPhonemizer.ps1'
@@ -136,10 +136,10 @@ function Import-StudentPhonemizer {
     $assembly.GetType('CoreDriver', $true).GetMethod('Run').CreateDelegate([Func[string,object]])
 }
 
-function Import-StudentTeacher([string] $OutputDirectory) {
-    # The lowered teacher runs inside its own module scope; only its entry points are exported.
-    $reference = Join-Path $script:StudentRoot $script:StudentInputs.Teacher
-    New-Module -Name KokoroTeacher -ArgumentList $reference, $OutputDirectory, $Threads -ScriptBlock {
+function Import-StudentSyllabus([string] $OutputDirectory) {
+    # The lowered syllabus runs inside its own module scope; only its entry points are exported.
+    $reference = Join-Path $script:StudentRoot $script:StudentInputs.Syllabus
+    New-Module -Name KokoroSyllabus -ArgumentList $reference, $OutputDirectory, $Threads -ScriptBlock {
         param([string] $Reference, [string] $Output, [int] $WorkerThreads)
         . $Reference -Mode Library -OutputDirectory $Output -Threads $WorkerThreads
         Export-ModuleMember -Function Invoke-OfflineSpeech
@@ -191,7 +191,7 @@ function Write-StudentFrame([string[]] $Lines, [int] $CursorRow = -1, [int] $Cur
 function Show-StudentConsole {
     $state = [ordered]@{
         Text = ''; Cursor = 0; Voice = 0; Speed = 1.0; Playback = $true
-        Status = 'Loading the phonemizer and the lowered teacher...'
+        Status = 'Loading the phonemizer and the lowered syllabus...'
         Last = $null; History = [Collections.Generic.List[string]]::new(); Player = $null
     }
     function Get-ConsoleLines {
@@ -243,7 +243,7 @@ function Show-StudentConsole {
         $script:StudentContext.Phonemize = Import-StudentPhonemizer
         $script:StudentContext.Voices = @(Get-StudentVoices)
         if ($script:StudentContext.Voices.Count -eq 0) { throw 'No pinned voice pack is present under build/inputs/kokoro.' }
-        $script:StudentContext.Teacher = Import-StudentTeacher (Join-Path $script:StudentContext.OutputDirectory 'teacher')
+        $script:StudentContext.Syllabus = Import-StudentSyllabus (Join-Path $script:StudentContext.OutputDirectory 'syllabus')
         $state.Status = 'Ready.'
         while ($true) {
             Write-StudentFrame (Get-ConsoleLines) 4 (2 + $state.Cursor)
@@ -272,7 +272,7 @@ function Show-StudentConsole {
     }
     finally {
         if ($state.Player) { $state.Player.Stop(); $state.Player.Dispose() }
-        if ($script:StudentContext.Teacher) { Remove-Module -ModuleInfo $script:StudentContext.Teacher -Force }
+        if ($script:StudentContext.Syllabus) { Remove-Module -ModuleInfo $script:StudentContext.Syllabus -Force }
         [Console]::Out.Write("`e[?25h`e[?1049l")
     }
 }
@@ -1228,7 +1228,7 @@ function Invoke-StudentRender {
     $phonemize = Import-StudentPhonemizer
     $voices = @(Get-StudentVoices)
     if ($voices -cnotcontains $Voice) { throw "Voice $Voice is not pinned and present; available: $($voices -join ', ')." }
-    $teacher = Import-StudentTeacher (Join-Path $output 'teacher')
+    $syllabus = Import-StudentSyllabus (Join-Path $output 'syllabus')
     try {
         $watch = [Diagnostics.Stopwatch]::StartNew()
         $pronunciation = $phonemize.Invoke($Text)
@@ -1241,7 +1241,7 @@ function Invoke-StudentRender {
         [pscustomobject]@{ PSTypeName = 'Kokoro.StudentRender'; Text = $Text; Phonemes = $pronunciation.KokoroPhones; Voice = $Voice; Speed = $Speed
             AudioSeconds = $seconds; RenderSeconds = $watch.Elapsed.TotalSeconds; RealTimeFactor = $watch.Elapsed.TotalSeconds / $seconds; Path = $path }
     }
-    finally { Remove-Module -ModuleInfo $teacher -Force }
+    finally { Remove-Module -ModuleInfo $syllabus -Force }
 }
 
 function Get-StudentWindowOccurrences([object] $Book, [object] $Window) {
@@ -1266,54 +1266,54 @@ function Get-StudentWindowOccurrences([object] $Book, [object] $Window) {
     $occurrences.ToArray()
 }
 
-function Invoke-StudentTeacher {
-    # Host teacher evidence up to the generator boundary. The window is only the teacher's evidence
+function Invoke-StudentSyllabus {
+    # Host syllabus evidence up to the generator boundary. The window is only the syllabus's evidence
     # scope; what the Student receives is typed occurrences with their ticks of x and f0.
     $path = Get-StudentCorpusPath
     $data = ConvertFrom-StudentStored (Import-Clixml -LiteralPath (Join-Path $path 'corpus.clixml'))
     $voices = @(Get-StudentVoices)
     if ($voices -cnotcontains $Voice) { throw "Voice $Voice is not pinned and present; available: $($voices -join ', ')." }
-    $cache = Join-Path $script:StudentBuild "student/teacher/$Voice"; [void][IO.Directory]::CreateDirectory($cache)
-    $teacherHash = (@($script:StudentInputs.Teacher, 'tools/Kokoro.TextEncoder.psm1') | ForEach-Object { (Get-FileHash -LiteralPath (Join-Path $script:StudentRoot $_)).Hash }) -join '+'
+    $cache = Join-Path $script:StudentBuild "student/syllabus/$Voice"; [void][IO.Directory]::CreateDirectory($cache)
+    $syllabusHash = (@($script:StudentInputs.Syllabus, 'tools/Kokoro.TextEncoder.psm1') | ForEach-Object { (Get-FileHash -LiteralPath (Join-Path $script:StudentRoot $_)).Hash }) -join '+'
     $books = @{}; foreach ($book in $data.Books) { $books[$book.Index] = $book }
     $windows = @($data.Windows); if ($WindowLimit -gt 0 -and $windows.Count -gt $WindowLimit) { $windows = $windows[0..($WindowLimit - 1)] }
-    $teacher = $null; $watch = [Diagnostics.Stopwatch]::StartNew(); $renderSeconds = 0.0
+    $syllabus = $null; $watch = [Diagnostics.Stopwatch]::StartNew(); $renderSeconds = 0.0
     $records = [Collections.Generic.List[object]]::new()
     try {
         foreach ($window in $windows) {
             $occurrences = Get-StudentWindowOccurrences $books[$window.Book] $window
-            $keyText = [Text.Encoding]::UTF8.GetBytes("$Voice`n$Speed`n$teacherHash`n$($window.Phonemes)")
+            $keyText = [Text.Encoding]::UTF8.GetBytes("$Voice`n$Speed`n$syllabusHash`n$($window.Phonemes)")
             $key = [Convert]::ToHexString([Security.Cryptography.SHA256]::HashData($keyText))
             $file = Join-Path $cache "$key.clixml"; $cached = Test-Path -LiteralPath $file
             if ($cached) { $evidence = ConvertFrom-StudentStored (Import-Clixml -LiteralPath $file) }
             else {
-                # The teacher compiles its kernels once into a fresh directory; evidence stays in the cache.
-                if ($null -eq $teacher) { $teacher = Import-StudentTeacher (Join-Path (New-StudentOutputDirectory 'teacher') 'teacher') }
+                # The syllabus compiles its kernels once into a fresh directory; evidence stays in the cache.
+                if ($null -eq $syllabus) { $syllabus = Import-StudentSyllabus (Join-Path (New-StudentOutputDirectory 'syllabus') 'syllabus') }
                 $render = [Diagnostics.Stopwatch]::StartNew()
                 $speech = Invoke-OfflineSpeech -Phonemes $window.Phonemes -Voice $Voice -Speed $Speed -SkipGenerator
                 $renderSeconds += $render.Elapsed.TotalSeconds
-                $evidence = [pscustomobject]@{ PSTypeName = 'Kokoro.StudentTeacherEvidence'; Key = $key; Voice = $Voice; Speed = $Speed; Phonemes = $window.Phonemes
+                $evidence = [pscustomobject]@{ PSTypeName = 'Kokoro.StudentSyllabusEvidence'; Key = $key; Voice = $Voice; Speed = $Speed; Phonemes = $window.Phonemes
                     Durations = [int[]]$speech.Durations; F0 = [float[]]$speech.F0; X = [float[]]$speech.Features }
                 Export-Clixml -LiteralPath $file -InputObject (ConvertTo-StudentStored $evidence) -Depth 4
             }
             # One duration per token id: the two pads and one id per phoneme character.
             if ($evidence.Durations.Length -ne $window.Phonemes.Length + 2) { throw "Window $($window.Index): phonemes outside the Kokoro vocabulary." }
             $ticks = $evidence.F0.Length; $frames = 0; foreach ($duration in $evidence.Durations) { $frames += $duration }
-            if ($ticks -ne 2 * $frames -or $evidence.X.Length -ne 512 * $ticks) { throw "Window $($window.Index): teacher output is not two ticks per duration frame." }
+            if ($ticks -ne 2 * $frames -or $evidence.X.Length -ne 512 * $ticks) { throw "Window $($window.Index): syllabus output is not two ticks per duration frame." }
             $frameStart = [int[]]::new($evidence.Durations.Length + 1)
             for ($i = 0; $i -lt $evidence.Durations.Length; $i++) { $frameStart[$i + 1] = $frameStart[$i] + $evidence.Durations[$i] }
             foreach ($occurrence in $occurrences) {
                 $a = $occurrence.Start + 1; $b = $a + $occurrence.Phonemes.Length
                 $occurrence.FirstTick = 2 * $frameStart[$a]; $occurrence.Ticks = 2 * ($frameStart[$b] - $frameStart[$a])
             }
-            $records.Add([pscustomobject]@{ PSTypeName = 'Kokoro.StudentTeacherWindow'; Index = $window.Index; Key = $key; Cached = $cached; Ticks = $ticks
+            $records.Add([pscustomobject]@{ PSTypeName = 'Kokoro.StudentSyllabusWindow'; Index = $window.Index; Key = $key; Cached = $cached; Ticks = $ticks
                 AudioSeconds = $ticks / 80.0; Occurrences = $occurrences; Evidence = $evidence })
         }
     }
-    finally { if ($null -ne $teacher) { Remove-Module -ModuleInfo $teacher -Force } }
+    finally { if ($null -ne $syllabus) { Remove-Module -ModuleInfo $syllabus -Force } }
     $rendered = @($records | Where-Object { -not $_.Cached })
     $renderedAudio = 0.0; foreach ($record in $rendered) { $renderedAudio += $record.AudioSeconds }
-    [pscustomobject]@{ PSTypeName = 'Kokoro.StudentTeacher'; Corpus = $path; Voice = $Voice; Cache = $cache; Windows = $records.ToArray()
+    [pscustomobject]@{ PSTypeName = 'Kokoro.StudentSyllabus'; Corpus = $path; Voice = $Voice; Cache = $cache; Windows = $records.ToArray()
         Rendered = $rendered.Count; Cached = $records.Count - $rendered.Count; Occurrences = ($records | ForEach-Object { $_.Occurrences.Count } | Measure-Object -Sum).Sum
         AudioSeconds = ($records | Measure-Object AudioSeconds -Sum).Sum; RenderSeconds = $renderSeconds
         RenderRealTimeFactor = if ($renderedAudio) { $renderSeconds / $renderedAudio } else { $null }; WallSeconds = $watch.Elapsed.TotalSeconds }
@@ -1325,7 +1325,7 @@ $script:StudentSteps = [ordered]@{
     Corpus = { Invoke-StudentCorpus }
     Pronunciation = { Invoke-StudentPronunciation }
     Normalize = { Invoke-StudentNormalization }
-    Teacher = { Invoke-StudentTeacher }
+    Syllabus = { Invoke-StudentSyllabus }
 }
 }
 & $studentOwner { & $script:StudentSteps[$Step] }
