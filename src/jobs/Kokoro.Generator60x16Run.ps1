@@ -93,6 +93,8 @@ function New-KokoroGenerator60x16RunSteps {
         # job (QuRT unlock on main before the workers start, try-lock in the worker, and the reverse at the end);
         # Convolution has the worker take and release it around every convolution.
         [ValidateSet('Main','Worker','Convolution')][string]$MatrixLock='Main',
+        # With -Source: generate the source noise on the DSP from the seed and scale the input holds where z was.
+        [switch]$SeededNoise,
         # Tile schedule: weight planes per convolution. 1 keeps only each stage's high weight plane resident (int8 weights
         # in the high bytes of the 16-bit weights file), two accumulator groups and the two-group combine.
         [ValidateSet(1,2)][int]$WeightPlanes=2,
@@ -103,6 +105,7 @@ function New-KokoroGenerator60x16RunSteps {
         [switch]$ControllerContact)
     if($WeightPlanes -eq 1 -and $Schedule -ne 'Tile'){ throw 'One weight plane is a tile schedule option.' }
     if($ControllerContact -and $Schedule -ne 'Tile'){ throw 'The controller contact is a tile schedule option.' }
+    if($SeededNoise -and -not $Source){ throw 'Seeded noise is a source option.' }
     if(-not $PoolWait){ $PoolWait=if($Schedule -eq 'Tile'){'Spin'}else{'Futex'} }
     if($MatrixThread -and ($Schedule -ne 'Tile' -or $MatrixThread -ge $HvxThreads)){ throw 'MatrixThread names an HVX worker of the tile schedule.' }
     if($Schedule -eq 'Tile' -and ($Whole -or $Source -or $Decoder -or $Front -or $Tail -or $RuntimeFrames -or $StopAfterStage -ge 0 -or
@@ -620,7 +623,7 @@ function New-KokoroGenerator60x16RunSteps {
     if($Decoder){ & $mark 'Boundary' 'Decoder'; $decJob=Add-KokoroDecoder16JobSteps -Steps $s -Calls $calls -Frames $decIn -InputBase 20 -InputOffset $decInOff -WeightsBase 21 -WeightsOffset $decWOff -TablesBase 22 -TablesOffset $decPOff -OutputBase 25 -OutputOffset $decSlot -Moments $DecoderMoments; & $mark 'Decoder' 'Setup'; & $mark 'Unmarked' -site 30; & $sync }
     if($Source){
         & $mark 'Boundary' 'Source'
-        Add-KokoroHarmonicSource16JobSteps -Steps $s -Calls $calls -Frames $sourceFrames -InputBase 20 -InputOffset $sourceIn -WeightsBase 21 -WeightsOffset $sourceW -TablesBase 22 -TablesOffset $sourceP -HarBase 25 -HarOffset $har60At
+        Add-KokoroHarmonicSource16JobSteps -Steps $s -Calls $calls -Frames $sourceFrames -InputBase 20 -InputOffset $sourceIn -WeightsBase 21 -WeightsOffset $sourceW -TablesBase 22 -TablesOffset $sourceP -HarBase 25 -HarOffset $har60At -SeededNoise:$SeededNoise
         & $mark 'Source' 'HarLayout'
         & $mark 'Unmarked' -site 31; & $sync
         & $dma 18 $gHi 25 $har60At ($tiles60*4096L); & $dma 18 $gLo 25 ($har60At+$tiles60*4096L) ($tiles60*4096L)
@@ -951,7 +954,7 @@ function New-KokoroGenerator60x16RunSteps {
     }
     if($Decoder){ foreach($pair in (Get-KokoroDecoder16Bodies -Job $decJob)){ $bodies.Add($pair) } }
     if($Source){
-        foreach($pair in (Get-KokoroHarmonicSource16Bodies -PlaneStride $sourceLayout.Stft.PlaneStride)){ $bodies.Add($pair) }
+        foreach($pair in (Get-KokoroHarmonicSource16Bodies -PlaneStride $sourceLayout.Stft.PlaneStride -SeededNoise:$SeededNoise)){ $bodies.Add($pair) }
         $bodies.Add(@('body_har_phase_major',@(New-KokoroHarPhaseMajor16Steps -Phases 6)))
         $bodies.Add(@('body_har_phase_major_tiles',@(New-KokoroHarPhaseMajor16Steps -Phases 6 -TileBatch -LabelPrefix 'harphasemajor16tiles')))
         $bodies.Add(@('body_har_phase_major_last',@(New-KokoroHarPhaseMajor16Steps -Phases 1 -LabelPrefix 'harphasemajor16last')))
@@ -1030,6 +1033,7 @@ function New-KokoroGenerator60x16RunSteps {
     $resultLayout=[ordered]@{Frames=$Frames;Tiles=$tiles;InputBytes=$totalInput;WeightBytes=$totalWeights;ParameterBytes=$totalParameters;OutputBytes=$totalOutput;VtcmBytes=$vtcmTotal;Samples=$(if($Tail){5*($Frames-1)}else{1});PcmOffset=$(if($Tail){$pcmOffset}else{256});BranchStride=$stride;FinalWorkspaceOffset=$finalOffset;CoefficientOffset=$coefOffset;ScratchOffset=$scratchOffset;CompletedStages=$(6*$branches+[int]$withMean);BatchTiles=$batch;HvxThreads=$HvxThreads;Regions=$layout.Regions}
     $resultLayout.AdaInMode=$AdaInMode
     $resultLayout.WeightRegions=$weightRegions.ToArray()
+    if($Source){ $resultLayout.SourceNoise=[pscustomobject]@{InputOffset=$sourceIn+$sourceLayout.F0Bytes;Bytes=$sourceLayout.HalfwordBytes;Seeded=$SeededNoise.IsPresent} }
     if($ControllerContact){ $resultLayout.ControllerContact=[pscustomobject]@{Offset=$contactOffset;SensitivityBytesPerStage=8L*$Channels;ControllerOffset=$contactOffset+18L*8*$Channels;ControllerBytes=$controllerBytes;Tiles=$tiles} }
     if($PmuEvents){$resultLayout.PmuProfile=[pscustomobject]@{Categories=$pmuCategories;SiteRecordOffset=$pmuSiteOffset;SiteRecordCount=$pmuSiteRecordCount;Sites=$pmuSites}}
     $resultLayout.ConstantPacking=[pscustomobject]@{Frames=$Frames;ParameterBytes=$constantsTableOffset;ConstantsTableOffset=$constantsTableOffset;

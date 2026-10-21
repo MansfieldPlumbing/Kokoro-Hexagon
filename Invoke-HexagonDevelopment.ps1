@@ -1025,7 +1025,7 @@ $script:Kernels=@(
     # The whole generator with the harmonic source: decoder output, f0 and z to PCM (tail harness plays the PCM) under the generic tail harness (completion word 1).
     . (Join-Path $script:HexagonToolsRoot '..\src\jobs\Kokoro.Generator60x16Run.ps1')
     $pmu=if($ResidentPmuEvents){@{PmuEvents=$ResidentPmuEvents}}else{@{}}
-    $run=New-KokoroGenerator60x16RunSteps -Frames $ResBlockFrames -HvxThreads $ResidentHvxThreads -BatchTiles $ResidentBatchTiles -Whole -Source -AdaInMode $GeneratorMoments @pmu
+    $run=New-KokoroGenerator60x16RunSteps -Frames $ResBlockFrames -HvxThreads $ResidentHvxThreads -BatchTiles $ResidentBatchTiles -Whole -Source -AdaInMode $GeneratorMoments @pmu -SeededNoise:$SourceSeededNoise
     $steps=@($run.Steps)
     $symbol='kokoro_generator_tail_skel_handle_invoke'; $soname='libkokoro_generator_tail_skel.so'
     # The existing generator consumes the decoder tensor through the typed layout.
