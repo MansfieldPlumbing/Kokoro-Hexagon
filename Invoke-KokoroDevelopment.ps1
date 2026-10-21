@@ -1524,7 +1524,10 @@ function Test-KokoroGeneratorWeightPrecision {
 function Test-KokoroGeneratorTileEquivalence {
     param([Parameter(Mandatory)][string]$OutputDirectory,[string]$Soc='SM8550',[string]$Package='dev.mansfieldplumbing.kokoro',
         [string]$FixtureDirectory=(Join-Path $Build 'speak-20261010-h0-fast/job-input/generator60x16-fixture-20261008-holdout2'),[ValidateRange(1,21)][int]$Runs=3,
-        [ValidateSet(1,2,4)][int]$TileBlock=4,[ValidateRange(0,3)][int]$MatrixThread=0,[ValidateSet('Main','Worker','Convolution')][string]$MatrixLock='Main')
+        [ValidateSet(1,2,4)][int]$TileBlock=4,[ValidateRange(0,3)][int]$MatrixThread=0,[ValidateSet('Main','Worker','Convolution')][string]$MatrixLock='Main',
+        # 1: both jobs run int8 weights q = round(w / 256) (clamped to +-127) stored as 256 q, table biases corrected; the
+        # tile job keeps only the high plane resident.
+        [ValidateSet(1,2)][int]$WeightPlanes=2)
     $out=[IO.Path]::GetFullPath($OutputDirectory)
     if(-not $out.StartsWith($Build+[IO.Path]::DirectorySeparatorChar,[StringComparison]::OrdinalIgnoreCase) -or (Test-Path -LiteralPath $out)){throw 'Choose a fresh equivalence directory under build/.'}
     [void][IO.Directory]::CreateDirectory($out)
@@ -1534,15 +1537,51 @@ function Test-KokoroGeneratorTileEquivalence {
     $common=@{ResBlockFrames=[int]$fixture.Frames;ResidentHvxThreads=4}
     $export=Invoke-KokoroEmission -Kernel KokoroGenerator60x16Run -Parameters ($common+@{ResidentBatchTiles=22;GeneratorMoments='Export';GeneratorSchedule='Layer'})
     $layer=Invoke-KokoroEmission -Kernel KokoroGenerator60x16Run -Parameters ($common+@{ResidentBatchTiles=22;GeneratorMoments='Constants';GeneratorSchedule='Layer'})
-    $tile=Invoke-KokoroEmission -Kernel KokoroGenerator60x16Run -Parameters ($common+@{ResidentBatchTiles=$TileBlock;GeneratorMoments='Constants';GeneratorSchedule='Tile';GeneratorMatrixThread=$MatrixThread;GeneratorMatrixLock=$MatrixLock})
+    $tile=Invoke-KokoroEmission -Kernel KokoroGenerator60x16Run -Parameters ($common+@{ResidentBatchTiles=$TileBlock;GeneratorMoments='Constants';GeneratorSchedule='Tile';GeneratorMatrixThread=$MatrixThread;GeneratorMatrixLock=$MatrixLock;GeneratorWeightPlanes=$WeightPlanes})
     $statistics=[IO.File]::ReadAllBytes((Join-Path $FixtureDirectory 'tables.bin'))
-    $stage={param([string]$Name,[byte[]]$Tables)
+    $weights=[IO.File]::ReadAllBytes((Join-Path $FixtureDirectory 'weights.bin'))
+    $stage={param([string]$Name,[byte[]]$Tables,[byte[]]$WeightBytes)
         $directory=Join-Path $out $Name; [void][IO.Directory]::CreateDirectory($directory)
-        foreach($file in 'activations.bin','weights.bin'){[IO.File]::Copy((Join-Path $FixtureDirectory $file),(Join-Path $directory $file))}
+        [IO.File]::Copy((Join-Path $FixtureDirectory 'activations.bin'),(Join-Path $directory 'activations.bin'))
+        [IO.File]::WriteAllBytes((Join-Path $directory 'weights.bin'),$WeightBytes)
         [IO.File]::WriteAllBytes((Join-Path $directory 'tables.bin'),$Tables); $directory}
-    $exportRun=Invoke-KokoroDeviceJob -EmissionDirectory $export.Directory -EmissionArtifact $export -InputDirectory (& $stage 'export' $statistics) -Soc $Soc -Runs 1 -Package $Package
+    $exportRun=Invoke-KokoroDeviceJob -EmissionDirectory $export.Directory -EmissionArtifact $export -InputDirectory (& $stage 'export' $statistics $weights) -Soc $Soc -Runs 1 -Package $Package
     $exact=New-KokoroDecoderConstantsTables -Layout $export.Layout.ConstantPacking -Tables $statistics -Observation $exportRun.Output -OutputOffset 0 -Contracts @(1)
-    $constantsInput=& $stage 'constants' $exact.Tables
+    $runTables=$exact.Tables; $runWeights=$weights
+    if($WeightPlanes -eq 1){
+        # int8 weights in the high plane: q = round(w / 256), clamped to +-127, stored as 256 q (low plane zero). Zero-point
+        # biases follow the planes (as Test-KokoroGeneratorWeightPrecision): group 0 by -128 (sum q - sum Wh), group 1 by
+        # 128 sum Wl. HMX weight byte order: ((g K + k) CB + blk) 2048 + 1024 hh + 128 (i >> 2) + 4 c + (i & 3).
+        $runTables=[byte[]]$exact.Tables.Clone(); $runWeights=[byte[]]$weights.Clone()
+        $records=@{}; foreach($site in $layer.Layout.ConstantPacking.MomentSites){ $records["$($site.Block).$($site.Stage)"]=[long]$site.RecordOffset }
+        foreach($region in $layer.Layout.WeightRegions){
+            $width=[int]$region.Channels; $kernel=[int]$region.Kernel; $count=$width*$width*$kernel; $blocks=$width/32
+            $block=3+[Array]::IndexOf([int[]]@(3,7,11),$kernel)
+            for($st=0;$st -lt 6;$st++){
+                $high=[long]$region.Offset+2L*$count*$st; $low=$high+$count
+                $deltaHigh=[long[]]::new($width); $sumLow=[long[]]::new($width)
+                for($at=0;$at -lt $count;$at++){
+                    $hb=[int]$weights[$high+$at]; if($hb -ge 128){$hb-=256}; $lb=[int]$weights[$low+$at]; if($lb -ge 128){$lb-=256}
+                    $within=$at%2048
+                    $o=64*[math]::Floor([math]::Floor($at/2048)/($kernel*$blocks))+$(if($within -ge 1024){32}else{0})+[math]::Floor(($within%128)/4)
+                    $q=[int][math]::Max(-127,[math]::Min(127,[math]::Round((256*$hb+$lb)/256.0,[MidpointRounding]::AwayFromZero)))
+                    $runWeights[$high+$at]=[byte]($q -band 255); $runWeights[$low+$at]=0
+                    $deltaHigh[$o]+=$q-$hb; $sumLow[$o]+=$lb
+                }
+                $record=$records["$block.$st"]
+                for($o=0;$o -lt $width;$o++){
+                    for($plane=0;$plane -lt 4;$plane++){
+                        $at=[int]($record+32L*$width+(6*[math]::Floor($o/32)+$plane)*256+128+4*($o%32))
+                        $delta=if($plane -lt 2){-128L*$deltaHigh[$o]}else{128L*$sumLow[$o]}
+                        $corrected=[long][BitConverter]::ToInt32($runTables,$at)+$delta
+                        if($corrected -lt [int]::MinValue -or $corrected -gt [int]::MaxValue){throw "Table bias overflow at block $block stage $st channel $o."}
+                        [Array]::Copy([BitConverter]::GetBytes([int]$corrected),0,$runTables,$at,4)
+                    }
+                }
+            }
+        }
+    }
+    $constantsInput=& $stage 'constants' $runTables $runWeights
     $layerRun=Invoke-KokoroDeviceJob -EmissionDirectory $layer.Directory -EmissionArtifact $layer -InputDirectory $constantsInput -Soc $Soc -Runs $Runs -Package $Package
     $tileRun=Invoke-KokoroDeviceJob -EmissionDirectory $tile.Directory -EmissionArtifact $tile -InputDirectory $constantsInput -Soc $Soc -Runs $Runs -Package $Package
     # The DDR workspace starts at the first 128-byte boundary at least 64 bytes into the output buffer.
@@ -1552,7 +1591,7 @@ function Test-KokoroGeneratorTileEquivalence {
     [IO.File]::WriteAllBytes((Join-Path $out 'layer-tensor.bin'),$layerTensor); [IO.File]::WriteAllBytes((Join-Path $out 'tile-tensor.bin'),$tileTensor)
     $different=0; $first=-1; $differingTiles=[Collections.Generic.List[int]]::new()
     for($i=0;$i -lt $tensorBytes;$i++){if($layerTensor[$i] -ne $tileTensor[$i]){$different++; if($first -lt 0){$first=$i}; $t=[int][math]::Floor($i/8192); if($differingTiles.Count -eq 0 -or $differingTiles[-1] -ne $t){$differingTiles.Add($t)}}}
-    $report=[pscustomobject]@{Soc=$Soc;Fixture=$FixtureDirectory;Tiles=[int]$fixture.Tiles;TileBlock=$TileBlock;MatrixThread=$MatrixThread;MatrixLock=$MatrixLock;TensorBytes=$tensorBytes;ByteIdentical=($different -eq 0);DifferentBytes=$different;FirstDifference=$first;DifferingTiles=$differingTiles.ToArray()
+    $report=[pscustomobject]@{Soc=$Soc;Fixture=$FixtureDirectory;Tiles=[int]$fixture.Tiles;TileBlock=$TileBlock;MatrixThread=$MatrixThread;MatrixLock=$MatrixLock;WeightPlanes=$WeightPlanes;TensorBytes=$tensorBytes;ByteIdentical=($different -eq 0);DifferentBytes=$different;FirstDifference=$first;DifferingTiles=$differingTiles.ToArray()
         LayerDspMs=$layerRun.MedianMs;TileDspMs=$tileRun.MedianMs;LayerVtcmBytes=$layer.Layout.VtcmBytes;TileVtcmBytes=$tile.Layout.VtcmBytes;LayerLibraryBytes=$layer.Bytes;TileLibraryBytes=$tile.Bytes
         LayerLibrarySHA256=$layer.LibrarySHA256;TileLibrarySHA256=$tile.LibrarySHA256;LayerTensorSHA256=[Convert]::ToHexString([Security.Cryptography.SHA256]::HashData($layerTensor))
         TileTensorSHA256=[Convert]::ToHexString([Security.Cryptography.SHA256]::HashData($tileTensor))}

@@ -28,10 +28,15 @@ function New-KokoroHmxConvPlanesSteps {
         [ValidateSet(1, 2)][int] $WeightPlanes = 1,
         [Parameter(Mandatory)][ValidateRange(2048, 1073741824)][long] $PlaneStride,
         [string] $LabelPrefix = 'hmxconvplanes',
-        [switch] $NoReturn
+        [switch] $NoReturn,
+        # Column-table stride in accumulator groups (default: this conv's own). 3 lets a one-plane conv read tables laid
+        # out for -WeightPlanes 2, using their first two groups.
+        [ValidateRange(0, 3)][int] $TableGroups = 0
     )
     [int]$cb = $InputChannels / 32; [int]$ob = $OutputChannels / 32; [int]$groups = $OutputChannels / 64
     $accGroups = if ($WeightPlanes -eq 2) { 3 } else { 2 }
+    $tableStride = if ($TableGroups) { $TableGroups } else { $accGroups }
+    if ($tableStride -lt $accGroups) { throw 'Table stride must cover every accumulator group' }
     $wlOffset = $groups * $Kernel * $cb * 2048
     [int]$half = ($Kernel - 1) / 2
     if ($Dilation * $half -gt 31) { throw 'Tap shift exceeds one crouton' }
@@ -74,7 +79,7 @@ function New-KokoroHmxConvPlanesSteps {
                 $o = 2 * $g + $h
                 foreach ($plane in 0, 1) {
                     $p = 2 * $group + $plane
-                    $s.Add(@{Op='addi'; d=14; s=3; i=(512 * $accGroups * $o + 256 * $p)})
+                    $s.Add(@{Op='addi'; d=14; s=3; i=(512 * $tableStride * $o + 256 * $p)})
                     $s.Add(@{Op='bias-mxmem2'; s=14})
                     & $imm 15 ($p * $PlaneStride + 2048 * $o)
                     $s.Add(@{Op='add'; d=14; s=5; t=15})

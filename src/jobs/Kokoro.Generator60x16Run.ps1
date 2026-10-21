@@ -92,7 +92,11 @@ function New-KokoroGenerator60x16RunSteps {
         # With MatrixThread: Main leaves the matrix lock with the main thread; Worker hands it to that worker for the
         # job (QuRT unlock on main before the workers start, try-lock in the worker, and the reverse at the end);
         # Convolution has the worker take and release it around every convolution.
-        [ValidateSet('Main','Worker','Convolution')][string]$MatrixLock='Main')
+        [ValidateSet('Main','Worker','Convolution')][string]$MatrixLock='Main',
+        # Tile schedule: weight planes per convolution. 1 keeps only each stage's high weight plane resident (int8 weights
+        # in the high bytes of the 16-bit weights file), two accumulator groups and the two-group combine.
+        [ValidateSet(1,2)][int]$WeightPlanes=2)
+    if($WeightPlanes -eq 1 -and $Schedule -ne 'Tile'){ throw 'One weight plane is a tile schedule option.' }
     if(-not $PoolWait){ $PoolWait=if($Schedule -eq 'Tile'){'Spin'}else{'Futex'} }
     if($MatrixThread -and ($Schedule -ne 'Tile' -or $MatrixThread -ge $HvxThreads)){ throw 'MatrixThread names an HVX worker of the tile schedule.' }
     if($Schedule -eq 'Tile' -and ($Whole -or $Source -or $Decoder -or $Front -or $Tail -or $RuntimeFrames -or $StopAfterStage -ge 0 -or
@@ -248,14 +252,15 @@ function New-KokoroGenerator60x16RunSteps {
         $al={param([long]$v) [long]([math]::Ceiling($v/65536)*65536)}
         $tileStages=@(for($bb=0;$bb -lt 3;$bb++){for($st=0;$st -lt 6;$st++){
             [pscustomobject]@{Branch=$bb;Stage=$st;Pair=[int][math]::Floor($st/2);Half=$st%2;Dilation=@(1,3,5)[[int][math]::Floor($st/2)]
-                WeightOffset=$branchWeights[$bb]+$st*2L*$Channels*$Channels*$Kernels[$bb];WeightBytes=2L*$Channels*$Channels*$Kernels[$bb];RecordOffset=$pBase+(6L*$bb+$st)*$recordBytes}}})
+                WeightOffset=$branchWeights[$bb]+$st*2L*$Channels*$Channels*$Kernels[$bb];WeightBytes=[long]$WeightPlanes*$Channels*$Channels*$Kernels[$bb];RecordOffset=$pBase+(6L*$bb+$st)*$recordBytes}}})
+        $tilePlanes=4L+2*($WeightPlanes-1)
         $tileRegions=[ordered]@{}; $at=0L
-        foreach($r in @(@('Window',(($batch+2L)*$tileBytes)),@('WindowLow',(($batch+2L)*$tileBytes)),@('Planes',(6L*$batch*$tileBytes)),@('Moments',(16L*$Channels)),@('Mean',([long]$batch*$tileBytes)),
+        foreach($r in @(@('Window',(($batch+2L)*$tileBytes)),@('WindowLow',(($batch+2L)*$tileBytes)),@('Planes',($tilePlanes*$batch*$tileBytes)),@('Moments',(16L*$Channels)),@('Mean',([long]$batch*$tileBytes)),
             @('ResidualRings',(3L*8*$batch*$tileBytes)),@('StageRings',(9L*4*$batch*$tileBytes)),@('Kms',(18L*$kmsBytes)),@('Records',(18L*$recordBytes)))){ $tileRegions[$r[0]]=$at; $at+=& $al $r[1] }
         $tileWeightAt=[long[]]::new(18); foreach($g in $tileStages){ $tileWeightAt[6*$g.Branch+$g.Stage]=$at; $at+=$g.WeightBytes }
         $vtcmTotal=& $al $at
         if($vtcmTotal -gt 8388608){throw 'The tile schedule does not fit VTCM.'}
-        if($tileRegions.Planes+6L*$batch*$tileBytes -gt 1048576){throw 'HMX windows and planes must lie in the first 1 MiB of VTCM.'}
+        if($tileRegions.Planes+$tilePlanes*$batch*$tileBytes -gt 1048576){throw 'HMX windows and planes must lie in the first 1 MiB of VTCM.'}
     }
     . $bind 0
     $vtcmBytes=$vtcmTotal
@@ -896,10 +901,12 @@ function New-KokoroGenerator60x16RunSteps {
         $bodies.Add(@("body_moments$sfx",@(New-KokoroAdaInMoments16Steps -Channels $Channels -LabelPrefix "adainmoments16$sfx")))
         $bodies.Add(@("body_coeff$sfx",@(New-KokoroAdaInTurnsCoefficientsSteps -Channels $Channels -LabelPrefix "turnscoeff$sfx")))
     }
-    $bodies.Add(@("body_combine_conv$sfx",@(New-KokoroPlaneCombineSteps -Mode Conv -Channels $Channels -Groups 3 -Group3Shifts -PlaneStride $planeStride -LabelPrefix "combineconv$sfx")))
-    $bodies.Add(@("body_combine_residual$sfx",@(New-KokoroPlaneCombineSteps -Mode Residual -Channels $Channels -Groups 3 -Group3Shifts -PlaneStride $planeStride -LabelPrefix "combineresidual$sfx")))
+    $combineGroups=if($WeightPlanes -eq 2){@{Groups=3;Group3Shifts=$true}}else{@{Groups=2}}
+    $convPlanes=if($WeightPlanes -eq 2){@{WeightPlanes=2}}else{@{WeightPlanes=1;TableGroups=3}}
+    $bodies.Add(@("body_combine_conv$sfx",@(New-KokoroPlaneCombineSteps -Mode Conv -Channels $Channels @combineGroups -PlaneStride $planeStride -LabelPrefix "combineconv$sfx")))
+    $bodies.Add(@("body_combine_residual$sfx",@(New-KokoroPlaneCombineSteps -Mode Residual -Channels $Channels @combineGroups -PlaneStride $planeStride -LabelPrefix "combineresidual$sfx")))
     $bodies.Add(@("body_mean$sfx",@(New-KokoroBranchMean16Steps -Channels $Channels -LabelPrefix "branchmean16$sfx")))
-    for($b=0;$b -lt $branches;$b++){foreach($d in 1,3,5){$bodies.Add(@("body_conv_b${b}_d$d$sfx",@(New-KokoroHmxConvPlanesSteps -InputChannels $Channels -OutputChannels $Channels -Kernel $Kernels[$b] -Dilation $d -WeightPlanes 2 -PlaneStride $planeStride -LabelPrefix "g16_b${b}_d$d$sfx")))}}
+    for($b=0;$b -lt $branches;$b++){foreach($d in 1,3,5){$bodies.Add(@("body_conv_b${b}_d$d$sfx",@(New-KokoroHmxConvPlanesSteps -InputChannels $Channels -OutputChannels $Channels -Kernel $Kernels[$b] -Dilation $d @convPlanes -PlaneStride $planeStride -LabelPrefix "g16_b${b}_d$d$sfx")))}}
     if($front10){
         $bodies.Add(@('body_conv_front10_noise',@(New-KokoroHmxConvPlanesSteps -InputChannels 256 -OutputChannels 256 -Kernel 3 -Dilation 1 -WeightPlanes 2 -PlaneStride $planeStride -LabelPrefix 'g16tn')))
         $bodies.Add(@('body_conv_front10_up',@(New-KokoroHmxConvPlanesSteps -InputChannels 512 -OutputChannels 256 -Kernel 3 -Dilation 1 -WeightPlanes 2 -PlaneStride $planeStride -LabelPrefix 'g16tu')))
