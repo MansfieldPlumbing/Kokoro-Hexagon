@@ -1523,7 +1523,8 @@ function Test-KokoroGeneratorWeightPrecision {
 # input and weights, and their output tensors must be byte-identical.
 function Test-KokoroGeneratorTileEquivalence {
     param([Parameter(Mandatory)][string]$OutputDirectory,[string]$Soc='SM8550',[string]$Package='dev.mansfieldplumbing.kokoro',
-        [string]$FixtureDirectory=(Join-Path $Build 'speak-20261010-h0-fast/job-input/generator60x16-fixture-20261008-holdout2'),[ValidateRange(1,21)][int]$Runs=3)
+        [string]$FixtureDirectory=(Join-Path $Build 'speak-20261010-h0-fast/job-input/generator60x16-fixture-20261008-holdout2'),[ValidateRange(1,21)][int]$Runs=3,
+        [ValidateSet(1,2,4)][int]$TileBlock=4)
     $out=[IO.Path]::GetFullPath($OutputDirectory)
     if(-not $out.StartsWith($Build+[IO.Path]::DirectorySeparatorChar,[StringComparison]::OrdinalIgnoreCase) -or (Test-Path -LiteralPath $out)){throw 'Choose a fresh equivalence directory under build/.'}
     [void][IO.Directory]::CreateDirectory($out)
@@ -1533,7 +1534,7 @@ function Test-KokoroGeneratorTileEquivalence {
     $common=@{ResBlockFrames=[int]$fixture.Frames;ResidentHvxThreads=4}
     $export=Invoke-KokoroEmission -Kernel KokoroGenerator60x16Run -Parameters ($common+@{ResidentBatchTiles=22;GeneratorMoments='Export';GeneratorSchedule='Layer'})
     $layer=Invoke-KokoroEmission -Kernel KokoroGenerator60x16Run -Parameters ($common+@{ResidentBatchTiles=22;GeneratorMoments='Constants';GeneratorSchedule='Layer'})
-    $tile=Invoke-KokoroEmission -Kernel KokoroGenerator60x16Run -Parameters ($common+@{ResidentBatchTiles=1;GeneratorMoments='Constants';GeneratorSchedule='Tile'})
+    $tile=Invoke-KokoroEmission -Kernel KokoroGenerator60x16Run -Parameters ($common+@{ResidentBatchTiles=$TileBlock;GeneratorMoments='Constants';GeneratorSchedule='Tile'})
     $statistics=[IO.File]::ReadAllBytes((Join-Path $FixtureDirectory 'tables.bin'))
     $stage={param([string]$Name,[byte[]]$Tables)
         $directory=Join-Path $out $Name; [void][IO.Directory]::CreateDirectory($directory)
@@ -1548,9 +1549,10 @@ function Test-KokoroGeneratorTileEquivalence {
     $tensorBytes=[long]$fixture.Tiles*8192
     $read={param($Run,$Emission) $at=128+[long]$Emission.Layout.FinalWorkspaceOffset; [byte[]]$Run.Output[$at..($at+$tensorBytes-1)]}
     $layerTensor=& $read $layerRun $layer; $tileTensor=& $read $tileRun $tile
-    $different=0; $first=-1
-    for($i=0;$i -lt $tensorBytes;$i++){if($layerTensor[$i] -ne $tileTensor[$i]){$different++; if($first -lt 0){$first=$i}}}
-    $report=[pscustomobject]@{Soc=$Soc;Fixture=$FixtureDirectory;Tiles=[int]$fixture.Tiles;TensorBytes=$tensorBytes;ByteIdentical=($different -eq 0);DifferentBytes=$different;FirstDifference=$first
+    [IO.File]::WriteAllBytes((Join-Path $out 'layer-tensor.bin'),$layerTensor); [IO.File]::WriteAllBytes((Join-Path $out 'tile-tensor.bin'),$tileTensor)
+    $different=0; $first=-1; $differingTiles=[Collections.Generic.List[int]]::new()
+    for($i=0;$i -lt $tensorBytes;$i++){if($layerTensor[$i] -ne $tileTensor[$i]){$different++; if($first -lt 0){$first=$i}; $t=[int][math]::Floor($i/8192); if($differingTiles.Count -eq 0 -or $differingTiles[-1] -ne $t){$differingTiles.Add($t)}}}
+    $report=[pscustomobject]@{Soc=$Soc;Fixture=$FixtureDirectory;Tiles=[int]$fixture.Tiles;TileBlock=$TileBlock;TensorBytes=$tensorBytes;ByteIdentical=($different -eq 0);DifferentBytes=$different;FirstDifference=$first;DifferingTiles=$differingTiles.ToArray()
         LayerDspMs=$layerRun.MedianMs;TileDspMs=$tileRun.MedianMs;LayerVtcmBytes=$layer.Layout.VtcmBytes;TileVtcmBytes=$tile.Layout.VtcmBytes;LayerLibraryBytes=$layer.Bytes;TileLibraryBytes=$tile.Bytes
         LayerLibrarySHA256=$layer.LibrarySHA256;TileLibrarySHA256=$tile.LibrarySHA256;LayerTensorSHA256=[Convert]::ToHexString([Security.Cryptography.SHA256]::HashData($layerTensor))
         TileTensorSHA256=[Convert]::ToHexString([Security.Cryptography.SHA256]::HashData($tileTensor))}

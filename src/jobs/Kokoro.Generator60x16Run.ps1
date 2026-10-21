@@ -76,15 +76,16 @@ function New-KokoroGenerator60x16RunSteps {
         # its output written to the DDR workspace where the 10x front reads it instead of the input buffer.
         [switch]$Decoder,
         [ValidateSet('Accumulate','Constants')][string]$DecoderMoments='Accumulate',
-        # Tile: depth-first. Every stage's weights, record and K/M/S stay resident in VTCM, and each tile runs through all
-        # 18 stages before the next: at step i, stage q of every branch processes tile i - q, so each stage reads exactly
-        # what the layer schedule gives it. Residual rings of 8 tiles and stage rings of 4; interior steps run in a loop1
-        # hardware loop with ring slots computed in registers, the six steps at each end unrolled. One section without
-        # fronts or tail, three kernels and their mean, supplied AdaIN values, one tile per batch.
+        # Tile: depth-first. Every stage's weights, record and K/M/S stay resident in VTCM, and each block of BatchTiles
+        # tiles runs through all 18 stages before the next: at step i, stage q of every branch processes block i - q, so
+        # each stage reads exactly what the layer schedule gives it. Residual rings of 8 blocks and stage rings of 4;
+        # interior steps run in a counted loop with ring slots computed in registers, the six steps at each end
+        # unrolled; the tile-parallel bodies use every HVX thread. One section without fronts or tail, three kernels and
+        # their mean, supplied AdaIN values, a power-of-two BatchTiles.
         [ValidateSet('Layer','Tile')][string]$Schedule='Layer')
     if($Schedule -eq 'Tile' -and ($Whole -or $Source -or $Decoder -or $Front -or $Tail -or $RuntimeFrames -or $StopAfterStage -ge 0 -or
-        $Kernels.Count -ne 3 -or $AdaInMode -ne 'Constants' -or $BatchTiles -ne 1 -or $Channels -ne 128 -or $PmuEvents)) {
-        throw 'The tile schedule runs one 128-channel section of three kernels and their mean with supplied AdaIN values, one tile per batch.'
+        $Kernels.Count -ne 3 -or $AdaInMode -ne 'Constants' -or ($BatchTiles -band ($BatchTiles-1)) -or $Channels -ne 128 -or $PmuEvents)) {
+        throw 'The tile schedule runs one 128-channel section of three kernels and their mean with supplied AdaIN values, a power-of-two block of tiles per step.'
     }
     if($RuntimeFrames -and ($Whole -or $Source -or $Decoder -or $Front -or $Tail -or $StopAfterStage -ge 0)) {
         throw 'Runtime frames currently admit complete residual stages only.'
@@ -237,12 +238,12 @@ function New-KokoroGenerator60x16RunSteps {
             [pscustomobject]@{Branch=$bb;Stage=$st;Pair=[int][math]::Floor($st/2);Half=$st%2;Dilation=@(1,3,5)[[int][math]::Floor($st/2)]
                 WeightOffset=$branchWeights[$bb]+$st*2L*$Channels*$Channels*$Kernels[$bb];WeightBytes=2L*$Channels*$Channels*$Kernels[$bb];RecordOffset=$pBase+(6L*$bb+$st)*$recordBytes}}})
         $tileRegions=[ordered]@{}; $at=0L
-        foreach($r in @(@('Window',(3L*$tileBytes)),@('WindowLow',(3L*$tileBytes)),@('Planes',(6L*$tileBytes)),@('Moments',(16L*$Channels)),@('Mean',[long]$tileBytes),
-            @('ResidualRings',(3L*8*$tileBytes)),@('StageRings',(9L*4*$tileBytes)),@('Kms',(18L*$kmsBytes)),@('Records',(18L*$recordBytes)))){ $tileRegions[$r[0]]=$at; $at+=& $al $r[1] }
+        foreach($r in @(@('Window',(($batch+2L)*$tileBytes)),@('WindowLow',(($batch+2L)*$tileBytes)),@('Planes',(6L*$batch*$tileBytes)),@('Moments',(16L*$Channels)),@('Mean',([long]$batch*$tileBytes)),
+            @('ResidualRings',(3L*8*$batch*$tileBytes)),@('StageRings',(9L*4*$batch*$tileBytes)),@('Kms',(18L*$kmsBytes)),@('Records',(18L*$recordBytes)))){ $tileRegions[$r[0]]=$at; $at+=& $al $r[1] }
         $tileWeightAt=[long[]]::new(18); foreach($g in $tileStages){ $tileWeightAt[6*$g.Branch+$g.Stage]=$at; $at+=$g.WeightBytes }
         $vtcmTotal=& $al $at
         if($vtcmTotal -gt 8388608){throw 'The tile schedule does not fit VTCM.'}
-        if($tileRegions.Planes+6L*$tileBytes -gt 1048576){throw 'HMX windows and planes must lie in the first 1 MiB of VTCM.'}
+        if($tileRegions.Planes+6L*$batch*$tileBytes -gt 1048576){throw 'HMX windows and planes must lie in the first 1 MiB of VTCM.'}
     }
     . $bind 0
     $vtcmBytes=$vtcmTotal
@@ -323,9 +324,12 @@ function New-KokoroGenerator60x16RunSteps {
     # Tile-parallel call: arguments are VTCM offsets (r18-relative); perTile ones advance 8192 bytes per tile.
     # With -Moments the second argument is the job's moments record: each worker accumulates into its own
     # zeroed 2048-byte record, added into the job's after the join (wrapping int32 sums, order-free).
-    $parallel={param([string]$body,[long[]]$off,[bool[]]$perTile,[int]$count,[switch]$Moments)
+    # An argument may also be a ring descriptor (tile schedule): @{Base;Blocks;Block;Delta;Within}, set by $ringPointer
+    # at the descriptor's tile plus the worker's first tile.
+    $parallel={param([string]$body,[object[]]$off,[bool[]]$perTile,[int]$count,[switch]$Moments)
         $n=$off.Count
-        if($HvxThreads -eq 1 -or $count -lt 2){ for($i=0;$i -lt $n;$i++){ & $ptr $i 18 $off[$i] }; & $imm $n $count; & $call $body; return }
+        $argument={param([int]$r,[int]$i,[int]$skip) if($off[$i] -is [hashtable]){ & $ringPointer $r $off[$i].Base $off[$i].Blocks $off[$i].Block $off[$i].Delta ($off[$i].Within+$skip) } else { & $ptr $r 18 $off[$i] } }
+        if($HvxThreads -eq 1 -or $count -lt 2){ for($i=0;$i -lt $n;$i++){ & $argument $i $i 0 }; & $imm $n $count; & $call $body; return }
         $chunk=[int][math]::Ceiling($count/$HvxThreads)
         for($k=1;$k -lt $HvxThreads;$k++){
             $o=$k*$chunk; $c=[math]::Max(0,[math]::Min($chunk,$count-$o))
@@ -333,8 +337,9 @@ function New-KokoroGenerator60x16RunSteps {
             & $ptr 6 25 ($poolOffset+64*$k)
             if($c -gt 0){
                 for($i=0;$i -lt $n;$i++){
-                    $value=if($Moments -and $i -eq 1){$privateMoments[$k]}elseif($perTile[$i]){$off[$i]+$o*$tileBytes}else{$off[$i]}
-                    & $ptr 0 18 $value; $s.Add(@{Op='store';s=6;t=0;Offset=(4*$i)})
+                    if($off[$i] -is [hashtable]){ & $argument 0 $i $o }
+                    else { $value=if($Moments -and $i -eq 1){$privateMoments[$k]}elseif($perTile[$i]){$off[$i]+$o*$tileBytes}else{$off[$i]}; & $ptr 0 18 $value }
+                    $s.Add(@{Op='store';s=6;t=0;Offset=(4*$i)})
                 }
                 & $imm 0 $c; $s.Add(@{Op='store';s=6;t=0;Offset=(4*$n)})
                 & $addr 0 $body; $s.Add(@{Op='store';s=6;t=0;Offset=44})
@@ -344,7 +349,7 @@ function New-KokoroGenerator60x16RunSteps {
         $s.Add(@{Op='syncht'})
         & $ptr 6 25 $poolOffset; $s.Add(@{Op='load';d=0;s=6;Offset=0}); $s.Add(@{Op='addi';d=0;s=0;i=1}); $s.Add(@{Op='store';s=6;t=0;Offset=0})
         $s.Add(@{Op='addi';d=0;s=6;i=0}); & $imm 1 ($HvxThreads-1); $s.Add(@{Op='trap0';i=0x11})
-        for($i=0;$i -lt $n;$i++){ & $ptr $i 18 $off[$i] }; & $imm $n ([math]::Min($chunk,$count)); & $call $body
+        for($i=0;$i -lt $n;$i++){ & $argument $i $i 0 }; & $imm $n ([math]::Min($chunk,$count)); & $call $body
         for($k=1;$k -lt $HvxThreads;$k++){
             $wait=& $label; $done=& $label
             $s.Add(@{Op='label';Name=$wait})
@@ -594,69 +599,78 @@ function New-KokoroGenerator60x16RunSteps {
         & $dma 25 $harPmAt 18 $gPmHi ($tiles10*16384L); & $dma 25 ($harPmAt+$tiles10*16384L) 18 $gPmLo ($tiles10*16384L)
         & $mark 'Unmarked' -site 34; & $sync
     }
-    # Tile schedule (see -Schedule). A tile operand is either a constant tile index (the unrolled end steps) or $null, the
-    # runtime step in r17; ring slots are tile & (ring - 1). r17 is free in every body this schedule calls.
-    $tileShift=[int][math]::Round([math]::Log($tileBytes,2))
-    $ringPointer={param([int]$r,[long]$ringBase,[int]$ringTiles,$tile,[int]$delta)
-        if($null -ne $tile){ & $ptr $r 18 ($ringBase+(($tile+$delta) -band ($ringTiles-1))*[long]$tileBytes); return }
-        $s.Add(@{Op='addi';d=$r;s=17;i=$delta}); & $imm 15 ($ringTiles-1); $s.Add(@{Op='and';d=$r;s=$r;t=15})
-        $s.Add(@{Op='asl-i';d=$r;s=$r;i=$tileShift}); & $imm 15 $ringBase; $s.Add(@{Op='add';d=$r;s=$r;t=15}); $s.Add(@{Op='add';d=$r;s=$r;t=18})
+    # Tile schedule (see -Schedule). A step moves a block of $batch tiles: at step i, stage q of every branch processes
+    # block i - q. A block operand is a constant block index (the unrolled end steps) or $null, the runtime step in r17
+    # (free in every body this schedule calls). Ring slots are block & (ring blocks - 1), each $batch contiguous tiles.
+    $blockBytes=[long]$batch*$tileBytes
+    $blockShift=[int][math]::Round([math]::Log($blockBytes,2))
+    $blockCount=[int][math]::Ceiling($tiles/$batch)
+    $blockTiles={param([int]$block) [int][math]::Min($batch,$tiles-$block*$batch)}
+    # Register r <- tile `within` of block (block + delta) in a ring.
+    $ringPointer={param([int]$r,[long]$ringBase,[int]$ringBlocks,$block,[int]$delta,[int]$within)
+        if($null -ne $block){ & $ptr $r 18 ($ringBase+(($block+$delta) -band ($ringBlocks-1))*$blockBytes+$within*[long]$tileBytes); return }
+        $s.Add(@{Op='addi';d=$r;s=17;i=$delta}); & $imm 15 ($ringBlocks-1); $s.Add(@{Op='and';d=$r;s=$r;t=15})
+        $s.Add(@{Op='asl-i';d=$r;s=$r;i=$blockShift}); & $imm 15 ($ringBase+$within*[long]$tileBytes); $s.Add(@{Op='add';d=$r;s=$r;t=15}); $s.Add(@{Op='add';d=$r;s=$r;t=18})
     }
+    $ring={param([long]$ringBase,[int]$ringBlocks,$block,[int]$delta,[int]$within) @{Base=$ringBase;Blocks=$ringBlocks;Block=$block;Delta=$delta;Within=$within}}
     $dmaRegisters={param([long]$length) & $imm 3 $length; $s.Add(@{Op='addi';d=0;s=24;i=0}); foreach($step in @(New-KokoroDmaCopySteps -NoReturn)){$s.Add($step)} }
-    # Stage q of a branch at step i processes tile i - q: a constant tile, or at run time r17 + (k - q) for its tile + k.
-    $tileStage={param($g,[int]$q,$tile)
+    # Stage q of a branch at step i processes block i - q: a constant block, or at run time r17 + (k - q) for its block + k.
+    $tileStage={param($g,[int]$q,$block)
         $index=6*$g.Branch+$g.Stage
         $kAt=$tileRegions.Kms+$index*$kmsBytes; $rAt=$tileRegions.Records+$index*$recordBytes
-        $residualBase=$tileRegions.ResidualRings+$g.Branch*8L*$tileBytes; $stageBase=$tileRegions.StageRings+(3L*$g.Branch+$g.Pair)*4*$tileBytes
-        $sourceBase=if($g.Half -eq 0){$residualBase}else{$stageBase}; $sourceTiles=if($g.Half -eq 0){8}else{4}
-        $delta={param([int]$k) if($null -ne $tile){$k}else{$k-$q}}
-        if($null -ne $tile -and $tile -eq 0){ & $fill $tileRegions.Window 1 0x80008000L; & $fill $tileRegions.WindowLow 1 0 }
-        if($null -ne $tile -and $tile -eq $tiles-1){ & $fill ($tileRegions.Window+2L*$tileBytes) 1 0x80008000L; & $fill ($tileRegions.WindowLow+2L*$tileBytes) 1 0 }
-        foreach($k in -1,0,1){
-            if($null -ne $tile -and ($tile+$k -lt 0 -or $tile+$k -ge $tiles)){continue}
-            & $ringPointer 0 $sourceBase $sourceTiles $tile (& $delta $k)
-            & $ptr 1 18 ($tileRegions.Window+($k+1)*[long]$tileBytes); & $ptr 2 18 ($tileRegions.WindowLow+($k+1)*[long]$tileBytes); & $ptr 3 18 $kAt; & $imm 4 1
-            & $call "body_turns$sfx"
-        }
-        if($null -ne $tile -and $tile -ge $tiles-2){
-            $position=$tiles-$tile; & $padRows ($tileRegions.Window+$position*[long]$tileBytes) 0x8000; & $padRows ($tileRegions.WindowLow+$position*[long]$tileBytes) 0
+        $residualBase=$tileRegions.ResidualRings+$g.Branch*8L*$blockBytes; $stageBase=$tileRegions.StageRings+(3L*$g.Branch+$g.Pair)*4*$blockBytes
+        $sourceBase=if($g.Half -eq 0){$residualBase}else{$stageBase}; $sourceBlocks=if($g.Half -eq 0){8}else{4}
+        $delta={param([int]$k) if($null -ne $block){$k}else{$k-$q}}
+        $count=if($null -ne $block){& $blockTiles $block}else{$batch}
+        $isFirst=$null -ne $block -and $block -eq 0; $isLast=$null -ne $block -and $block -eq $blockCount-1
+        if($isFirst){ & $fill $tileRegions.Window 1 0x80008000L; & $fill $tileRegions.WindowLow 1 0 }
+        if($isLast){ & $fill ($tileRegions.Window+($count+1)*[long]$tileBytes) 1 0x80008000L; & $fill ($tileRegions.WindowLow+($count+1)*[long]$tileBytes) 1 0 }
+        # Window positions: 0 the previous block's last tile, 1..count this block, count + 1 the next block's first tile.
+        if(-not $isFirst){ & $parallel "body_turns$sfx" @((& $ring $sourceBase $sourceBlocks $block (& $delta -1) ($batch-1)),$tileRegions.Window,$tileRegions.WindowLow,$kAt) @($true,$true,$true,$false) 1 }
+        & $parallel "body_turns$sfx" @((& $ring $sourceBase $sourceBlocks $block (& $delta 0) 0),($tileRegions.Window+$tileBytes),($tileRegions.WindowLow+$tileBytes),$kAt) @($true,$true,$true,$false) $count
+        if(-not $isLast){ & $parallel "body_turns$sfx" @((& $ring $sourceBase $sourceBlocks $block (& $delta 1) 0),($tileRegions.Window+($count+1)*[long]$tileBytes),($tileRegions.WindowLow+($count+1)*[long]$tileBytes),$kAt) @($true,$true,$true,$false) 1 }
+        if($null -ne $block){
+            $position=($tiles-1)-$block*$batch+1
+            if($position -ge 0 -and $position -le $count+1){ & $padRows ($tileRegions.Window+$position*[long]$tileBytes) 0x8000; & $padRows ($tileRegions.WindowLow+$position*[long]$tileBytes) 0 }
         }
         & $sync
-        & $ptr 0 18 ($tileRegions.Window+$tileBytes); & $ptr 1 18 ($tileRegions.WindowLow+$tileBytes); & $ptr 2 18 $tileWeightAt[$index]; & $ptr 3 18 ($rAt+$tablesAt); & $imm 4 1; & $ptr 5 18 $tileRegions.Planes
+        & $ptr 0 18 ($tileRegions.Window+$tileBytes); & $ptr 1 18 ($tileRegions.WindowLow+$tileBytes); & $ptr 2 18 $tileWeightAt[$index]; & $ptr 3 18 ($rAt+$tablesAt); & $imm 4 $count; & $ptr 5 18 $tileRegions.Planes
         & $call "body_conv_b$($g.Branch)_d$(if($g.Half -eq 0){$g.Dilation}else{1})$sfx"
         & $sync
-        $targetBase=if($g.Half -eq 0){$stageBase}else{$residualBase}; $targetTiles=if($g.Half -eq 0){4}else{8}
-        & $ptr 0 18 $tileRegions.Planes; & $ringPointer 1 $targetBase $targetTiles $tile (& $delta 0); & $ptr 2 18 ($rAt+$ratiosAt); & $imm 3 1
-        & $call $(if($g.Half -eq 0){"body_combine_conv$sfx"}else{"body_combine_residual$sfx"})
-        if($null -ne $tile -and $tile -eq $tiles-1){ & $padRows ($targetBase+(($tiles-1) -band ($targetTiles-1))*[long]$tileBytes) 0x8000 }
+        $targetBase=if($g.Half -eq 0){$stageBase}else{$residualBase}; $targetBlocks=if($g.Half -eq 0){4}else{8}
+        & $parallel $(if($g.Half -eq 0){"body_combine_conv$sfx"}else{"body_combine_residual$sfx"}) @($tileRegions.Planes,(& $ring $targetBase $targetBlocks $block (& $delta 0) 0),($rAt+$ratiosAt)) @($true,$true,$false) $count
+        if($isLast){ & $padRows ($targetBase+($block -band ($targetBlocks-1))*$blockBytes+($count-1)*[long]$tileBytes) 0x8000 }
     }
-    # Step i: load input tile i + 1 into every branch's residual ring, run every branch's stages, then the mean of tile i - 5.
+    # Step i: load input block i + 1 into every branch's residual ring, run every branch's stages, then the mean of block i - 5.
     $tileStep={param($step)
-        if($null -eq $step -or $step+1 -lt $tiles){
+        if($null -eq $step -or $step+1 -lt $blockCount){
             for($bb=0;$bb -lt 3;$bb++){
-                if($null -ne $step){ & $dma 18 ($tileRegions.ResidualRings+$bb*8L*$tileBytes+(($step+1) -band 7)*[long]$tileBytes) 20 ($r0Offset+($step+1)*[long]$tileBytes) $tileBytes }
+                $ringBase=$tileRegions.ResidualRings+$bb*8L*$blockBytes
+                if($null -ne $step){ & $dma 18 ($ringBase+(($step+1) -band 7)*$blockBytes) 20 ($r0Offset+($step+1)*$blockBytes) ((& $blockTiles ($step+1))*[long]$tileBytes) }
                 else {
-                    $s.Add(@{Op='addi';d=1;s=17;i=1}); $s.Add(@{Op='asl-i';d=1;s=1;i=$tileShift}); & $imm 15 $r0Offset; $s.Add(@{Op='add';d=1;s=1;t=15}); $s.Add(@{Op='add';d=1;s=1;t=20})
-                    & $ringPointer 2 ($tileRegions.ResidualRings+$bb*8L*$tileBytes) 8 $null 1
-                    & $dmaRegisters $tileBytes
+                    $s.Add(@{Op='addi';d=1;s=17;i=1}); $s.Add(@{Op='asl-i';d=1;s=1;i=$blockShift}); & $imm 15 $r0Offset; $s.Add(@{Op='add';d=1;s=1;t=15}); $s.Add(@{Op='add';d=1;s=1;t=20})
+                    & $ringPointer 2 $ringBase 8 $null 1 0
+                    & $dmaRegisters $blockBytes
                 }
             }
         }
         for($bb=0;$bb -lt 3;$bb++){ for($q=0;$q -lt 6;$q++){
-            $tile=if($null -ne $step){$step-$q}else{$null}
-            if($null -ne $tile -and ($tile -lt 0 -or $tile -ge $tiles)){continue}
-            & $tileStage $tileStages[6*$bb+$q] $q $tile
+            $block=if($null -ne $step){$step-$q}else{$null}
+            if($null -ne $block -and ($block -lt 0 -or $block -ge $blockCount)){continue}
+            & $tileStage $tileStages[6*$bb+$q] $q $block
         }}
-        $tile=if($null -ne $step){$step-5}else{$null}
-        if($null -ne $tile -and ($tile -lt 0 -or $tile -ge $tiles)){return}
-        for($bb=0;$bb -lt 3;$bb++){ & $ringPointer $bb ($tileRegions.ResidualRings+$bb*8L*$tileBytes) 8 $tile $(if($null -ne $tile){0}else{-5}) }
-        & $ptr 3 18 $tileRegions.Mean; & $imm 4 1; & $call "body_mean$sfx"
+        $block=if($null -ne $step){$step-5}else{$null}
+        if($null -ne $block -and ($block -lt 0 -or $block -ge $blockCount)){return}
+        $count=if($null -ne $block){& $blockTiles $block}else{$batch}
+        $meanDelta=if($null -ne $block){0}else{-5}
+        $branchRings=@(for($bb=0;$bb -lt 3;$bb++){ & $ring ($tileRegions.ResidualRings+$bb*8L*$blockBytes) 8 $block $meanDelta 0 })
+        & $parallel "body_mean$sfx" @($branchRings[0],$branchRings[1],$branchRings[2],$tileRegions.Mean) @($true,$true,$true,$true) $count
         & $sync
-        if($null -ne $tile){ & $dma 25 ($finalOffset+$tile*[long]$tileBytes) 18 $tileRegions.Mean $tileBytes }
+        if($null -ne $block){ & $dma 25 ($finalOffset+$block*$blockBytes) 18 $tileRegions.Mean ($count*[long]$tileBytes) }
         else {
             & $ptr 1 18 $tileRegions.Mean
-            $s.Add(@{Op='addi';d=2;s=17;i=-5}); $s.Add(@{Op='asl-i';d=2;s=2;i=$tileShift}); & $imm 15 $finalOffset; $s.Add(@{Op='add';d=2;s=2;t=15}); $s.Add(@{Op='add';d=2;s=2;t=25})
-            & $dmaRegisters $tileBytes
+            $s.Add(@{Op='addi';d=2;s=17;i=-5}); $s.Add(@{Op='asl-i';d=2;s=2;i=$blockShift}); & $imm 15 $finalOffset; $s.Add(@{Op='add';d=2;s=2;t=15}); $s.Add(@{Op='add';d=2;s=2;t=25})
+            & $dmaRegisters $blockBytes
         }
     }
     $tileSection={
@@ -669,14 +683,19 @@ function New-KokoroGenerator60x16RunSteps {
             & $dma 18 $tileRegions.Moments 22 ($constantsTableOffset+$site.Offset) $site.Bytes
             & $ptr 0 18 $tileRegions.Moments; & $ptr 1 18 $rAt; & $ptr 2 18 ($tileRegions.Kms+$index*$kmsBytes); & $call "body_constant$sfx"
         }
-        for($bb=0;$bb -lt 3;$bb++){ & $dma 18 ($tileRegions.ResidualRings+$bb*8L*$tileBytes) 20 $r0Offset $tileBytes }
+        for($bb=0;$bb -lt 3;$bb++){ & $dma 18 ($tileRegions.ResidualRings+$bb*8L*$blockBytes) 20 $r0Offset ((& $blockTiles 0)*[long]$tileBytes) }
+        # Steps 0..5 and blockCount-2..blockCount+4 are unrolled: they hold the first block, the last two and the partial wave.
         for($step=0;$step -lt 6;$step++){ & $tileStep $step }
-        & $imm 17 6; & $imm 5 ($tiles-8)
-        $s.Add(@{Op='loop1-r';s=5;Label='tile_steps'}); $s.Add(@{Op='label';Name='tile_steps'})
+        # The interior steps count in r17, not LC1: the worker join can wait in a QuRT futex trap, and LC1 did not
+        # survive it (the loop ended after a varying number of steps).
+        & $imm 17 6
+        $steps=& $label; $stepsDone=& $label
+        $s.Add(@{Op='label';Name=$steps})
         & $tileStep $null
         $s.Add(@{Op='addi';d=17;s=17;i=1})
-        $s.Add(@{Op='endloop1'})
-        for($step=$tiles-2;$step -lt $tiles+5;$step++){ & $tileStep $step }
+        & $imm 15 ($blockCount-2); $s.Add(@{Op='eq';d=0;s=17;t=15}); $s.Add(@{Op='jump-p';u=0;Label=$stepsDone}); & $jump $steps
+        $s.Add(@{Op='label';Name=$stepsDone})
+        for($step=$blockCount-2;$step -lt $blockCount+5;$step++){ & $tileStep $step }
     }
     for($section=0;$section -lt $sections.Count;$section++){
     if($section -gt 0){ $chainOffset=$finalOffset; $chainTiles=$tiles; . $bind $section }
