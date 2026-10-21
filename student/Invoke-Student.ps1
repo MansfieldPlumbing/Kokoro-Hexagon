@@ -19,7 +19,8 @@ Steps:
             build/student/syllabus, and each resolved token span as a typed occurrence with its ticks.
   Recordings Decode the human recordings under -Recordings (MP3) to WAV beside them (48 kHz, two channels,
             16-bit: the Windows media transcoder's only accepted WAV profile); returns each file's frames and seconds.
-  Listen    From -Recordings alone: pitch, level and voicing, exported as MPE MIDI and a native controller recording.
+  Listen    From -Recordings alone: typed acoustic notes with pitch, level, octave spectral slope and YIN aperiodicity,
+            exported as MPE MIDI and a physical controller recording on the generator tick clock.
   Stems     Render -State (a controller recording or Listen result) through the host contact emulator, with synchronized
             audio and MIDI per contact. Without State, measure deterministic controller coverage and round-trip gates.
 .PARAMETER Corpus
@@ -82,6 +83,7 @@ Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
 $script:StudentRoot = [IO.Path]::GetFullPath((Join-Path $StudentOwnerRoot '..'))
+$script:StudentMachineSHA256 = (Get-FileHash -LiteralPath $StudentOwnerPath).Hash
 $script:StudentBuild = Join-Path $script:StudentRoot 'build'
 $script:StudentContext = [ordered]@{
     Syllabus = $null          # in-memory module exporting Invoke-OfflineSpeech
@@ -137,7 +139,7 @@ $script:StudentController = [ordered]@{
         [pscustomobject]@{ Name = 'Aperiodicity'; Unit = 'ratio'; Offset = 3; Bytes = 1; Minimum = 0.0; Maximum = 1.0 }
         [pscustomobject]@{ Name = 'PitchHz'; Unit = 'hertz'; Offset = 4; Bytes = 2; Minimum = 0.0; Maximum = 1000.0 }
         [pscustomobject]@{ Name = 'Coefficient'; Unit = 'coefficient axis'; Offset = 6; Bytes = 2; Minimum = -1.0; Maximum = 1.0 }
-        [pscustomobject]@{ Name = 'TiltDb'; Unit = 'dB/octave'; Offset = 8; Bytes = 2; Minimum = -24.0; Maximum = 0.0 }
+        [pscustomobject]@{ Name = 'TiltDb'; Unit = 'dB/octave'; Offset = 8; Bytes = 2; Minimum = -96.0; Maximum = 96.0 }
         [pscustomobject]@{ Name = 'TimeSeconds'; Unit = 'seconds (reserved, zero)'; Offset = 10; Bytes = 2; Minimum = 0.0; Maximum = 0.0 }
     )
     Contacts = @('Harmonic', 'Noise', 'Events', 'Coefficient')
@@ -580,11 +582,57 @@ class StudentTextKernels {
         }
         return $out
     }
+    static [float[]] SpectralSlope([float[]] $signal, [int] $rate, [int] $hop, [int] $window) {
+        # Least-squares dB/octave across five octave bands. Three complex projections per band
+        # (0.8, 1, 1.25 times its centre), Hamming-weighted. This is an acoustic descriptor, not a vocal-tract model.
+        $frames = [int][Math]::Floor([double]($signal.Length - $window) / [double]$hop)
+        if ($frames -lt 0) { $frames = 0 }
+        $out = [float[]]::new($frames); $weights = [double[]]::new($window)
+        $cosStep = [double[]]::new(15); $sinStep = [double[]]::new(15)
+        for ($j = 0; $j -lt $window; $j++) { $weights[$j] = 0.54 - 0.46 * [Math]::Cos(2.0 * [Math]::PI * [double]$j / [double]($window - 1)) }
+        for ($band = 0; $band -lt 5; $band++) {
+            for ($bin = 0; $bin -lt 3; $bin++) {
+                $frequency = 250.0 * [Math]::Pow(2.0, [double]$band) * [Math]::Pow(1.25, [double]($bin - 1))
+                $angle = 2.0 * [Math]::PI * $frequency / [double]$rate
+                $cosStep[3 * $band + $bin] = [Math]::Cos($angle); $sinStep[3 * $band + $bin] = [Math]::Sin($angle)
+            }
+        }
+        for ($f = 0; $f -lt $frames; $f++) {
+            $slope = 0.0
+            for ($band = 0; $band -lt 5; $band++) {
+                $power = 0.0
+                for ($bin = 0; $bin -lt 3; $bin++) {
+                    $cosine = 1.0; $sine = 0.0; $real = 0.0; $imaginary = 0.0
+                    $cosineStep = $cosStep[3 * $band + $bin]; $sineStep = $sinStep[3 * $band + $bin]
+                    for ($j = 0; $j -lt $window; $j++) {
+                        $value = [double]$signal[$f * $hop + $j] * $weights[$j]
+                        $real = $real + $value * $cosine; $imaginary = $imaginary + $value * $sine
+                        $nextCosine = $cosine * $cosineStep - $sine * $sineStep
+                        $sine = $sine * $cosineStep + $cosine * $sineStep; $cosine = $nextCosine
+                    }
+                    $power = $power + $real * $real + $imaginary * $imaginary
+                }
+                $slope = $slope + [double]($band - 2) * 10.0 * [Math]::Log10($power + 1e-20) / 10.0
+            }
+            $out[$f] = [float]$slope
+        }
+        return $out
+    }
     static [short[]] Pcm16([float[]] $signal) {
         $out = [short[]]::new($signal.Length)
         for ($i = 0; $i -lt $signal.Length; $i++) {
             $value = [Math]::Round([double]$signal[$i] * 32768.0)
             $out[$i] = [short][Math]::Clamp($value, -32768.0, 32767.0)
+        }
+        return $out
+    }
+    static [float[]] ReadStem([byte[]] $wav) {
+        # Stems writes its own fixed PCM16 mono header; the caller never routes external WAVs here.
+        $count = [int][Math]::Floor([double]($wav.Length - 44) / 2.0); $out = [float[]]::new($count)
+        for ($i = 0; $i -lt $count; $i++) {
+            $value = [int]$wav[44 + 2 * $i] -bor ([int]$wav[45 + 2 * $i] -shl 8)
+            if ($value -ge 32768) { $value = $value - 65536 }
+            $out[$i] = [float]([double]$value / 32768.0)
         }
         return $out
     }
@@ -808,7 +856,8 @@ function Import-StudentKernels {
     $pins = @(Import-Csv -LiteralPath (Join-Path $compiler 'verified-source.tsv') -Delimiter "`t")
     foreach ($item in $pins) { if ($item.Commit -cne $pin -or (Get-FileHash -LiteralPath (Join-Path $compiler $item.Path)).Hash -cne $item.Sha256) { throw 'Pinned compiler integrity mismatch.' } }
     Import-Module (Join-Path $compiler 'src/Dev.MansfieldPlumbing.PowerShell.Lowering.psd1')
-    $directory = Join-Path $script:StudentBuild ('student/kernels/' + (Get-FileHash -LiteralPath $StudentOwnerPath).Hash)
+    if ((Get-FileHash -LiteralPath $StudentOwnerPath).Hash -cne $script:StudentMachineSHA256) { throw 'Student source changed before kernel admission; restart the command.' }
+    $directory = Join-Path $script:StudentBuild ('student/kernels/' + $script:StudentMachineSHA256)
     [void][IO.Directory]::CreateDirectory($directory)
     $dll = Join-Path $directory 'Kokoro.Student.dll'
     if (-not (Test-Path -LiteralPath $dll)) { $null = Export-LoweredAssembly -SourcePath $StudentOwnerPath -ClassName StudentTextKernels -OutputPath $dll -Deterministic }
@@ -829,7 +878,9 @@ function Import-StudentKernels {
         ContactStem = $type.GetMethod('ContactStem').CreateDelegate([Func[float[],int,int,float[]]])
         FrameLevels = $type.GetMethod('FrameLevels').CreateDelegate([Func[float[],int,float[]]])
         Pcm16 = $type.GetMethod('Pcm16').CreateDelegate([Func[float[],short[]]])
+        ReadStem = $type.GetMethod('ReadStem').CreateDelegate([Func[byte[],float[]]])
         CoefficientTrack = $type.GetMethod('CoefficientTrack').CreateDelegate([Func[float[],float[]]])
+        SpectralSlope = $type.GetMethod('SpectralSlope').CreateDelegate([Func[float[],int,int,int,float[]]])
     }
     $script:StudentContext.Kernels
 }
@@ -1549,7 +1600,7 @@ function Get-StudentWavLayout([string] $Path) {
     [pscustomobject]@{ Data = $data + 8; Frames = [int]([long][BitConverter]::ToUInt32($head, $data + 4) / 4) }
 }
 
-function New-StudentControllerRecording([object[]] $Events, [int] $Ticks, [string] $Provenance, [int] $Seed) {
+function New-StudentControllerRecording([object[]] $Events, [int] $Ticks, [object] $Provenance, [int] $Seed) {
     if ($Ticks -le 0 -or $Ticks -gt [int]::MaxValue / 300) { throw 'Controller duration is outside the audio buffer range.' }
     $previousTick = -1
     foreach ($event in $Events) {
@@ -1565,8 +1616,8 @@ function New-StudentControllerRecording([object[]] $Events, [int] $Ticks, [strin
     }
     if ($Events.Count -eq 0 -or $Events[0].Tick -ne 0) { throw 'Controller recording needs its initial state at tick zero.' }
     [pscustomobject]@{ PSTypeName = 'Kokoro.StudentControllerRecording'; Layout = $script:StudentController
-        Ticks = $Ticks; Events = $Events; Seed = $Seed; Provenance = $Provenance
-        MachineSHA256 = (Get-FileHash -LiteralPath $StudentOwnerPath).Hash
+        Ticks = $Ticks; Events = $Events; Occurrences = @(); Seed = $Seed; Provenance = $Provenance
+        MachineSHA256 = $script:StudentMachineSHA256
         KernelSHA256 = (Import-StudentKernels).SHA256 }
 }
 
@@ -1630,7 +1681,7 @@ function Export-StudentStemMidi($Performance, [float[]] $Frames, [int] $Contact,
             & $writeEvent $tickIndex ([byte[]](225, ($bendValue -band 127), ($bendValue -shr 7)))
             & $writeEvent $tickIndex ([byte[]](177, 74, [int][Math]::Clamp([Math]::Round(127 * ($Frames[$offset + 3] + 1) / 2), 0, 127)))
             & $writeEvent $tickIndex ([byte[]](209, [int][Math]::Clamp([Math]::Round(127 * ($Frames[$offset + 1] + 96) / 96), 0, 127)))
-            & $writeEvent $tickIndex ([byte[]](177, 71, [int][Math]::Clamp([Math]::Round(127 * ($Frames[$offset + 4] + 24) / 24), 0, 127)))
+            & $writeEvent $tickIndex ([byte[]](177, 71, [int][Math]::Clamp([Math]::Round(127 * ($Frames[$offset + 4] + 96) / 192), 0, 127)))
             & $writeEvent $tickIndex ([byte[]](177, 1, [int][Math]::Clamp([Math]::Round(127 * $Frames[$offset + 2]), 0, 127)))
         }
         $previous = $buttons -band 112
@@ -1661,6 +1712,7 @@ function Invoke-StudentStems($Performance = $State, [string] $Destination = '') 
     $validated = New-StudentControllerRecording $Performance.Events $Performance.Ticks $Performance.Provenance $Performance.Seed
     # Capture provenance stays attached to the original performance when a different renderer plays it.
     $validated.MachineSHA256 = $Performance.MachineSHA256; $validated.KernelSHA256 = $Performance.KernelSHA256
+    if ($Performance.PSObject.Properties['Occurrences']) { $validated.Occurrences = $Performance.Occurrences }
     $Performance = $validated
     if (-not $Destination) { $Destination = New-StudentOutputDirectory 'student-stems' }
     [void][IO.Directory]::CreateDirectory($Destination)
@@ -1676,9 +1728,7 @@ function Invoke-StudentStems($Performance = $State, [string] $Destination = '') 
         $audioPath = Join-Path $Destination "$name.wav"; [IO.File]::WriteAllBytes($audioPath, $bytes)
         $midiPath = Join-Path $Destination "$name.mpe.mid"; Export-StudentStemMidi $Performance $expanded.Frames $contactIndex $midiPath
         # Score the quantized PCM actually written, not the unquantized synthesis buffer.
-        $samples = [short[]]::new($signal.Length); [Buffer]::BlockCopy($bytes, 44, $samples, 0, 2 * $samples.Length)
-        for ($sampleIndex = 0; $sampleIndex -lt $signal.Length; $sampleIndex++) { $signal[$sampleIndex] = [float]($samples[$sampleIndex] / 32768.0) }
-        $signals.Add($signal)
+        $signals.Add($kernels.ReadStem.Invoke($bytes))
         $stems.Add([pscustomobject]@{ PSTypeName = 'Kokoro.StudentStem'; Contact = $name; Audio = $audioPath; Midi = $midiPath; SHA256 = $hash; Samples = $signal.Length })
     }
     $harmonic = [float[]]$signals[0]; $padded = [float[]]::new($harmonic.Length + 1200); $harmonic.CopyTo($padded, 0)
@@ -1724,7 +1774,7 @@ function Invoke-StudentStems($Performance = $State, [string] $Destination = '') 
         PitchToleranceCents = $Performance.Layout.PitchToleranceCents; StateErrors = $stateErrors; EventErrors = $clickErrors
         BoundaryToleranceTicks = $Performance.Layout.BoundaryToleranceTicks
         MaximumAxisError = $axisMaximumError; AxisTolerance = 0.05; MaximumResponseError = $responseMaximumError; ResponseTolerance = 0.1
-        GhostReplay = $true; RenderMachineSHA256 = (Get-FileHash -LiteralPath $StudentOwnerPath).Hash; RenderKernelSHA256 = $kernels.SHA256
+        GhostReplay = $true; RenderMachineSHA256 = $script:StudentMachineSHA256; RenderKernelSHA256 = $kernels.SHA256
         BiasRow = 'Not supplied'; Binding = 'Diagnostic host contacts; generator contact not exercised' }
     $result | Export-Clixml -LiteralPath (Join-Path $Destination 'receipt.clixml')
     $result
@@ -1748,8 +1798,12 @@ function Invoke-StudentListen {
         $x = $kernels.MonoDecimate.Invoke([IO.File]::ReadAllBytes($recording.Wav), $recording.Data, $recording.Frames, $taps, 3)
         $decodeSeconds = $watch.Elapsed.TotalSeconds
         $track = $kernels.PitchTrack.Invoke($x, $rate, $hop, $window, 32, 229, 0.15)
+        $tilt = $kernels.SpectralSlope.Invoke($x, $rate, $hop, $window)
         $trackSeconds = $watch.Elapsed.TotalSeconds - $decodeSeconds
+        $sourceHash = (Get-FileHash -LiteralPath $recording.Wav).Hash
+        $sourceIdentity = [IO.Path]::GetRelativePath($script:StudentRoot, $recording.Wav)
         $n = [int]($track.Length / 3); $db = [double[]]::new($n); $semis = [double[]]::new($n); $peak = -200.0
+        if ($n -eq 0) { throw 'Recording is too short for the Listen detector support.' }
         for ($t = 0; $t -lt $n; $t++) { $db[$t] = 20 * [Math]::Log10([double]$track[3 * $t + 2] + 1e-9); if ($db[$t] -gt $peak) { $peak = $db[$t] } }
         $floor = $peak - 35
         $voiced = [bool[]]::new($n)
@@ -1766,7 +1820,18 @@ function Invoke-StudentListen {
                 -not ($db[$t] -lt $top - 9 -and $t + 1 -lt $n -and $db[$t + 1] -gt $db[$t])) { if ($db[$t] -gt $top) { $top = $db[$t] }; $t++ }
             if ($t - $first -ge 4) {
                 $values = [double[]]@($semis[$first..($t - 1)] | Sort-Object); $onset = ($db[$first..([Math]::Min($t - 1, $first + 4))] | Measure-Object -Maximum).Maximum
-                $notes.Add([pscustomobject]@{ First = $first; Last = $t; Note = [int][Math]::Round($values[[int][Math]::Floor($values.Count / 2)]); Onset = $onset })
+                $pitchTotal = 0.0; $levelTotal = 0.0; $tiltTotal = 0.0; $aperiodicTotal = 0.0
+                for ($noteFrame = $first; $noteFrame -lt $t; $noteFrame++) {
+                    $pitchTotal += $track[3 * $noteFrame]; $levelTotal += $db[$noteFrame]
+                    $tiltTotal += $tilt[$noteFrame]; $aperiodicTotal += $track[3 * $noteFrame + 1]
+                }
+                $noteFrames = $t - $first
+                $notes.Add([pscustomobject]@{ PSTypeName = 'Kokoro.StudentAcousticOccurrence'; Identity = $sourceHash + ':' + $notes.Count
+                    Source = $sourceIdentity; SourceSHA256 = $sourceHash; Kind = 'VoicedNote'; First = $first; Last = $t
+                    StartSeconds = ($first * $hop + $window / 2) / $rate; EndSeconds = ($t * $hop + $window / 2) / $rate
+                    PitchHz = $pitchTotal / $noteFrames; LevelDb = $levelTotal / $noteFrames
+                    TiltDbPerOctave = $tiltTotal / $noteFrames; Aperiodicity = $aperiodicTotal / $noteFrames
+                    Note = [int][Math]::Round($values[[int][Math]::Floor($values.Count / 2)]); Onset = $onset })
             }
         }
         $level = { param([double] $value) [int][Math]::Max(1, [Math]::Min(127, [Math]::Round(($value - $floor) / 35 * 126) + 1)) }
@@ -1786,6 +1851,8 @@ function Invoke-StudentListen {
             for ($t = $note.First + 2; $t -lt $note.Last; $t += 2) {
                 & $add (& $tick $t) (& $bend $channel (100 * ($semis[$t] - $note.Note)))
                 $pressure = & $level $db[$t]; if ($pressure -ne $last) { & $add (& $tick $t) ([byte[]]((0xD0 + $channel), $pressure)); $last = $pressure }
+                & $add (& $tick $t) ([byte[]]((0xB0 + $channel), 74, [int][Math]::Clamp([Math]::Round(127 * ($tilt[$t] + 96) / 192), 0, 127)))
+                & $add (& $tick $t) ([byte[]]((0xB0 + $channel), 1, [int][Math]::Clamp([Math]::Round(127 * $track[3 * $t + 1]), 0, 127)))
             }
             & $add (& $tick $note.Last) ([byte[]]((0x80 + $channel), $note.Note, 0))
         }
@@ -1816,10 +1883,14 @@ function Invoke-StudentListen {
             [pscustomobject]@{ PSTypeName = 'Kokoro.StudentControllerEvent'; Tick = $tickIndex; Buttons = $buttons
                 PitchHz = $(if ($currentNote -ge 0) { [double]$track[3 * $frame] } else { 0.0 })
                 LevelDb = [Math]::Clamp($db[$frame], -96.0, 0.0); Aperiodicity = [Math]::Clamp([double]$track[3 * $frame + 1], 0.0, 1.0)
-                Coefficient = 0.0; TiltDb = -12.0; TimeSeconds = 0.0; AcousticNote = $currentNote }
+                Coefficient = 0.0; TiltDb = [double]$tilt[$frame]; TimeSeconds = 0.0
+                Occurrence = $(if ($currentNote -ge 0) { $notes[$currentNote].Identity } else { $null }) }
             $priorNote = $currentNote; $priorActive = $active
         })
-        $performance = New-StudentControllerRecording $controllerEvents $controllerTicks ('Human recording: ' + [IO.Path]::GetRelativePath($script:StudentRoot, $recording.Wav)) 1729
+        $provenance = [pscustomobject]@{ PSTypeName = 'Kokoro.StudentProvenance'; Kind = 'Human'; Source = $sourceIdentity; SHA256 = $sourceHash
+            PitchMethod = 'YIN normalized difference'; TiltMethod = 'Five octave bands, three projections per band, Hamming weighting, dB/octave regression' }
+        $performance = New-StudentControllerRecording $controllerEvents $controllerTicks $provenance 1729
+        $performance.Occurrences = $notes.ToArray()
         $controllerPath = Join-Path $output ([IO.Path]::ChangeExtension((Split-Path -Leaf $recording.Wav), '.controller.clixml'))
         $performance | Export-Clixml -LiteralPath $controllerPath
         $rests = @(for ($k = 1; $k -lt $notes.Count; $k++) { 10 * ($notes[$k].First - $notes[$k - 1].Last) }) | Sort-Object
@@ -1828,7 +1899,7 @@ function Invoke-StudentListen {
             VoicedShare = [Math]::Round(@($voiced | Where-Object { $_ }).Count / [double]$n, 3); Notes = $notes.Count
             NotesPerSecond = [Math]::Round($notes.Count / $recording.Seconds, 2); MedianF0 = $(if ($f0s.Count) { [Math]::Round($f0s[[int]($f0s.Count / 2)], 1) })
             RestMedianMs = $(if ($rests.Count) { $rests[[int]($rests.Count / 2)] }); RestsOver300Ms = @($rests | Where-Object { $_ -gt 300 }).Count
-            Midi = $midiPath; Controller = $performance; ControllerPath = $controllerPath
+            Midi = $midiPath; Controller = $performance; ControllerPath = $controllerPath; Occurrences = $notes.ToArray()
             DecodeSeconds = [Math]::Round($decodeSeconds, 1); TrackSeconds = [Math]::Round($trackSeconds, 1); WallSeconds = [Math]::Round($watch.Elapsed.TotalSeconds, 1) }
     }
 }
