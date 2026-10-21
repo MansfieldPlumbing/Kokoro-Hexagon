@@ -326,6 +326,22 @@ function New-KokoroGenerator60x16RunSteps {
     # zeroed 2048-byte record, added into the job's after the join (wrapping int32 sums, order-free).
     # An argument may also be a ring descriptor (tile schedule): @{Base;Blocks;Block;Delta;Within}, set by $ringPointer
     # at the descriptor's tile plus the worker's first tile.
+    # Publish the next pool sequence and wake the workers; then wait until every worker has reported that sequence.
+    $wake={
+        $s.Add(@{Op='syncht'})
+        & $ptr 6 25 $poolOffset; $s.Add(@{Op='load';d=0;s=6;Offset=0}); $s.Add(@{Op='addi';d=0;s=0;i=1}); $s.Add(@{Op='store';s=6;t=0;Offset=0})
+        $s.Add(@{Op='addi';d=0;s=6;i=0}); & $imm 1 ($HvxThreads-1); $s.Add(@{Op='trap0';i=0x11})
+    }
+    $join={
+        for($k=1;$k -lt $HvxThreads;$k++){
+            $wait=& $label; $done=& $label
+            $s.Add(@{Op='label';Name=$wait})
+            & $ptr 6 25 ($poolOffset+64*$k); & $ptr 7 25 $poolOffset; $s.Add(@{Op='load';d=8;s=6;Offset=20}); $s.Add(@{Op='load';d=9;s=7;Offset=0})
+            $s.Add(@{Op='eq';d=0;s=8;t=9}); $s.Add(@{Op='jump-p';u=0;Label=$done})
+            $s.Add(@{Op='addi';d=6;s=6;i=20}); & $futexWait 6 8; & $jump $wait
+            $s.Add(@{Op='label';Name=$done})
+        }
+    }
     $parallel={param([string]$body,[object[]]$off,[bool[]]$perTile,[int]$count,[switch]$Moments)
         $n=$off.Count
         $argument={param([int]$r,[int]$i,[int]$skip) if($off[$i] -is [hashtable]){ & $ringPointer $r $off[$i].Base $off[$i].Blocks $off[$i].Block $off[$i].Delta ($off[$i].Within+$skip) } else { & $ptr $r 18 $off[$i] } }
@@ -346,18 +362,9 @@ function New-KokoroGenerator60x16RunSteps {
             }
             & $imm 0 $c; $s.Add(@{Op='store';s=6;t=0;Offset=48})
         }
-        $s.Add(@{Op='syncht'})
-        & $ptr 6 25 $poolOffset; $s.Add(@{Op='load';d=0;s=6;Offset=0}); $s.Add(@{Op='addi';d=0;s=0;i=1}); $s.Add(@{Op='store';s=6;t=0;Offset=0})
-        $s.Add(@{Op='addi';d=0;s=6;i=0}); & $imm 1 ($HvxThreads-1); $s.Add(@{Op='trap0';i=0x11})
+        & $wake
         for($i=0;$i -lt $n;$i++){ & $argument $i $i 0 }; & $imm $n ([math]::Min($chunk,$count)); & $call $body
-        for($k=1;$k -lt $HvxThreads;$k++){
-            $wait=& $label; $done=& $label
-            $s.Add(@{Op='label';Name=$wait})
-            & $ptr 6 25 ($poolOffset+64*$k); & $ptr 7 25 $poolOffset; $s.Add(@{Op='load';d=8;s=6;Offset=20}); $s.Add(@{Op='load';d=9;s=7;Offset=0})
-            $s.Add(@{Op='eq';d=0;s=8;t=9}); $s.Add(@{Op='jump-p';u=0;Label=$done})
-            $s.Add(@{Op='addi';d=6;s=6;i=20}); & $futexWait 6 8; & $jump $wait
-            $s.Add(@{Op='label';Name=$done})
-        }
+        & $join
         if($Moments){
             for($k=1;$k -lt $HvxThreads;$k++){
                 if($k*$chunk -ge $count){ continue }
@@ -614,6 +621,26 @@ function New-KokoroGenerator60x16RunSteps {
     }
     $ring={param([long]$ringBase,[int]$ringBlocks,$block,[int]$delta,[int]$within) @{Base=$ringBase;Blocks=$ringBlocks;Block=$block;Delta=$delta;Within=$within}}
     $dmaRegisters={param([long]$length) & $imm 3 $length; $s.Add(@{Op='addi';d=0;s=24;i=0}); foreach($step in @(New-KokoroDmaCopySteps -NoReturn)){$s.Add($step)} }
+    # Segmented tile-parallel call: segment k runs on HVX thread k (0 the main thread) with its own arguments (VTCM
+    # offsets or ring descriptors) and tile count.
+    $dispatch={param([string]$body,[object[]]$segments)
+        if($HvxThreads -lt 3 -or $segments.Count -gt $HvxThreads){throw 'A segmented dispatch needs one HVX thread per segment, at least three.'}
+        $value={param([int]$r,$a) if($a -is [hashtable]){ & $ringPointer $r $a.Base $a.Blocks $a.Block $a.Delta $a.Within } else { & $ptr $r 18 $a } }
+        $n=$segments[0].Arguments.Count
+        for($k=1;$k -lt $HvxThreads;$k++){
+            & $ptr 6 25 ($poolOffset+64*$k)
+            $c=if($k -lt $segments.Count){$segments[$k].Count}else{0}
+            if($c -gt 0){
+                for($i=0;$i -lt $n;$i++){ & $value 0 $segments[$k].Arguments[$i]; $s.Add(@{Op='store';s=6;t=0;Offset=(4*$i)}) }
+                & $imm 0 $c; $s.Add(@{Op='store';s=6;t=0;Offset=(4*$n)})
+                & $addr 0 $body; $s.Add(@{Op='store';s=6;t=0;Offset=44})
+            }
+            & $imm 0 $c; $s.Add(@{Op='store';s=6;t=0;Offset=48})
+        }
+        & $wake
+        for($i=0;$i -lt $n;$i++){ & $value $i $segments[0].Arguments[$i] }; & $imm $n $segments[0].Count; & $call $body
+        & $join
+    }
     # Stage q of a branch at step i processes block i - q: a constant block, or at run time r17 + (k - q) for its block + k.
     $tileStage={param($g,[int]$q,$block)
         $index=6*$g.Branch+$g.Stage
@@ -626,9 +653,14 @@ function New-KokoroGenerator60x16RunSteps {
         if($isFirst){ & $fill $tileRegions.Window 1 0x80008000L; & $fill $tileRegions.WindowLow 1 0 }
         if($isLast){ & $fill ($tileRegions.Window+($count+1)*[long]$tileBytes) 1 0x80008000L; & $fill ($tileRegions.WindowLow+($count+1)*[long]$tileBytes) 1 0 }
         # Window positions: 0 the previous block's last tile, 1..count this block, count + 1 the next block's first tile.
-        if(-not $isFirst){ & $parallel "body_turns$sfx" @((& $ring $sourceBase $sourceBlocks $block (& $delta -1) ($batch-1)),$tileRegions.Window,$tileRegions.WindowLow,$kAt) @($true,$true,$true,$false) 1 }
-        & $parallel "body_turns$sfx" @((& $ring $sourceBase $sourceBlocks $block (& $delta 0) 0),($tileRegions.Window+$tileBytes),($tileRegions.WindowLow+$tileBytes),$kAt) @($true,$true,$true,$false) $count
-        if(-not $isLast){ & $parallel "body_turns$sfx" @((& $ring $sourceBase $sourceBlocks $block (& $delta 1) 0),($tileRegions.Window+($count+1)*[long]$tileBytes),($tileRegions.WindowLow+($count+1)*[long]$tileBytes),$kAt) @($true,$true,$true,$false) 1 }
+        # One dispatch fills the window: each halo tile is its own segment, the block's tiles split over the other threads.
+        $fillSegment={param([int]$k,[int]$within,[int]$position,[int]$tilesInSegment) @{Count=$tilesInSegment;Arguments=@((& $ring $sourceBase $sourceBlocks $block (& $delta $k) $within),($tileRegions.Window+$position*[long]$tileBytes),($tileRegions.WindowLow+$position*[long]$tileBytes),$kAt)}}
+        $segments=[Collections.Generic.List[object]]::new()
+        if(-not $isFirst){ $segments.Add((& $fillSegment -1 ($batch-1) 0 1)) }
+        $parts=$HvxThreads-$(if($isFirst){0}else{1})-$(if($isLast){0}else{1}); $chunk=[int][math]::Ceiling($count/$parts)
+        for($o=0;$o -lt $count;$o+=$chunk){ $segments.Add((& $fillSegment 0 $o (1+$o) ([math]::Min($chunk,$count-$o)))) }
+        if(-not $isLast){ $segments.Add((& $fillSegment 1 0 ($count+1) 1)) }
+        & $dispatch "body_turns$sfx" $segments.ToArray()
         if($null -ne $block){
             $position=($tiles-1)-$block*$batch+1
             if($position -ge 0 -and $position -le $count+1){ & $padRows ($tileRegions.Window+$position*[long]$tileBytes) 0x8000; & $padRows ($tileRegions.WindowLow+$position*[long]$tileBytes) 0 }
