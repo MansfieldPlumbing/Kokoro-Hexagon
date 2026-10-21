@@ -19,6 +19,8 @@ Steps:
             build/student/syllabus, and each resolved token span as a typed occurrence with its ticks.
   Recordings Decode the human recordings under -Recordings (MP3) to WAV beside them (48 kHz, two channels,
             16-bit: the Windows media transcoder's only accepted WAV profile); returns each file's frames and seconds.
+  Listen    From -Recordings alone: pitch, level and voicing per 10 ms as notes and rests, written under its listen
+            subdirectory as an MPE MIDI file and a preview WAV of the tracked melody (-RecordingLimit files).
 .PARAMETER Corpus
 Corpus directory for Pronunciation; defaults to the latest build/corpus-* with corpus.clixml.
 .PARAMETER ParagraphLimit
@@ -53,7 +55,7 @@ Run from a PowerShell prompt: pwsh -File passes every argument as a string, so a
 #requires -Version 7.7
 [CmdletBinding()]
 param(
-    [ValidateSet('Console', 'Render', 'Corpus', 'Pronunciation', 'Normalize', 'Syllabus', 'Recordings')][string] $Step = 'Console',
+    [ValidateSet('Console', 'Render', 'Corpus', 'Pronunciation', 'Normalize', 'Syllabus', 'Recordings', 'Listen')][string] $Step = 'Console',
     [ValidateRange(2, 64)][int] $Threads = [Math]::Max(2, [Environment]::ProcessorCount),
     [string] $Text = '',
     [string] $Voice = 'af_heart',
@@ -64,7 +66,8 @@ param(
     [string] $SourceIdentity = '',
     [ValidateRange(0, [int]::MaxValue)][int] $ParagraphLimit = 0,
     [ValidateRange(0, [int]::MaxValue)][int] $WindowLimit = 0,
-    [string] $Recordings = ''
+    [string] $Recordings = '',
+    [ValidateRange(0, [int]::MaxValue)][int] $RecordingLimit = 0
 )
 $studentInvocation = @{}
 foreach ($parameterName in $MyInvocation.MyCommand.Parameters.Keys) {
@@ -501,6 +504,85 @@ class StudentTextKernels {
         }
         return [string]::new($buffer, 0, $count)
     }
+    # Listening: audio kernels over 16-bit PCM WAV bytes and float signals. Lowered arithmetic takes identical operand
+    # types, so every mixed operation is cast.
+    static [float[]] MonoDecimate([byte[]] $wav, [int] $data, [int] $frames, [float[]] $taps, [int] $factor) {
+        # Two-channel 16-bit PCM from byte $data on: channel mean, low-pass by $taps, every $factor-th sample kept.
+        $count = [int][Math]::Floor([double]$frames / [double]$factor); $half = [int][Math]::Floor([double]$taps.Length / 2.0)
+        $out = [float[]]::new($count)
+        for ($n = 0; $n -lt $count; $n++) {
+            $acc = 0.0
+            for ($k = 0; $k -lt $taps.Length; $k++) {
+                $i = $n * $factor + $k - $half
+                if ($i -ge 0 -and $i -lt $frames) {
+                    $b = $data + 4 * $i
+                    $left = [int]$wav[$b] -bor ([int]$wav[$b + 1] -shl 8); if ($left -ge 32768) { $left = $left - 65536 }
+                    $right = [int]$wav[$b + 2] -bor ([int]$wav[$b + 3] -shl 8); if ($right -ge 32768) { $right = $right - 65536 }
+                    $acc = $acc + [double]$taps[$k] * [double]($left + $right) / 65536.0
+                }
+            }
+            $out[$n] = [float]$acc
+        }
+        return $out
+    }
+    static [float[]] PitchTrack([float[]] $x, [int] $rate, [int] $hop, [int] $window, [int] $tauMin, [int] $tauMax, [double] $threshold) {
+        # YIN per frame (de Cheveigne and Kawahara 2002): three values per frame, f0 in Hz (0 when unvoiced), the
+        # normalized difference at the chosen lag (aperiodicity) and RMS level.
+        $frames = [int][Math]::Floor([double]($x.Length - $window - $tauMax) / [double]$hop); if ($frames -lt 0) { $frames = 0 }
+        $out = [float[]]::new(3 * $frames); $d = [double[]]::new($tauMax + 2); $dn = [double[]]::new($tauMax + 2)
+        for ($f = 0; $f -lt $frames; $f++) {
+            $start = $f * $hop
+            $energy = 0.0
+            for ($j = 0; $j -lt $window; $j++) { $energy = $energy + [double]$x[$start + $j] * [double]$x[$start + $j] }
+            for ($tau = 1; $tau -le $tauMax + 1; $tau++) {
+                $sum = 0.0
+                for ($j = 0; $j -lt $window; $j++) { $diff = [double]$x[$start + $j] - [double]$x[$start + $j + $tau]; $sum = $sum + $diff * $diff }
+                $d[$tau] = $sum
+            }
+            $running = 0.0; $dn[0] = 1.0
+            for ($tau = 1; $tau -le $tauMax + 1; $tau++) {
+                $running = $running + $d[$tau]
+                $dn[$tau] = 1.0; if ($running -gt 0.0) { $dn[$tau] = $d[$tau] * [double]$tau / $running }
+            }
+            $best = -1
+            for ($tau = $tauMin; $tau -le $tauMax -and $best -lt 0; $tau++) {
+                if ($dn[$tau] -lt $threshold) {
+                    $best = $tau
+                    while ($best + 1 -le $tauMax -and $dn[$best + 1] -lt $dn[$best]) { $best = $best + 1 }
+                }
+            }
+            $f0 = 0.0; $aperiodic = 1.0
+            if ($best -gt 0) {
+                $a = $dn[$best - 1]; $bb = $dn[$best]; $c = $dn[$best + 1]; $den = $a - 2.0 * $bb + $c
+                $shift = 0.0; if ([Math]::Abs($den) -gt 1e-12) { $shift = 0.5 * ($a - $c) / $den }
+                if ($shift -gt 1.0) { $shift = 1.0 }; if ($shift -lt -1.0) { $shift = -1.0 }
+                $f0 = [double]$rate / ([double]$best + $shift); $aperiodic = $bb
+            }
+            $out[3 * $f] = [float]$f0; $out[3 * $f + 1] = [float]$aperiodic; $out[3 * $f + 2] = [float][Math]::Sqrt($energy / [double]$window)
+        }
+        return $out
+    }
+    static [short[]] RenderTrack([float[]] $track, [int] $hop, [int] $rate, [int] $harmonics, [double] $gain) {
+        # A preview instrument: per frame (f0 Hz, level) pairs played as a harmonic tone (1/h amplitudes, below
+        # Nyquist), both interpolated between frames; silent where f0 is 0.
+        $frames = [int][Math]::Floor([double]$track.Length / 2.0); $count = $frames * $hop
+        $out = [short[]]::new($count); $phase = 0.0; $turn = 2.0 * [Math]::PI
+        for ($n = 0; $n -lt $count; $n++) {
+            $f = [int][Math]::Floor([double]$n / [double]$hop); $w = [double]($n - $f * $hop) / [double]$hop
+            $g = $f + 1; if ($g -ge $frames) { $g = $f }
+            $f0a = [double]$track[2 * $f]; $f0b = [double]$track[2 * $g]
+            $f0 = $f0a; if ($f0a -gt 0.0 -and $f0b -gt 0.0) { $f0 = $f0a + ($f0b - $f0a) * $w }
+            $level = [double]$track[2 * $f + 1] + ([double]$track[2 * $g + 1] - [double]$track[2 * $f + 1]) * $w
+            $value = 0.0
+            if ($f0 -gt 0.0) {
+                $phase = $phase + $turn * $f0 / [double]$rate; if ($phase -gt $turn) { $phase = $phase - $turn }
+                for ($h = 1; $h -le $harmonics; $h++) { if ([double]$h * $f0 -lt [double]$rate / 2.0) { $value = $value + [Math]::Sin([double]$h * $phase) / [double]$h } }
+            }
+            $sample = $value * $level * $gain * 32767.0; if ($sample -gt 32767.0) { $sample = 32767.0 }; if ($sample -lt -32767.0) { $sample = -32767.0 }
+            $out[$n] = [short][Math]::Round($sample)
+        }
+        return $out
+    }
 }
 
 $script:StudentTokenKinds = @{ 1 = 'Word'; 2 = 'Number'; 3 = 'Ordinal'; 4 = 'Punctuation'; 5 = 'Quote'; 6 = 'Symbol'; 7 = 'Note' }
@@ -669,7 +751,10 @@ function Import-StudentKernels {
         Unstressed = $type.GetMethod('Unstressed').CreateDelegate([Func[string,string]])
         Align = $type.GetMethod('Align').CreateDelegate([Func[string,string,int[]]])
         Substitute = $type.GetMethod('Substitute').CreateDelegate([Func[string,char[],string[],string]])
-        StressFirstVowel = $type.GetMethod('StressFirstVowel').CreateDelegate([Func[string,string,string]]) }
+        StressFirstVowel = $type.GetMethod('StressFirstVowel').CreateDelegate([Func[string,string,string]])
+        MonoDecimate = $type.GetMethod('MonoDecimate').CreateDelegate([Func[byte[],int,int,float[],int,float[]]])
+        PitchTrack = $type.GetMethod('PitchTrack').CreateDelegate([Func[float[],int,int,int,int,int,double,float[]]])
+        RenderTrack = $type.GetMethod('RenderTrack').CreateDelegate([Func[float[],int,int,int,double,short[]]]) }
     $script:StudentContext.Kernels
 }
 
@@ -1370,17 +1455,110 @@ foreach ($job in (ConvertFrom-Json (Get-Content -Raw -LiteralPath $env:KOKORO_RE
         if ($LASTEXITCODE) { throw "Recording decode failed with exit code $LASTEXITCODE." }
     }
     foreach ($job in $jobs) {
-        # RIFF chunks in order (Windows writes JUNK before fmt); only the header is read.
-        $head = [byte[]]::new(4096); $stream = [IO.File]::OpenRead($job.Wav); try { $read = $stream.Read($head, 0, $head.Length) } finally { $stream.Dispose() }
-        $format = -1; $data = -1
-        for ($at = 12; $at + 8 -le $read -and $data -lt 0; $at += 8 + [BitConverter]::ToInt32($head, $at + 4)) {
-            $id = [Text.Encoding]::ASCII.GetString($head, $at, 4)
-            if ($id -ceq 'fmt ') { $format = $at + 8 } elseif ($id -ceq 'data') { $data = $at }
+        $layout = Get-StudentWavLayout $job.Wav
+        [pscustomobject]@{ PSTypeName = 'Kokoro.StudentRecording'; Source = $job.Mp3; Wav = $job.Wav; Data = $layout.Data; Frames = $layout.Frames; Seconds = $layout.Frames / 48000.0 }
+    }
+}
+
+function Get-StudentWavLayout([string] $Path) {
+    # A decoded recording's sample data: RIFF chunks walked in order (Windows writes JUNK before fmt), header only.
+    $head = [byte[]]::new(4096); $stream = [IO.File]::OpenRead($Path); try { $read = $stream.Read($head, 0, $head.Length) } finally { $stream.Dispose() }
+    $format = -1; $data = -1
+    for ($at = 12; $at + 8 -le $read -and $data -lt 0; $at += 8 + [BitConverter]::ToInt32($head, $at + 4)) {
+        $id = [Text.Encoding]::ASCII.GetString($head, $at, 4)
+        if ($id -ceq 'fmt ') { $format = $at + 8 } elseif ($id -ceq 'data') { $data = $at }
+    }
+    if ($format -lt 0 -or $data -lt 0 -or [BitConverter]::ToUInt16($head, $format) -ne 1 -or [BitConverter]::ToInt16($head, $format + 2) -ne 2 -or
+        [BitConverter]::ToInt32($head, $format + 4) -ne 48000 -or [BitConverter]::ToInt16($head, $format + 14) -ne 16) { throw "$Path is not 48 kHz two-channel 16-bit PCM." }
+    [pscustomobject]@{ Data = $data + 8; Frames = [int]([long][BitConverter]::ToUInt32($head, $data + 4) / 4) }
+}
+
+function Invoke-StudentListen {
+    # Listening, first form, from the audio alone (no text, no alignment yet): pitch, level and voicing per 10 ms (YIN at
+    # 16 kHz), voiced stretches split at level dips and pitch jumps into notes, the silences between them as rests.
+    # Written as an MPE MIDI 1.0 file (member channels 2 to 16, +-48-semitone per-note bend, channel pressure for level;
+    # 1 tick = 1 ms) and as a preview WAV of the tracked melody played by a harmonic tone.
+    $kernels = Import-StudentKernels
+    $decoded = @(Invoke-StudentRecordings); if ($RecordingLimit -gt 0 -and $decoded.Count -gt $RecordingLimit) { $decoded = $decoded[0..($RecordingLimit - 1)] }
+    $output = Join-Path ([IO.Path]::GetFullPath($Recordings)) 'listen'; [void][IO.Directory]::CreateDirectory($output)
+    # 63-tap Hamming-windowed sinc low-pass at 7 kHz for 48 kHz to 16 kHz.
+    $taps = [float[]]::new(63); $sum = 0.0
+    for ($k = 0; $k -lt 63; $k++) { $m = $k - 31; $cut = 7000.0 / 48000.0; $v = if ($m -eq 0) { 2 * $cut } else { [Math]::Sin(2 * [Math]::PI * $cut * $m) / ([Math]::PI * $m) }; $v *= 0.54 - 0.46 * [Math]::Cos(2 * [Math]::PI * $k / 62); $taps[$k] = $v; $sum += $v }
+    for ($k = 0; $k -lt 63; $k++) { $taps[$k] = $taps[$k] / $sum }
+    $rate = 16000; $hop = 160; $window = 400
+    foreach ($recording in $decoded) {
+        $watch = [Diagnostics.Stopwatch]::StartNew()
+        $x = $kernels.MonoDecimate.Invoke([IO.File]::ReadAllBytes($recording.Wav), $recording.Data, $recording.Frames, $taps, 3)
+        $decodeSeconds = $watch.Elapsed.TotalSeconds
+        $track = $kernels.PitchTrack.Invoke($x, $rate, $hop, $window, 32, 229, 0.15)
+        $trackSeconds = $watch.Elapsed.TotalSeconds - $decodeSeconds
+        $n = [int]($track.Length / 3); $db = [double[]]::new($n); $semis = [double[]]::new($n); $peak = -200.0
+        for ($t = 0; $t -lt $n; $t++) { $db[$t] = 20 * [Math]::Log10([double]$track[3 * $t + 2] + 1e-9); if ($db[$t] -gt $peak) { $peak = $db[$t] } }
+        $floor = $peak - 35
+        $voiced = [bool[]]::new($n)
+        for ($t = 0; $t -lt $n; $t++) {
+            $f0 = [double]$track[3 * $t]
+            if ($f0 -gt 0 -and $db[$t] -gt $floor -and $track[3 * $t + 1] -lt 0.2) { $voiced[$t] = $true; $semis[$t] = 69 + 12 * [Math]::Log($f0 / 440.0, 2) }
         }
-        if ($format -lt 0 -or $data -lt 0 -or [BitConverter]::ToUInt16($head, $format) -ne 1 -or [BitConverter]::ToInt16($head, $format + 2) -ne 2 -or
-            [BitConverter]::ToInt32($head, $format + 4) -ne 48000 -or [BitConverter]::ToInt16($head, $format + 14) -ne 16) { throw "$($job.Wav) is not 48 kHz two-channel 16-bit PCM." }
-        $frames = [long][BitConverter]::ToUInt32($head, $data + 4) / 4
-        [pscustomobject]@{ PSTypeName = 'Kokoro.StudentRecording'; Source = $job.Mp3; Wav = $job.Wav; Frames = [long]$frames; Seconds = $frames / 48000.0 }
+        # Notes: voiced runs, split where pitch jumps 3 semitones or level dips 9 dB below the note's peak and rises again.
+        $notes = [Collections.Generic.List[object]]::new(); $t = 0
+        while ($t -lt $n) {
+            if (-not $voiced[$t]) { $t++; continue }
+            $first = $t; $top = $db[$t]; $t++
+            while ($t -lt $n -and $voiced[$t] -and [Math]::Abs($semis[$t] - $semis[$t - 1]) -lt 3 -and
+                -not ($db[$t] -lt $top - 9 -and $t + 1 -lt $n -and $db[$t + 1] -gt $db[$t])) { if ($db[$t] -gt $top) { $top = $db[$t] }; $t++ }
+            if ($t - $first -ge 4) {
+                $values = [double[]]@($semis[$first..($t - 1)] | Sort-Object); $onset = ($db[$first..([Math]::Min($t - 1, $first + 4))] | Measure-Object -Maximum).Maximum
+                $notes.Add([pscustomobject]@{ First = $first; Last = $t; Note = [int][Math]::Round($values[[int][Math]::Floor($values.Count / 2)]); Onset = $onset })
+            }
+        }
+        $level = { param([double] $value) [int][Math]::Max(1, [Math]::Min(127, [Math]::Round(($value - $floor) / 35 * 126) + 1)) }
+        $tick = { param([int] $frame) [int][Math]::Round(($frame * $hop + $window / 2) * 1000.0 / $rate) }
+        # MPE: channel 1 the master (MPE Configuration Message, 15 member channels), members 2 to 16 at +-48 semitones.
+        $events = [Collections.Generic.List[object]]::new()
+        $add = { param([int] $at, [byte[]] $bytes) $events.Add([pscustomobject]@{ Tick = $at; Order = $script:listenOrder++; Bytes = $bytes }) }
+        $script:listenOrder = 0
+        & $add 0 ([byte[]](0xFF, 0x51, 0x03, 0x07, 0xA1, 0x20))
+        & $add 0 ([byte[]](0xB0, 101, 0, 0xB0, 100, 6, 0xB0, 6, 15))
+        for ($c = 1; $c -le 15; $c++) { & $add 0 ([byte[]]((0xB0 + $c), 101, 0, (0xB0 + $c), 100, 0, (0xB0 + $c), 6, 48, (0xB0 + $c), 38, 0)) }
+        $bend = { param([int] $channel, [double] $cents) $v = [int][Math]::Max(0, [Math]::Min(16383, 8192 + [Math]::Round($cents / 4800 * 8192))); [byte[]]((0xE0 + $channel), ($v -band 127), ($v -shr 7)) }
+        for ($k = 0; $k -lt $notes.Count; $k++) {
+            $note = $notes[$k]; $channel = 1 + ($k % 15); $last = -1
+            & $add (& $tick $note.First) (& $bend $channel (100 * ($semis[$note.First] - $note.Note)))
+            & $add (& $tick $note.First) ([byte[]]((0x90 + $channel), $note.Note, (& $level $note.Onset)))
+            for ($t = $note.First + 2; $t -lt $note.Last; $t += 2) {
+                & $add (& $tick $t) (& $bend $channel (100 * ($semis[$t] - $note.Note)))
+                $pressure = & $level $db[$t]; if ($pressure -ne $last) { & $add (& $tick $t) ([byte[]]((0xD0 + $channel), $pressure)); $last = $pressure }
+            }
+            & $add (& $tick $note.Last) ([byte[]]((0x80 + $channel), $note.Note, 0))
+        }
+        $track_ = [IO.MemoryStream]::new(); $previous = 0
+        foreach ($event in ($events | Sort-Object Tick, Order)) {
+            $delta = $event.Tick - $previous; $previous = $event.Tick
+            $vlq = [Collections.Generic.List[byte]]::new(); $vlq.Insert(0, [byte]($delta -band 127)); $delta = $delta -shr 7
+            while ($delta -gt 0) { $vlq.Insert(0, [byte](($delta -band 127) -bor 128)); $delta = $delta -shr 7 }
+            $track_.Write($vlq.ToArray(), 0, $vlq.Count); $track_.Write($event.Bytes, 0, $event.Bytes.Length)
+        }
+        $track_.Write([byte[]](0, 0xFF, 0x2F, 0), 0, 4)
+        $body = $track_.ToArray(); $big = { param([int] $value, [int] $bytes) [byte[]]@(for ($i = $bytes - 1; $i -ge 0; $i--) { ($value -shr (8 * $i)) -band 255 }) }
+        $midiPath = Join-Path $output ([IO.Path]::ChangeExtension((Split-Path -Leaf $recording.Wav), '.mpe.mid'))
+        [IO.File]::WriteAllBytes($midiPath, [byte[]]([Text.Encoding]::ASCII.GetBytes('MThd') + (& $big 6 4) + (& $big 0 2) + (& $big 1 2) + (& $big 500 2) + [Text.Encoding]::ASCII.GetBytes('MTrk') + (& $big $body.Length 4) + $body))
+        # Preview: the tracked melody (voiced frames inside notes) at its level.
+        $pairs = [float[]]::new(2 * $n); $inside = [bool[]]::new($n); foreach ($note in $notes) { for ($t = $note.First; $t -lt $note.Last; $t++) { $inside[$t] = $true } }
+        $loud = 0.0; for ($t = 0; $t -lt $n; $t++) { if ($inside[$t]) { $pairs[2 * $t] = $track[3 * $t]; $pairs[2 * $t + 1] = $track[3 * $t + 2]; if ($track[3 * $t + 2] -gt $loud) { $loud = $track[3 * $t + 2] } } }
+        $pcm = $kernels.RenderTrack.Invoke($pairs, $hop, $rate, 12, 0.35 / [Math]::Max($loud, 1e-6))
+        $pcmBytes = [byte[]]::new(2 * $pcm.Length); [Buffer]::BlockCopy($pcm, 0, $pcmBytes, 0, $pcmBytes.Length)
+        $little = { param([int] $value, [int] $bytes) [byte[]]@(for ($i = 0; $i -lt $bytes; $i++) { ($value -shr (8 * $i)) -band 255 }) }
+        $previewPath = Join-Path $output ([IO.Path]::ChangeExtension((Split-Path -Leaf $recording.Wav), '.melody.wav'))
+        [IO.File]::WriteAllBytes($previewPath, [byte[]]([Text.Encoding]::ASCII.GetBytes('RIFF') + (& $little (36 + $pcmBytes.Length) 4) + [Text.Encoding]::ASCII.GetBytes('WAVEfmt ') + (& $little 16 4) + (& $little 1 2) + (& $little 1 2) +
+            (& $little $rate 4) + (& $little (2 * $rate) 4) + (& $little 2 2) + (& $little 16 2) + [Text.Encoding]::ASCII.GetBytes('data') + (& $little $pcmBytes.Length 4) + $pcmBytes))
+        $rests = @(for ($k = 1; $k -lt $notes.Count; $k++) { 10 * ($notes[$k].First - $notes[$k - 1].Last) }) | Sort-Object
+        $f0s = @(foreach ($note in $notes) { for ($t = $note.First; $t -lt $note.Last; $t++) { [double]$track[3 * $t] } }) | Sort-Object
+        [pscustomobject]@{ PSTypeName = 'Kokoro.StudentListening'; Recording = $recording.Wav; Seconds = $recording.Seconds; Frames = $n
+            VoicedShare = [Math]::Round(@($voiced | Where-Object { $_ }).Count / [double]$n, 3); Notes = $notes.Count
+            NotesPerSecond = [Math]::Round($notes.Count / $recording.Seconds, 2); MedianF0 = $(if ($f0s.Count) { [Math]::Round($f0s[[int]($f0s.Count / 2)], 1) })
+            RestMedianMs = $(if ($rests.Count) { $rests[[int]($rests.Count / 2)] }); RestsOver300Ms = @($rests | Where-Object { $_ -gt 300 }).Count
+            Midi = $midiPath; Melody = $previewPath; DecodeSeconds = [Math]::Round($decodeSeconds, 1); TrackSeconds = [Math]::Round($trackSeconds, 1); WallSeconds = [Math]::Round($watch.Elapsed.TotalSeconds, 1) }
     }
 }
 
@@ -1392,6 +1570,7 @@ $script:StudentSteps = [ordered]@{
     Normalize = { Invoke-StudentNormalization }
     Syllabus = { Invoke-StudentSyllabus }
     Recordings = { Invoke-StudentRecordings }
+    Listen = { Invoke-StudentListen }
 }
 }
 & $studentOwner { & $script:StudentSteps[$Step] }
