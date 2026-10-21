@@ -1136,6 +1136,7 @@ $script:Kernels=@(
     $harness=if($phoneHarness){@{AdaInMode=$GeneratorMoments;Schedule=$GeneratorSchedule;GenericHarness=$true}}else{@{}}
             if($GeneratorMatrixThread){ $harness.MatrixThread=$GeneratorMatrixThread; $harness.MatrixLock=$GeneratorMatrixLock }
             if($GeneratorWeightPlanes -ne 2){ $harness.WeightPlanes=$GeneratorWeightPlanes }
+            if($GeneratorControllerContact){ $harness.ControllerContact=$true }
         $run=New-KokoroGenerator60x16RunSteps -Frames $ResBlockFrames -HvxThreads $ResidentHvxThreads -BatchTiles $ResidentBatchTiles -StopAfterStage $Stage16StopAfter -DumpPoint $Stage16DumpPoint -Kernels $Stage16Kernels -RuntimeFrames:$GeneratorRuntimeFrames @pmu @harness
     $steps=@($run.Steps)
     $symbol='kokoro_resblock_run_skel_handle_invoke'; $soname='libkokoro_resblock_run_skel.so'
@@ -1317,6 +1318,8 @@ param(
     [ValidateSet('Main','Worker','Convolution')][string] $GeneratorMatrixLock = 'Main',
     # KokoroGenerator60x16Run tile schedule: 1 keeps one resident int8 weight plane per stage (the high bytes).
     [ValidateSet(1, 2)][int] $GeneratorWeightPlanes = 2,
+    # KokoroGenerator60x16Run tile schedule: per-tile AdaIN from the controller contact (K = K_base + P_K * v, M likewise).
+    [switch] $GeneratorControllerContact,
     [ValidateSet(1, 3, 5)][int] $ConvDilation = 1,
     [ValidateSet(1,3)][int] $TemplateBranches = 1,
     [switch] $TemplateAddResidual,

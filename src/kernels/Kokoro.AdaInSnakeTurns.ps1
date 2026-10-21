@@ -19,7 +19,11 @@
 # -TurnsBits QT (24 above; 22 gives K four times the range, one input LSB up to 1/64 turn): the cos
 # argument stays the 16-bit fractional turn, bits QT-16..QT-1 of P.
 function New-KokoroAdaInSnakeTurnsSteps {
-    param([ValidateSet(128,256)][int]$Channels=128,[ValidateSet(22,24)][int]$TurnsBits=24,[string]$LabelPrefix='adainsnaketurns',[switch]$NoReturn)
+    # -ControllerContact: r3 also holds P_K[C] at 12C and P_M[C] at 16C, and r5 points at the first tile's controller word
+    # (v << 16, int32, one word per tile). Each tile computes K = K_base + P_K * v and M = M_base + P_M * v per channel
+    # with the Q31 multiply used for K * x; v = 0 leaves K and M exactly the base values. r16 is saved and restored.
+    param([ValidateSet(128,256)][int]$Channels=128,[ValidateSet(22,24)][int]$TurnsBits=24,[string]$LabelPrefix='adainsnaketurns',[switch]$NoReturn,[switch]$ControllerContact)
+    if ($ControllerContact -and $NoReturn) { throw 'The controller contact restores r16 on return.' }
     # Shift registers: fraction of the even row (right, QT-16), of the odd row (left, 32-QT), and (1-cos)/(2 pi)
     # from Q30 to QT (right, 30-QT); r9 = 8, r11 = 6, r28 = 10.
     $sh = if ($TurnsBits -eq 24) { @{ Even = 9; Odd = 9; Cos = 11 } } else { @{ Even = 11; Odd = 28; Cos = 9 } }
@@ -31,6 +35,7 @@ function New-KokoroAdaInSnakeTurnsSteps {
     $imm = { param([int]$r,[long]$v) $u=[long]([uint32]($v -band 0xffffffffL)); $s.Add(@{Op='lo';x=$r;i=($u -band 65535)}); $s.Add(@{Op='hi';x=$r;i=($u -shr 16)}) }
     $splat = { param([int]$v,[long]$value) & $imm 13 $value; $s.Add(@{Op='vsplat';d=$v;s=13}) }
     $half = { param([int]$h) [long](($h -band 0xffff) -bor (($h -band 0xffff) -shl 16)) }
+    if ($ControllerContact) { $s.Add(@{Op='allocframe';Bytes=8}); $s.Add(@{Op='store';s=29;t=16;Offset=0}); $s.Add(@{Op='addi';d=16;s=5;i=0}) }
     # Resident constants.
     & $splat 31 0x80008000L                     # u16 bias
     & $splat 30 0xFFFF0000L                     # odd-halfword mask
@@ -57,6 +62,17 @@ function New-KokoroAdaInSnakeTurnsSteps {
         $s.Add(@{Op='addi';d=15;s=4;i=0})
         $tile = "${LabelPrefix}_b${block}_tile"; $pair = "${LabelPrefix}_b${block}_pair"
         $s.Add(@{Op='label';Name=$tile})
+        if ($ControllerContact) {
+            # This tile's controller word: r16 + 4 * (tiles done = r4 - r15), splat; then K and M from base + P * v.
+            $s.Add(@{Op='sub';d=14;s=4;t=15}); $s.Add(@{Op='asl-i';d=14;s=14;i=2}); $s.Add(@{Op='add';d=14;s=14;t=16})
+            $s.Add(@{Op='load';d=14;s=14;Offset=0}); $s.Add(@{Op='vsplat';d=0;s=14})
+            foreach ($m in @(@(14,0),@(15,($Channels*4)))) {
+                $s.Add(@{Op='addi';d=14;s=3;i=($block*128+$m[1])}); $s.Add(@{Op='vload';d=$m[0];s=14;Offset=0})
+                $s.Add(@{Op='addi';d=14;s=14;i=($Channels*12)}); $s.Add(@{Op='vload';d=1;s=14;Offset=0})
+                $s.Add(@{Op='vmpye-w-uh';d=2;s=1;t=0}); $s.Add(@{Op='vmpyo-acc-w-h-rnd-sat-shift';d=2;s=1;t=0})
+                $s.Add(@{Op='vadd-w';d=$m[0];s=$m[0];t=2})
+            }
+        }
         $s.Add(@{Op='imm';d=14;i=16})
         $s.Add(@{Op='label';Name=$pair})
         $s.Add(@{Op='vload';d=0;s=5;Offset=0})
@@ -113,6 +129,7 @@ function New-KokoroAdaInSnakeTurnsSteps {
         $s.Add(@{Op='gtu';d=0;s=15;t=7})
         $s.Add(@{Op='jump-p';u=0;Label=$tile})
     }
-    if (-not $NoReturn) { $s.Add(@{Op='return'}) }
+    if ($ControllerContact) { $s.Add(@{Op='load';d=16;s=29;Offset=0}); $s.Add(@{Op='dealloc-return'}) }
+    elseif (-not $NoReturn) { $s.Add(@{Op='return'}) }
     $s.ToArray()
 }

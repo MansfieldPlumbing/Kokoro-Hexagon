@@ -1527,7 +1527,12 @@ function Test-KokoroGeneratorTileEquivalence {
         [ValidateSet(1,2,4)][int]$TileBlock=4,[ValidateRange(0,3)][int]$MatrixThread=0,[ValidateSet('Main','Worker','Convolution')][string]$MatrixLock='Main',
         # 1: both jobs run int8 weights q = round(w / 256) (clamped to +-127) stored as 256 q, table biases corrected; the
         # tile job keeps only the high plane resident.
-        [ValidateSet(1,2)][int]$WeightPlanes=2)
+        [ValidateSet(1,2)][int]$WeightPlanes=2,
+        # The controller contact proof: the tile job reads per-tile AdaIN as K_base + P * v with fixed pseudo-random P.
+        # Held: v = 0 against the layer job. Moving: v = V everywhere must differ; a step from 0 to V at ControllerStep
+        # must equal the v = 0 run before it and the v = V run after it, outside ControllerMargin tiles; and the step at
+        # blocks of 1 must equal blocks of TileBlock.
+        [switch]$ControllerContact,[int]$ControllerStep=160,[int]$ControllerMargin=8,[int]$ControllerValue=8192,[int]$SensitivityRange=1048576)
     $out=[IO.Path]::GetFullPath($OutputDirectory)
     if(-not $out.StartsWith($Build+[IO.Path]::DirectorySeparatorChar,[StringComparison]::OrdinalIgnoreCase) -or (Test-Path -LiteralPath $out)){throw 'Choose a fresh equivalence directory under build/.'}
     [void][IO.Directory]::CreateDirectory($out)
@@ -1537,7 +1542,8 @@ function Test-KokoroGeneratorTileEquivalence {
     $common=@{ResBlockFrames=[int]$fixture.Frames;ResidentHvxThreads=4}
     $export=Invoke-KokoroEmission -Kernel KokoroGenerator60x16Run -Parameters ($common+@{ResidentBatchTiles=22;GeneratorMoments='Export';GeneratorSchedule='Layer'})
     $layer=Invoke-KokoroEmission -Kernel KokoroGenerator60x16Run -Parameters ($common+@{ResidentBatchTiles=22;GeneratorMoments='Constants';GeneratorSchedule='Layer'})
-    $tile=Invoke-KokoroEmission -Kernel KokoroGenerator60x16Run -Parameters ($common+@{ResidentBatchTiles=$TileBlock;GeneratorMoments='Constants';GeneratorSchedule='Tile';GeneratorMatrixThread=$MatrixThread;GeneratorMatrixLock=$MatrixLock;GeneratorWeightPlanes=$WeightPlanes})
+    $tileParameters=$common+@{ResidentBatchTiles=$TileBlock;GeneratorMoments='Constants';GeneratorSchedule='Tile';GeneratorMatrixThread=$MatrixThread;GeneratorMatrixLock=$MatrixLock;GeneratorWeightPlanes=$WeightPlanes;GeneratorControllerContact=$ControllerContact.IsPresent}
+    $tile=Invoke-KokoroEmission -Kernel KokoroGenerator60x16Run -Parameters $tileParameters
     $statistics=[IO.File]::ReadAllBytes((Join-Path $FixtureDirectory 'tables.bin'))
     $weights=[IO.File]::ReadAllBytes((Join-Path $FixtureDirectory 'weights.bin'))
     $stage={param([string]$Name,[byte[]]$Tables,[byte[]]$WeightBytes)
@@ -1583,10 +1589,43 @@ function Test-KokoroGeneratorTileEquivalence {
     }
     $constantsInput=& $stage 'constants' $runTables $runWeights
     $layerRun=Invoke-KokoroDeviceJob -EmissionDirectory $layer.Directory -EmissionArtifact $layer -InputDirectory $constantsInput -Soc $Soc -Runs $Runs -Package $Package
-    $tileRun=Invoke-KokoroDeviceJob -EmissionDirectory $tile.Directory -EmissionArtifact $tile -InputDirectory $constantsInput -Soc $Soc -Runs $Runs -Package $Package
     # The DDR workspace starts at the first 128-byte boundary at least 64 bytes into the output buffer.
     $tensorBytes=[long]$fixture.Tiles*8192
     $read={param($Run,$Emission) $at=128+[long]$Emission.Layout.FinalWorkspaceOffset; [byte[]]$Run.Output[$at..($at+$tensorBytes-1)]}
+    $contactProof=$null
+    if($ControllerContact){
+        # Contact inputs after the constants: per stage P_K[C] and P_M[C] (fixed pseudo-random, |P| <= SensitivityRange),
+        # then one controller word (v << 16) per tile.
+        $contact=$tile.Layout.ControllerContact
+        if($runTables.Length -gt $contact.Offset){throw 'Constants tables run past the controller contact.'}
+        $sensitivities=[byte[]]::new(18*$contact.SensitivityBytesPerStage); $random=[Random]::new(7)
+        for($i=0;$i -lt $sensitivities.Length;$i+=4){ [Array]::Copy([BitConverter]::GetBytes([int]$random.Next(-$SensitivityRange,$SensitivityRange+1)),0,$sensitivities,$i,4) }
+        $contactTables={param([int[]]$Values)
+            $bytes=[byte[]]::new($contact.ControllerOffset+$contact.ControllerBytes)
+            [Array]::Copy($runTables,0,$bytes,0,$runTables.Length); [Array]::Copy($sensitivities,0,$bytes,$contact.Offset,$sensitivities.Length)
+            for($t=0;$t -lt $Values.Length;$t++){ [Array]::Copy([BitConverter]::GetBytes([int]($Values[$t] -shl 16)),0,$bytes,$contact.ControllerOffset+4*$t,4) }
+            $bytes}
+        $tilesCount=[int]$fixture.Tiles
+        $held=[int[]]::new($tilesCount); $high=[int[]]::new($tilesCount); $step=[int[]]::new($tilesCount)
+        for($t=0;$t -lt $tilesCount;$t++){ $high[$t]=$ControllerValue; if($t -ge $ControllerStep){ $step[$t]=$ControllerValue } }
+        $contactRun={param([string]$Name,[int[]]$Values,$Emission) Invoke-KokoroDeviceJob -EmissionDirectory $Emission.Directory -EmissionArtifact $Emission -InputDirectory (& $stage $Name (& $contactTables $Values) $runWeights) -Soc $Soc -Runs $Runs -Package $Package}
+        $tileRun=& $contactRun 'contact-held' $held $tile
+        $highRun=& $contactRun 'contact-high' $high $tile; $stepRun=& $contactRun 'contact-step' $step $tile
+        $singleParameters=$tileParameters.Clone(); $singleParameters.ResidentBatchTiles=1
+        $single=Invoke-KokoroEmission -Kernel KokoroGenerator60x16Run -Parameters $singleParameters
+        $singleRun=& $contactRun 'contact-step-single' $step $single
+        $heldTensor=& $read $tileRun $tile; $highTensor=& $read $highRun $tile; $stepTensor=& $read $stepRun $tile; $singleTensor=& $read $singleRun $single
+        $sameTiles={param([byte[]]$A,[byte[]]$B,[int]$From,[int]$To) $bad=0; for($t=[Math]::Max(0,$From);$t -lt [Math]::Min($tilesCount,$To);$t++){ for($i=8192*$t;$i -lt 8192*($t+1);$i++){ if($A[$i] -ne $B[$i]){ $bad++; break } } }; $bad}
+        $contactProof=[pscustomobject]@{Step=$ControllerStep;Margin=$ControllerMargin;Value=$ControllerValue;SensitivityRange=$SensitivityRange
+            HighDifferingTiles=(& $sameTiles $heldTensor $highTensor 0 $tilesCount)
+            StepBeforeDifferingTiles=(& $sameTiles $stepTensor $heldTensor 0 ($ControllerStep-$ControllerMargin))
+            StepAfterDifferingTiles=(& $sameTiles $stepTensor $highTensor ($ControllerStep+$ControllerMargin) $tilesCount)
+            StepTransitionDifferingFromHeld=(& $sameTiles $stepTensor $heldTensor ($ControllerStep-$ControllerMargin) ($ControllerStep+$ControllerMargin))
+            BlockInvariant=([Convert]::ToHexString([Security.Cryptography.SHA256]::HashData($stepTensor)) -ceq [Convert]::ToHexString([Security.Cryptography.SHA256]::HashData($singleTensor)))
+            HighDspMs=$highRun.MedianMs;StepDspMs=$stepRun.MedianMs;SingleBlockDspMs=$singleRun.MedianMs
+            StepTensorSHA256=[Convert]::ToHexString([Security.Cryptography.SHA256]::HashData($stepTensor))}
+    }
+    else { $tileRun=Invoke-KokoroDeviceJob -EmissionDirectory $tile.Directory -EmissionArtifact $tile -InputDirectory $constantsInput -Soc $Soc -Runs $Runs -Package $Package }
     $layerTensor=& $read $layerRun $layer; $tileTensor=& $read $tileRun $tile
     [IO.File]::WriteAllBytes((Join-Path $out 'layer-tensor.bin'),$layerTensor); [IO.File]::WriteAllBytes((Join-Path $out 'tile-tensor.bin'),$tileTensor)
     $different=0; $first=-1; $differingTiles=[Collections.Generic.List[int]]::new()
@@ -1594,7 +1633,7 @@ function Test-KokoroGeneratorTileEquivalence {
     $report=[pscustomobject]@{Soc=$Soc;Fixture=$FixtureDirectory;Tiles=[int]$fixture.Tiles;TileBlock=$TileBlock;MatrixThread=$MatrixThread;MatrixLock=$MatrixLock;WeightPlanes=$WeightPlanes;TensorBytes=$tensorBytes;ByteIdentical=($different -eq 0);DifferentBytes=$different;FirstDifference=$first;DifferingTiles=$differingTiles.ToArray()
         LayerDspMs=$layerRun.MedianMs;TileDspMs=$tileRun.MedianMs;LayerVtcmBytes=$layer.Layout.VtcmBytes;TileVtcmBytes=$tile.Layout.VtcmBytes;LayerLibraryBytes=$layer.Bytes;TileLibraryBytes=$tile.Bytes
         LayerLibrarySHA256=$layer.LibrarySHA256;TileLibrarySHA256=$tile.LibrarySHA256;LayerTensorSHA256=[Convert]::ToHexString([Security.Cryptography.SHA256]::HashData($layerTensor))
-        TileTensorSHA256=[Convert]::ToHexString([Security.Cryptography.SHA256]::HashData($tileTensor))}
+        TileTensorSHA256=[Convert]::ToHexString([Security.Cryptography.SHA256]::HashData($tileTensor));ControllerContact=$contactProof}
     $report | Export-Clixml -LiteralPath (Join-Path $out 'equivalence.clixml') -Depth 4
     $report
 }
