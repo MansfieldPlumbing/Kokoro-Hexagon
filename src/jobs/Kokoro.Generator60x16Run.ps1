@@ -123,7 +123,7 @@ function New-KokoroGenerator60x16RunSteps {
     if(-not $PoolWait){ $PoolWait=if($Schedule -eq 'Tile'){'Spin'}else{'Futex'} }
     if($MatrixThread -and ($Schedule -ne 'Tile' -or $MatrixThread -ge $HvxThreads)){ throw 'MatrixThread names an HVX worker of the tile schedule.' }
     if($Schedule -eq 'Tile' -and ($Whole -or $Source -or $Decoder -or $Front -or $Tail -or $RuntimeFrames -or $StopAfterStage -ge 0 -or
-        $Kernels.Count -ne 3 -or $AdaInMode -ne 'Constants' -or ($BatchTiles -band ($BatchTiles-1)) -or $Channels -ne 128 -or $PmuEvents)) {
+        $Kernels.Count -ne 3 -or $AdaInMode -ne 'Constants' -or ($BatchTiles -band ($BatchTiles-1)) -or $Channels -ne 128)) {
         throw 'The tile schedule runs one 128-channel section of three kernels and their mean with supplied AdaIN values, a power-of-two block of tiles per step.'
     }
     if($RuntimeFrames -and ($Whole -or $Source -or $Decoder -or $Front -or $Tail -or $StopAfterStage -ge 0)) {
@@ -761,6 +761,7 @@ function New-KokoroGenerator60x16RunSteps {
         }
         if(-not $isLast){ $segments.Add((& $fillSegment 1 0 ($count+1) 1)) }
         & $dispatch $(if($grouped){"body_turns3_h$($g.Half)$sfx"}else{"body_turns$sfx"}) $segments.ToArray()
+        & $mark 'AdaInSnake'
         if($null -ne $block){
             $position=($tiles-1)-$block*$batch+1
             for($b=0;$b -lt $BranchesPerStage;$b++){
@@ -793,9 +794,11 @@ function New-KokoroGenerator60x16RunSteps {
             & $ptr 0 18 ($winAt+$tileBytes); & $ptr 1 18 ($lowAt+$tileBytes); & $ptr 2 18 $tileWeightAt[$index]; & $ptr 3 18 ($rAt+$tablesAt); & $imm 4 $count; & $ptr 5 18 $tileRegions.Planes
             & $call $convBody
         }
+        & $mark 'HmxConv'
         & $sync
         $targetBase=if($g.Half -eq 0){$stageBase}else{$residualBase}; $targetBlocks=if($g.Half -eq 0){4}else{8}
         & $parallel "$(if($g.Half -eq 0){'body_combine_conv'}else{'body_combine_residual'})$(if($grouped){'3'})$sfx" @($tileRegions.Planes,(& $ring $targetBase $targetBlocks $block (& $delta 0) 0),($rAt+$ratiosAt)) @($true,$true,$false) $count
+        & $mark 'Combine'
         $targetStride=if($g.Half -eq 0){12L*$blockBytes}else{8L*$blockBytes}
         for($b=0;$b -lt $BranchesPerStage;$b++){
             if($isLast){ & $padRows ($targetBase+$b*$targetStride+($block -band ($targetBlocks-1))*$blockBytes+($count-1)*[long]$tileBytes) 0x8000 }
@@ -813,6 +816,7 @@ function New-KokoroGenerator60x16RunSteps {
                     & $dmaRegisters $blockBytes
                 }
             }
+            & $mark 'Dma'
         }
         for($bb=0;$bb -lt 3/$BranchesPerStage;$bb++){ for($q=0;$q -lt 6;$q++){
             $block=if($null -ne $step){$step-$q}else{$null}
@@ -825,12 +829,13 @@ function New-KokoroGenerator60x16RunSteps {
         $meanDelta=if($null -ne $block){0}else{-5}
         $branchRings=@(for($bb=0;$bb -lt 3;$bb++){ & $ring ($tileRegions.ResidualRings+$bb*8L*$blockBytes) 8 $block $meanDelta 0 })
         & $parallel "body_mean$sfx" @($branchRings[0],$branchRings[1],$branchRings[2],$tileRegions.Mean) @($true,$true,$true,$true) $count
+        & $mark 'Mean'
         & $sync
         if($null -ne $block){ & $dma 25 ($finalOffset+$block*$blockBytes) 18 $tileRegions.Mean ($count*[long]$tileBytes) }
         else {
             & $ptr 1 18 $tileRegions.Mean
             $s.Add(@{Op='addi';d=2;s=17;i=-5}); $s.Add(@{Op='asl-i';d=2;s=2;i=$blockShift}); & $imm 15 $finalOffset; $s.Add(@{Op='add';d=2;s=2;t=15}); $s.Add(@{Op='add';d=2;s=2;t=25})
-            & $dmaRegisters $blockBytes
+            & $dmaRegisters $blockBytes; & $mark 'Dma'
         }
     }
     $tileSection={
@@ -841,11 +846,12 @@ function New-KokoroGenerator60x16RunSteps {
             & $dma 18 $tileWeightAt[$index] 21 $g.WeightOffset $g.WeightBytes
             $site=$siteByRecord[[long]$g.RecordOffset]
             & $dma 18 $tileRegions.Moments 22 ($constantsTableOffset+$site.Offset) $site.Bytes
-            & $ptr 0 18 $tileRegions.Moments; & $ptr 1 18 $rAt; & $ptr 2 18 ($tileRegions.Kms+$index*$kmsBytes); & $call "body_constant$sfx"
+            & $ptr 0 18 $tileRegions.Moments; & $ptr 1 18 $rAt; & $ptr 2 18 ($tileRegions.Kms+$index*$kmsBytes); & $call "body_constant$sfx"; & $mark 'Coefficients'
             if($ControllerContact){ & $dma 18 ($tileRegions.Kms+$index*$kmsBytes+12L*$Channels) 22 ($contactOffset+$index*8L*$Channels) (8L*$Channels) }
         }
         if($ControllerContact){ & $dma 18 $tileRegions.Controller 22 ($contactOffset+18L*8*$Channels) $controllerBytes }
         for($bb=0;$bb -lt 3;$bb++){ & $dma 18 ($tileRegions.ResidualRings+$bb*8L*$blockBytes) 20 $r0Offset ((& $blockTiles 0)*[long]$tileBytes) }
+        & $mark 'Boundary' "Res${Channels}_0"
         # Steps 0..5 and blockCount-2..blockCount+4 are unrolled: they hold the first block, the last two and the partial wave.
         for($step=0;$step -lt 6;$step++){ & $tileStep $step }
         # The interior steps count in r17, not LC1: the worker join can wait in a QuRT futex trap, and LC1 did not

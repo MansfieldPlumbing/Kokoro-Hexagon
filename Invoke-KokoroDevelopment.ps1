@@ -884,6 +884,40 @@ function Test-KokoroDecoderConstants {
     $result
 }
 
+# PMU records of a profiled generator run: per category and per Unmarked site, ticks (19.2 MHz), cycles, calls and the
+# eight event counters (event set A: HVX packets in counter 1; B: permutes in counter 1, HVX packets in counter 7).
+function Read-KokoroPmuRecords {
+    param([Parameter(Mandatory)][byte[]]$Output,[Parameter(Mandatory)]$PmuProfile,[ValidateSet('A','B')][string]$EventSet='A')
+    $categories=@($PmuProfile.Categories); $packets=if($EventSet -ceq 'A'){1}else{7}
+    $header=-1; $search=0
+    while($search -lt $Output.Length){
+        $candidate=[Array]::IndexOf[byte]($Output,0x50,$search); if($candidate -lt 0){break}
+        if($candidate+$PmuProfile.SiteRecordOffset+64*$PmuProfile.SiteRecordCount -le $Output.Length -and [BitConverter]::ToUInt32($Output,$candidate) -eq 0x31554d50){if($header -ge 0){throw 'Multiple PMU records found.'};$header=$candidate}
+        $search=$candidate+1
+    }
+    if($header -lt 0 -or [BitConverter]::ToUInt32($Output,$header+28) -ne 0){throw 'Missing PMU record or failed PMU call.'}
+    $record={param([long]$at,[hashtable]$Fields)
+        $counters=[uint32[]]::new(8); [Buffer]::BlockCopy($Output,$at,$counters,0,32)
+        [pscustomobject]($Fields+@{Ticks=[BitConverter]::ToUInt64($Output,$at+32);Ms=[BitConverter]::ToUInt64($Output,$at+32)/19200.0;
+            Cycles=[BitConverter]::ToUInt64($Output,$at+40);Calls=[BitConverter]::ToUInt32($Output,$at+48);
+            HvxPackets=$counters[$packets];Permutes=$(if($EventSet -ceq 'B'){$counters[1]}else{$null});Counters=$counters})}
+    $measurements=[Collections.Generic.List[object]]::new()
+    for($index=0;$index -lt $categories.Count;$index++){ $measurements.Add((& $record ($header+256+64*$index) @{Category=$categories[$index]})) }
+    $unmarked=@(foreach($site in $PmuProfile.Sites){ & $record ($header+$PmuProfile.SiteRecordOffset+64*$site.Index) @{Index=$site.Index;File=$site.File;MarkLine=$site.MarkLine;PrecedingLine=$site.PrecedingLine;PrecedingStep=$site.PrecedingStep} })
+    $unmarkedIndex=[array]::IndexOf($categories,'Unmarked')
+    if($unmarkedIndex -lt 0 -or $measurements[$unmarkedIndex].Calls -ne 0){throw 'Unexpected aggregate Unmarked record.'}
+    $totalCounters=[ulong[]]::new(8)
+    foreach($site in $unmarked){for($counter=0;$counter -lt 8;$counter++){$totalCounters[$counter]+=$site.Counters[$counter]}}
+    $ticks=($unmarked | Measure-Object Ticks -Sum).Sum
+    $measurements[$unmarkedIndex]=[pscustomobject]@{Category='Unmarked';Ticks=[ulong]$ticks;Ms=$ticks/19200.0;
+        Cycles=($unmarked | Measure-Object Cycles -Sum).Sum;Calls=($unmarked | Measure-Object Calls -Sum).Sum;
+        HvxPackets=$totalCounters[$packets];Permutes=$(if($EventSet -ceq 'B'){$totalCounters[1]}else{$null});Counters=$totalCounters}
+    $categoryTicks=($measurements | Where-Object Category -CNotLike 'Stage.*' | Measure-Object Ticks -Sum).Sum
+    $stageTicks=($measurements | Where-Object Category -CLike 'Stage.*' | Measure-Object Ticks -Sum).Sum
+    if($categoryTicks -ne $stageTicks){throw "Category/stage accounting differs: $categoryTicks/$stageTicks ticks."}
+    [pscustomobject]@{Measurements=$measurements.ToArray();UnmarkedSites=$unmarked}
+}
+
 function Test-KokoroGeneratorPmu {
     param([Parameter(Mandatory)][string]$OutputDirectory,[string]$Soc='SM8550',
         [string]$Package='dev.mansfieldplumbing.kokoro',
@@ -939,46 +973,10 @@ function Test-KokoroGeneratorPmu {
                 $samples=[byte[]]::new(2*$emission.Layout.Samples); [Array]::Copy($run.Output,$emission.Layout.PcmOffset,$samples,0,$samples.Length)
                 $pcmHash=[Convert]::ToHexString([Security.Cryptography.SHA256]::HashData($samples))
                 if($case.ContainsKey('Pcm') -and $pcmHash -cne $case.Pcm){throw "$($case.Name) profile PCM differs: expected $($case.Pcm), received $pcmHash."}
-                $measurements=[Collections.Generic.List[object]]::new()
-                $unmarked=[Collections.Generic.List[object]]::new()
-                if($eventSet -cne 'Total'){
-                    $pmu=$emission.Layout.PmuProfile; $categories=@($pmu.Categories)
-                    $header=-1; $search=0
-                    while($search -lt $run.Output.Length){
-                        $candidate=[Array]::IndexOf[byte]($run.Output,0x50,$search); if($candidate -lt 0){break}
-                        if($candidate+$pmu.SiteRecordOffset+64*$pmu.SiteRecordCount -le $run.Output.Length -and [BitConverter]::ToUInt32($run.Output,$candidate) -eq 0x31554d50){if($header -ge 0){throw 'Multiple PMU records found.'};$header=$candidate}
-                        $search=$candidate+1
-                    }
-                    if($header -lt 0 -or [BitConverter]::ToUInt32($run.Output,$header+28) -ne 0){throw 'Missing PMU record or failed PMU call.'}
-                    for($index=0;$index -lt $categories.Count;$index++){
-                        $at=$header+256+64*$index
-                        $counters=[uint32[]]::new(8); [Buffer]::BlockCopy($run.Output,$at,$counters,0,32)
-                        $measurements.Add([pscustomobject]@{Category=$categories[$index];Ticks=[BitConverter]::ToUInt64($run.Output,$at+32);Ms=[BitConverter]::ToUInt64($run.Output,$at+32)/19200.0;
-                            Cycles=[BitConverter]::ToUInt64($run.Output,$at+40);Calls=[BitConverter]::ToUInt32($run.Output,$at+48);
-                            HvxPackets=$counters[$(if($eventSet -ceq 'A'){1}else{7})];Permutes=$(if($eventSet -ceq 'B'){$counters[1]}else{$null});Counters=$counters})
-                    }
-                    foreach($site in $pmu.Sites){
-                        $at=$header+$pmu.SiteRecordOffset+64*$site.Index
-                        $counters=[uint32[]]::new(8); [Buffer]::BlockCopy($run.Output,$at,$counters,0,32)
-                        $unmarked.Add([pscustomobject]@{Index=$site.Index;File=$site.File;MarkLine=$site.MarkLine;PrecedingLine=$site.PrecedingLine;PrecedingStep=$site.PrecedingStep;
-                            Ticks=[BitConverter]::ToUInt64($run.Output,$at+32);Ms=[BitConverter]::ToUInt64($run.Output,$at+32)/19200.0;
-                            Cycles=[BitConverter]::ToUInt64($run.Output,$at+40);Calls=[BitConverter]::ToUInt32($run.Output,$at+48);
-                            HvxPackets=$counters[$(if($eventSet -ceq 'A'){1}else{7})];Permutes=$(if($eventSet -ceq 'B'){$counters[1]}else{$null});Counters=$counters})
-                    }
-                    $unmarkedIndex=[array]::IndexOf($categories,'Unmarked')
-                    if($unmarkedIndex -lt 0 -or $measurements[$unmarkedIndex].Calls -ne 0){throw 'Unexpected aggregate Unmarked record.'}
-                    $totalCounters=[ulong[]]::new(8)
-                    foreach($site in $unmarked){for($counter=0;$counter -lt 8;$counter++){$totalCounters[$counter]+=$site.Counters[$counter]}}
-                    $ticks=($unmarked | Measure-Object Ticks -Sum).Sum
-                    $measurements[$unmarkedIndex]=[pscustomobject]@{Category='Unmarked';Ticks=[ulong]$ticks;Ms=$ticks/19200.0;
-                        Cycles=($unmarked | Measure-Object Cycles -Sum).Sum;Calls=($unmarked | Measure-Object Calls -Sum).Sum;
-                        HvxPackets=$totalCounters[$(if($eventSet -ceq 'A'){1}else{7})];Permutes=$(if($eventSet -ceq 'B'){$totalCounters[1]}else{$null});Counters=$totalCounters}
-                    $categoryTicks=($measurements | Where-Object Category -CNotLike 'Stage.*' | Measure-Object Ticks -Sum).Sum
-                    $stageTicks=($measurements | Where-Object Category -CLike 'Stage.*' | Measure-Object Ticks -Sum).Sum
-                    if($categoryTicks -ne $stageTicks){throw "Category/stage accounting differs: $categoryTicks/$stageTicks ticks."}
-                }
+                $measurements=@(); $unmarked=@()
+                if($eventSet -cne 'Total'){ $records=Read-KokoroPmuRecords -Output $run.Output -PmuProfile $emission.Layout.PmuProfile -EventSet $eventSet; $measurements=$records.Measurements; $unmarked=$records.UnmarkedSites }
                 $row=[pscustomobject]@{Profile=$case.Name;EventSet=$eventSet;LibrarySHA256=$emission.LibrarySHA256;DspMs=$run.MedianMs;
-                    OutputPath=$run.OutputPath;PcmSHA256=$pcmHash;Measurements=$measurements.ToArray();UnmarkedSites=$unmarked.ToArray()}
+                    OutputPath=$run.OutputPath;PcmSHA256=$pcmHash;Measurements=$measurements;UnmarkedSites=$unmarked}
                 $rows.Add($row); $row | Export-Clixml -LiteralPath (Join-Path $out "$($case.Name)-$eventSet.clixml") -Depth 8
                 Write-Host "$($case.Name) Set=$eventSet DspMs=$($run.MedianMs) PcmParity=True"
                 if($case.Name -ceq 'P3' -and $eventSet -ceq 'A'){
@@ -1541,7 +1539,10 @@ function Test-KokoroGeneratorTileEquivalence {
         # The tile job's stages with all three branches together (one fill and one combine dispatch per stage).
         [ValidateSet(1,3)][int]$BranchesPerStage=1,
         # The tile job keeps a window per stage and fills each window tile once.
-        [switch]$FillOnce)
+        [switch]$FillOnce,
+        # Also run the tile job with PMU event sets A and B (output must equal the unprofiled run) and record its
+        # time per category: fill, convolution, combine, mean, DMA, synchronization, tile fixes.
+        [switch]$PmuSplit)
     $out=[IO.Path]::GetFullPath($OutputDirectory)
     if(-not $out.StartsWith($Build+[IO.Path]::DirectorySeparatorChar,[StringComparison]::OrdinalIgnoreCase) -or (Test-Path -LiteralPath $out)){throw 'Choose a fresh equivalence directory under build/.'}
     [void][IO.Directory]::CreateDirectory($out)
@@ -1637,13 +1638,27 @@ function Test-KokoroGeneratorTileEquivalence {
     else { $tileRun=Invoke-KokoroDeviceJob -EmissionDirectory $tile.Directory -EmissionArtifact $tile -InputDirectory $constantsInput -Soc $Soc -Runs $Runs -Package $Package }
     $layerTensor=& $read $layerRun $layer; $tileTensor=& $read $tileRun $tile
     [IO.File]::WriteAllBytes((Join-Path $out 'layer-tensor.bin'),$layerTensor); [IO.File]::WriteAllBytes((Join-Path $out 'tile-tensor.bin'),$tileTensor)
+    $split=$null
+    if($PmuSplit){
+        $events=@{A=[int[]]@(0x3,0x111,0x100,0x101,0x105,0x128,0x129,0x103);B=[int[]]@(0x12a,0x12b,0x115,0x116,0x117,0x12c,0x3,0x111)}
+        $split=@(foreach($eventSet in 'A','B'){
+            $profiled=$tileParameters.Clone(); $profiled.ResidentPmuEvents=$events[$eventSet]
+            $emission=Invoke-KokoroEmission -Kernel KokoroGenerator60x16Run -Parameters $profiled
+            # The resident listener returns only the header and PCM ranges; the PMU records need the whole output.
+            $run=Invoke-KokoroDeviceJob -EmissionDirectory $emission.Directory -EmissionArtifact $emission -InputDirectory $constantsInput -Soc $Soc -Runs $Runs -Package $Package -OneShot
+            $profiledTensor=& $read $run $emission
+            if([Convert]::ToHexString([Security.Cryptography.SHA256]::HashData($profiledTensor)) -cne [Convert]::ToHexString([Security.Cryptography.SHA256]::HashData($tileTensor))){throw "Profiled tile output (set $eventSet) differs from the unprofiled run."}
+            $records=Read-KokoroPmuRecords -Output $run.Output -PmuProfile $emission.Layout.PmuProfile -EventSet $eventSet
+            [pscustomobject]@{EventSet=$eventSet;DspMs=$run.MedianMs;LibrarySHA256=$emission.LibrarySHA256;Measurements=$records.Measurements;UnmarkedSites=$records.UnmarkedSites}
+        })
+    }
     $different=0; $first=-1; $differingTiles=[Collections.Generic.List[int]]::new()
     for($i=0;$i -lt $tensorBytes;$i++){if($layerTensor[$i] -ne $tileTensor[$i]){$different++; if($first -lt 0){$first=$i}; $t=[int][math]::Floor($i/8192); if($differingTiles.Count -eq 0 -or $differingTiles[-1] -ne $t){$differingTiles.Add($t)}}}
     $report=[pscustomobject]@{Soc=$Soc;Fixture=$FixtureDirectory;Tiles=[int]$fixture.Tiles;TileBlock=$TileBlock;MatrixThread=$MatrixThread;MatrixLock=$MatrixLock;WeightPlanes=$WeightPlanes;TensorBytes=$tensorBytes;ByteIdentical=($different -eq 0);DifferentBytes=$different;FirstDifference=$first;DifferingTiles=$differingTiles.ToArray()
         LayerDspMs=$layerRun.MedianMs;TileDspMs=$tileRun.MedianMs;LayerVtcmBytes=$layer.Layout.VtcmBytes;TileVtcmBytes=$tile.Layout.VtcmBytes;LayerLibraryBytes=$layer.Bytes;TileLibraryBytes=$tile.Bytes
         LayerLibrarySHA256=$layer.LibrarySHA256;TileLibrarySHA256=$tile.LibrarySHA256;LayerTensorSHA256=[Convert]::ToHexString([Security.Cryptography.SHA256]::HashData($layerTensor))
-        TileTensorSHA256=[Convert]::ToHexString([Security.Cryptography.SHA256]::HashData($tileTensor));ControllerContact=$contactProof}
-    $report | Export-Clixml -LiteralPath (Join-Path $out 'equivalence.clixml') -Depth 4
+        TileTensorSHA256=[Convert]::ToHexString([Security.Cryptography.SHA256]::HashData($tileTensor));ControllerContact=$contactProof;PmuSplit=$split}
+    $report | Export-Clixml -LiteralPath (Join-Path $out 'equivalence.clixml') -Depth 8
     $report
 }
 
