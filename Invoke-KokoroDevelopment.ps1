@@ -1525,7 +1525,10 @@ function Test-KokoroGeneratorWeightPrecision {
 # position).
 function Test-KokoroGeneratorTileEquivalence {
     param([Parameter(Mandatory)][string]$OutputDirectory,[string]$Soc='SM8550',[string]$Package='dev.mansfieldplumbing.kokoro',
-        [string]$FixtureDirectory=(Join-Path $Build 'speak-20261010-h0-fast/job-input/generator60x16-fixture-20261008-holdout2'),[ValidateRange(1,21)][int]$Runs=3,
+        # 128: the 128-channel section (resblocks.3-5) on the backward schedule; 256: the 256-channel section (resblocks.0-2)
+        # on the chunked schedule, its weights streamed per stage. Each picks its fixture from the same utterance.
+        [ValidateSet(128,256)][int]$Channels=128,
+        [string]$FixtureDirectory=(Join-Path $Build $(if($Channels -eq 256){'speak-20261010-h0-fast/job-input/g256-fixture-20261008'}else{'speak-20261010-h0-fast/job-input/generator60x16-fixture-20261008-holdout2'})),[ValidateRange(1,21)][int]$Runs=3,
         # Tiles per step, one per HVX thread.
         [ValidateSet(2,4)][int]$TileBlock=4,
         # 1: both jobs run int8 weights q = round(w / 256) (clamped to +-127) stored as 256 q, table biases corrected; the
@@ -1546,11 +1549,15 @@ function Test-KokoroGeneratorTileEquivalence {
     [void][IO.Directory]::CreateDirectory($out)
     Import-Evaluator
     $fixture=Get-Content -LiteralPath (Join-Path $FixtureDirectory 'fixture.json') -Raw | ConvertFrom-Json
-    if($fixture.Graph -cne 'Generator60x16' -or [int]$fixture.Frames -ne 10201){throw 'The fixture is not the 128-channel residual section.'}
+    $firstBlock=if($Channels -eq 256){0}else{3}
+    if($fixture.Graph -cne 'Generator60x16' -or $fixture.Module -cne 'resblocks' -or [int]$fixture.Blocks[0] -ne $firstBlock -or
+        (Get-Item -LiteralPath (Join-Path $FixtureDirectory 'activations.bin')).Length -ne 64L*$Channels*[int]$fixture.Tiles){throw "The fixture is not the $Channels-channel residual section."}
+    $tileBytes=64*$Channels
     $common=@{ResBlockFrames=[int]$fixture.Frames;ResidentHvxThreads=4}
+    if($Channels -ne 128){ $common.Stage16Channels=$Channels }
     $export=Invoke-KokoroEmission -Kernel KokoroGenerator60x16Run -Parameters ($common+@{ResidentBatchTiles=22;GeneratorMoments='Export';GeneratorSchedule='Layer'})
     $layer=Invoke-KokoroEmission -Kernel KokoroGenerator60x16Run -Parameters ($common+@{ResidentBatchTiles=22;GeneratorMoments='Constants';GeneratorSchedule='Layer'})
-    $tileParameters=$common+@{ResidentBatchTiles=$TileBlock;GeneratorMoments='Constants';GeneratorSchedule='Backward';GeneratorWeightPlanes=$WeightPlanes;GeneratorControllerContact=$ControllerContact.IsPresent;GeneratorVectorPackets=$VectorPackets.IsPresent}
+    $tileParameters=$common+@{ResidentBatchTiles=$TileBlock;GeneratorMoments='Constants';GeneratorSchedule=$(if($Channels -eq 256){'Chunked'}else{'Backward'});GeneratorWeightPlanes=$WeightPlanes;GeneratorControllerContact=$ControllerContact.IsPresent;GeneratorVectorPackets=$VectorPackets.IsPresent}
     $tile=Invoke-KokoroEmission -Kernel KokoroGenerator60x16Run -Parameters $tileParameters
     $statistics=[IO.File]::ReadAllBytes((Join-Path $FixtureDirectory 'tables.bin'))
     $weights=[IO.File]::ReadAllBytes((Join-Path $FixtureDirectory 'weights.bin'))
@@ -1570,7 +1577,7 @@ function Test-KokoroGeneratorTileEquivalence {
         $records=@{}; foreach($site in $layer.Layout.ConstantPacking.MomentSites){ $records["$($site.Block).$($site.Stage)"]=[long]$site.RecordOffset }
         foreach($region in $layer.Layout.WeightRegions){
             $width=[int]$region.Channels; $kernel=[int]$region.Kernel; $count=$width*$width*$kernel; $blocks=$width/32
-            $block=3+[Array]::IndexOf([int[]]@(3,7,11),$kernel)
+            $block=$firstBlock+[Array]::IndexOf([int[]]@(3,7,11),$kernel)
             for($st=0;$st -lt 6;$st++){
                 $high=[long]$region.Offset+2L*$count*$st; $low=$high+$count
                 $deltaHigh=[long[]]::new($width); $sumLow=[long[]]::new($width)
@@ -1598,7 +1605,7 @@ function Test-KokoroGeneratorTileEquivalence {
     $constantsInput=& $stage 'constants' $runTables $runWeights
     $layerRun=Invoke-KokoroDeviceJob -EmissionDirectory $layer.Directory -EmissionArtifact $layer -InputDirectory $constantsInput -Soc $Soc -Runs $Runs -Package $Package
     # The DDR workspace starts at the first 128-byte boundary at least 64 bytes into the output buffer.
-    $tensorBytes=[long]$fixture.Tiles*8192
+    $tensorBytes=[long]$fixture.Tiles*$tileBytes
     $read={param($Run,$Emission) $at=128+[long]$Emission.Layout.FinalWorkspaceOffset; [byte[]]$Run.Output[$at..($at+$tensorBytes-1)]}
     $contactProof=$null
     if($ControllerContact){
@@ -1623,7 +1630,7 @@ function Test-KokoroGeneratorTileEquivalence {
         $single=Invoke-KokoroEmission -Kernel KokoroGenerator60x16Run -Parameters $singleParameters
         $singleRun=& $contactRun 'contact-step-single' $step $single
         $heldTensor=& $read $tileRun $tile; $highTensor=& $read $highRun $tile; $stepTensor=& $read $stepRun $tile; $singleTensor=& $read $singleRun $single
-        $sameTiles={param([byte[]]$A,[byte[]]$B,[int]$From,[int]$To) $bad=0; for($t=[Math]::Max(0,$From);$t -lt [Math]::Min($tilesCount,$To);$t++){ for($i=8192*$t;$i -lt 8192*($t+1);$i++){ if($A[$i] -ne $B[$i]){ $bad++; break } } }; $bad}
+        $sameTiles={param([byte[]]$A,[byte[]]$B,[int]$From,[int]$To) $bad=0; for($t=[Math]::Max(0,$From);$t -lt [Math]::Min($tilesCount,$To);$t++){ for($i=$tileBytes*$t;$i -lt $tileBytes*($t+1);$i++){ if($A[$i] -ne $B[$i]){ $bad++; break } } }; $bad}
         $contactProof=[pscustomobject]@{Step=$ControllerStep;Margin=$ControllerMargin;Value=$ControllerValue;SensitivityRange=$SensitivityRange
             HighDifferingTiles=(& $sameTiles $heldTensor $highTensor 0 $tilesCount)
             StepBeforeDifferingTiles=(& $sameTiles $stepTensor $heldTensor 0 ($ControllerStep-$ControllerMargin))
@@ -1651,8 +1658,8 @@ function Test-KokoroGeneratorTileEquivalence {
         })
     }
     $different=0; $first=-1; $differingTiles=[Collections.Generic.List[int]]::new()
-    for($i=0;$i -lt $tensorBytes;$i++){if($layerTensor[$i] -ne $tileTensor[$i]){$different++; if($first -lt 0){$first=$i}; $t=[int][math]::Floor($i/8192); if($differingTiles.Count -eq 0 -or $differingTiles[-1] -ne $t){$differingTiles.Add($t)}}}
-    $report=[pscustomobject]@{Soc=$Soc;Fixture=$FixtureDirectory;Tiles=[int]$fixture.Tiles;TileBlock=$TileBlock;WeightPlanes=$WeightPlanes;TensorBytes=$tensorBytes;ByteIdentical=($different -eq 0);DifferentBytes=$different;FirstDifference=$first;DifferingTiles=$differingTiles.ToArray()
+    for($i=0;$i -lt $tensorBytes;$i++){if($layerTensor[$i] -ne $tileTensor[$i]){$different++; if($first -lt 0){$first=$i}; $t=[int][math]::Floor($i/$tileBytes); if($differingTiles.Count -eq 0 -or $differingTiles[-1] -ne $t){$differingTiles.Add($t)}}}
+    $report=[pscustomobject]@{Soc=$Soc;Fixture=$FixtureDirectory;Channels=$Channels;Schedule=$tileParameters.GeneratorSchedule;Tiles=[int]$fixture.Tiles;TileBlock=$TileBlock;WeightPlanes=$WeightPlanes;TensorBytes=$tensorBytes;ByteIdentical=($different -eq 0);DifferentBytes=$different;FirstDifference=$first;DifferingTiles=$differingTiles.ToArray()
         LayerDspMs=$layerRun.MedianMs;TileDspMs=$tileRun.MedianMs;LayerVtcmBytes=$layer.Layout.VtcmBytes;TileVtcmBytes=$tile.Layout.VtcmBytes;LayerLibraryBytes=$layer.Bytes;TileLibraryBytes=$tile.Bytes
         LayerLibrarySHA256=$layer.LibrarySHA256;TileLibrarySHA256=$tile.LibrarySHA256;LayerTensorSHA256=[Convert]::ToHexString([Security.Cryptography.SHA256]::HashData($layerTensor))
         TileTensorSHA256=[Convert]::ToHexString([Security.Cryptography.SHA256]::HashData($tileTensor));ControllerContact=$contactProof;PmuSplit=$split}

@@ -91,7 +91,14 @@ function New-KokoroGenerator60x16RunSteps {
         # convolutions; the main thread releases the job's lock before the one dispatch and takes it back after. One
         # 128-channel section of three kernels and their mean, supplied AdaIN values, 2 <= BatchTiles <= HvxThreads, a
         # power of two.
-        [ValidateSet('Layer','Backward')][string]$Schedule='Layer',
+        # Chunked: the backward geometry with streamed weights, for a section whose weights do not fit VTCM (the
+        # 256-channel section). Step j runs block j of BatchTiles tiles through each stage in turn: before a stage's
+        # convolutions DMA brings its three branches' weight planes into one buffer, the fills and combines are dispatched
+        # one tile per HVX thread, and the main thread runs the convolutions over the block. Each branch and plane has
+        # one conv-input buffer (two history tiles, then the block) shared by the six stages; each stage's two history
+        # tiles are copied in before its convolutions and its block's last two tiles copied out after them.
+        # 2 <= BatchTiles <= HvxThreads, a power of two.
+        [ValidateSet('Layer','Backward','Chunked')][string]$Schedule='Layer',
         # How HVX workers wait for work and the main thread waits for them: QuRT futex traps, or polling the pool
         # with pause. Default: Spin for the backward schedule (dispatches microseconds apart), Futex otherwise.
         [ValidateSet('','Futex','Spin')][string]$PoolWait='',
@@ -115,9 +122,10 @@ function New-KokoroGenerator60x16RunSteps {
     if($SeededNoise -and -not $Source){ throw 'Seeded noise is a source option.' }
     if(-not $PoolWait){ $PoolWait=if($Schedule -ne 'Layer'){'Spin'}else{'Futex'} }
     if($Schedule -ne 'Layer' -and ($Whole -or $Source -or $Decoder -or $Front -or $Tail -or $RuntimeFrames -or $StopAfterStage -ge 0 -or
-        $Kernels.Count -ne 3 -or $AdaInMode -ne 'Constants' -or ($BatchTiles -band ($BatchTiles-1)) -or $Channels -ne 128 -or $BatchTiles -lt 2 -or $BatchTiles -gt $HvxThreads)) {
-        throw 'The backward schedule runs one 128-channel section of three kernels and their mean with supplied AdaIN values, one tile per HVX thread (2 <= BatchTiles <= HvxThreads, a power of two).'
+        $Kernels.Count -ne 3 -or $AdaInMode -ne 'Constants' -or ($BatchTiles -band ($BatchTiles-1)) -or ($Schedule -eq 'Backward' -and $Channels -ne 128) -or $BatchTiles -lt 2 -or $BatchTiles -gt $HvxThreads)) {
+        throw 'The backward schedule runs one 128-channel section (the chunked schedule one section) of three kernels and their mean with supplied AdaIN values, one tile per HVX thread (2 <= BatchTiles <= HvxThreads, a power of two).'
     }
+    if($Schedule -eq 'Chunked' -and $HvxThreads -lt 3){ throw 'The chunked schedule dispatches over at least three HVX threads.' }
     if($RuntimeFrames -and ($Whole -or $Source -or $Decoder -or $Front -or $Tail -or $StopAfterStage -ge 0)) {
         throw 'Runtime frames currently admit complete residual stages only.'
     }
@@ -290,6 +298,27 @@ function New-KokoroGenerator60x16RunSteps {
         $tileWeightAt=[long[]]::new(18); foreach($g in $tileStages){ $tileWeightAt[6*$g.Branch+$g.Stage]=$at; $at+=$g.WeightBytes }
         $vtcmTotal=& $al $at
         if($vtcmTotal -gt 8388608){throw 'The backward schedule does not fit VTCM.'}
+    }
+    if($Schedule -eq 'Chunked'){
+        # Planes first (inside the first 1 MiB); per plane the three branches' conv-input buffers (two history tiles, then
+        # the block), each plane's group inside one 1 MiB page; per stage and plane the three branches' saved history
+        # tiles; the input, level and stage rings (two blocks); the mean, K/M/S, records and one stage's weights.
+        $ringTiles=2*$batch; $ringBytes=[long]$ringTiles*$tileBytes; $fillBytes=($batch+2L)*$tileBytes; $guardBytes=2L*$tileBytes
+        $historyBytes=3L*$guardBytes
+        $tileRegions=[ordered]@{}; $at=0L
+        $tileRegions.Planes=$at; $at+=& $al (3*$planesStride)
+        if($at -gt 1048576){throw 'HMX planes must lie in the first 1 MiB of VTCM.'}
+        $fillAt=@{}
+        foreach($plane in 'High','Low'){
+            if([math]::Floor($at/1048576) -ne [math]::Floor(($at+3*$fillBytes-1)/1048576)){ $at=[long]([math]::Ceiling($at/1048576)*1048576) }
+            $fillAt[$plane]=$at; $at+=3*$fillBytes }
+        $at=& $al $at
+        # One stage's three branches of weight planes, branch b at streamAt[b].
+        $streamAt=[long[]]::new(3); $streamBytes=0L
+        for($bb=0;$bb -lt 3;$bb++){ $streamAt[$bb]=$streamBytes; $streamBytes+=$tileStages[6*$bb].WeightBytes }
+        foreach($r in @(@('History',(12L*$historyBytes)),@('Input',$ringBytes),@('Levels',(9L*$ringBytes)),@('Stage',(9L*$ringBytes)),@('Mean',([long]$batch*$tileBytes)),@('Moments',(16L*$Channels)),@('Kms',(18L*$kmsBytes)),@('Records',(18L*$recordBytes)),@('Controller',$(if($ControllerContact){$controllerBytes}else{0L})),@('Weights',$streamBytes))){ $tileRegions[$r[0]]=$at; $at+=& $al $r[1] }
+        $vtcmTotal=& $al $at
+        if($vtcmTotal -gt 8388608){throw "The chunked schedule needs $vtcmTotal bytes of VTCM."}
     }
     . $bind 0
     $vtcmBytes=$vtcmTotal
@@ -676,19 +705,25 @@ function New-KokoroGenerator60x16RunSteps {
         & $imm 15 ($ringTiles-1); $s.Add(@{Op='and';d=$r;s=$r;t=15}); $s.Add(@{Op='asl-i';d=$r;s=$r;i=$tileShift})
         & $imm 15 $base; $s.Add(@{Op='add';d=$r;s=$r;t=15}); $s.Add(@{Op='add';d=$r;s=$r;t=18})
     }
-    # Segmented call: segment k runs its body on HVX thread k (0 the main thread) with its own arguments (VTCM offsets or
-    # @{Register=r}, the caller's register r) and count.
+    $tileArg={param([long]$base,$block,[int]$delta) @{Base=$base;RingTiles=$ringTiles;Block=$block;Delta=$delta}}
+    # Segmented call: segment k runs its body on HVX thread k (0 the main thread) with its own arguments (VTCM offsets,
+    # @{Register=r} the caller's register r, ring tiles from $tileArg, controller words) and count; an optional Extra
+    # argument reaches the body in r5 (pool slot 56, loaded by the chunked schedule's workers).
     $dispatch={param([string]$body,[object[]]$segments)
         if($HvxThreads -lt 3 -or $segments.Count -gt $HvxThreads){throw 'A segmented dispatch needs one HVX thread per segment, at least three.'}
         $value={param([int]$r,$a)
             if($a -is [hashtable] -and $a.ContainsKey('Register')){ $s.Add(@{Op='addi';d=$r;s=$a.Register;i=0}) }
+            elseif($a -is [hashtable] -and $a.ContainsKey('RingTiles')){ & $tileAt $r $a.Base $a.RingTiles $a.Block $a.Delta }
+            elseif($a -is [hashtable] -and $a.Controller){ & $controllerPointer $r $a.Block $a.Delta $a.Within }
             else { & $ptr $r 18 $a } }
+        if(@($segments | Where-Object { $_.Contains('Extra') }).Count -and $Schedule -ne 'Chunked'){ throw 'Only the chunked schedule loads the Extra argument.' }
         $n=$segments[0].Arguments.Count
         for($k=1;$k -lt $HvxThreads;$k++){
             & $ptr 6 25 ($poolOffset+64*$k)
             $c=if($k -lt $segments.Count){$segments[$k].Count}else{0}
             if($c -gt 0){
                 for($i=0;$i -lt $n;$i++){ & $value 0 $segments[$k].Arguments[$i]; $s.Add(@{Op='store';s=6;t=0;Offset=(4*$i)}) }
+                if($segments[$k].Contains('Extra')){ & $value 0 $segments[$k].Extra; $s.Add(@{Op='store';s=6;t=0;Offset=56}) }
                 & $imm 0 $c; $s.Add(@{Op='store';s=6;t=0;Offset=(4*$n)})
                 & $addr 0 $(if($segments[$k].Contains('Body')){$segments[$k].Body}else{$body}); $s.Add(@{Op='store';s=6;t=0;Offset=44})
             }
@@ -696,6 +731,7 @@ function New-KokoroGenerator60x16RunSteps {
         }
         & $wake
         for($i=0;$i -lt $n;$i++){ & $value $i $segments[0].Arguments[$i] }
+        if($segments[0].Contains('Extra')){ & $value 5 $segments[0].Extra }
         & $imm $n $segments[0].Count; & $call $(if($segments[0].Contains('Body')){$segments[0].Body}else{$body})
         & $join
     }
@@ -704,7 +740,7 @@ function New-KokoroGenerator60x16RunSteps {
         foreach($g in $tileStages){
             $index=6*$g.Branch+$g.Stage; $rAt=$tileRegions.Records+$index*$recordBytes
             & $dma 18 $rAt 22 $g.RecordOffset $recordBytes
-            & $dma 18 $tileWeightAt[$index] 21 $g.WeightOffset $g.WeightBytes
+            if($Schedule -eq 'Backward'){ & $dma 18 $tileWeightAt[$index] 21 $g.WeightOffset $g.WeightBytes }
             $site=$siteByRecord[[long]$g.RecordOffset]
             & $dma 18 $tileRegions.Moments 22 ($constantsTableOffset+$site.Offset) $site.Bytes
             & $ptr 0 18 $tileRegions.Moments; & $ptr 1 18 $rAt; & $ptr 2 18 ($tileRegions.Kms+$index*$kmsBytes); & $call "body_constant$sfx"; & $mark 'Coefficients'
@@ -869,10 +905,112 @@ function New-KokoroGenerator60x16RunSteps {
         & $dispatch "body_lockstep_t0$sfx" @(for($thread=0;$thread -lt $batch;$thread++){ @{Count=1;Body="body_lockstep_t$thread$sfx";Arguments=@(@{Register=18},@{Register=25},@{Register=20})} })
         & $matrixLock; & $mark 'Lockstep'
     }
+    # Chunked schedule. VTCM bytes srcOff -> destOff on the main thread, 1 KiB at a time.
+    $copyTiles={param([long]$destOff,[long]$srcOff,[long]$bytes)
+        & $ptr 4 18 $srcOff; & $ptr 5 18 $destOff; & $imm 6 ($bytes/1024); $s.Add(@{Op='imm';d=7;i=0})
+        $n=& $label; $s.Add(@{Op='label';Name=$n})
+        for($k=0;$k -lt 8;$k++){ $s.Add(@{Op='vload';d=$k;s=4;Offset=(128*$k)}) }
+        for($k=0;$k -lt 8;$k++){ $s.Add(@{Op='vstore';s=5;t=$k;Offset=(128*$k)}) }
+        $s.Add(@{Op='addi';d=4;s=4;i=1024}); $s.Add(@{Op='addi';d=5;s=5;i=1024}); $s.Add(@{Op='addi';d=6;s=6;i=-1}); $s.Add(@{Op='gtu';d=0;s=6;t=7}); $s.Add(@{Op='jump-p';u=0;Label=$n})
+        & $mark 'TileFix'
+    }
+    # Stage st's saved history of branch b in plane (0 high, 1 low), and its conv-input buffer's tile i (0 and 1 history,
+    # 2 + w tile w of the block).
+    $historyAt={param([int]$st,[int]$plane,[int]$branch) $tileRegions.History+(2L*$st+$plane)*$historyBytes+$branch*$guardBytes}
+    $workAt={param([int]$plane,[int]$branch,[int]$i) $fillAt[@('High','Low')[$plane]]+$branch*$fillBytes+$i*[long]$tileBytes}
+    # Step: block j (a constant, or $null for the runtime step in r17) through every stage, stage by stage.
+    $chunkedStep={param($block)
+        $inputTiles=if($null -eq $block){$batch}else{[math]::Max(0,[math]::Min($batch,$tiles-$batch*$block))}
+        if($inputTiles -gt 0){
+            if($null -ne $block){ & $dma 18 ($tileRegions.Input+(($batch*$block) % $ringTiles)*[long]$tileBytes) 20 ($r0Offset+$batch*$block*[long]$tileBytes) ($inputTiles*[long]$tileBytes) }
+            else {
+                $s.Add(@{Op='asl-i';d=1;s=17;i=$blockShift}); & $imm 15 $r0Offset; $s.Add(@{Op='add';d=1;s=1;t=15}); $s.Add(@{Op='add';d=1;s=1;t=20})
+                & $tileAt 2 $tileRegions.Input $ringTiles $null 0
+                & $dmaRegisters $blockBytes; & $mark 'Dma'
+            }
+        }
+        for($st=0;$st -lt 6;$st++){
+            $p=[int][math]::Floor($st/2); $half=$st % 2; $src=& $fillSource $st
+            for($branch=0;$branch -lt 3;$branch++){ & $dma 18 ($tileRegions.Weights+$streamAt[$branch]) 21 $tileStages[6*$branch+$st].WeightOffset $tileStages[6*$branch+$st].WeightBytes }
+            for($plane=0;$plane -lt 2;$plane++){ for($branch=0;$branch -lt 3;$branch++){ & $copyTiles (& $workAt $plane $branch 0) (& $historyAt $st $plane $branch) $guardBytes } }
+            $segments=[Collections.Generic.List[object]]::new()
+            for($w=0;$w -lt $batch;$w++){
+                $segment=@{Count=1;Body="body_turnsB_$($src[1])$sfx";Arguments=@((& $tileArg $src[0] $block $w),(& $workAt 0 0 (2+$w)),(& $workAt 1 0 (2+$w)),($tileRegions.Kms+$st*$kmsBytes))}
+                if($ControllerContact){ $segment.Extra=@{Controller=$true;Block=$block;Delta=0;Within=($w-$p)} }
+                $segments.Add($segment)
+            }
+            & $dispatch $segments[0].Body $segments.ToArray(); & $mark 'AdaInSnake'
+            if($null -ne $block){
+                for($w=0;$w -lt $batch;$w++){ for($branch=0;$branch -lt 3;$branch++){
+                    $fx=& $edgeFix ($batch*$block+$w) (& $stageRows $branch $st); if($null -eq $fx){ continue }
+                    $hiAt=& $workAt 0 $branch (2+$w); $loAt=& $workAt 1 $branch (2+$w)
+                    if($fx -is [string]){ & $fill $hiAt 1 0x80008000L; & $fill $loAt 1 0 } else { & $padRows $hiAt 0x8000 $fx[0] $fx[1]; & $padRows $loAt 0 $fx[0] $fx[1] }
+                } }
+            }
+            & $sync
+            for($branch=0;$branch -lt 3;$branch++){
+                $at=6*$branch+$st
+                & $ptr 0 18 (& $workAt 0 $branch 2); & $ptr 1 18 (& $workAt 1 $branch 2)
+                & $ptr 2 18 ($tileRegions.Weights+$streamAt[$branch]); & $ptr 3 18 ($tileRegions.Records+$at*$recordBytes+$tablesAt); & $imm 4 $batch; & $ptr 5 18 ($tileRegions.Planes+$branch*$planesStride)
+                & $call "body_convB_b${branch}_s$st$sfx"
+            }
+            & $mark 'HmxConv'; & $sync
+            for($plane=0;$plane -lt 2;$plane++){ for($branch=0;$branch -lt 3;$branch++){ & $copyTiles (& $historyAt $st $plane $branch) (& $workAt $plane $branch $batch) $guardBytes } }
+            $rAt=$tileRegions.Records+$st*$recordBytes; $segments=[Collections.Generic.List[object]]::new()
+            for($w=0;$w -lt $batch;$w++){
+                $planes=$tileRegions.Planes+$w*[long]$tileBytes
+                if($half -eq 0){ $segments.Add(@{Count=1;Body="body_combine_convB$sfx";Arguments=@($planes,(& $tileArg ($tileRegions.Stage+3L*$p*$ringBytes) $block $w),($rAt+$ratiosAt))}) }
+                else {
+                    $residual=if($p -eq 0){@($tileRegions.Input,'shared')}else{@(($tileRegions.Levels+3L*($p-1)*$ringBytes),'branch')}
+                    $segments.Add(@{Count=1;Body="body_combine_residualB_$($residual[1])$sfx";Arguments=@($planes,(& $tileArg ($tileRegions.Levels+3L*$p*$ringBytes) $block $w),($rAt+$ratiosAt));Extra=(& $tileArg $residual[0] $block ($w-1))})
+                }
+            }
+            & $dispatch $segments[0].Body $segments.ToArray(); & $mark 'Combine'
+            if($half -eq 1 -and $null -ne $block){
+                for($w=0;$w -lt $batch;$w++){
+                    $lo=32*($batch*$block+$w-$p-1); if($lo -ge $Frames -or $lo+31 -lt $Frames){ continue }
+                    for($branch=0;$branch -lt 3;$branch++){ & $padRows ($tileRegions.Levels+(3L*$p+$branch)*$ringBytes+(($batch*$block+$w) % $ringTiles)*[long]$tileBytes) 0x8000 ($Frames-$lo) 32 }
+                }
+            }
+        }
+        $segments=@(for($w=0;$w -lt $batch;$w++){ @{Count=1;Body="body_mean$sfx";Arguments=@((& $tileArg ($tileRegions.Levels+6L*$ringBytes) $block $w),(& $tileArg ($tileRegions.Levels+7L*$ringBytes) $block $w),(& $tileArg ($tileRegions.Levels+8L*$ringBytes) $block $w),($tileRegions.Mean+$w*[long]$tileBytes))} })
+        & $dispatch "body_mean$sfx" $segments; & $mark 'Mean'; & $sync
+        if($null -ne $block){
+            $first=[math]::Max(0,3-$batch*$block); $last=[math]::Min($batch-1,$tiles+2-$batch*$block)
+            if($first -le $last){ & $dma 25 ($finalOffset+($batch*$block+$first-3)*[long]$tileBytes) 18 ($tileRegions.Mean+$first*[long]$tileBytes) (($last-$first+1)*[long]$tileBytes) }
+        } else {
+            & $ptr 1 18 $tileRegions.Mean
+            $s.Add(@{Op='asl-i';d=2;s=17;i=$blockShift}); & $imm 15 ($finalOffset-3L*$tileBytes); $s.Add(@{Op='add';d=2;s=2;t=15}); $s.Add(@{Op='add';d=2;s=2;t=25})
+            & $dmaRegisters $blockBytes; & $mark 'Dma'
+        }
+    }
+    $chunkedSection={
+        . $stageSetup
+        # Conv-input buffers and saved history start as the conv-input zero; residual and stage rings as x = 0.
+        & $fill $fillAt.High (3*($batch+2)) 0x80008000L; & $fill $fillAt.Low (3*($batch+2)) 0L
+        for($st=0;$st -lt 6;$st++){ & $fill (& $historyAt $st 0 0) 6 0x80008000L; & $fill (& $historyAt $st 1 0) 6 0L }
+        & $fill $tileRegions.Input $ringTiles 0x80008000L; & $fill $tileRegions.Levels (9*$ringTiles) 0x80008000L; & $fill $tileRegions.Stage (9*$ringTiles) 0x80008000L
+        & $mark 'Boundary' "Res${Channels}_0"
+        # Steps that need edge treatment are unrolled; the uniform steps between count in r17.
+        $stepCount=[int][math]::Ceiling(($tiles+3)/$batch)
+        $firstUniform=0; while($firstUniform -lt $stepCount -and (& $edgeStep $firstUniform)){ $firstUniform++ }
+        $lastUniform=$firstUniform-1; while($lastUniform+1 -lt $stepCount -and -not (& $edgeStep ($lastUniform+1))){ $lastUniform++ }
+        for($j=0;$j -lt $firstUniform;$j++){ & $chunkedStep $j }
+        if($lastUniform -ge $firstUniform){
+            & $imm 17 $firstUniform
+            $steps=& $label; $stepsDone=& $label
+            $s.Add(@{Op='label';Name=$steps})
+            & $chunkedStep $null; $s.Add(@{Op='addi';d=17;s=17;i=1})
+            & $imm 15 ($lastUniform+1); $s.Add(@{Op='eq';d=0;s=17;t=15}); $s.Add(@{Op='jump-p';u=0;Label=$stepsDone}); & $jump $steps
+            $s.Add(@{Op='label';Name=$stepsDone})
+        }
+        for($j=[math]::Max($firstUniform,$lastUniform+1);$j -lt $stepCount;$j++){ & $chunkedStep $j }
+    }
     for($section=0;$section -lt $sections.Count;$section++){
     if($section -gt 0){ $chainOffset=$finalOffset; $chainTiles=$tiles; . $bind $section }
     & $mark 'Boundary' "Front$Channels"
     if($Schedule -eq 'Backward'){ . $backwardSection; continue }
+    if($Schedule -eq 'Chunked'){ . $chunkedSection; continue }
     # Blocks: noise_res[1] first with -Front (index -1: its own weights and records, input computed in VTCM, kernel 11
     # bodies of branch 2), then the stage's branches.
     $blocks=[Collections.Generic.List[object]]::new()
@@ -1003,8 +1141,8 @@ function New-KokoroGenerator60x16RunSteps {
     $convPlanes=if($WeightPlanes -eq 2){@{WeightPlanes=2}}else{@{WeightPlanes=1;TableGroups=3}}
     $bodies.Add(@("body_combine_conv$sfx",@(New-KokoroPlaneCombineSteps -Mode Conv -Channels $Channels @combineGroups -PlaneStride $planeStride -LabelPrefix "combineconv$sfx")))
     $bodies.Add(@("body_combine_residual$sfx",@(New-KokoroPlaneCombineSteps -Mode Residual -Channels $Channels @combineGroups -PlaneStride $planeStride -LabelPrefix "combineresidual$sfx")))
-    if($Schedule -eq 'Backward'){
-        foreach($pair in $lockstepBodies){ $bodies.Add($pair) }
+    if($Schedule -ne 'Layer'){
+        if($Schedule -eq 'Backward'){ foreach($pair in $lockstepBodies){ $bodies.Add($pair) } }
         # A body over three branches: the inner body for branch 0 with the caller's r0 to r5, then for branches 1 and 2
         # with each argument advanced by its branch stride (bytes; 0 keeps it). Arguments live in the frame between calls.
         $branchBodies={param([string]$name,[string]$inner,[long[]]$strides)
@@ -1025,11 +1163,11 @@ function New-KokoroGenerator60x16RunSteps {
         }
         # Fill: source ring tile, conv-input tiles (high, low), K/M/S, count, mirror delta; the input ring is shared by the
         # branches (stride 0). Combines: planes, target ring tile, record, count, residual source.
-        $bodies.Add(@("body_turns_mirror$sfx",@(& $packets @(New-KokoroAdaInSnakeTurnsSteps -TurnsBits 22 -Channels $Channels -LabelPrefix "adainsnaketurnsmirror$sfx" -ControllerContact:$ControllerContact -MirrorDelta (-$ringBytes)))))
+        if($Schedule -eq 'Backward'){ $bodies.Add(@("body_turns_mirror$sfx",@(& $packets @(New-KokoroAdaInSnakeTurnsSteps -TurnsBits 22 -Channels $Channels -LabelPrefix "adainsnaketurnsmirror$sfx" -ControllerContact:$ControllerContact -MirrorDelta (-$ringBytes))))) }
         $bodies.Add(@("body_combine_residual_separate$sfx",@(New-KokoroPlaneCombineSteps -Mode Residual -Channels $Channels @combineGroups -PlaneStride $planeStride -LabelPrefix "combineresidualseparate$sfx" -SeparateResidual)))
         foreach($sharing in @(@('shared',0L),@('branch',$ringBytes))){
             $bodies.Add((& $branchBodies "body_turnsB_$($sharing[0])$sfx" "body_turns$sfx" @($sharing[1],$fillBytes,$fillBytes,(6L*$kmsBytes),0L,0L)))
-            $bodies.Add((& $branchBodies "body_turnsB_$($sharing[0])_mirror$sfx" "body_turns_mirror$sfx" @($sharing[1],$fillBytes,$fillBytes,(6L*$kmsBytes),0L,0L)))
+            if($Schedule -eq 'Backward'){ $bodies.Add((& $branchBodies "body_turnsB_$($sharing[0])_mirror$sfx" "body_turns_mirror$sfx" @($sharing[1],$fillBytes,$fillBytes,(6L*$kmsBytes),0L,0L))) }
             $bodies.Add((& $branchBodies "body_combine_residualB_$($sharing[0])$sfx" "body_combine_residual_separate$sfx" @($planesStride,$ringBytes,(6L*$recordBytes),0L,0L,$sharing[1])))
         }
         $bodies.Add((& $branchBodies "body_combine_convB$sfx" "body_combine_conv$sfx" @($planesStride,$ringBytes,(6L*$recordBytes),0L,0L,0L)))
@@ -1078,6 +1216,7 @@ function New-KokoroGenerator60x16RunSteps {
         $s.Add(@{Op='load';d=1;s=17;Offset=4}); $s.Add(@{Op='gtu';d=0;s=1;t=19}); $s.Add(@{Op='jump-p';u=0;Label=$quit})
         $s.Add(@{Op='load';d=5;s=16;Offset=48}); $s.Add(@{Op='eq';d=0;s=5;t=19}); $s.Add(@{Op='jump-p';u=0;Label=$done})
         foreach($k in 0..4){ $s.Add(@{Op='load';d=$k;s=16;Offset=(4*$k)}) }
+        if($Schedule -eq 'Chunked'){ $s.Add(@{Op='load';d=5;s=16;Offset=56}) }
         $s.Add(@{Op='load';d=20;s=16;Offset=44}); $s.Add(@{Op='callr';s=20})
         $s.Add(@{Op='syncht'})
         $s.Add(@{Op='label';Name=$done})

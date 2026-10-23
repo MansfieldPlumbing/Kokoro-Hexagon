@@ -62,7 +62,7 @@ param(
     [switch] $BypassStatisticsAndCoefficients,
     [switch] $BypassHmxCompute,
     [ValidateSet('Accumulate','Export','Constants')][string] $GeneratorMoments = 'Accumulate',
-    [ValidateSet('Layer','Backward')][string] $GeneratorSchedule = 'Layer',
+    [ValidateSet('Layer','Backward','Chunked')][string] $GeneratorSchedule = 'Layer',
     [switch] $GeneratorVectorPackets,
     [switch] $Force
 )
