@@ -1241,6 +1241,9 @@ $script:Kernels=@(
             if($GeneratorControllerContact){ $harness.ControllerContact=$true }
             if($GeneratorVectorPackets){ $harness.VectorPackets=$true }
             if($Stage16Channels -ne 128){ $harness.Channels=$Stage16Channels }
+            if($GeneratorFront){ $harness.Front=$true }
+            if($GeneratorWhole){ $harness.Whole=$true }
+            if($GeneratorSuppliedSource){ $harness.SuppliedSource=$true }
         $run=New-KokoroGenerator60x16RunSteps -Frames $ResBlockFrames -HvxThreads $ResidentHvxThreads -BatchTiles $ResidentBatchTiles -StopAfterStage $Stage16StopAfter -DumpPoint $Stage16DumpPoint -Kernels $Stage16Kernels -RuntimeFrames:$GeneratorRuntimeFrames @pmu @harness
     $steps=@($run.Steps)
     $symbol='kokoro_resblock_run_skel_handle_invoke'; $soname='libkokoro_resblock_run_skel.so'
@@ -1411,9 +1414,16 @@ param(
     # from the input) or Corrected (coefficient deltas from the input added to the accumulated coefficients).
     [ValidateSet('Accumulate','Export','Supplied','SuppliedExport','Corrected','Direct','Constants')][string] $DecoderMoments = 'Accumulate',
     [ValidateSet('Accumulate','Export','Constants')][string] $GeneratorMoments = 'Accumulate',
-    # KokoroGenerator60x16Run: Layer (each stage over every tile, the reference) or Backward (depth-first, backward
-    # convolutions, resident weights; see -Schedule in src/jobs/Kokoro.Generator60x16Run.ps1).
+    # KokoroGenerator60x16Run: Layer (each stage over every tile, the reference), Backward (depth-first, backward
+    # convolutions, resident weights) or Chunked (backward, streamed weights); see -Schedule in
+    # src/jobs/Kokoro.Generator60x16Run.ps1.
     [ValidateSet('Layer','Backward','Chunked')][string] $GeneratorSchedule = 'Layer',
+    # KokoroGenerator60x16Run: the section's front (ups and the source add) first; with GeneratorWhole both sections, ups.1
+    # chained from the 256-channel mean, and the tail. GeneratorSuppliedSource reads each source insertion point's stream
+    # from the input instead of computing noise_convs and noise_res.
+    [switch] $GeneratorFront,
+    [switch] $GeneratorWhole,
+    [switch] $GeneratorSuppliedSource,
     # KokoroGenerator60x16Run backward schedule: 1 keeps one resident int8 weight plane per stage (the high bytes).
     [ValidateSet(1, 2)][int] $GeneratorWeightPlanes = 2,
     # KokoroGenerator60x16Run backward schedule: per-tile AdaIN from the controller contact (K = K_base + P_K * v, M likewise).
