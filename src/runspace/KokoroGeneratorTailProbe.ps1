@@ -27,7 +27,7 @@ try {
     $tiles = [int]$kv.Tiles; $runs = [int]$kv.Runs; $outputBytes = [int]$kv.OutputBytes; $pcmOffset = [int]$kv.PcmOffset; $samples = [int]$kv.Samples
     # Serve=True: the resident job listener below instead of one job; each request carries its own job fields.
     $serve = $kv.ContainsKey('Serve')
-    if (-not $serve -and ($tiles -lt 1 -or $tiles -gt 1024 -or $runs -lt 1 -or $runs -gt 121 -or $samples -lt 1 -or $pcmOffset + 2 * $samples -gt $outputBytes)) { throw 'Spec out of range' }
+    if (-not $serve -and ($tiles -lt 1 -or $tiles -gt 32768 -or $runs -lt 1 -or $runs -gt 121 -or $samples -lt 1 -or $pcmOffset + 2 * $samples -gt $outputBytes)) { throw 'Spec out of range' }
     $lines.Add("Tiles=$tiles Runs=$runs Samples=$samples")
     $load = { param([string]$Name, [object[]]$Arguments)
         $ast = [Management.Automation.Language.Parser]::ParseFile([IO.Path]::Combine($root, $Name), [ref]$null, [ref]$null)
@@ -136,7 +136,7 @@ try {
                         }
                         $jobTiles = [int]$request.Tiles; $jobRuns = [int]$request.Runs; $jobOutputBytes = [int]$request.OutputBytes; $jobPcmOffset = [int]$request.PcmOffset; $jobSamples = [int]$request.Samples
                         $act = $cache[$keys[1]]; $wts = $cache[$keys[2]]; $tbl = $cache[$keys[3]]
-                        if ($jobTiles -lt 1 -or $jobTiles -gt 1024 -or $jobRuns -lt 1 -or $jobRuns -gt 121 -or $jobSamples -lt 1 -or $jobPcmOffset + 2 * $jobSamples -gt $jobOutputBytes -or $act.Length -ne [long]$request.InputBytes) { throw 'Job fields out of range.' }
+                        if ($jobTiles -lt 1 -or $jobTiles -gt 32768 -or $jobRuns -lt 1 -or $jobRuns -gt 121 -or $jobSamples -lt 1 -or $jobPcmOffset + 2 * $jobSamples -gt $jobOutputBytes -or $act.Length -ne [long]$request.InputBytes) { throw 'Job fields out of range.' }
                         $out = [byte[]]::new($jobOutputBytes)
                         $bufs = @(([BitConverter]::GetBytes([uint32]$jobTiles)), $act, $wts, $tbl, $out)
                         $jobPins = [Collections.Generic.List[object]]::new(); $jobBlock = $Marshal::AllocHGlobal(16 * $bufs.Count)

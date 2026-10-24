@@ -991,13 +991,23 @@ function New-KokoroGenerator60x16RunSteps {
             $j=$end
         }
     }
-    $lockstepProgram={param([int]$thread,[int]$j0,[int]$j1)
+    # Runtime: the steps start at r3 and number r4 (the dispatch's register argument and segment count), all uniform,
+    # an even count starting on the parity of j0.
+    $lockstepProgram={param([int]$thread,[int]$j0,[int]$j1,[switch]$Runtime)
         $s.Add(@{Op='allocframe';Bytes=256})
         foreach($r in 16,18,20,22,24,26){ $s.Add(@{Op='store-d';s=29;t=$r;Offset=(($r-16)*4)}) }
         $s.Add(@{Op='addi';d=18;s=0;i=0}); $s.Add(@{Op='addi';d=25;s=1;i=0}); $s.Add(@{Op='addi';d=20;s=2;i=0})
         $s.Add(@{Op='addi';d=24;s=29;i=(64+63)}); & $imm 0 -64; $s.Add(@{Op='and';d=24;s=24;t=0})
+        if($Runtime){
+            $s.Add(@{Op='addi';d=17;s=3;i=0}); $s.Add(@{Op='add';d=16;s=3;t=4})
+            $steps=& $label; $stepsDone=& $label
+            $s.Add(@{Op='label';Name=$steps})
+            foreach($stepInPair in 0,1){ & $lockstepTile $null (($j0+$stepInPair) % 2) $thread; $s.Add(@{Op='addi';d=17;s=17;i=1}) }
+            $s.Add(@{Op='eq';d=0;s=17;t=16}); $s.Add(@{Op='jump-p';u=0;Label=$stepsDone}); & $jump $steps
+            $s.Add(@{Op='label';Name=$stepsDone})
+        }
         # The loop body is two steps (an even and an odd ring slot).
-        & $stepRange $j0 $j1 { param($block,$parity) & $lockstepTile $block $parity $thread } 2
+        else { & $stepRange $j0 $j1 { param($block,$parity) & $lockstepTile $block $parity $thread } 2 }
         foreach($r in 16,18,20,22,24,26){ $s.Add(@{Op='load-d';d=$r;s=29;Offset=(($r-16)*4)}) }
         $s.Add(@{Op='dealloc-return'})
     }
@@ -1010,13 +1020,20 @@ function New-KokoroGenerator60x16RunSteps {
     }
     # Steps j0 .. j1 - 1: thread programs as bodies named by runName (no PMU marks inside: four threads would share the
     # records), then one dispatch. The progress words start at zero with the first step and carry across runs.
-    $backwardRun={param([int]$j0,[int]$j1,[string]$runName)
-        $mainSteps=$s; $marksOff=$true
-        for($thread=0;$thread -lt $batch;$thread++){ $s=[Collections.Generic.List[hashtable]]::new(); & $lockstepProgram $thread $j0 $j1; $lockstepBodies.Add(@("body_lockstep_t$thread$sfx$runName",$s.ToArray())) }
-        $s=$mainSteps; $marksOff=$false
+    # Runtime (a uniform span run in the span loop): the first step goes to the threads in r19 (an immediate the span loop
+    # makes span-relative) and the step count as the segment count.
+    $backwardRun={param([int]$j0,[int]$j1,[string]$runName,[switch]$Runtime)
+        $runSteps=$s; $marksOff=$true
+        for($thread=0;$thread -lt $batch;$thread++){ $s=[Collections.Generic.List[hashtable]]::new(); & $lockstepProgram $thread $j0 $j1 -Runtime:$Runtime; $lockstepBodies.Add(@("body_lockstep_t$thread$sfx$runName",$s.ToArray())) }
+        $s=$runSteps; $marksOff=$false
         if($j0 -eq 0){ & $ptr 2 18 $tileRegions.Progress; $s.Add(@{Op='imm';d=1;i=0}); for($k=0;$k -lt $batch;$k++){ $s.Add(@{Op='store';s=2;t=1;Offset=(4*$k)}) } }
         $s.Add(@{Op='syncht'}); & $matrixUnlock
-        & $dispatch "body_lockstep_t0$sfx$runName" @(for($thread=0;$thread -lt $batch;$thread++){ @{Count=1;Body="body_lockstep_t$thread$sfx$runName";Arguments=@(@{Register=18},@{Register=25},@{Register=20})} })
+        if($Runtime){
+            if(($j1-$j0) % 2 -or ($j1-$j0) -lt 2){throw 'A runtime lockstep run is an even number of steps.'}
+            & $imm 19 $j0
+            & $dispatch "body_lockstep_t0$sfx$runName" @(for($thread=0;$thread -lt $batch;$thread++){ @{Count=($j1-$j0);Body="body_lockstep_t$thread$sfx$runName";Arguments=@(@{Register=18},@{Register=25},@{Register=20},@{Register=19})} })
+        }
+        else { & $dispatch "body_lockstep_t0$sfx$runName" @(for($thread=0;$thread -lt $batch;$thread++){ @{Count=1;Body="body_lockstep_t$thread$sfx$runName";Arguments=@(@{Register=18},@{Register=25},@{Register=20})} }) }
         & $matrixLock; & $mark 'Lockstep'
     }
     # Chunked schedule. VTCM bytes srcOff -> destOff on the main thread, 1 KiB at a time.
@@ -1197,27 +1214,103 @@ function New-KokoroGenerator60x16RunSteps {
     }
     # Spans ($spans): per span the 256-channel front and section, then the 128-channel front, section and tail. A
     # section's first steps start from its initial state; later ones restore the state its previous steps saved.
-    $spanJob={
-        foreach($span in $spans){
-            . $bind 0; $slowMean=$finalOffset
-            & $mark 'Boundary' 'Front256'
-            if($span.D1 -gt $span.D0){ & $spanFront0 $span.D0 $span.D1 }
-            if($span.J1 -gt $span.J0){
-                if($span.J0 -eq 0){ . $sectionInit } else { & $dma 18 $stateFrom 25 $stateSlot $stateBytes; & $sync }
-                . $sectionRun $span.J0 $span.J1 "_s$($span.Index)"
-                if($span.J1 -lt $slowSteps){ & $sync; & $dma 25 $stateSlot 18 $stateFrom $stateBytes }
-            }
-            if($sections.Count -lt 2){ continue }
-            . $bind 1; $chainOffset=$slowMean
-            & $mark 'Boundary' 'Front128'
-            if($span.S1 -gt $span.S0){ & $spanFront1 $span.S0 $span.S1 }
-            if($span.K1 -gt $span.K0){
-                if($span.K0 -eq 0){ . $sectionInit } else { & $dma 18 $stateFrom 25 $stateSlot $stateBytes; & $sync }
-                . $sectionRun $span.K0 $span.K1 "_s$($span.Index)"
-                if($span.K1 -lt $fastSteps){ & $sync; & $dma 25 $stateSlot 18 $stateFrom $stateBytes }
-            }
-            if($span.T1 -gt $span.T0){ & $tailRange $span.T0 $span.T1 }
+    # One span. Generic: the uniform span's code for the span loop (its lockstep runs take their steps at run time).
+    $emitSpan={param($span,[switch]$Generic)
+        $runName=if($Generic){'_su'}else{"_s$($span.Index)"}
+        . $bind 0; $slowMean=$finalOffset
+        & $mark 'Boundary' 'Front256'
+        if($span.D1 -gt $span.D0){ & $spanFront0 $span.D0 $span.D1 }
+        if($span.J1 -gt $span.J0){
+            if($span.J0 -eq 0){ . $sectionInit } else { & $dma 18 $stateFrom 25 $stateSlot $stateBytes; & $sync }
+            . $sectionRun $span.J0 $span.J1 $runName
+            if($span.J1 -lt $slowSteps){ & $sync; & $dma 25 $stateSlot 18 $stateFrom $stateBytes }
         }
+        if($sections.Count -lt 2){ return }
+        . $bind 1; $chainOffset=$slowMean
+        & $mark 'Boundary' 'Front128'
+        if($span.S1 -gt $span.S0){ & $spanFront1 $span.S0 $span.S1 }
+        if($span.K1 -gt $span.K0){
+            if($span.K0 -eq 0){ . $sectionInit } else { & $dma 18 $stateFrom 25 $stateSlot $stateBytes; & $sync }
+            if($Generic -and $sectionSchedule -eq 'Backward'){ . $backwardRun $span.K0 $span.K1 $runName -Runtime } else { . $sectionRun $span.K0 $span.K1 $runName }
+            if($span.K1 -lt $fastSteps){ & $sync; & $dma 25 $stateSlot 18 $stateFrom $stateBytes }
+        }
+        if($span.T1 -gt $span.T0){ & $tailRange $span.T0 $span.T1 }
+    }
+    # A uniform span: every range a constant step from the previous span's, and no stage at an edge of the input (no
+    # step with edge treatment, no front or tail range touching either end), so its code differs from its neighbours'
+    # only in immediates that advance by a constant per span.
+    $rangeNames=@('D0','D1','In0','In1','J0','J1','S0','S1','F0','F1','K0','K1','T0','T1') | Where-Object { $spans[0].PSObject.Properties.Name -contains $_ }
+    $spanRejections=[Collections.Generic.List[string]]::new()
+    $uniformSpan={param([int]$k)
+        $no={param([string]$why) $spanRejections.Add("span ${k}: $why"); $false}
+        if($k -lt 1 -or $k+1 -ge $spans.Count){ return (& $no 'first or last') }
+        $spanBefore=$spans[$k-1]; $spanHere=$spans[$k]; $spanAfter=$spans[$k+1]
+        foreach($n in $rangeNames){ $before=$spanHere.$n-$spanBefore.$n; $after=$spanAfter.$n-$spanHere.$n; if($before -ne $after -or $before -le 0){ return (& $no "$n steps $before then $after") } }
+        . $bind 0
+        if($spanHere.D0 -lt 1 -or $spanHere.D1 -ge $decTiles -or 10*$spanHere.D1 -ge $tiles){ return (& $no '256-channel front at an edge') }
+        for($j=$spanHere.J0;$j -lt $spanHere.J1;$j++){ if(& $edgeStep $j){ return (& $no "256-channel step $j at an edge") } }
+        if($sections.Count -gt 1){
+            . $bind 1
+            if($spanHere.S0 -lt 1 -or $spanHere.S1 -ge $upTiles -or 6*$spanHere.S1 -ge $tiles -or $spanHere.T0 -lt 2 -or $spanHere.T1+2 -gt $tiles -or [math]::Floor(($Frames-2)/32) -lt $spanHere.T1){ return (& $no '128-channel front or tail at an edge') }
+            if(($spanHere.K1-$spanHere.K0) % 2 -or ($spanHere.K0 % 2) -ne ($spanBefore.K0 % 2)){ return (& $no 'odd lockstep run') }
+            for($j=$spanHere.K0;$j -lt $spanHere.K1;$j++){ if(& $edgeStep $j){ return (& $no "128-channel step $j at an edge") } }
+        }
+        $true
+    }
+    # Span-relative code from three consecutive uniform spans' code: identical operations, and each lo/hi immediate
+    # pair either equal in all three or advancing by one constant stride, which becomes base + r16 * stride (r16 the
+    # span index; r14 the scratch, free between an immediate and its use).
+    $spanRelative={param($A,$B,$C,[int]$first)
+        if($A.Count -ne $B.Count -or $A.Count -ne $C.Count){throw 'Uniform spans emit different instruction counts.'}
+        $out=[Collections.Generic.List[hashtable]]::new()
+        for($i=0;$i -lt $A.Count;$i++){
+            $x=$A[$i]
+            if($x.Op -ceq 'lo' -and $i+1 -lt $A.Count -and $A[$i+1].Op -ceq 'hi' -and $A[$i+1].x -eq $x.x){
+                $v=foreach($list in $A,$B,$C){ [long]$list[$i].i -bor ([long]$list[$i+1].i -shl 16) }
+                $stride=($v[1]-$v[0]) -band 0xffffffffL
+                if($stride -ne (($v[2]-$v[1]) -band 0xffffffffL)){throw "Immediate at step $i does not advance by one stride."}
+                if($stride -eq 0){ $out.Add($x); $out.Add($A[$i+1]); $i++; continue }
+                if($x.x -in 14,16){throw 'A span-relative immediate cannot use r14 or r16.'}
+                $base=($v[0]-$first*$stride) -band 0xffffffffL
+                $out.Add(@{Op='lo';x=$x.x;i=($base -band 65535)}); $out.Add(@{Op='hi';x=$x.x;i=($base -shr 16)})
+                $out.Add(@{Op='lo';x=14;i=($stride -band 65535)}); $out.Add(@{Op='hi';x=14;i=($stride -shr 16)})
+                $out.Add(@{Op='mpyi';d=14;s=14;t=16}); $out.Add(@{Op='add';d=$x.x;s=$x.x;t=14})
+                $i++; continue
+            }
+            foreach($key in @($x.Keys) + @($B[$i].Keys) | Select-Object -Unique){
+                if($key -in 'Name','Label'){ continue }
+                if("$($x[$key])" -cne "$($B[$i][$key])" -or "$($x[$key])" -cne "$($C[$i][$key])"){throw "Uniform spans differ at step $i ($($x.Op).$key)."}
+            }
+            $out.Add($x)
+        }
+        , $out.ToArray()
+    }
+    $spanBodies=[Collections.Generic.List[object]]::new()
+    $spanJob={
+        # The longest run of uniform spans [u0, u1), looped when it holds at least three spans.
+        $u0=-1; $u1=-1
+        for($spanAt=0;$spanAt -lt $spans.Count;$spanAt++){ if(& $uniformSpan $spanAt){ if($u0 -lt 0){$u0=$spanAt}; $u1=$spanAt+1 } elseif($u0 -ge 0){ break } }
+        if($u1-$u0 -lt 3){ $u0=$spans.Count; $u1=$spans.Count }
+        for($spanAt=0;$spanAt -lt $u0;$spanAt++){ . $emitSpan $spans[$spanAt] }
+        if($u0 -lt $spans.Count){
+            $jobSteps=$s; $callsAt=$calls.Count; $bodiesAt=$lockstepBodies.Count; $spanCode=@()
+            foreach($spanAt in $u0,($u0+1),($u0+2)){
+                $s=[Collections.Generic.List[hashtable]]::new(); . $emitSpan $spans[$spanAt] -Generic; $spanCode+=,$s
+                if($spanAt -eq $u0){ $callsAt=$calls.Count; $bodiesAt=$lockstepBodies.Count }
+            }
+            $calls.RemoveRange($callsAt,$calls.Count-$callsAt); $lockstepBodies.RemoveRange($bodiesAt,$lockstepBodies.Count-$bodiesAt)
+            $body=[Collections.Generic.List[hashtable]]::new(); $body.Add(@{Op='allocframe';Bytes=16})
+            foreach($step in (& $spanRelative $spanCode[0] $spanCode[1] $spanCode[2] $u0)){ $body.Add($step) }
+            $body.Add(@{Op='dealloc-return'}); $spanBodies.Add(@('body_span_uniform',$body.ToArray()))
+            $s=$jobSteps
+            & $imm 16 $u0
+            $spansLoop=& $label; $spansDone=& $label
+            $s.Add(@{Op='label';Name=$spansLoop}); & $call 'body_span_uniform'; $s.Add(@{Op='addi';d=16;s=16;i=1})
+            & $imm 15 $u1; $s.Add(@{Op='eq';d=0;s=16;t=15}); $s.Add(@{Op='jump-p';u=0;Label=$spansDone}); & $jump $spansLoop
+            $s.Add(@{Op='label';Name=$spansDone})
+        }
+        for($spanAt=$u1;$spanAt -lt $spans.Count;$spanAt++){ . $emitSpan $spans[$spanAt] }
+        $spanLoop=[pscustomobject]@{First=$u0;End=$u1}
     }
     for($section=0;$section -lt $sections.Count;$section++){
     if($section -gt 0){ $chainOffset=$finalOffset; $chainTiles=$tiles; . $bind $section }
@@ -1411,6 +1504,7 @@ function New-KokoroGenerator60x16RunSteps {
         $bodies.Add(@('body_har_phase_major_tiles',@(New-KokoroHarPhaseMajor16Steps -Phases 6 -TileBatch -LabelPrefix 'harphasemajor16tiles')))
         $bodies.Add(@('body_har_phase_major_last',@(New-KokoroHarPhaseMajor16Steps -Phases 1 -LabelPrefix 'harphasemajor16last')))
     }
+    foreach($pair in $spanBodies){ $bodies.Add($pair) }
     foreach($entry in $padBodies){
         $width,$halfword=$entry.Split(','); $name="body_padcapacity_${width}_$halfword"
         $bodies.Add(@($name,@(New-KokoroPadCapacity16Steps -Channels ([int]$width) -Halfword ([int]$halfword) -LabelPrefix $name)))
@@ -1473,6 +1567,7 @@ function New-KokoroGenerator60x16RunSteps {
     $resultLayout.WeightRegions=$weightRegions.ToArray()
     $resultLayout.SourceStreams=@($sourceStreams | Where-Object { $null -ne $_ })
     $resultLayout.Spans=$spans
+    $resultLayout.SpanLoop=$spanLoop; $resultLayout.SpanRejections=$spanRejections.ToArray()
     # Each section's tensors in the workspace: its input after the front (fronted sections) and its output.
     $resultLayout.Sections=@(for($i=0;$i -lt $sections.Count;$i++){ . $bind $i
         [pscustomobject]@{Section=$i;Channels=$Channels;Tiles=$tiles;Bytes=$tensorBytes;InputWorkspaceOffset=$(if($Front){$r0Slot}else{-1L});FinalWorkspaceOffset=$finalOffset} })

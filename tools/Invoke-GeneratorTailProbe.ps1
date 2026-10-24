@@ -47,7 +47,7 @@ if ($null -ne $EmissionArtifact) {
     # Preserved reference artifacts retain their original metadata contract.
     $layout = Get-Content (Join-Path $emission 'runner-layout.json') -Raw | ConvertFrom-Json
 }
-if ([long]$layout.Tiles -lt 1 -or [long]$layout.Tiles -gt 1024 -or
+if ([long]$layout.Tiles -lt 1 -or [long]$layout.Tiles -gt 32768 -or
     [long]$layout.InputBytes -lt 1 -or [long]$layout.Samples -lt 1 -or
     [long]$layout.PcmOffset -lt 0 -or
     [long]$layout.PcmOffset + 2L * [long]$layout.Samples -gt [long]$layout.OutputBytes) {
