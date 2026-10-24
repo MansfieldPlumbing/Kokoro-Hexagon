@@ -1539,6 +1539,18 @@ function Test-KokoroGeneratorTileEquivalence {
         # Front and Whole: the depth-first job runs in spans of this many 256-channel tiles, each section's state saved
         # and restored between them.
         [int]$SpanTiles=20,[ValidateRange(2,64)][int]$Repeat=4,[int[]]$SpanSizes=@(20,40),
+        # Front and Whole: Layer feeds each source insertion point the stream the layer job computed; Zero feeds x = 0
+        # there (no source contribution), and the report gives the PCM SNR against the layer job.
+        # Model: the sections in ModelSections take their add's result from a frozen model of Y on U (ModelName, the
+        # fold of SourceModel, a generator-source-boundary receipt, that held out ModelHeldOut), realized through the
+        # supplied stream by inverting the add's integer arithmetic; the others keep the layer job's stream.
+        # LayerOutput (control): the ModelSections take the layer job's own Y through the same injection as a model.
+        [ValidateSet('Layer','Zero','Model','LayerOutput')][string]$SourceStreams='Layer',
+        [string]$SourceModel,[ValidateSet('M1','M2')][string]$ModelName='M1',[int[]]$ModelSections=@(0,1),[string]$ModelHeldOut='build\decoder-generator-fixture-20261009',
+        # Output: Y^ replaces the add's result in the depth-first job (the replacement under test); with both sections the
+        # first pass gives section 1's own U and a second pass injects its Y^. Inverse (diagnostic): the supplied source N^
+        # that the add turns into Y^, each section's U from the layer job.
+        [ValidateSet('Output','Inverse')][string]$ModelInjection='Output',
         [string]$FixtureDirectory=(Join-Path $Build $(switch($Joint){'Front'{'speak-20261010-h0-fast/job-input/front10-stage-fixture-20261008'}{$_ -in 'Whole','Spans'}{'generator-whole-fixture-20261008'}default{if($Channels -eq 256){'speak-20261010-h0-fast/job-input/g256-fixture-20261008'}else{'speak-20261010-h0-fast/job-input/generator60x16-fixture-20261008-holdout2'}}})),[ValidateRange(1,21)][int]$Runs=3,
         # Tiles per step, one per HVX thread.
         [ValidateSet(2,4)][int]$TileBlock=4,
@@ -1577,9 +1589,12 @@ function Test-KokoroGeneratorTileEquivalence {
     # A job with a tail returns only its header and PCM through the resident listener; the workspace needs a one-shot run.
     $oneShot=$Joint -in 'Whole','Spans'
     $export=Invoke-KokoroEmission -Kernel KokoroGenerator60x16Run -Parameters ($common+@{ResidentBatchTiles=22;GeneratorMoments='Export';GeneratorSchedule='Layer'})
-    $layer=Invoke-KokoroEmission -Kernel KokoroGenerator60x16Run -Parameters ($common+@{ResidentBatchTiles=22;GeneratorMoments='Constants';GeneratorSchedule='Layer'})
+    $layerParameters=$common+@{ResidentBatchTiles=22;GeneratorMoments='Constants';GeneratorSchedule='Layer'}; if($SourceStreams -eq 'Model'){ $layerParameters.GeneratorExportFrontTensors=$true }
+    $layer=Invoke-KokoroEmission -Kernel KokoroGenerator60x16Run -Parameters $layerParameters
     $tileParameters=$common+@{ResidentBatchTiles=$TileBlock;GeneratorMoments='Constants';GeneratorSchedule=$depthFirst;GeneratorWeightPlanes=$WeightPlanes;GeneratorControllerContact=$ControllerContact.IsPresent;GeneratorVectorPackets=$VectorPackets.IsPresent}
     if($Joint -ne 'Section'){ $tileParameters.GeneratorSuppliedSource=$true; $tileParameters.GeneratorSpanTiles=$SpanTiles }
+    if($SourceStreams -eq 'Model'){ $tileParameters.GeneratorExportFrontTensors=$true; if($ModelInjection -eq 'Output'){ $tileParameters.GeneratorSuppliedSectionInputs=$ModelSections } }
+    if($SourceStreams -eq 'LayerOutput'){ $tileParameters.GeneratorSuppliedSectionInputs=$ModelSections }
     $tile=Invoke-KokoroEmission -Kernel KokoroGenerator60x16Run -Parameters $tileParameters
     $statistics=[IO.File]::ReadAllBytes((Join-Path $FixtureDirectory 'tables.bin'))
     $weights=[IO.File]::ReadAllBytes((Join-Path $FixtureDirectory 'weights.bin'))
@@ -1634,14 +1649,62 @@ function Test-KokoroGeneratorTileEquivalence {
     $tileInput=$constantsInput
     if($Joint -ne 'Section'){
         # Each source stream the layer job parked in its workspace becomes the depth-first job's supplied input there.
-        # The span job's input is x, then the streams (the layer job's har planes are not read).
+        if($SourceStreams -eq 'Model'){
+            if(-not $SourceModel){throw 'SourceStreams Model needs -SourceModel (a generator-source-boundary receipt).'}
+            $boundary=Import-Clixml -LiteralPath $SourceModel; Import-CaptureKernels; $applyModel=Get-MatrixApplyKernel
+        }
+        # A section's tensor at a workspace offset of a run's output, [channel][frame] values at one LSB.
+        $streamFrames={param($Stream) if([int]$Stream.Channels -eq 256){([int]$fixture.Frames-1)/6}else{[int]$fixture.Frames}}
+        $readTensor={param($Run,[long]$Offset,$Stream)
+            $ones=[double[]]::new([int]$Stream.Channels); [Array]::Fill($ones,1.0); $bytes=[byte[]]::new($Stream.Bytes); [Array]::Copy($Run.Output,128+$Offset,$bytes,0,$Stream.Bytes)
+            ConvertFrom-KokoroCroutons16 -Bytes $bytes -Frames (& $streamFrames $Stream) -Units $ones}
+        $encodeTensor={param($Stream,[float[]]$Values) $ones=[double[]]::new([int]$Stream.Channels); [Array]::Fill($ones,1.0); ConvertTo-KokoroCroutons16 -Values $Values -Frames (& $streamFrames $Stream) -Scales $ones}
+        # The frozen fit's Y^ from U: per channel the fitted taps on U (zero past either end) and the offset, clamped to int16.
+        $predictY={param($Stream,[float[]]$UValues)
+            $channels=[int]$Stream.Channels; $frames=& $streamFrames $Stream
+            $fit=@(@($boundary.Sections)[$Stream.Section].Fits | Where-Object { $_.Model -ceq $ModelName -and ([string]$_.HeldOutFixture).EndsWith($ModelHeldOut) })[0]
+            if(-not $fit){throw "No $ModelName fit of section $($Stream.Section) holds out $ModelHeldOut."}
+            $yHat=[float[]]::new($channels*$frames)
+            for($c=0;$c -lt $channels;$c++){
+                $w=[double[]]$fit.Weights[$c]; $nf=$w.Length; $taps=$nf-1; $reach=[int](($taps-1)/2); $m=[double[]]::new($nf*$frames)
+                for($k=0;$k -lt $taps;$k++){ $lag=$k-$reach; $n=$frames-[math]::Abs($lag); for($i=0;$i -lt $n;$i++){ $m[$k*$frames+[math]::Max(0,-$lag)+$i]=$UValues[$c*$frames+[math]::Max(0,$lag)+$i] } }
+                [Array]::Fill($m,1.0,$taps*$frames,$frames)
+                $prediction=[double[]]::new($frames); $applyModel.Invoke($w,1,$nf,$m,$frames,[double[]]@(0.0),$prediction)
+                for($i=0;$i -lt $frames;$i++){ $yHat[$c*$frames+$i]=[float][math]::Round([math]::Max(-32768,[math]::Min(32767,$prediction[$i]))) }
+            }
+            ,$yHat}
+        # Diagnostic: the supplied source N^ for which the add gives Y^. front_add computes Y = sat(2 sat(q(U rU) + q(N rN)))
+        # with q(x) = (2x + 2^15) >> 16 (Q14 ratios); N^ solves q(N^ rN) = Y^/2 - q(U rU), clamped to int16.
+        $invertAdd={param($Stream,[float[]]$UValues,[float[]]$YHat)
+            $channels=[int]$Stream.Channels; $frames=& $streamFrames $Stream; $q={param([long]$x) [long][math]::Floor((2.0*$x+32768)/65536)}
+            $nHat=[float[]]::new($channels*$frames); $at=[long]$Stream.AddRatioOffset
+            for($c=0;$c -lt $channels;$c++){
+                if($Stream.AddRatioForm -ceq 'HalfwordVectors'){ $ru=[BitConverter]::ToInt16($runTables,$at+128*($c -shr 5)+4*($c -band 31)); $rn=[BitConverter]::ToInt16($runTables,$at+128*($channels/32+($c -shr 5))+4*($c -band 31)) }
+                else { $ru=[BitConverter]::ToInt16($runTables,$at+4*$c); $rn=[BitConverter]::ToInt16($runTables,$at+512+4*$c) }
+                for($i=0;$i -lt $frames;$i++){
+                    $b=[math]::Floor($YHat[$c*$frames+$i]/2+0.5)-(& $q ([long]$UValues[$c*$frames+$i]*$ru))
+                    $nHat[$c*$frames+$i]=[float][math]::Max(-32768,[math]::Min(32767,$(if($rn -eq 0){0}else{[math]::Round($b*32768.0/$rn)})))
+                }
+            }
+            ,$nHat}
+        $modelY=@{}        # The span job's input is x, then the streams (the layer job's har planes are not read).
         $activations=[byte[]]::new($tile.Layout.InputBytes)
         $layerStreams=@($layer.Layout.SourceStreams); $tileStreams=@($tile.Layout.SourceStreams)
         $fixtureActivations=[IO.File]::ReadAllBytes((Join-Path $FixtureDirectory 'activations.bin')); [Array]::Copy($fixtureActivations,$activations,[math]::Min($fixtureActivations.Length,[long]$tileStreams[0].InputOffset))
         if($layerStreams.Count -ne $tileStreams.Count){throw 'The jobs have different source insertion points.'}
         for($i=0;$i -lt $tileStreams.Count;$i++){
             if($layerStreams[$i].Bytes -ne $tileStreams[$i].Bytes){throw "Source stream $i differs in size between the jobs."}
-            [Array]::Copy($layerRun.Output,128+[long]$layerStreams[$i].WorkspaceOffset,$activations,[long]$tileStreams[$i].InputOffset,[long]$tileStreams[$i].Bytes)
+            if($SourceStreams -eq 'Zero'){ for($at=[long]$tileStreams[$i].InputOffset+1;$at -lt [long]$tileStreams[$i].InputOffset+[long]$tileStreams[$i].Bytes;$at+=2){ $activations[$at]=0x80 } }
+            elseif($SourceStreams -eq 'LayerOutput' -and $i -in $ModelSections){
+                [Array]::Copy($layerRun.Output,128+[long]@($layer.Layout.Sections)[$i].InputWorkspaceOffset,$activations,[long]$tileStreams[$i].InputOffset,[long]$tileStreams[$i].Bytes)
+            }
+            elseif($SourceStreams -eq 'Model' -and $i -in $ModelSections){
+                # Y^ from the layer job's U; in a combined run section 1 is replaced after a first pass gives its own U.
+                $uLayer=& $readTensor $layerRun $layerStreams[$i].UpsWorkspaceOffset $layerStreams[$i]; $modelY[$i]=& $predictY $layerStreams[$i] $uLayer
+                $modelled=if($ModelInjection -eq 'Output'){& $encodeTensor $tileStreams[$i] $modelY[$i]}else{& $encodeTensor $tileStreams[$i] (& $invertAdd $layerStreams[$i] $uLayer $modelY[$i])}
+                [Array]::Copy($modelled,0,$activations,[long]$tileStreams[$i].InputOffset,$modelled.Length)
+            }
+            else { [Array]::Copy($layerRun.Output,128+[long]$layerStreams[$i].WorkspaceOffset,$activations,[long]$tileStreams[$i].InputOffset,[long]$tileStreams[$i].Bytes) }
         }
         $tileInput=& $stage 'supplied-source' $runTables $runWeights $activations
     }
@@ -1710,6 +1773,18 @@ function Test-KokoroGeneratorTileEquivalence {
             StepTensorSHA256=[Convert]::ToHexString([Security.Cryptography.SHA256]::HashData($stepTensor))}
     }
     else { $tileRun=Invoke-KokoroDeviceJob -EmissionDirectory $tile.Directory -EmissionArtifact $tile -InputDirectory $tileInput -Soc $Soc -Runs $Runs -Package $Package -OneShot:$oneShot }
+    if($SourceStreams -eq 'Model' -and $ModelInjection -eq 'Output' -and 0 -in $ModelSections -and 1 -in $ModelSections){
+        # Section 1's Y^ from the U the fitted section 0 gives it, then the second pass.
+        $uFitted=& $readTensor $tileRun $tileStreams[1].UpsWorkspaceOffset $tileStreams[1]; $modelY[1]=& $predictY $tileStreams[1] $uFitted
+        $second=& $encodeTensor $tileStreams[1] $modelY[1]; [Array]::Copy($second,0,$activations,[long]$tileStreams[1].InputOffset,$second.Length)
+        $tileInput=& $stage 'supplied-model-pass2' $runTables $runWeights $activations
+        $tileRun=Invoke-KokoroDeviceJob -EmissionDirectory $tile.Directory -EmissionArtifact $tile -InputDirectory $tileInput -Soc $Soc -Runs $Runs -Package $Package -OneShot:$oneShot
+    }
+    # Per modelled section: Y^ against the layer job's Y (this utterance), and the depth-first job's section input against Y^
+    # (how faithfully the injection or the inverted add realizes it).
+    $modelReport=@(if($SourceStreams -eq 'Model'){ foreach($i in $ModelSections){
+        $yLayer=& $readTensor $layerRun @($layer.Layout.Sections)[$i].InputWorkspaceOffset $layerStreams[$i]; $yRealized=& $readTensor $tileRun @($tile.Layout.Sections)[$i].InputWorkspaceOffset $tileStreams[$i]
+        [pscustomobject]@{Section=$i;Model=$ModelName;Injection=$ModelInjection;ModelSnrDb=(Get-KokoroSnr $modelY[$i] $yLayer);RealizedSnrDb=(Get-KokoroSnr $yRealized $modelY[$i])} } })
     $layerTensor=& $read $layerRun $layer; $tileTensor=& $read $tileRun $tile
     [IO.File]::WriteAllBytes((Join-Path $out 'layer-tensor.bin'),$layerTensor); [IO.File]::WriteAllBytes((Join-Path $out 'tile-tensor.bin'),$tileTensor)
     $split=$null
@@ -1743,15 +1818,140 @@ function Test-KokoroGeneratorTileEquivalence {
     if([int]$tile.Layout.Samples -gt 1){
         $pcmOf={param($Run,$Emission) $at=[long]$Emission.Layout.PcmOffset; [byte[]]$Run.Output[$at..($at+2L*[int]$Emission.Layout.Samples-1)]}
         $layerPcm=& $pcmOf $layerRun $layer; $tilePcm=& $pcmOf $tileRun $tile
-        $pcm=[pscustomobject]@{Samples=[int]$tile.Layout.Samples;Identical=([Convert]::ToHexString([Security.Cryptography.SHA256]::HashData($layerPcm)) -ceq [Convert]::ToHexString([Security.Cryptography.SHA256]::HashData($tilePcm)))
+        $toFloat={param([byte[]]$Bytes) $v=[float[]]::new($Bytes.Length/2); for($i=0;$i -lt $v.Length;$i++){ $v[$i]=[BitConverter]::ToInt16($Bytes,2*$i) }; ,$v}
+        $rms={param([float[]]$v) $sum=0.0; foreach($x in $v){ $sum+=[double]$x*$x }; [math]::Round([math]::Sqrt($sum/[math]::Max(1,$v.Length)),1)}
+        $layerValues=& $toFloat $layerPcm; $tileValues=& $toFloat $tilePcm
+        $dot={param([float[]]$A,[float[]]$B) $sum=0.0; for($i=0;$i -lt $A.Length;$i++){ $sum+=[double]$A[$i]*$B[$i] }; $sum}
+        $gain=(& $dot $tileValues $layerValues)/[math]::Max(1e-9,(& $dot $tileValues $tileValues)); $matched=[float[]]::new($tileValues.Length); for($i=0;$i -lt $matched.Length;$i++){ $matched[$i]=[float]($gain*$tileValues[$i]) }
+        $pcm=[pscustomobject]@{Samples=[int]$tile.Layout.Samples;SnrDb=(Get-KokoroSnr $tileValues $layerValues);LevelMatchedSnrDb=(Get-KokoroSnr $matched $layerValues);LayerRms=(& $rms $layerValues);TileRms=(& $rms $tileValues);LevelErrorDb=[math]::Round(20*[math]::Log10([math]::Max(1e-9,(& $rms $tileValues))/[math]::Max(1e-9,(& $rms $layerValues))),2);Identical=([Convert]::ToHexString([Security.Cryptography.SHA256]::HashData($layerPcm)) -ceq [Convert]::ToHexString([Security.Cryptography.SHA256]::HashData($tilePcm)))
             LayerSHA256=[Convert]::ToHexString([Security.Cryptography.SHA256]::HashData($layerPcm));TileSHA256=[Convert]::ToHexString([Security.Cryptography.SHA256]::HashData($tilePcm))}
     }
-    $report=[pscustomobject]@{Soc=$Soc;Fixture=$FixtureDirectory;Joint=$Joint;Pcm=$pcm;Sections=$sectionReport;Channels=$Channels;Schedule=$tileParameters.GeneratorSchedule;Tiles=[int]$fixture.Tiles;TileBlock=$TileBlock;WeightPlanes=$WeightPlanes;TensorBytes=$tensorBytes;ByteIdentical=($different -eq 0);DifferentBytes=$different;FirstDifference=$first;DifferingTiles=$differingTiles.ToArray()
+    $report=[pscustomobject]@{Soc=$Soc;Fixture=$FixtureDirectory;Joint=$Joint;SourceStreams=$SourceStreams;Model=$modelReport;Pcm=$pcm;Sections=$sectionReport;Channels=$Channels;Schedule=$tileParameters.GeneratorSchedule;Tiles=[int]$fixture.Tiles;TileBlock=$TileBlock;WeightPlanes=$WeightPlanes;TensorBytes=$tensorBytes;ByteIdentical=($different -eq 0);DifferentBytes=$different;FirstDifference=$first;DifferingTiles=$differingTiles.ToArray()
         LayerDspMs=$layerRun.MedianMs;TileDspMs=$tileRun.MedianMs;LayerVtcmBytes=$layer.Layout.VtcmBytes;TileVtcmBytes=$tile.Layout.VtcmBytes;LayerLibraryBytes=$layer.Bytes;TileLibraryBytes=$tile.Bytes
         LayerLibrarySHA256=$layer.LibrarySHA256;TileLibrarySHA256=$tile.LibrarySHA256;LayerTensorSHA256=[Convert]::ToHexString([Security.Cryptography.SHA256]::HashData($layerTensor))
         TileTensorSHA256=[Convert]::ToHexString([Security.Cryptography.SHA256]::HashData($tileTensor));ControllerContact=$contactProof;PmuSplit=$split}
     $report | Export-Clixml -LiteralPath (Join-Path $out 'equivalence.clixml') -Depth 8
     $report
+}
+
+function Test-KokoroGeneratorSourceBoundary {
+    # The source insertion points as a fitting target. Each fixture's layer decoder-and-generator job (source computed
+    # from F0 on the DSP) exports, at both fronts, U (the upsampled input of the add), N (the source after noise_res)
+    # and Y (the add's result, the section input), in integer LSB units. Reported per section: the powers of the add's two
+    # parts (U and N times their Q14 ratios) and of Y, the U-N
+    # correlation and the cancellation (power of the parts over power of the sum), saturated values in Y, and how well
+    # models with no source branch predict Y on an utterance left out of the fit: M0 Y = U; M1 per-channel gain and
+    # offset on U; M2 M1 with a temporal filter of FilterTaps taps on U. Every prediction is clamped to int16.
+    param([Parameter(Mandatory)][string]$OutputDirectory,[string]$Soc='SM8550',[string]$Package='dev.mansfieldplumbing.kokoro',
+        [string[]]$FixtureDirectories=@((Join-Path $Build 'decoder-generator-fixture-20261009'),(Join-Path $Build 'evaluator/input/timing-passage-0/decoder-generator-fixture-20261009'),(Join-Path $Build 'speak-20261010-h0-fast/job-input/decoder-generator-fixture-20261009')),
+        [ValidateRange(1,9)][int]$FilterTaps=5,
+        # A previous run's captures directory: fit again without the phone.
+        [string]$CaptureDirectory)
+    $out=[IO.Path]::GetFullPath($OutputDirectory)
+    if(-not $out.StartsWith($Build+[IO.Path]::DirectorySeparatorChar,[StringComparison]::OrdinalIgnoreCase) -or (Test-Path -LiteralPath $out)){throw 'Choose a fresh directory under build/.'}
+    [void][IO.Directory]::CreateDirectory($out)
+    if($FilterTaps % 2 -eq 0){throw 'FilterTaps is odd (centred on the frame).'}
+    Import-Evaluator; Import-CaptureKernels
+    $cross=Get-CrossProductKernel
+    # Per fixture and section: U, N, Y as [channel][frame] doubles and the add's Q14 ratios rU, rN. Captured on the phone
+    # into <OutputDirectory>/captures (croutons and captures.json), or read back from CaptureDirectory.
+    $captures=if($CaptureDirectory){[IO.Path]::GetFullPath($CaptureDirectory)}else{Join-Path $out 'captures'}
+    if(-not $CaptureDirectory){
+        [void][IO.Directory]::CreateDirectory($captures)
+        $index=@(for($u=0;$u -lt $FixtureDirectories.Count;$u++){
+            $dir=$FixtureDirectories[$u]; $fixture=Get-Content -LiteralPath (Join-Path $dir 'fixture.json') -Raw | ConvertFrom-Json
+            $emission=Invoke-KokoroEmission -Kernel KokoroDecoderGenerator16Run -Parameters @{ResBlockFrames=[int]$fixture.Frames;ResidentHvxThreads=4;ResidentBatchTiles=14;GeneratorExportFrontTensors=$true}
+            $run=Invoke-KokoroDeviceJob -EmissionDirectory $emission.Directory -EmissionArtifact $emission -InputDirectory $dir -Soc $Soc -Runs 1 -Package $Package -OneShot
+            $tables=[IO.File]::ReadAllBytes((Join-Path $dir 'tables.bin'))
+            $sectionIndex=@(foreach($stream in @($emission.Layout.SourceStreams)){
+                $section=@($emission.Layout.Sections)[$stream.Section]; $channels=[int]$stream.Channels
+                foreach($pair in @(@('U',$stream.UpsWorkspaceOffset),@('N',$stream.WorkspaceOffset),@('Y',$section.InputWorkspaceOffset))){
+                    $part=[byte[]]::new($stream.Bytes); [Array]::Copy($run.Output,128+[long]$pair[1],$part,0,$stream.Bytes); [IO.File]::WriteAllBytes((Join-Path $captures "u$u-s$($stream.Section)-$($pair[0]).bin"),$part) }
+                $at=[long]$stream.AddRatioOffset; $ru=[int[]]::new($channels); $rn=[int[]]::new($channels)
+                for($c=0;$c -lt $channels;$c++){
+                    if($stream.AddRatioForm -ceq 'HalfwordVectors'){ $ru[$c]=[BitConverter]::ToInt16($tables,$at+128*($c -shr 5)+4*($c -band 31)); $rn[$c]=[BitConverter]::ToInt16($tables,$at+128*($channels/32+($c -shr 5))+4*($c -band 31)) }
+                    else { $ru[$c]=[BitConverter]::ToInt16($tables,$at+4*$c); $rn[$c]=[BitConverter]::ToInt16($tables,$at+512+4*$c) } }
+                [pscustomobject]@{Section=[int]$stream.Section;Channels=$channels;Frames=$(if($channels -eq 256){([int]$fixture.Frames-1)/6}else{[int]$fixture.Frames});RatioU=$ru;RatioN=$rn}
+            })
+            [pscustomobject]@{Index=$u;Fixture=$dir;Frames=[int]$fixture.Frames;DspMs=$run.MedianMs;Sections=$sectionIndex}
+        })
+        $index | ConvertTo-Json -Depth 6 | Set-Content -LiteralPath (Join-Path $captures 'captures.json') -Encoding utf8
+    }
+    $utterances=@(foreach($entry in @(Get-Content -LiteralPath (Join-Path $captures 'captures.json') -Raw | ConvertFrom-Json)){
+        $sections=@(foreach($sec in @($entry.Sections)){
+            $ones=[double[]]::new([int]$sec.Channels); [Array]::Fill($ones,1.0)
+            $read={param([string]$Name) $v=ConvertFrom-KokoroCroutons16 -Bytes ([IO.File]::ReadAllBytes((Join-Path $captures "u$($entry.Index)-s$($sec.Section)-$Name.bin"))) -Frames ([int]$sec.Frames) -Units $ones; $d=[double[]]::new($v.Length); [Array]::Copy($v,$d,$v.Length); ,$d}
+            [pscustomobject]@{Channels=[int]$sec.Channels;Frames=[int]$sec.Frames;U=(& $read 'U');N=(& $read 'N');Y=(& $read 'Y');RatioU=[int[]]$sec.RatioU;RatioN=[int[]]$sec.RatioN}
+        })
+        [pscustomobject]@{Fixture=$entry.Fixture;Frames=[int]$entry.Frames;DspMs=$entry.DspMs;Sections=$sections}
+    })
+    $clampedError=Get-ClampedErrorKernel; $saturatedCount=Get-SaturatedCountKernel; $apply=Get-MatrixApplyKernel
+    $snr={param([double]$signal,[double]$noise) if($noise -le 0){999}else{[math]::Round(10*[math]::Log10($signal/$noise),2)}}
+    # Diagonal of a.b^T over [channels][frames]: per channel sum of a_c * b_c.
+    $diagonal={param([double[]]$A,[double[]]$B,[int]$Channels,[int]$Frames) $g=[double[]]::new($Channels*$Channels); $cross.Invoke($A,$Channels,$B,$Channels,$Frames,0,$Frames,$g); $d=[double[]]::new($Channels); for($c=0;$c -lt $Channels;$c++){ $d[$c]=$g[$c*$Channels+$c] }; ,$d}
+    $half=[int](($FilterTaps-1)/2)
+    # Features of channel c, [feature][frame]: M1 U and 1; M2 U(t - half) .. U(t + half) (zero past either end) and 1.
+    $features={param($Tensors,[int]$Channel,[string]$Model)
+        $f=$Tensors.Frames; $lags=if($Model -eq 'M1'){,0}else{@(-$half..$half)}; $nf=$lags.Count+1; $m=[double[]]::new($nf*$f)
+        for($k=0;$k -lt $lags.Count;$k++){ $lag=$lags[$k]; $n=$f-[math]::Abs($lag); if($n -gt 0){ [Array]::Copy($Tensors.U,$Channel*$f+[math]::Max(0,$lag),$m,$k*$f+[math]::Max(0,-$lag),$n) } }
+        [Array]::Fill($m,1.0,($nf-1)*$f,$f); ,$m}
+    $report=[Collections.Generic.List[object]]::new()
+    for($sec=0;$sec -lt 2;$sec++){
+        $channels=$utterances[0].Sections[$sec].Channels
+        $pu=0.0; $pn=0.0; $py=0.0; $saturated=0L; $count=0L; $suu=[double[]]::new($channels); $snn=[double[]]::new($channels); $sun=[double[]]::new($channels)
+        foreach($u in $utterances){
+            $s=$u.Sections[$sec]; $f=$s.Frames; $count+=$s.Y.Length; $saturated+=$saturatedCount.Invoke($s.Y)
+            $du=& $diagonal $s.U $s.U $channels $f; $dn=& $diagonal $s.N $s.N $channels $f; $dy=& $diagonal $s.Y $s.Y $channels $f; $dun=& $diagonal $s.U $s.N $channels $f
+            for($c=0;$c -lt $channels;$c++){ $gu=$s.RatioU[$c]/16384.0; $gn=$s.RatioN[$c]/16384.0; $pu+=$du[$c]*$gu*$gu; $pn+=$dn[$c]*$gn*$gn; $py+=$dy[$c]; $suu[$c]+=$du[$c]*$gu*$gu; $snn[$c]+=$dn[$c]*$gn*$gn; $sun[$c]+=$dun[$c]*$gu*$gn }
+        }
+        $sortedCorr=@(for($c=0;$c -lt $channels;$c++){ if($suu[$c] -gt 0 -and $snn[$c] -gt 0){$sun[$c]/[math]::Sqrt($suu[$c]*$snn[$c])}else{0.0} }) | Sort-Object
+        # Leave one utterance out: coefficients fitted on the others, frozen, scored on Y of the one left out.
+        $scores=[ordered]@{M0=[Collections.Generic.List[double]]::new();M1=[Collections.Generic.List[double]]::new();M2=[Collections.Generic.List[double]]::new()}
+        # Each fold's frozen coefficients per channel: [w_features..., offset], features as in $features.
+        $fitWeights=@{}; for($h=0;$h -lt $utterances.Count;$h++){ foreach($model in 'M1','M2'){ $fitWeights["$h.$model"]=[object[]]::new($channels) } }
+        for($held=0;$held -lt $utterances.Count;$held++){
+            $test=$utterances[$held].Sections[$sec]; $tf=$test.Frames
+            $err=@{M0=0.0;M1=0.0;M2=0.0}; $sig=0.0; foreach($value in (& $diagonal $test.Y $test.Y $channels $tf)){ $sig+=$value }
+            for($c=0;$c -lt $channels;$c++){
+                $err.M0+=$clampedError.Invoke($test.U,$c*$tf,$test.Y,$c*$tf,$tf)
+                foreach($model in 'M1','M2'){
+                    $nf=if($model -eq 'M1'){2}else{$FilterTaps+1}; $gram=[double[]]::new($nf*$nf); $rhs=[double[]]::new($nf)
+                    for($tr=0;$tr -lt $utterances.Count;$tr++){
+                        if($tr -eq $held){ continue }
+                        $s=$utterances[$tr].Sections[$sec]; $f=$s.Frames; $m=& $features $s $c $model
+                        $yc=[double[]]::new($f); [Array]::Copy($s.Y,$c*$f,$yc,0,$f)
+                        $g=[double[]]::new($nf*$nf); $cross.Invoke($m,$nf,$m,$nf,$f,0,$f,$g); $r=[double[]]::new($nf); $cross.Invoke($m,$nf,$yc,1,$f,0,$f,$r)
+                        for($i=0;$i -lt $g.Length;$i++){ $gram[$i]+=$g[$i] }; for($i=0;$i -lt $nf;$i++){ $rhs[$i]+=$r[$i] }
+                    }
+                    # Least squares by Cholesky, a relative ridge of 1e-6 on the diagonal.
+                    for($i=0;$i -lt $nf;$i++){ $gram[$i*$nf+$i]=[math]::Max($gram[$i*$nf+$i]*1.000001,1e-9) }
+                    $L=[double[]]::new($nf*$nf)
+                    for($i=0;$i -lt $nf;$i++){ for($j=0;$j -le $i;$j++){ $sum=$gram[$i*$nf+$j]; for($k=0;$k -lt $j;$k++){ $sum-=$L[$i*$nf+$k]*$L[$j*$nf+$k] }; if($i -eq $j){ $L[$i*$nf+$i]=[math]::Sqrt([math]::Max($sum,1e-12)) } else { $L[$i*$nf+$j]=$sum/$L[$j*$nf+$j] } } }
+                    $z=[double[]]::new($nf); for($i=0;$i -lt $nf;$i++){ $sum=$rhs[$i]; for($k=0;$k -lt $i;$k++){ $sum-=$L[$i*$nf+$k]*$z[$k] }; $z[$i]=$sum/$L[$i*$nf+$i] }
+                    $w=[double[]]::new($nf); for($i=$nf-1;$i -ge 0;$i--){ $sum=$z[$i]; for($k=$i+1;$k -lt $nf;$k++){ $sum-=$L[$k*$nf+$i]*$w[$k] }; $w[$i]=$sum/$L[$i*$nf+$i] }
+                    $prediction=[double[]]::new($tf); $apply.Invoke($w,1,$nf,(& $features $test $c $model),$tf,[double[]]@(0.0),$prediction)
+                    $err[$model]+=$clampedError.Invoke($prediction,0,$test.Y,$c*$tf,$tf)
+                    $fitWeights["$held.$model"][$c]=$w
+                }
+            }
+            foreach($model in 'M0','M1','M2'){ $scores[$model].Add((& $snr $sig $err[$model])) }
+        }
+        # The same held-out errors against Y with each channel's mean removed: the waveform part of the signal.
+        $acScores=@{}; foreach($model in 'M0','M1','M2'){ $acScores[$model]=[Collections.Generic.List[double]]::new() }
+        for($held=0;$held -lt $utterances.Count;$held++){
+            $test=$utterances[$held].Sections[$sec]; $tf=$test.Frames; $ac=0.0
+            for($c=0;$c -lt $channels;$c++){ $sum=0.0; $sq=0.0; for($i=$c*$tf;$i -lt ($c+1)*$tf;$i++){ $sum+=$test.Y[$i]; $sq+=$test.Y[$i]*$test.Y[$i] }; $ac+=$sq-$sum*$sum/$tf }
+            foreach($model in 'M0','M1','M2'){ $total=(& $diagonal $test.Y $test.Y $channels $tf); $allPower=0.0; foreach($v in $total){ $allPower+=$v }; $errPower=$allPower/[math]::Pow(10,$scores[$model][$held]/10); $acScores[$model].Add((& $snr $ac $errPower)) }
+        }        $report.Add([pscustomobject]@{Section=$sec;Channels=$channels
+            UPartPower=[math]::Round($pu/$count,1);NPartPower=[math]::Round($pn/$count,1);YPower=[math]::Round($py/$count,1);Cancellation=[math]::Round(($pu+$pn)/$py,3);SaturatedFraction=[math]::Round($saturated/[double]$count,6)
+            CorrelationMedian=[math]::Round($sortedCorr[[int]($channels/2)],3);CorrelationMin=[math]::Round($sortedCorr[0],3);CorrelationMax=[math]::Round($sortedCorr[-1],3)
+            HeldOutSnrM0=$scores.M0.ToArray();HeldOutSnrM1=$scores.M1.ToArray();HeldOutSnrM2=$scores.M2.ToArray()
+            HeldOutWaveformSnrM0=$acScores.M0.ToArray();HeldOutWaveformSnrM1=$acScores.M1.ToArray();HeldOutWaveformSnrM2=$acScores.M2.ToArray()
+            Fits=@(foreach($key in $fitWeights.Keys){ $h,$model=$key.Split('.'); [pscustomobject]@{HeldOut=[int]$h;HeldOutFixture=$utterances[[int]$h].Fixture;Model=$model;Weights=$fitWeights[$key]} })})
+    }
+    $result=[pscustomobject]@{Soc=$Soc;Fixtures=$FixtureDirectories;FilterTaps=$FilterTaps;Utterances=@($utterances | ForEach-Object { [pscustomobject]@{Fixture=$_.Fixture;Frames=$_.Frames;DspMs=$_.DspMs} });Sections=$report.ToArray()}
+    $result | Export-Clixml -LiteralPath (Join-Path $out 'boundary.clixml') -Depth 6
+    $result
 }
 
 function Test-KokoroSourceSeededNoise {
@@ -2972,7 +3172,7 @@ switch ($Command) {
     'Run' {
         if (-not $Case) { throw 'Run needs -Case (see Status for names).' }
         # Measurement cases write a fresh receipt directory; without -OutputDirectory it is build/<case>-<UTC time>.
-        if (-not $OutputDirectory -and $Case -cin @('generator-propagation', 'generator-representation', 'generator-weight-precision', 'generator-tile-equivalence', 'source-seeded-noise', 'generator-seeded-noise', 'generator-pmu')) {
+        if (-not $OutputDirectory -and $Case -cin @('generator-propagation', 'generator-representation', 'generator-weight-precision', 'generator-tile-equivalence', 'generator-source-boundary', 'source-seeded-noise', 'generator-seeded-noise', 'generator-pmu')) {
             $OutputDirectory = Join-Path $Build ('{0}-{1:yyyyMMddTHHmmss}' -f $Case, [DateTime]::UtcNow)
         }
         if($Case -ceq 'decoder-constants'){
@@ -2993,6 +3193,11 @@ switch ($Command) {
         if($Case -ceq 'source-seeded-noise'){
             $noiseParameters=if($Parameters){$Parameters}else{@{}}
             Test-KokoroSourceSeededNoise -OutputDirectory $OutputDirectory -Soc $Soc -Package $HostPackage @noiseParameters
+            break
+        }
+        if($Case -ceq 'generator-source-boundary'){
+            $boundaryParameters=if($Parameters){$Parameters}else{@{}}
+            Test-KokoroGeneratorSourceBoundary -OutputDirectory $OutputDirectory -Soc $Soc -Package $HostPackage @boundaryParameters
             break
         }
         if($Case -ceq 'generator-tile-equivalence'){

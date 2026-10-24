@@ -1136,7 +1136,7 @@ $script:Kernels=@(
     # The decoder then the whole generator with the harmonic source: asr, F0_curve, N_curve, f0 and z to PCM, one DSP job.
     . (Join-Path $script:HexagonToolsRoot '..\src\jobs\Kokoro.Generator60x16Run.ps1')
     $pmu=if($ResidentPmuEvents){@{PmuEvents=$ResidentPmuEvents}}else{@{}}
-    $run=New-KokoroGenerator60x16RunSteps -Frames $ResBlockFrames -HvxThreads $ResidentHvxThreads -BatchTiles $ResidentBatchTiles -Whole -Source -Decoder -AdaInMode $GeneratorMoments -DecoderMoments $DecoderMoments @pmu
+    $run=New-KokoroGenerator60x16RunSteps -Frames $ResBlockFrames -HvxThreads $ResidentHvxThreads -BatchTiles $ResidentBatchTiles -Whole -Source -Decoder -AdaInMode $GeneratorMoments -DecoderMoments $DecoderMoments @pmu -ExportFrontTensors:$GeneratorExportFrontTensors
     $steps=@($run.Steps)
     $symbol='kokoro_generator_tail_skel_handle_invoke'; $soname='libkokoro_generator_tail_skel.so'
     # Layout and link state remain part of the typed artifact.
@@ -1244,6 +1244,8 @@ $script:Kernels=@(
             if($GeneratorFront){ $harness.Front=$true }
             if($GeneratorWhole){ $harness.Whole=$true }
             if($GeneratorSuppliedSource){ $harness.SuppliedSource=$true; $harness.SpanTiles=$GeneratorSpanTiles }
+            if($GeneratorExportFrontTensors){ $harness.ExportFrontTensors=$true }
+            if($GeneratorSuppliedSectionInputs.Count){ $harness.SuppliedSectionInputs=$GeneratorSuppliedSectionInputs }
         $run=New-KokoroGenerator60x16RunSteps -Frames $ResBlockFrames -HvxThreads $ResidentHvxThreads -BatchTiles $ResidentBatchTiles -StopAfterStage $Stage16StopAfter -DumpPoint $Stage16DumpPoint -Kernels $Stage16Kernels -RuntimeFrames:$GeneratorRuntimeFrames @pmu @harness
     $steps=@($run.Steps)
     $symbol='kokoro_resblock_run_skel_handle_invoke'; $soname='libkokoro_resblock_run_skel.so'
@@ -1426,6 +1428,10 @@ param(
     [switch] $GeneratorSuppliedSource,
     # KokoroGenerator60x16Run with supplied sources: 256-channel tiles per span (-SpanTiles).
     [ValidateRange(10,1280)][int] $GeneratorSpanTiles = 20,
+    # KokoroGenerator60x16Run, KokoroDecoderGenerator16Run layer fronts: also export each add's upsampled input U (-ExportFrontTensors).
+    [switch] $GeneratorExportFrontTensors,
+    # KokoroGenerator60x16Run spans: sections whose supplied stream is the add's result (-SuppliedSectionInputs).
+    [int[]] $GeneratorSuppliedSectionInputs = @(),
     # KokoroGenerator60x16Run backward schedule: 1 keeps one resident int8 weight plane per stage (the high bytes).
     [ValidateSet(1, 2)][int] $GeneratorWeightPlanes = 2,
     # KokoroGenerator60x16Run backward schedule: per-tile AdaIN from the controller contact (K = K_base + P_K * v, M likewise).

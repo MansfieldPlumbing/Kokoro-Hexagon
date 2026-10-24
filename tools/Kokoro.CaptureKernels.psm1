@@ -542,4 +542,66 @@ function Get-Fp16ConversionTableKernel {
     $kernel
 }
 
-Export-ModuleMember -Function Get-FoldConvWeightsKernel, Get-QuantizeRowsKernel, Get-SplitPlanesKernel, Get-LowLowWindowShapedKernel, Get-Conv1dKernel, Get-PackWeightPlanesShapedKernel, Get-LowLowWindowKernel, Get-QuantizeCroutons16Kernel, Get-PackWeightPlanesKernel, Get-Mean3Kernel, Get-Croutons16ErrorKernel, Get-ChannelStatsKernel, Get-ColumnPeaksKernel, Get-DecodeCroutons16Kernel, Get-InterleavePlanesKernel, Get-Fp16CroutonsKernel, Get-PackFp16WeightsKernel, Get-GeneratorCoefficientsKernel, Get-Fp16ConversionTableKernel
+function Get-CrossProductKernel {
+    # (double[] a [ra][T], int ra, double[] b [rb][T], int rb, int frames T, int t0, int t1, double[] out [ra][rb]):
+    # out[i][j] = sum over t0 <= t < t1 of a[i][t] * b[j][t]. Least-squares Gram and cross terms.
+    if ($script:Kernels.ContainsKey('CrossProduct')) { return $script:Kernels.CrossProduct }
+    $a = [Expression]::Parameter([double[]], 'a'); $ra = [Expression]::Parameter([int], 'ra'); $b = [Expression]::Parameter([double[]], 'b'); $rb = [Expression]::Parameter([int], 'rb')
+    $frames = [Expression]::Parameter([int], 'frames'); $t0 = [Expression]::Parameter([int], 't0'); $t1 = [Expression]::Parameter([int], 't1'); $out = [Expression]::Parameter([double[]], 'out')
+    $i = [Expression]::Variable([int], 'i'); $j = [Expression]::Variable([int], 'j'); $t = [Expression]::Variable([int], 't'); $sum = [Expression]::Variable([double], 'sum')
+    $ai = [Expression]::Variable([int], 'ai'); $bj = [Expression]::Variable([int], 'bj')
+    $inner = [Expression]::AddAssign($sum, [Expression]::Multiply([Expression]::ArrayIndex($a, [Expression]::Add($ai, $t)), [Expression]::ArrayIndex($b, [Expression]::Add($bj, $t))))
+    $cell = [Expression]::Block(
+        [Expression]::Assign($bj, [Expression]::Multiply($j, $frames)), [Expression]::Assign($sum, [Expression]::Constant(0.0)),
+        (New-For $t $t0 $t1 $inner),
+        [Expression]::Assign([Expression]::ArrayAccess($out, [Expression]::Add([Expression]::Multiply($i, $rb), $j)), $sum))
+    $body = [Expression]::Block([ParameterExpression[]]@($i, $j, $t, $sum, $ai, $bj),
+        (New-For $i (New-Int 0) $ra ([Expression]::Block([Expression]::Assign($ai, [Expression]::Multiply($i, $frames)), (New-For $j (New-Int 0) $rb $cell)))))
+    $k = [Expression]::Lambda([Action[double[], int, double[], int, int, int, int, double[]]], $body, [ParameterExpression[]]@($a, $ra, $b, $rb, $frames, $t0, $t1, $out)).Compile()
+    $script:Kernels.CrossProduct = $k; $k
+}
+
+function Get-MatrixApplyKernel {
+    # (double[] m [rows][cols], int rows, int cols, double[] x [cols][T], int frames T, double[] bias [rows], double[] out [rows][T]):
+    # out[r][t] = bias[r] + sum over c of m[r][c] * x[c][t].
+    if ($script:Kernels.ContainsKey('MatrixApply')) { return $script:Kernels.MatrixApply }
+    $m = [Expression]::Parameter([double[]], 'm'); $rows = [Expression]::Parameter([int], 'rows'); $cols = [Expression]::Parameter([int], 'cols')
+    $x = [Expression]::Parameter([double[]], 'x'); $frames = [Expression]::Parameter([int], 'frames'); $bias = [Expression]::Parameter([double[]], 'bias'); $out = [Expression]::Parameter([double[]], 'out')
+    $r = [Expression]::Variable([int], 'r'); $c = [Expression]::Variable([int], 'c'); $t = [Expression]::Variable([int], 't'); $w = [Expression]::Variable([double], 'w')
+    $ro = [Expression]::Variable([int], 'ro'); $xo = [Expression]::Variable([int], 'xo')
+    $init = New-For $t (New-Int 0) $frames ([Expression]::Assign([Expression]::ArrayAccess($out, [Expression]::Add($ro, $t)), [Expression]::ArrayIndex($bias, $r)))
+    $acc = New-For $t (New-Int 0) $frames ([Expression]::AddAssign([Expression]::ArrayAccess($out, [Expression]::Add($ro, $t)), [Expression]::Multiply($w, [Expression]::ArrayIndex($x, [Expression]::Add($xo, $t)))))
+    $perCol = [Expression]::Block([Expression]::Assign($w, [Expression]::ArrayIndex($m, [Expression]::Add([Expression]::Multiply($r, $cols), $c))), [Expression]::Assign($xo, [Expression]::Multiply($c, $frames)), $acc)
+    $body = [Expression]::Block([ParameterExpression[]]@($r, $c, $t, $w, $ro, $xo),
+        (New-For $r (New-Int 0) $rows ([Expression]::Block([Expression]::Assign($ro, [Expression]::Multiply($r, $frames)), $init, (New-For $c (New-Int 0) $cols $perCol)))))
+    $k = [Expression]::Lambda([Action[double[], int, int, double[], int, double[], double[]]], $body, [ParameterExpression[]]@($m, $rows, $cols, $x, $frames, $bias, $out)).Compile()
+    $script:Kernels.MatrixApply = $k; $k
+}
+
+function Get-ClampedErrorKernel {
+    # (double[] a, int aOffset, double[] b, int bOffset, int n) -> sum over i < n of (clamp(a[aOffset+i], -32768, 32767)
+    # - b[bOffset+i])^2: the squared error of an int16-saturated prediction.
+    if ($script:Kernels.ContainsKey('ClampedError')) { return $script:Kernels.ClampedError }
+    $a = [Expression]::Parameter([double[]], 'a'); $ao = [Expression]::Parameter([int], 'ao'); $b = [Expression]::Parameter([double[]], 'b'); $bo = [Expression]::Parameter([int], 'bo'); $n = [Expression]::Parameter([int], 'n')
+    $i = [Expression]::Variable([int], 'i'); $sum = [Expression]::Variable([double], 'sum'); $d = [Expression]::Variable([double], 'd')
+    $clamp = [Math].GetMethod('Clamp', [Type[]]@([double], [double], [double]))
+    $inner = [Expression]::Block(
+        [Expression]::Assign($d, [Expression]::Subtract([Expression]::Call($clamp, [Expression]::ArrayIndex($a, [Expression]::Add($ao, $i)), [Expression]::Constant(-32768.0), [Expression]::Constant(32767.0)), [Expression]::ArrayIndex($b, [Expression]::Add($bo, $i)))),
+        [Expression]::AddAssign($sum, [Expression]::Multiply($d, $d)))
+    $body = [Expression]::Block([double], [ParameterExpression[]]@($i, $sum, $d), [Expression]::Assign($sum, [Expression]::Constant(0.0)), (New-For $i (New-Int 0) $n $inner), $sum)
+    $k = [Expression]::Lambda([Func[double[], int, double[], int, int, double]], $body, [ParameterExpression[]]@($a, $ao, $b, $bo, $n)).Compile()
+    $script:Kernels.ClampedError = $k; $k
+}
+
+function Get-SaturatedCountKernel {
+    # (double[] v) -> count of values at or past int16 full scale (>= 32767 or <= -32768).
+    if ($script:Kernels.ContainsKey('SaturatedCount')) { return $script:Kernels.SaturatedCount }
+    $v = [Expression]::Parameter([double[]], 'v'); $i = [Expression]::Variable([int], 'i'); $count = [Expression]::Variable([long], 'count')
+    $x = [Expression]::ArrayIndex($v, $i)
+    $inner = [Expression]::IfThen([Expression]::OrElse([Expression]::GreaterThanOrEqual($x, [Expression]::Constant(32767.0)), [Expression]::LessThanOrEqual($x, [Expression]::Constant(-32768.0))), [Expression]::PostIncrementAssign($count))
+    $body = [Expression]::Block([long], [ParameterExpression[]]@($i, $count), [Expression]::Assign($count, [Expression]::Constant(0L)), (New-For $i (New-Int 0) ([Expression]::ArrayLength($v)) $inner), $count)
+    $k = [Expression]::Lambda([Func[double[], long]], $body, [ParameterExpression[]]@($v)).Compile()
+    $script:Kernels.SaturatedCount = $k; $k
+}
+
+Export-ModuleMember -Function Get-ClampedErrorKernel, Get-SaturatedCountKernel, Get-CrossProductKernel, Get-MatrixApplyKernel, Get-FoldConvWeightsKernel, Get-QuantizeRowsKernel, Get-SplitPlanesKernel, Get-LowLowWindowShapedKernel, Get-Conv1dKernel, Get-PackWeightPlanesShapedKernel, Get-LowLowWindowKernel, Get-QuantizeCroutons16Kernel, Get-PackWeightPlanesKernel, Get-Mean3Kernel, Get-Croutons16ErrorKernel, Get-ChannelStatsKernel, Get-ColumnPeaksKernel, Get-DecodeCroutons16Kernel, Get-InterleavePlanesKernel, Get-Fp16CroutonsKernel, Get-PackFp16WeightsKernel, Get-GeneratorCoefficientsKernel, Get-Fp16ConversionTableKernel

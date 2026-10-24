@@ -113,6 +113,13 @@ function New-KokoroGenerator60x16RunSteps {
         # workspace; each section's VTCM state is saved there after its steps and restored before its next ones, so VTCM
         # does not grow with the length.
         [ValidateRange(10,1280)][int]$SpanTiles=20,
+        # Spans: the sections listed here take their supplied stream as the add's result Y (the section input) instead of
+        # the source N added to U; the front still computes U (exported with -ExportFrontTensors).
+        [int[]]$SuppliedSectionInputs=@(),
+        # Layer schedule with -Front or -Whole: each front also parks U, the upsampled input of its add, in the workspace
+        # (Layout.SourceStreams[].UpsWorkspaceOffset), next to the source N (WorkspaceOffset) and the add's result Y (the
+        # section input, Layout.Sections[].InputWorkspaceOffset): the boundary a fitted source binding learns from.
+        [switch]$ExportFrontTensors,
         # How HVX workers wait for work and the main thread waits for them: QuRT futex traps, or polling the pool
         # with pause. Default: Spin for the backward schedule (dispatches microseconds apart), Futex otherwise.
         [ValidateSet('','Futex','Spin')][string]$PoolWait='',
@@ -318,6 +325,8 @@ function New-KokoroGenerator60x16RunSteps {
         if($spanMode){ $noiseSlot=-1L; $r0Slot=[long]([math]::Ceiling(($scratchOffset+131072)/4096)*4096) }
         else { $noiseSlot=[long]([math]::Ceiling(($scratchOffset+131072)/4096)*4096); $r0Slot=$noiseSlot+[long]([math]::Ceiling($tensorBytes/4096)*4096) }
         $outputBytes=192+$r0Slot+$tensorBytes; $r0Base=25; $r0Offset=$r0Slot
+        # -ExportFrontTensors: U, the upsampled input of the add, also parks in the workspace.
+        $upsSlot=-1L; if($ExportFrontTensors){ $upsSlot=[long]([math]::Ceiling($outputBytes/4096)*4096); $outputBytes=192+$upsSlot+$tensorBytes }
     }
     elseif($Front){
         if(-not $withMean -or $StopAfterStage -ge 0){throw '-Front feeds the whole three-block stage'}
@@ -338,6 +347,8 @@ function New-KokoroGenerator60x16RunSteps {
         if($spanMode){ $noiseSlot=-1L; $r0Slot=[long]([math]::Ceiling(($scratchOffset+131072)/4096)*4096) }
         else { $noiseSlot=[long]([math]::Ceiling(($scratchOffset+131072)/4096)*4096); $r0Slot=$noiseSlot+[long]([math]::Ceiling($tensorBytes/4096)*4096) }
         $outputBytes=192+$r0Slot+$tensorBytes; $r0Base=25; $r0Offset=$r0Slot
+        # -ExportFrontTensors: U, the upsampled input of the add, also parks in the workspace.
+        $upsSlot=-1L; if($ExportFrontTensors){ $upsSlot=[long]([math]::Ceiling($outputBytes/4096)*4096); $outputBytes=192+$upsSlot+$tensorBytes }
     }
     $tailWeightOffset=$weightBytes; $tailParameterOffset=$parameterBytes
     if($Tail){
@@ -393,7 +404,7 @@ function New-KokoroGenerator60x16RunSteps {
     for($i=0;$i -lt $sections.Count;$i++){
         . $bind $i
         if(-not $Front){ $sourceStreams.Add($null); continue }
-        $sourceStreams.Add([pscustomobject]@{Section=$i;Channels=$Channels;Tiles=$tiles;Bytes=$tensorBytes;InputOffset=$(if($SuppliedSource){$totalInput}else{-1L});WorkspaceOffset=$noiseSlot})
+        $sourceStreams.Add([pscustomobject]@{Section=$i;Channels=$Channels;Tiles=$tiles;Bytes=$tensorBytes;InputOffset=$(if($SuppliedSource){$totalInput}else{-1L});WorkspaceOffset=$noiseSlot;UpsWorkspaceOffset=$upsSlot;AddRatioOffset=$frontParameterOffset+$(if($front10){149504L}else{59392L});AddRatioForm=$(if($front10){'HalfwordVectors'}else{'Words'})})
         if($SuppliedSource){ $totalInput+=[long]([math]::Ceiling($tensorBytes/128)*128) }
     }
     $anyChunked=@(for($i=0;$i -lt $sections.Count;$i++){ . $bind $i; if($sectionSchedule -eq 'Chunked'){ $i } }).Count -gt 0
@@ -717,6 +728,7 @@ function New-KokoroGenerator60x16RunSteps {
             & $ptr 4 18 ($offConv+2048*$blk); $s.Add(@{Op='vload';d=0;s=4;Offset=0}); $s.Add(@{Op='vload';d=1;s=4;Offset=128})
             $s.Add(@{Op='vand';d=0;s=0;t=30}); $s.Add(@{Op='vand';d=1;s=1;t=31}); $s.Add(@{Op='vor';d=0;s=0;t=1}); $s.Add(@{Op='vstore';s=4;t=0;Offset=0})
         }
+        if($ExportFrontTensors){ & $sync; & $dma 25 $upsSlot 18 $offConv $tensorBytes }
         & $mark 'Unmarked' -site 9; & $sync; & $dma 18 $offResidual 25 $noiseSlot $tensorBytes
         & $ptr 0 18 $offConv; & $ptr 1 18 $offResidual; & $ptr 2 18 ($offFrontTables+59392); & $imm 3 $tiles
         & $call 'body_front_add'; & $mark 'Combine'
@@ -760,6 +772,7 @@ function New-KokoroGenerator60x16RunSteps {
             }
             if($r%2){ & $mark 'Unmarked' -site 26; & $sync; & $ptr 0 18 $offUpA; & $ptr 1 18 $offConv; & $imm 2 (($r-1)/2); & $imm 3 $qPairs; & $ptr 4 18 $offUpB; & $call 'body_front10_interleave'; & $mark 'Combine'; & $mark 'Unmarked' -site 27; & $sync }
         }
+        if($ExportFrontTensors){ & $sync; & $dma 25 $upsSlot 18 $offConv $tensorBytes }
         & $dma 18 $offResidual 25 $noiseSlot $tensorBytes
         & $ptr 0 18 $offConv; & $ptr 1 18 $offResidual; & $ptr 2 18 ($offFrontTables+149504); & $imm 3 $tiles
         & $call 'body_front10_add'; & $mark 'Combine'
@@ -1162,9 +1175,12 @@ function New-KokoroGenerator60x16RunSteps {
             }
             if($r%2){ & $sync; & $ptr 0 18 $F.PhaseA; & $ptr 1 18 $F.Target; & $imm 2 (($r-1)/2); & $imm 3 $pairs; & $ptr 4 18 $F.PhaseB; & $call 'body_front10_interleave'; & $mark 'Combine'; & $sync }
         }
+        if($ExportFrontTensors){ & $sync; & $dma 25 ($upsSlot+$t0*16384L) 18 $F.Target (($t1-$t0)*16384L) }
         & $dma 18 $F.Sum 20 ($sourceStreams[0].InputOffset+$t0*16384L) (($t1-$t0)*16384L); & $sync
-        & $ptr 0 18 $F.Target; & $ptr 1 18 $F.Sum; & $ptr 2 18 ($F.Tables+149504); & $imm 3 ($t1-$t0)
-        & $call 'body_front10_add'; & $mark 'Combine'
+        if(0 -notin $SuppliedSectionInputs){
+            & $ptr 0 18 $F.Target; & $ptr 1 18 $F.Sum; & $ptr 2 18 ($F.Tables+149504); & $imm 3 ($t1-$t0)
+            & $call 'body_front10_add'; & $mark 'Combine'
+        }
         if($t1 -eq $tiles){ & $padRows ($F.Sum+($tiles-1-$t0)*16384L) 0x8000 }
         & $sync; & $dma 25 ($r0Slot+$t0*16384L) 18 $F.Sum (($t1-$t0)*16384L)
     }
@@ -1201,9 +1217,12 @@ function New-KokoroGenerator60x16RunSteps {
                 $s.Add(@{Op='vand';d=0;s=0;t=30}); $s.Add(@{Op='vand';d=1;s=1;t=31}); $s.Add(@{Op='vor';d=0;s=0;t=1}); $s.Add(@{Op='vstore';s=4;t=0;Offset=0})
             }
         }
+        if($ExportFrontTensors){ & $sync; & $dma 25 ($upsSlot+$t0*8192L) 18 $F.Target (($t1-$t0)*8192L) }
         & $dma 18 $F.Sum 20 ($sourceStreams[1].InputOffset+$t0*8192L) (($t1-$t0)*8192L); & $sync
-        & $ptr 0 18 $F.Target; & $ptr 1 18 $F.Sum; & $ptr 2 18 ($F.Tables+59392); & $imm 3 ($t1-$t0)
-        & $call 'body_front_add'; & $mark 'Combine'
+        if(1 -notin $SuppliedSectionInputs){
+            & $ptr 0 18 $F.Target; & $ptr 1 18 $F.Sum; & $ptr 2 18 ($F.Tables+59392); & $imm 3 ($t1-$t0)
+            & $call 'body_front_add'; & $mark 'Combine'
+        }
         if($t1 -eq $tiles){ & $padRows ($F.Sum+($tiles-1-$t0)*8192L) 0x8000 }
         & $sync; & $dma 25 ($r0Slot+$t0*8192L) 18 $F.Sum (($t1-$t0)*8192L)
     }
