@@ -18,7 +18,7 @@
 # the final tensor, the K/M/S constants of all 18 stages (1536 bytes each), then 128 KiB scratch.
 
 function Get-KokoroGenerator60x16Layout {
-    param([ValidateRange(2,32768)][int]$Frames=7801,[ValidateRange(1,64)][int]$BatchTiles=22,[ValidateSet(128,256)][int]$Channels=128)
+    param([ValidateRange(2,1048576)][int]$Frames=7801,[ValidateRange(1,64)][int]$BatchTiles=22,[ValidateSet(128,256)][int]$Channels=128)
     # Per channel count C: tiles of 64 C bytes; parameter records of 128 C bytes (turns parameters 32 C, column tables at
     # 32 C, residual ratios at 80 C, group 3 shifts at 80 C + 1024); moments records of 16 C bytes; K/M/S of 12 C bytes.
     $tileBytes=64*$Channels; $record=128*$Channels
@@ -37,7 +37,7 @@ function Get-KokoroGenerator60x16Layout {
 }
 
 function New-KokoroGenerator60x16RunSteps {
-    param([ValidateRange(2,32768)][int]$Frames=7801,[ValidateRange(1,64)][int]$BatchTiles=22,[ValidateRange(1,4)][int]$HvxThreads=4,
+    param([ValidateRange(2,1048576)][int]$Frames=7801,[ValidateRange(1,64)][int]$BatchTiles=22,[ValidateRange(1,4)][int]$HvxThreads=4,
         [ValidateSet('Accumulate','Export','Constants')][string]$AdaInMode='Accumulate',
         # Capacity-sized residual stage with a live int32 frame count appended to the input.
         [switch]$RuntimeFrames,
@@ -104,8 +104,15 @@ function New-KokoroGenerator60x16RunSteps {
         [ValidateSet('Layer','Backward','Chunked')][string]$Schedule='Layer',
         # With -Front or -Whole: each source insertion point (the input of the add after ups) reads a supplied stream, one
         # tensor of the section's tiles per section after the other inputs, instead of computing noise_convs and noise_res
-        # from har. Under a depth-first schedule the front runs over the whole section before it.
+        # from har.
         [switch]$SuppliedSource,
+        # Depth-first with supplied sources: the job runs in spans of SpanTiles 256-channel tiles (a multiple of 10 and of
+        # BatchTiles). Each span runs every stage over the tiles its upstream has finished: the 256-channel front over the
+        # span's decoder tiles, the chunked section's steps, the 128-channel front over the 256-channel mean that has
+        # its right halo, the 128-channel section's steps and the tail likewise. Whole-length tensors live in the DDR
+        # workspace; each section's VTCM state is saved there after its steps and restored before its next ones, so VTCM
+        # does not grow with the length.
+        [ValidateRange(10,1280)][int]$SpanTiles=20,
         # How HVX workers wait for work and the main thread waits for them: QuRT futex traps, or polling the pool
         # with pause. Default: Spin for the backward schedule (dispatches microseconds apart), Futex otherwise.
         [ValidateSet('','Futex','Spin')][string]$PoolWait='',
@@ -156,6 +163,38 @@ function New-KokoroGenerator60x16RunSteps {
         if($Decoder){ if(-not $Source){throw '-Decoder needs -Whole -Source'}; $decIn=[int]((($Frames-1)/6)/20); if(20*$decIn -ne ($Frames-1)/6){throw 'The 10x frames are not 20 decoder frames each'}; $decLayout=Get-KokoroDecoder16Layout -Frames $decIn; $decSlot=$sourceDdrBytes; $sourceDdrBytes+=[long]([math]::Ceiling($decLayout.OutputBytes/4096)*4096) }
     } elseif($Source){ throw '-Source needs -Whole'
     } else { $sections=@(,@{Channels=$Channels;Frames=$Frames;Front=[bool]$Front;Tail=[bool]$Tail;Chained=$false;Suffix=''}) }
+    # Span plan (depth-first with supplied sources). Per span: the 256-channel front's decoder tiles [D0, D1) and
+    # slow-input tiles [In0, In1); the chunked section's steps [J0, J1); the 128-channel front's slow tiles [S0, S1) and
+    # fast-input tiles [F0, F1); the 128-channel section's steps [K0, K1); the tail's tiles [T0, T1). A stage takes
+    # what its upstream has finished: a step needs its block's input, a section's mean lags its steps by three tiles,
+    # a front needs one mean tile of right halo and the tail two. At the end of the input every stage finishes.
+    $spanMode=$Schedule -ne 'Layer' -and $SuppliedSource
+    $spans=@()
+    if($spanMode){
+        if($sections[0].Channels -ne 256 -or ($SpanTiles % 10) -or ($SpanTiles % $BatchTiles)){throw 'Spans start at the 256-channel section and hold whole decoder tiles and whole blocks.'}
+        $slowFrames=$sections[0].Frames; $decFramesAll=[int]($slowFrames/10); $decTilesAll=[int][math]::Ceiling($decFramesAll/32)
+        $slowTiles=[int][math]::Ceiling($slowFrames/32); $slowSteps=[int][math]::Ceiling(($slowTiles+3)/$BatchTiles)
+        $two=$sections.Count -gt 1
+        if($two){ $fastTiles=[int][math]::Ceiling($sections[1].Frames/32); $fastSteps=[int][math]::Ceiling(($fastTiles+3)/$BatchTiles); if([int][math]::Ceiling(($slowFrames+1)/32) -ne $slowTiles){throw 'The 256-channel mean does not cover the ups[1] input tiles'} }
+        $perSpan=$SpanTiles/10; $reached=[ordered]@{D=0;In=0;J=0;S=0;F=0;K=0;T=0}
+        for($k=0;;$k++){
+            $d1=[math]::Min($decTilesAll,$perSpan*($k+1)); $in1=if($d1 -eq $decTilesAll){$slowTiles}else{10*$d1}
+            $j1=if($in1 -eq $slowTiles){$slowSteps}else{[int][math]::Floor($in1/$BatchTiles)}
+            $mean0=if($j1 -eq $slowSteps){$slowTiles}else{[math]::Max(0,$BatchTiles*$j1-3)}
+            $span=[ordered]@{Index=$k;D0=$reached.D;D1=$d1;In0=$reached.In;In1=$in1;J0=$reached.J;J1=$j1}
+            if($two){
+                $s1=if($mean0 -eq $slowTiles){$slowTiles}else{[math]::Max(0,$mean0-1)}; $f1=if($s1 -eq $slowTiles){$fastTiles}else{6*$s1}
+                $k1=if($f1 -eq $fastTiles){$fastSteps}else{[int][math]::Floor($f1/$BatchTiles)}
+                $mean1=if($k1 -eq $fastSteps){$fastTiles}else{[math]::Max(0,$BatchTiles*$k1-3)}; $t1=if($mean1 -eq $fastTiles){$fastTiles}else{[math]::Max(0,$mean1-2)}
+                $span+=[ordered]@{S0=$reached.S;S1=$s1;F0=$reached.F;F1=$f1;K0=$reached.K;K1=$k1;T0=$reached.T;T1=$t1}
+                $reached.S=$s1; $reached.F=$f1; $reached.K=$k1; $reached.T=$t1
+            }
+            $spans+=[pscustomobject]$span; $reached.D=$d1; $reached.In=$in1; $reached.J=$j1
+            if(($two -and $reached.T -eq $fastTiles) -or (-not $two -and $reached.J -eq $slowSteps)){ break }
+        }
+    }
+    # Largest range of each span stage (VTCM is sized by them).
+    $spanMax={param([string]$a,[string]$b) [int](@($spans | ForEach-Object { $_.$b-$_.$a }) | Measure-Object -Maximum).Maximum}
     # Depth-first layout of the bound section (dot-sourced at the end of $configure). Records and K/M/S of all 18 stages
     # stay in VTCM for the section; weights stay resident (Backward) or stream per stage (Chunked).
     $sectionLayout={
@@ -207,6 +246,33 @@ function New-KokoroGenerator60x16RunSteps {
         if($vtcmBytes -gt 8388608){throw "The chunked schedule needs $vtcmBytes bytes of VTCM."}
     }
     }
+    # Span layout of the bound depth-first section (dot-sourced at the end of $configure). Its front's VTCM regions for
+    # the largest span (used while no section state is in VTCM): the planes in the first 1 MiB, then each HMX source
+    # inside one 1 MiB page. Its state, the VTCM bytes from the first ring to the last region the steps carry
+    # (StateFrom, StateBytes), and the workspace slot it is saved to between spans.
+    $spanSectionLayout={
+        $frontRegions=[ordered]@{}; $at=0L; $al={param([long]$v) [long]([math]::Ceiling($v/65536)*65536)}
+        $place={param([string]$regionName,[long]$regionBytes,[switch]$Hmx)
+            if($Hmx -and [math]::Floor($at/1048576) -ne [math]::Floor(($at+$regionBytes-1)/1048576)){ $at=[long]([math]::Ceiling($at/1048576)*1048576) }
+            $frontRegions[$regionName]=$at; $at+=& $al $regionBytes }
+        if($front10){
+            $n=$SpanTiles/10
+            . $place Planes (6L*$planeStride); . $place Input (($n+2)*32768L); . $place High (($n+2)*32768L) -Hmx; . $place Low (($n+2)*32768L) -Hmx
+            . $place PhaseA ($n*16384L); . $place PhaseB ($n*16384L); . $place Target ((10L*$n+1)*16384); . $place Sum (10L*$n*16384)
+            . $place Weights 786432; . $place Tables 163840
+        } elseif($Front){
+            $n=& $spanMax 'S0' 'S1'
+            . $place Planes (6L*$planeStride); . $place Input (($n+2)*16384L); . $place High (($n+2)*16384L) -Hmx; . $place Low (($n+2)*16384L) -Hmx
+            . $place Phase ($n*16384L); . $place Target ((6L*$n+4)*8192); . $place Sum (6L*$n*8192)
+            . $place Weights 393216; . $place Tables 65536
+        }
+        if($Front){ if($frontRegions.Planes+6L*$planeStride -gt 1048576){throw 'Front planes must lie in the first 1 MiB of VTCM.'}; $vtcmBytes=[math]::Max($vtcmBytes,$at) }
+        if($vtcmBytes -gt 8388608){throw "The span front needs $vtcmBytes bytes of VTCM."}
+        $spanFront=$frontRegions
+        if($sectionSchedule -eq 'Chunked'){ $stateFrom=$tileRegions.History; $stateBytes=$tileRegions.Weights-$tileRegions.History }
+        else { $stateFrom=[long]($fillAt.Values | Measure-Object -Minimum).Minimum; $stateBytes=$tileWeightAt[17]+$tileStages[17].WeightBytes-$stateFrom }
+        $stateSlot=[long]([math]::Ceiling($outputBytes/4096)*4096); $outputBytes=192+$stateSlot+$stateBytes
+    }
     # Binds one section's sizes and offsets in this scope (dot-sourced). Inputs, weights and records start at the given
     # bases; the DDR workspace offsets (r25-relative, 4096-aligned base) are absolute.
     $configure={param($sec,[long]$ddrBase,[long]$inBase,[long]$wBase,[long]$pBase)
@@ -227,9 +293,9 @@ function New-KokoroGenerator60x16RunSteps {
     $branchWeights=[long[]]::new($branches); $weightBytes=$wBase
     for($b=0;$b -lt $branches;$b++){ $branchWeights[$b]=$weightBytes; $weightBytes+=6L*2*$Channels*$Channels*$Kernels[$b] }
     $parameterBytes=$pBase+6*$branches*$recordBytes
-    $stride=[int]([math]::Ceiling($tensorBytes/128)*128); $finalOffset=$ddrBase+2*$stride; $coefOffset=$finalOffset+$tensorBytes
+    $stride=[int]([math]::Ceiling($tensorBytes/128)*128); $finalOffset=$ddrBase+$(if($spanMode){0L}else{2L*$stride}); $coefOffset=$finalOffset+$tensorBytes
     $scratchOffset=[long]([math]::Ceiling(($coefOffset+18*$kmsBytes)/4096)*4096); $outputBytes=192+$scratchOffset+131072
-    $vtcmBytes=$layout.VtcmBytes; $inputBytes=$inBase+$tensorBytes
+    $vtcmBytes=$(if($spanMode){0L}else{$layout.VtcmBytes}); $inputBytes=$inBase+$tensorBytes
     $r0Base=20; $r0Offset=$inBase
     if($front10){
         # 256-channel front (tools/New-KokoroGeneratorFront10x16Fixture.ps1): input buffer = decoder output (512-channel
@@ -237,16 +303,20 @@ function New-KokoroGenerator60x16RunSteps {
         if(-not $withMean -or $StopAfterStage -ge 0){throw '-Front feeds the whole three-block stage'}
         $decFrames=[int]($Frames/10); if(10*$decFrames -ne $Frames){throw 'Frames is not 10 m'}
         $decTiles=[int][math]::Ceiling($decFrames/32); $qPairs=[int][math]::Ceiling(($decFrames+1)/2); $decBytes=$decTiles*32768L
-        $inputBytes=$inBase+$(if($Decoder){0L}else{$decBytes})+$(if($harFromInput){2L*$tiles*$tileBytes}else{0L})
+        $inputBytes=$inBase+$(if($Decoder){0L}else{$decBytes})+$(if($harFromInput -and -not $spanMode){2L*$tiles*$tileBytes}else{0L})
         if($harFromInput){ $harReg=20; $harAt=$inBase+$decBytes } else { $harReg=$sec.HarReg; $harAt=$sec.HarAt }
         $al64={param([long]$v) [long]([math]::Ceiling($v/65536)*65536)}
-        $offFrontWeights=& $al64 $layout.VtcmBytes; $offFrontTables=$offFrontWeights+786432; $offUpA=$offFrontTables+163840; $offUpB=$offUpA+$decTiles*16384L
-        $vtcmBytes=[math]::Max($vtcmBytes,(& $al64 ($offUpB+$decTiles*16384L)))
-        $upHi=$R.Residual.Offset; $upLo=$upHi+($decTiles+2)*32768L
-        if($upLo+($decTiles+2)*32768L -gt $R.Residual.Offset+$R.Residual.Bytes){throw 'ups[0] input planes exceed the residual region'}
-        if([math]::Floor($upHi/4194304) -ne [math]::Floor(($upLo+($decTiles+2)*32768L-1)/4194304)){throw 'ups[0] input planes cross a 4 MiB VTCM boundary'}
-        if((10*$qPairs+5)/16 -gt [math]::Floor($R.ConvOutput.Bytes/$tileBytes)){throw 'The interleave writes past the target region'}
-        $noiseSlot=[long]([math]::Ceiling(($scratchOffset+131072)/4096)*4096); $r0Slot=$noiseSlot+[long]([math]::Ceiling($tensorBytes/4096)*4096)
+        if(-not $spanMode){
+            $offFrontWeights=& $al64 $layout.VtcmBytes; $offFrontTables=$offFrontWeights+786432; $offUpA=$offFrontTables+163840; $offUpB=$offUpA+$decTiles*16384L
+            $vtcmBytes=[math]::Max($vtcmBytes,(& $al64 ($offUpB+$decTiles*16384L)))
+            $upHi=$R.Residual.Offset; $upLo=$upHi+($decTiles+2)*32768L
+            if($upLo+($decTiles+2)*32768L -gt $R.Residual.Offset+$R.Residual.Bytes){throw 'ups[0] input planes exceed the residual region'}
+            if([math]::Floor($upHi/4194304) -ne [math]::Floor(($upLo+($decTiles+2)*32768L-1)/4194304)){throw 'ups[0] input planes cross a 4 MiB VTCM boundary'}
+            if((10*$qPairs+5)/16 -gt [math]::Floor($R.ConvOutput.Bytes/$tileBytes)){throw 'The interleave writes past the target region'}
+        }
+        # Spans keep only the section input in the workspace (no source slot).
+        if($spanMode){ $noiseSlot=-1L; $r0Slot=[long]([math]::Ceiling(($scratchOffset+131072)/4096)*4096) }
+        else { $noiseSlot=[long]([math]::Ceiling(($scratchOffset+131072)/4096)*4096); $r0Slot=$noiseSlot+[long]([math]::Ceiling($tensorBytes/4096)*4096) }
         $outputBytes=192+$r0Slot+$tensorBytes; $r0Base=25; $r0Offset=$r0Slot
     }
     elseif($Front){
@@ -255,20 +325,24 @@ function New-KokoroGenerator60x16RunSteps {
         $upFrames=[int](($Frames-1)/6)+1; if(6*($upFrames-1)+1 -ne $Frames){throw 'Frames is not 6 m + 1'}
         $upTiles=[int][math]::Ceiling($upFrames/32); $upBatch=$batch/2
         # Chained (-Whole): the ups[1] input planes come from the 10x section, not the input buffer.
-        $inputBytes=$inBase+$(if($harFromInput){2L*$tiles*4096}else{0L})+$(if($chained){0L}else{2L*$upTiles*16384})
+        $inputBytes=$inBase+$(if($harFromInput -and -not $spanMode){2L*$tiles*4096}else{0L})+$(if($chained){0L}else{2L*$upTiles*16384})
         if($harFromInput){ $harReg=20; $harAt=$inBase } else { $harReg=$sec.HarReg; $harAt=$sec.HarAt }
         $al64={param([long]$v) [long]([math]::Ceiling($v/65536)*65536)}
-        $offFrontWeights=& $al64 $layout.VtcmBytes; $offFrontTables=$offFrontWeights+393216; $offUpPhase=$offFrontTables+65536
-        $vtcmBytes=[math]::Max($vtcmBytes,(& $al64 ($offUpPhase+$upTiles*16384L)))
-        if($R.Residual.Offset+2L*($upTiles+2)*16384 -gt 4194304){throw 'ups[1] input planes cross a 4 MiB VTCM boundary'}
-        if(($tiles+4)*8192L -gt $R.ConvOutput.Bytes){throw 'The interleave needs four tiles of slack after the stage input'}
-        $noiseSlot=[long]([math]::Ceiling(($scratchOffset+131072)/4096)*4096); $r0Slot=$noiseSlot+[long]([math]::Ceiling($tensorBytes/4096)*4096)
+        if(-not $spanMode){
+            $offFrontWeights=& $al64 $layout.VtcmBytes; $offFrontTables=$offFrontWeights+393216; $offUpPhase=$offFrontTables+65536
+            $vtcmBytes=[math]::Max($vtcmBytes,(& $al64 ($offUpPhase+$upTiles*16384L)))
+            if($R.Residual.Offset+2L*($upTiles+2)*16384 -gt 4194304){throw 'ups[1] input planes cross a 4 MiB VTCM boundary'}
+            if(($tiles+4)*8192L -gt $R.ConvOutput.Bytes){throw 'The interleave needs four tiles of slack after the stage input'}
+        }
+        # Spans keep only the section input in the workspace (no source slot).
+        if($spanMode){ $noiseSlot=-1L; $r0Slot=[long]([math]::Ceiling(($scratchOffset+131072)/4096)*4096) }
+        else { $noiseSlot=[long]([math]::Ceiling(($scratchOffset+131072)/4096)*4096); $r0Slot=$noiseSlot+[long]([math]::Ceiling($tensorBytes/4096)*4096) }
         $outputBytes=192+$r0Slot+$tensorBytes; $r0Base=25; $r0Offset=$r0Slot
     }
     $tailWeightOffset=$weightBytes; $tailParameterOffset=$parameterBytes
     if($Tail){
         if($StopAfterStage -ge 0){throw '-Tail runs only after the whole stage'}
-        $tailLayout=Get-KokoroGeneratorTail16Layout -Frames $Frames
+        $tailLayout=Get-KokoroGeneratorTail16Layout -Frames $Frames -SpanTiles $(if($spanMode){& $spanMax 'T0' 'T1'}else{0})
         $vtcmBytes=[math]::Max($vtcmBytes,$tailLayout.VtcmBytes); $weightBytes+=172032; $parameterBytes+=16384
         $pcmOffset=[long]([math]::Ceiling($outputBytes/256)*256); $outputBytes=$pcmOffset+$tailLayout.OutputBytes-256
     }
@@ -279,6 +353,7 @@ function New-KokoroGenerator60x16RunSteps {
     $controllerBytes=[long]([math]::Ceiling(4L*$tiles/128)*128)
     $sectionSchedule=if($Schedule -eq 'Layer'){'Layer'}elseif($Channels -eq 256){'Chunked'}else{$Schedule}
     if($sectionSchedule -ne 'Layer'){ . $sectionLayout }
+    if($spanMode -and $sectionSchedule -ne 'Layer'){ . $spanSectionLayout }
     }
     # Place each section after the previous one, then bind the first. VTCM is shared: the job requests the largest.
     $bases=[Collections.Generic.List[long[]]]::new(); $ddrAt=$(if($Source){$sourceDdrBytes}else{0L}); $inAt=0L; $wAt=0L; $pAt=0L; $vtcmTotal=0L
@@ -894,44 +969,54 @@ function New-KokoroGenerator60x16RunSteps {
         }
     }
     # Thread k's program: r0 VTCM base, r1 the DDR workspace, r2 the input buffer; r16 to r27 saved; r24 its own DMA
-    # descriptor slots in its frame. The step bounds come from the section ($firstUniform, $pairsEnd, $stepCount).
-    $lockstepProgram={param([int]$thread)
+    # descriptor slots in its frame. It runs the section's steps j0 .. j1 - 1.
+    # Steps j0 .. j1 - 1 of the bound section: a step that needs edge treatment unrolled at its block, each run of
+    # uniform steps as a loop over r17 whose body is `period` steps (ring slot parities), steps the period leaves over
+    # unrolled. step: {param($block, $parity)}.
+    $stepRange={param([int]$j0,[int]$j1,[scriptblock]$step,[int]$period)
+        $j=$j0
+        while($j -lt $j1){
+            if(& $edgeStep $j){ & $step $j ($j % 2); $j++; continue }
+            $end=$j; while($end -lt $j1 -and -not (& $edgeStep $end)){ $end++ }
+            $loopEnd=$j+$period*[int][math]::Floor(($end-$j)/$period)
+            if($loopEnd -gt $j){
+                & $imm 17 $j
+                $steps=& $label; $stepsDone=& $label
+                $s.Add(@{Op='label';Name=$steps})
+                for($i=0;$i -lt $period;$i++){ & $step $null (($j+$i) % 2); $s.Add(@{Op='addi';d=17;s=17;i=1}) }
+                & $imm 15 $loopEnd; $s.Add(@{Op='eq';d=0;s=17;t=15}); $s.Add(@{Op='jump-p';u=0;Label=$stepsDone}); & $jump $steps
+                $s.Add(@{Op='label';Name=$stepsDone})
+            }
+            for($k=$loopEnd;$k -lt $end;$k++){ & $step $k ($k % 2) }
+            $j=$end
+        }
+    }
+    $lockstepProgram={param([int]$thread,[int]$j0,[int]$j1)
         $s.Add(@{Op='allocframe';Bytes=256})
         foreach($r in 16,18,20,22,24,26){ $s.Add(@{Op='store-d';s=29;t=$r;Offset=(($r-16)*4)}) }
         $s.Add(@{Op='addi';d=18;s=0;i=0}); $s.Add(@{Op='addi';d=25;s=1;i=0}); $s.Add(@{Op='addi';d=20;s=2;i=0})
         $s.Add(@{Op='addi';d=24;s=29;i=(64+63)}); & $imm 0 -64; $s.Add(@{Op='and';d=24;s=24;t=0})
-        for($j=0;$j -lt $firstUniform;$j++){ & $lockstepTile $j ($j % 2) $thread }
-        if($pairsEnd -gt $firstUniform){
-            & $imm 17 $firstUniform
-            $steps=& $label; $stepsDone=& $label
-            $s.Add(@{Op='label';Name=$steps})
-            foreach($stepInPair in 0,1){ & $lockstepTile $null (($firstUniform+$stepInPair) % 2) $thread; $s.Add(@{Op='addi';d=17;s=17;i=1}) }
-            & $imm 15 $pairsEnd; $s.Add(@{Op='eq';d=0;s=17;t=15}); $s.Add(@{Op='jump-p';u=0;Label=$stepsDone}); & $jump $steps
-            $s.Add(@{Op='label';Name=$stepsDone})
-        }
-        for($j=$pairsEnd;$j -lt $stepCount;$j++){ & $lockstepTile $j ($j % 2) $thread }
+        # The loop body is two steps (an even and an odd ring slot).
+        & $stepRange $j0 $j1 { param($block,$parity) & $lockstepTile $block $parity $thread } 2
         foreach($r in 16,18,20,22,24,26){ $s.Add(@{Op='load-d';d=$r;s=29;Offset=(($r-16)*4)}) }
         $s.Add(@{Op='dealloc-return'})
     }
-    $backwardSection={
+    $backwardInit={
         . $stageSetup
         # Conv-input rings and guards start as the conv-input zero; residual and stage rings as x = 0.
         foreach($plane in 'High','Low'){ for($st=0;$st -lt 6;$st++){ & $fill $fillAt["$plane.$st"] (3*($ringTiles+2)) $(if($plane -eq 'High'){0x80008000L}else{0L}) } }
         & $fill $tileRegions.Input $ringTiles 0x80008000L; & $fill $tileRegions.Levels (9*$ringTiles) 0x80008000L; & $fill $tileRegions.Stage (9*$ringTiles) 0x80008000L
         & $mark 'Boundary' "Res${Channels}_0"
-        # Steps that need edge treatment are unrolled; the uniform steps between count in r17.
-        $stepCount=[int][math]::Ceiling(($tiles+3)/$batch)
-        $firstUniform=0; while($firstUniform -lt $stepCount -and (& $edgeStep $firstUniform)){ $firstUniform++ }
-        $lastUniform=$firstUniform-1; while($lastUniform+1 -lt $stepCount -and -not (& $edgeStep ($lastUniform+1))){ $lastUniform++ }
-        # The loop body is two steps (an even and an odd ring slot); an odd count of uniform steps leaves one unrolled.
-        $pairsEnd=$firstUniform+2*[int][math]::Floor([math]::Max(0,$lastUniform-$firstUniform+1)/2)
-        # Thread programs as bodies (no PMU marks inside: four threads would share the records), then one dispatch.
-        $mainSteps=$s; $marksOff=$true; $lockstepBodies=[Collections.Generic.List[object]]::new()
-        for($thread=0;$thread -lt $batch;$thread++){ $s=[Collections.Generic.List[hashtable]]::new(); & $lockstepProgram $thread; $lockstepBodies.Add(@("body_lockstep_t$thread$sfx",$s.ToArray())) }
+    }
+    # Steps j0 .. j1 - 1: thread programs as bodies named by runName (no PMU marks inside: four threads would share the
+    # records), then one dispatch. The progress words start at zero with the first step and carry across runs.
+    $backwardRun={param([int]$j0,[int]$j1,[string]$runName)
+        $mainSteps=$s; $marksOff=$true
+        for($thread=0;$thread -lt $batch;$thread++){ $s=[Collections.Generic.List[hashtable]]::new(); & $lockstepProgram $thread $j0 $j1; $lockstepBodies.Add(@("body_lockstep_t$thread$sfx$runName",$s.ToArray())) }
         $s=$mainSteps; $marksOff=$false
-        & $ptr 2 18 $tileRegions.Progress; $s.Add(@{Op='imm';d=1;i=0}); for($k=0;$k -lt $batch;$k++){ $s.Add(@{Op='store';s=2;t=1;Offset=(4*$k)}) }
+        if($j0 -eq 0){ & $ptr 2 18 $tileRegions.Progress; $s.Add(@{Op='imm';d=1;i=0}); for($k=0;$k -lt $batch;$k++){ $s.Add(@{Op='store';s=2;t=1;Offset=(4*$k)}) } }
         $s.Add(@{Op='syncht'}); & $matrixUnlock
-        & $dispatch "body_lockstep_t0$sfx" @(for($thread=0;$thread -lt $batch;$thread++){ @{Count=1;Body="body_lockstep_t$thread$sfx";Arguments=@(@{Register=18},@{Register=25},@{Register=20})} })
+        & $dispatch "body_lockstep_t0$sfx$runName" @(for($thread=0;$thread -lt $batch;$thread++){ @{Count=1;Body="body_lockstep_t$thread$sfx$runName";Arguments=@(@{Register=18},@{Register=25},@{Register=20})} })
         & $matrixLock; & $mark 'Lockstep'
     }
     # Chunked schedule. VTCM bytes srcOff -> destOff on the main thread, 1 KiB at a time.
@@ -1013,28 +1098,18 @@ function New-KokoroGenerator60x16RunSteps {
             & $dmaRegisters $blockBytes; & $mark 'Dma'
         }
     }
-    $chunkedSection={
+    $chunkedInit={
         . $stageSetup
         # Conv-input buffers and saved history start as the conv-input zero; residual and stage rings as x = 0.
         & $fill $fillAt.High (3*($batch+2)) 0x80008000L; & $fill $fillAt.Low (3*($batch+2)) 0L
         for($st=0;$st -lt 6;$st++){ & $fill (& $historyAt $st 0 0) 6 0x80008000L; & $fill (& $historyAt $st 1 0) 6 0L }
         & $fill $tileRegions.Input $ringTiles 0x80008000L; & $fill $tileRegions.Levels (9*$ringTiles) 0x80008000L; & $fill $tileRegions.Stage (9*$ringTiles) 0x80008000L
         & $mark 'Boundary' "Res${Channels}_0"
-        # Steps that need edge treatment are unrolled; the uniform steps between count in r17.
-        $stepCount=[int][math]::Ceiling(($tiles+3)/$batch)
-        $firstUniform=0; while($firstUniform -lt $stepCount -and (& $edgeStep $firstUniform)){ $firstUniform++ }
-        $lastUniform=$firstUniform-1; while($lastUniform+1 -lt $stepCount -and -not (& $edgeStep ($lastUniform+1))){ $lastUniform++ }
-        for($j=0;$j -lt $firstUniform;$j++){ & $chunkedStep $j }
-        if($lastUniform -ge $firstUniform){
-            & $imm 17 $firstUniform
-            $steps=& $label; $stepsDone=& $label
-            $s.Add(@{Op='label';Name=$steps})
-            & $chunkedStep $null; $s.Add(@{Op='addi';d=17;s=17;i=1})
-            & $imm 15 ($lastUniform+1); $s.Add(@{Op='eq';d=0;s=17;t=15}); $s.Add(@{Op='jump-p';u=0;Label=$stepsDone}); & $jump $steps
-            $s.Add(@{Op='label';Name=$stepsDone})
-        }
-        for($j=[math]::Max($firstUniform,$lastUniform+1);$j -lt $stepCount;$j++){ & $chunkedStep $j }
     }
+    $chunkedRun={param([int]$j0,[int]$j1) & $stepRange $j0 $j1 { param($block,$parity) & $chunkedStep $block } 1 }
+    # The bound section's schedule: its initial state, and its steps j0 .. j1 - 1.
+    $sectionInit={ if($sectionSchedule -eq 'Backward'){ . $backwardInit } else { . $chunkedInit } }
+    $sectionRun={param([int]$j0,[int]$j1,[string]$runName) if($sectionSchedule -eq 'Backward'){ . $backwardRun $j0 $j1 $runName } else { . $chunkedRun $j0 $j1 } }
     # The tail on the section's final tensor (DDR workspace): PCM into the output buffer.
     $tailSteps={
         & $mark 'Boundary' 'Tail'
@@ -1042,22 +1117,114 @@ function New-KokoroGenerator60x16RunSteps {
         Add-KokoroGeneratorTail16JobSteps -Steps $s -Calls $calls -Frames $Frames -InputBase 25 -InputOffset $finalOffset -WeightsBase 21 -WeightsOffset $tailWeightOffset -TablesBase 22 -TablesOffset $tailParameterOffset -PcmBase 23 -PcmOffset $pcmOffset
         & $mark 'Tail' 'Exit'
     }
-    # Depth-first front: the section's front tables, its supplied source stream as the add's input R, then the layer
-    # front's ups sequence over the whole section, which leaves the section input in the workspace (r25 + r0Slot).
-    $suppliedFront={
-        & $dma 18 $offFrontTables 22 $frontParameterOffset $(if($front10){163840}else{65536})
-        & $dma 18 $offResidual 20 $sourceStreams[$section].InputOffset $tensorBytes
-        & $mark 'Unmarked' -site 52; & $sync
-        if($front10){ & $front10Ups } else { & $frontUps }
-        & $mark 'Unmarked' -site 53; & $sync
+    $lockstepBodies=[Collections.Generic.List[object]]::new()
+    # Span fronts (the layer fronts' arithmetic over a tile range, $spanFront regions). Each reads its input tiles with
+    # one tile of halo from the full-length tensor (zero planes past either end), adds the section's supplied source
+    # stream and writes the section input to the workspace (r25 + r0Slot) at its tiles.
+    # 256-channel front over decoder tiles d0 .. d1 - 1: LeakyReLU(0.1) of x, the ten ups[0] phases, interleave.
+    $spanFront0={param([int]$d0,[int]$d1)
+        $F=$spanFront; $n=$d1-$d0; $first=[math]::Max(0,$d0-1); $last=[math]::Min($decTiles,$d1+1)
+        $t0=10*$d0; $t1=[math]::Min($tiles,10*$d1)
+        $pairs=if($d1 -eq $decTiles){[int][math]::Ceiling(($decFrames-32*$d0+1)/2)}else{16*$n}
+        & $dma 18 $F.Tables 22 $frontParameterOffset 163840
+        & $dma 18 ($F.Input+($first-$d0+1)*32768L) 20 ($inBase+$first*32768L) (($last-$first)*32768L)
+        & $ptr 0 18 ($F.Input+($first-$d0+1)*32768L); & $ptr 1 18 ($F.High+($first-$d0+1)*32768L); & $ptr 2 18 ($F.Low+($first-$d0+1)*32768L); & $imm 3 (($last-$first)*256)
+        & $call 'body_leaky_up'
+        if($d0 -eq 0){ & $fill $F.High 2 0x80008000L; & $fill $F.Low 2 0 }
+        if($d1 -eq $decTiles){ & $fill ($F.High+($n+1)*32768L) 2 0x80008000L; & $fill ($F.Low+($n+1)*32768L) 2 0 }
+        & $sync
+        $upBatch10=[int][math]::Floor($planeStride/16384)
+        for($r=0;$r -lt 10;$r++){
+            & $dma 18 $F.Weights 21 ($frontWeightOffset+393216+$r*786432L) 786432
+            for($start=0;$start -lt $n;$start+=$upBatch10){
+                $count=[math]::Min($upBatch10,$n-$start)
+                & $ptr 0 18 ($F.High+32768+$start*32768L); & $ptr 1 18 ($F.Low+32768+$start*32768L); & $ptr 2 18 $F.Weights; & $ptr 3 18 ($F.Tables+16384+12288*$r); & $imm 4 $count; & $ptr 5 18 $F.Planes
+                & $call 'body_conv_front10_up'; & $mark 'HmxConv'; & $sync
+                & $parallel $(if($WeightPlanes -eq 2){"body_combine_conv$sfx"}else{"body_combine_front$sfx"}) @($F.Planes,($(if($r%2){$F.PhaseB}else{$F.PhaseA})+$start*16384L),($F.Tables+139264+1024*$r-1024)) @($true,$true,$false) $count
+                & $mark 'Combine'
+            }
+            if($r%2){ & $sync; & $ptr 0 18 $F.PhaseA; & $ptr 1 18 $F.Target; & $imm 2 (($r-1)/2); & $imm 3 $pairs; & $ptr 4 18 $F.PhaseB; & $call 'body_front10_interleave'; & $mark 'Combine'; & $sync }
+        }
+        & $dma 18 $F.Sum 20 ($sourceStreams[0].InputOffset+$t0*16384L) (($t1-$t0)*16384L); & $sync
+        & $ptr 0 18 $F.Target; & $ptr 1 18 $F.Sum; & $ptr 2 18 ($F.Tables+149504); & $imm 3 ($t1-$t0)
+        & $call 'body_front10_add'; & $mark 'Combine'
+        if($t1 -eq $tiles){ & $padRows ($F.Sum+($tiles-1-$t0)*16384L) 0x8000 }
+        & $sync; & $dma 25 ($r0Slot+$t0*16384L) 18 $F.Sum (($t1-$t0)*16384L)
+    }
+    # 128-channel front over 256-channel mean tiles s0 .. s1 - 1 (mean at chainOffset): LeakyReLU(0.1), the three ups[1]
+    # phase pairs, interleave, the reflection of frame 0 at the start.
+    $spanFront1={param([int]$s0,[int]$s1)
+        $F=$spanFront; $n=$s1-$s0; $first=[math]::Max(0,$s0-1); $last=[math]::Min($upTiles,$s1+1)
+        $t0=6*$s0; $t1=[math]::Min($tiles,6*$s1)
+        $pairs=if($s1 -eq $upTiles){[int][math]::Ceiling(($upFrames-32*$s0)/2)}else{16*$n}
+        & $dma 18 $F.Tables 22 $frontParameterOffset 65536
+        & $dma 18 ($F.Input+($first-$s0+1)*16384L) 25 ($chainOffset+$first*16384L) (($last-$first)*16384L)
+        & $ptr 0 18 ($F.Input+($first-$s0+1)*16384L); & $ptr 1 18 ($F.High+($first-$s0+1)*16384L); & $ptr 2 18 ($F.Low+($first-$s0+1)*16384L); & $imm 3 (($last-$first)*128)
+        & $call 'body_leaky_up'
+        if($s0 -eq 0){ & $fillVectors $F.High 128 0x80008000L; & $fillVectors $F.Low 128 0 }
+        if($s1 -eq $upTiles){ & $fillVectors ($F.High+($n+1)*16384L) 128 0x80008000L; & $fillVectors ($F.Low+($n+1)*16384L) 128 0 }
+        & $sync
+        for($c=0;$c -lt 3;$c++){
+            & $dma 18 $F.Weights 21 ($frontWeightOffset+49152+$c*393216L) 393216
+            for($start=0;$start -lt $n;$start+=$upBatch){
+                $count=[math]::Min($upBatch,$n-$start)
+                & $ptr 0 18 ($F.High+($start+1)*16384L); & $ptr 1 18 ($F.Low+($start+1)*16384L); & $ptr 2 18 $F.Weights; & $ptr 3 18 ($F.Tables+16384+12288*$c); & $imm 4 $count; & $ptr 5 18 $F.Planes
+                & $call 'body_conv_front_up'; & $mark 'HmxConv'; & $sync
+                & $ptr 0 18 $F.Planes; & $ptr 1 18 ($F.Phase+$start*16384L); & $ptr 2 18 ($F.Tables+53248+2048*$c-1024); & $imm 3 $count
+                & $call 'body_combine_conv256'; & $mark 'Combine'; & $sync
+            }
+            & $ptr 0 18 $F.Phase; & $ptr 1 18 $F.Target; & $imm 2 $c; & $imm 3 $pairs
+            & $call 'body_front_interleave'; & $mark 'Combine'; & $sync
+        }
+        if($s0 -eq 0){
+            # Reflection: padded frame 0 is padded frame 2 (even halfwords of row pairs 0 and 1 of tile 0).
+            & $imm 6 0xFFFF0000L; $s.Add(@{Op='vsplat';d=30;s=6}); & $imm 6 0x0000FFFFL; $s.Add(@{Op='vsplat';d=31;s=6})
+            for($blk=0;$blk -lt 4;$blk++){
+                & $ptr 4 18 ($F.Target+2048*$blk); $s.Add(@{Op='vload';d=0;s=4;Offset=0}); $s.Add(@{Op='vload';d=1;s=4;Offset=128})
+                $s.Add(@{Op='vand';d=0;s=0;t=30}); $s.Add(@{Op='vand';d=1;s=1;t=31}); $s.Add(@{Op='vor';d=0;s=0;t=1}); $s.Add(@{Op='vstore';s=4;t=0;Offset=0})
+            }
+        }
+        & $dma 18 $F.Sum 20 ($sourceStreams[1].InputOffset+$t0*8192L) (($t1-$t0)*8192L); & $sync
+        & $ptr 0 18 $F.Target; & $ptr 1 18 $F.Sum; & $ptr 2 18 ($F.Tables+59392); & $imm 3 ($t1-$t0)
+        & $call 'body_front_add'; & $mark 'Combine'
+        if($t1 -eq $tiles){ & $padRows ($F.Sum+($tiles-1-$t0)*8192L) 0x8000 }
+        & $sync; & $dma 25 ($r0Slot+$t0*8192L) 18 $F.Sum (($t1-$t0)*8192L)
+    }
+    # The tail over output tiles t0 .. t1 - 1 of the bound section's final tensor.
+    $tailRange={param([int]$t0,[int]$t1)
+        & $mark 'Boundary' 'Tail'; & $sync
+        Add-KokoroGeneratorTail16JobSteps -Steps $s -Calls $calls -Frames $Frames -InputBase 25 -InputOffset $finalOffset -WeightsBase 21 -WeightsOffset $tailWeightOffset -TablesBase 22 -TablesOffset $tailParameterOffset -PcmBase 23 -PcmOffset $pcmOffset -FirstTile $t0 -EndTile $t1 -SpanTiles (& $spanMax 'T0' 'T1') -LabelPrefix "t16r$t0"
+    }
+    # Spans ($spans): per span the 256-channel front and section, then the 128-channel front, section and tail. A
+    # section's first steps start from its initial state; later ones restore the state its previous steps saved.
+    $spanJob={
+        foreach($span in $spans){
+            . $bind 0; $slowMean=$finalOffset
+            & $mark 'Boundary' 'Front256'
+            if($span.D1 -gt $span.D0){ & $spanFront0 $span.D0 $span.D1 }
+            if($span.J1 -gt $span.J0){
+                if($span.J0 -eq 0){ . $sectionInit } else { & $dma 18 $stateFrom 25 $stateSlot $stateBytes; & $sync }
+                . $sectionRun $span.J0 $span.J1 "_s$($span.Index)"
+                if($span.J1 -lt $slowSteps){ & $sync; & $dma 25 $stateSlot 18 $stateFrom $stateBytes }
+            }
+            if($sections.Count -lt 2){ continue }
+            . $bind 1; $chainOffset=$slowMean
+            & $mark 'Boundary' 'Front128'
+            if($span.S1 -gt $span.S0){ & $spanFront1 $span.S0 $span.S1 }
+            if($span.K1 -gt $span.K0){
+                if($span.K0 -eq 0){ . $sectionInit } else { & $dma 18 $stateFrom 25 $stateSlot $stateBytes; & $sync }
+                . $sectionRun $span.K0 $span.K1 "_s$($span.Index)"
+                if($span.K1 -lt $fastSteps){ & $sync; & $dma 25 $stateSlot 18 $stateFrom $stateBytes }
+            }
+            if($span.T1 -gt $span.T0){ & $tailRange $span.T0 $span.T1 }
+        }
     }
     for($section=0;$section -lt $sections.Count;$section++){
     if($section -gt 0){ $chainOffset=$finalOffset; $chainTiles=$tiles; . $bind $section }
     & $mark 'Boundary' "Front$Channels"
     if($sectionSchedule -ne 'Layer'){
-        if($Front){ . $suppliedFront }
-        if($sectionSchedule -eq 'Backward'){ . $backwardSection } else { . $chunkedSection }
-        if($Tail){ . $tailSteps }
+        if($spanMode){ . $spanJob; break }
+        . $sectionInit; . $sectionRun 0 ([int][math]::Ceiling(($tiles+3)/$batch)) ''
         continue
     }
     # Blocks: noise_res[1] first with -Front (index -1: its own weights and records, input computed in VTCM, kernel 11
@@ -1305,6 +1472,7 @@ function New-KokoroGenerator60x16RunSteps {
     $resultLayout.AdaInMode=$AdaInMode
     $resultLayout.WeightRegions=$weightRegions.ToArray()
     $resultLayout.SourceStreams=@($sourceStreams | Where-Object { $null -ne $_ })
+    $resultLayout.Spans=$spans
     # Each section's tensors in the workspace: its input after the front (fronted sections) and its output.
     $resultLayout.Sections=@(for($i=0;$i -lt $sections.Count;$i++){ . $bind $i
         [pscustomobject]@{Section=$i;Channels=$Channels;Tiles=$tiles;Bytes=$tensorBytes;InputWorkspaceOffset=$(if($Front){$r0Slot}else{-1L});FinalWorkspaceOffset=$finalOffset} })

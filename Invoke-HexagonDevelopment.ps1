@@ -1243,7 +1243,7 @@ $script:Kernels=@(
             if($Stage16Channels -ne 128){ $harness.Channels=$Stage16Channels }
             if($GeneratorFront){ $harness.Front=$true }
             if($GeneratorWhole){ $harness.Whole=$true }
-            if($GeneratorSuppliedSource){ $harness.SuppliedSource=$true }
+            if($GeneratorSuppliedSource){ $harness.SuppliedSource=$true; $harness.SpanTiles=$GeneratorSpanTiles }
         $run=New-KokoroGenerator60x16RunSteps -Frames $ResBlockFrames -HvxThreads $ResidentHvxThreads -BatchTiles $ResidentBatchTiles -StopAfterStage $Stage16StopAfter -DumpPoint $Stage16DumpPoint -Kernels $Stage16Kernels -RuntimeFrames:$GeneratorRuntimeFrames @pmu @harness
     $steps=@($run.Steps)
     $symbol='kokoro_resblock_run_skel_handle_invoke'; $soname='libkokoro_resblock_run_skel.so'
@@ -1387,7 +1387,7 @@ param(
     [ValidateRange(1, 512)][int] $AlbertTokens = 16,
     # KokoroAlbert16Run diagnosis: end after this operator (src/jobs/Kokoro.Albert16Run.ps1 -StopAfter).
     [string] $AlbertStopAfter = '',
-    [ValidateRange(2, 32768)][int] $ResBlockFrames = 7801,
+    [ValidateRange(2, 1048576)][int] $ResBlockFrames = 7801,
     [ValidateSet(3,7,11)][int] $ResBlockKernel = 3,
     [ValidateSet(128,256)][int] $IntegerChannels = 128,
     [ValidateRange(1, 64)][int] $ConvTiles = 8,
@@ -1424,6 +1424,8 @@ param(
     [switch] $GeneratorFront,
     [switch] $GeneratorWhole,
     [switch] $GeneratorSuppliedSource,
+    # KokoroGenerator60x16Run with supplied sources: 256-channel tiles per span (-SpanTiles).
+    [ValidateRange(10,1280)][int] $GeneratorSpanTiles = 20,
     # KokoroGenerator60x16Run backward schedule: 1 keeps one resident int8 weight plane per stage (the high bytes).
     [ValidateSet(1, 2)][int] $GeneratorWeightPlanes = 2,
     # KokoroGenerator60x16Run backward schedule: per-tile AdaIN from the controller contact (K = K_base + P_K * v, M likewise).

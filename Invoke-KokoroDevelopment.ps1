@@ -1532,8 +1532,14 @@ function Test-KokoroGeneratorTileEquivalence {
         # source stream) and the chunked section. Whole: both fronts and sections (ups.1 from the 256-channel mean) and the
         # tail to PCM, the 128-channel section on the backward schedule. Each source insertion point of the depth-first
         # job reads the stream the layer job computed there (noise_convs and noise_res), exported from its workspace.
-        [ValidateSet('Section','Front','Whole')][string]$Joint='Section',
-        [string]$FixtureDirectory=(Join-Path $Build $(switch($Joint){'Front'{'speak-20261010-h0-fast/job-input/front10-stage-fixture-20261008'}'Whole'{'generator-whole-fixture-20261008'}default{if($Channels -eq 256){'speak-20261010-h0-fast/job-input/g256-fixture-20261008'}else{'speak-20261010-h0-fast/job-input/generator60x16-fixture-20261008-holdout2'}}})),[ValidateRange(1,21)][int]$Runs=3,
+        # Spans: past the layer job's length. x and the two source streams the layer job computed are repeated frame by
+        # frame Repeat times (any content serves; the check is self-consistency), and the span job runs that input at
+        # each of SpanSizes: every section's output and the PCM must be equal byte for byte across span sizes.
+        [ValidateSet('Section','Front','Whole','Spans')][string]$Joint='Section',
+        # Front and Whole: the depth-first job runs in spans of this many 256-channel tiles, each section's state saved
+        # and restored between them.
+        [int]$SpanTiles=20,[ValidateRange(2,64)][int]$Repeat=4,[int[]]$SpanSizes=@(20,40),
+        [string]$FixtureDirectory=(Join-Path $Build $(switch($Joint){'Front'{'speak-20261010-h0-fast/job-input/front10-stage-fixture-20261008'}{$_ -in 'Whole','Spans'}{'generator-whole-fixture-20261008'}default{if($Channels -eq 256){'speak-20261010-h0-fast/job-input/g256-fixture-20261008'}else{'speak-20261010-h0-fast/job-input/generator60x16-fixture-20261008-holdout2'}}})),[ValidateRange(1,21)][int]$Runs=3,
         # Tiles per step, one per HVX thread.
         [ValidateSet(2,4)][int]$TileBlock=4,
         # 1: both jobs run int8 weights q = round(w / 256) (clamped to +-127) stored as 256 q, table biases corrected; the
@@ -1565,15 +1571,15 @@ function Test-KokoroGeneratorTileEquivalence {
             $depthFirst=if($Channels -eq 256){'Chunked'}else{'Backward'}
         }
         'Front' { if($fixture.Graph -cne 'Generator60x16' -or $null -ne $fixture.Module){throw 'The fixture is not the 256-channel front and section.'}; $common.Stage16Channels=256; $common.GeneratorFront=$true; $depthFirst='Chunked' }
-        'Whole' { if($fixture.Graph -cne 'Generator16Whole'){throw 'The fixture is not the whole generator.'}; $common.GeneratorWhole=$true; $depthFirst='Backward' }
+        {$_ -in 'Whole','Spans'} { if($fixture.Graph -cne 'Generator16Whole'){throw 'The fixture is not the whole generator.'}; $common.GeneratorWhole=$true; $depthFirst='Backward' }
     }
     $tileBytes=64*$Channels
     # A job with a tail returns only its header and PCM through the resident listener; the workspace needs a one-shot run.
-    $oneShot=$Joint -eq 'Whole'
+    $oneShot=$Joint -in 'Whole','Spans'
     $export=Invoke-KokoroEmission -Kernel KokoroGenerator60x16Run -Parameters ($common+@{ResidentBatchTiles=22;GeneratorMoments='Export';GeneratorSchedule='Layer'})
     $layer=Invoke-KokoroEmission -Kernel KokoroGenerator60x16Run -Parameters ($common+@{ResidentBatchTiles=22;GeneratorMoments='Constants';GeneratorSchedule='Layer'})
     $tileParameters=$common+@{ResidentBatchTiles=$TileBlock;GeneratorMoments='Constants';GeneratorSchedule=$depthFirst;GeneratorWeightPlanes=$WeightPlanes;GeneratorControllerContact=$ControllerContact.IsPresent;GeneratorVectorPackets=$VectorPackets.IsPresent}
-    if($Joint -ne 'Section'){ $tileParameters.GeneratorSuppliedSource=$true }
+    if($Joint -ne 'Section'){ $tileParameters.GeneratorSuppliedSource=$true; $tileParameters.GeneratorSpanTiles=$SpanTiles }
     $tile=Invoke-KokoroEmission -Kernel KokoroGenerator60x16Run -Parameters $tileParameters
     $statistics=[IO.File]::ReadAllBytes((Join-Path $FixtureDirectory 'tables.bin'))
     $weights=[IO.File]::ReadAllBytes((Join-Path $FixtureDirectory 'weights.bin'))
@@ -1628,15 +1634,46 @@ function Test-KokoroGeneratorTileEquivalence {
     $tileInput=$constantsInput
     if($Joint -ne 'Section'){
         # Each source stream the layer job parked in its workspace becomes the depth-first job's supplied input there.
+        # The span job's input is x, then the streams (the layer job's har planes are not read).
         $activations=[byte[]]::new($tile.Layout.InputBytes)
-        $fixtureActivations=[IO.File]::ReadAllBytes((Join-Path $FixtureDirectory 'activations.bin')); [Array]::Copy($fixtureActivations,$activations,$fixtureActivations.Length)
         $layerStreams=@($layer.Layout.SourceStreams); $tileStreams=@($tile.Layout.SourceStreams)
+        $fixtureActivations=[IO.File]::ReadAllBytes((Join-Path $FixtureDirectory 'activations.bin')); [Array]::Copy($fixtureActivations,$activations,[math]::Min($fixtureActivations.Length,[long]$tileStreams[0].InputOffset))
         if($layerStreams.Count -ne $tileStreams.Count){throw 'The jobs have different source insertion points.'}
         for($i=0;$i -lt $tileStreams.Count;$i++){
             if($layerStreams[$i].Bytes -ne $tileStreams[$i].Bytes){throw "Source stream $i differs in size between the jobs."}
             [Array]::Copy($layerRun.Output,128+[long]$layerStreams[$i].WorkspaceOffset,$activations,[long]$tileStreams[$i].InputOffset,[long]$tileStreams[$i].Bytes)
         }
         $tileInput=& $stage 'supplied-source' $runTables $runWeights $activations
+    }
+    if($Joint -eq 'Spans'){
+        Import-CaptureKernels
+        $slice={param([byte[]]$Bytes,[long]$Offset,[long]$Length) $part=[byte[]]::new($Length); [Array]::Copy($Bytes,$Offset,$part,0,$Length); ,$part}
+        # [channel][frame] values at one LSB (exact for biased u16), repeated frame by frame to LongFrames.
+        $repeatFrames={param([byte[]]$Bytes,[int]$Channels,[int]$Frames,[int]$LongFrames)
+            $ones=[double[]]::new($Channels); [Array]::Fill($ones,1.0)
+            $v=ConvertFrom-KokoroCroutons16 -Bytes $Bytes -Frames $Frames -Units $ones; $w=[float[]]::new($Channels*[long]$LongFrames)
+            for($c=0;$c -lt $Channels;$c++){ for($at=0;$at -lt $LongFrames;$at+=$Frames){ [Array]::Copy($v,$c*$Frames,$w,$c*[long]$LongFrames+$at,[math]::Min($Frames,$LongFrames-$at)) } }
+            ConvertTo-KokoroCroutons16 -Values $w -Frames $LongFrames -Scales $ones}
+        $slowFrames=([int]$fixture.Frames-1)/6; $decFrames=$slowFrames/10; $longFrames=6*$slowFrames*$Repeat+1
+        $xLong=& $repeatFrames (& $slice $fixtureActivations 0 ([math]::Ceiling($decFrames/32)*32768)) 512 $decFrames ($decFrames*$Repeat)
+        $streamLong=@(for($i=0;$i -lt 2;$i++){
+            $at=128+[long]$layerStreams[$i].WorkspaceOffset; $streamFrames=if($i -eq 0){$slowFrames}else{[int]$fixture.Frames}
+            & $repeatFrames (& $slice $layerRun.Output $at $layerStreams[$i].Bytes) $layerStreams[$i].Channels $streamFrames $(if($i -eq 0){$slowFrames*$Repeat}else{$longFrames}) })
+        $spanRuns=@(foreach($size in $SpanSizes){
+            $parameters=$tileParameters.Clone(); $parameters.ResBlockFrames=$longFrames; $parameters.GeneratorSpanTiles=$size
+            $emission=Invoke-KokoroEmission -Kernel KokoroGenerator60x16Run -Parameters $parameters
+            $longInput=[byte[]]::new($emission.Layout.InputBytes); [Array]::Copy($xLong,$longInput,$xLong.Length)
+            $streams=@($emission.Layout.SourceStreams); for($i=0;$i -lt 2;$i++){ if($streamLong[$i].Length -ne $streams[$i].Bytes){throw "Long source stream $i has the wrong size."}; [Array]::Copy($streamLong[$i],0,$longInput,[long]$streams[$i].InputOffset,$streamLong[$i].Length) }
+            $run=Invoke-KokoroDeviceJob -EmissionDirectory $emission.Directory -EmissionArtifact $emission -InputDirectory (& $stage "spans-$size" $runTables $runWeights $longInput) -Soc $Soc -Runs $Runs -Package $Package -OneShot
+            $pcmAt=[long]$emission.Layout.PcmOffset; $pcmBytes=& $slice $run.Output $pcmAt (2L*[int]$emission.Layout.Samples)
+            $outputs=@(foreach($section in @($emission.Layout.Sections)){ $at=128+[long]$section.FinalWorkspaceOffset; [Convert]::ToHexString([Security.Cryptography.SHA256]::HashData((& $slice $run.Output $at $section.Bytes))) })
+            [pscustomobject]@{SpanTiles=$size;Spans=@($emission.Layout.Spans).Count;DspMs=$run.MedianMs;LibraryBytes=$emission.Bytes;VtcmBytes=$emission.Layout.VtcmBytes
+                PcmSHA256=[Convert]::ToHexString([Security.Cryptography.SHA256]::HashData($pcmBytes));SectionSHA256=$outputs;LibrarySHA256=$emission.LibrarySHA256}
+        })
+        $report=[pscustomobject]@{Soc=$Soc;Fixture=$FixtureDirectory;Joint=$Joint;Repeat=$Repeat;Frames=$longFrames;Samples=5L*($longFrames-1);AudioSeconds=5.0*($longFrames-1)/24000
+            Identical=(@($spanRuns | ForEach-Object { $_.PcmSHA256 + ($_.SectionSHA256 -join '') } | Select-Object -Unique).Count -eq 1);Runs=$spanRuns}
+        $report | Export-Clixml -LiteralPath (Join-Path $out 'equivalence.clixml') -Depth 8
+        return $report
     }
     $read={param($Run,$Emission) $at=128+[long]$Emission.Layout.FinalWorkspaceOffset; [byte[]]$Run.Output[$at..($at+$tensorBytes-1)]}
     $contactProof=$null
