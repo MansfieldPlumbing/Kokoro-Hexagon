@@ -3319,10 +3319,10 @@ function Get-StudentRecordingKeys($Word, $LastPhone) {
     @("w:$($Word.Phonemes)|$final|$place", "w:$($Word.Phonemes)|$final", "w:$($Word.Phonemes)", "s:$stress|$final", "s:$stress")
 }
 
-function Get-StudentWordGroups([object[]] $Phones) {
+function Get-StudentWordGroups([object[]] $PhoneList) {
     # The phones of each word occurrence in order (spaces before a word belong to no recording).
     $groups = [ordered]@{}
-    foreach ($phone in $Phones) {
+    foreach ($phone in $PhoneList) {
         if ($null -eq $phone.Word -or $phone.Offset -lt 0) { continue }
         $key = "$($phone.Window.Index):$($phone.Word.Book):$($phone.Word.FirstToken)"
         if (-not $groups.Contains($key)) { $groups[$key] = [Collections.Generic.List[object]]::new() }
@@ -3366,10 +3366,10 @@ function Find-StudentControlRecording($Library, $Word, $LastPhone) {
     $null
 }
 
-function Measure-StudentProsody($Rules, [object[]] $Phones) {
+function Measure-StudentProsody($Rules, [object[]] $PhoneList) {
     # Per occurrence, with the evidence's own timing: duration error in frames, voicing agreement, pitch error (dB of the
     # f0 ratio) where both are pitched, and energy error.
-    foreach ($phone in $Phones) {
+    foreach ($phone in $PhoneList) {
         $target = $Rules.Targets($phone); $f0 = $phone.Window.Evidence.F0; $energy = $phone.Window.Evidence.N
         $agree = 0; $pitchSquares = 0.0; $pitchTicks = 0; $energySquares = 0.0
         for ($t = $phone.FirstTick; $t -lt $phone.FirstTick + $phone.Ticks; $t++) {
@@ -3382,12 +3382,12 @@ function Measure-StudentProsody($Rules, [object[]] $Phones) {
     }
 }
 
-function Measure-StudentReplay($Rules, $Library, [object[]] $Phones) {
+function Measure-StudentReplay($Rules, $Library, [object[]] $PhoneList) {
     # Held-out scores with control recordings (from training only) replayed onto each occurrence's own timing, and the
     # spread of the predicted controls against the evidence's: duration, pitch (log f0 on pitched ticks) and energy.
-    $replay = Get-StudentReplayPlan $Library $Phones
+    $replay = Get-StudentReplayPlan $Library $PhoneList
     $rows = [Collections.Generic.List[object]]::new(); $spread = @{ Duration = @([Collections.Generic.List[double]]::new(), [Collections.Generic.List[double]]::new()); Pitch = @([Collections.Generic.List[double]]::new(), [Collections.Generic.List[double]]::new()); Energy = @([Collections.Generic.List[double]]::new(), [Collections.Generic.List[double]]::new()) }
-    foreach ($phone in $Phones) {
+    foreach ($phone in $PhoneList) {
         $target = $Rules.Targets($phone); $entry = $replay.Phone[$phone]; $f0 = $phone.Window.Evidence.F0; $energy = $phone.Window.Evidence.N
         $predicted = $Rules.Frames($phone); if ($null -ne $entry) { $predicted = [Math]::Max(0, [int][Math]::Round($predicted * $entry.Ratio)) }
         $wordFirst = 0; $wordTicks = 0; if ($null -ne $entry) { $wordFirst = $entry.Word[0].FirstTick; $wordTicks = $entry.Word[-1].FirstTick + $entry.Word[-1].Ticks - $wordFirst }
@@ -3462,12 +3462,12 @@ function Invoke-StudentInventory {
         Strata = $strata.ToArray(); Recordings = $library; Replay = $replayScores; Seconds = [Math]::Round($watch.Elapsed.TotalSeconds, 1); SyllabusWindows = $windows; Phones = $phones }
 }
 
-function Get-StudentReplayPlan($Library, [object[]] $Phones) {
+function Get-StudentReplayPlan($Library, [object[]] $PhoneList) {
     # Per phone occurrence: its word's recording (or none), the duration ratio to apply, and for each word its phones,
     # so residual curves can be mapped over the word's ticks.
     $plan = @{}; $used = @{}
     if ($null -eq $Library) { return [pscustomobject]@{ Phone = $plan; Keys = $used } }
-    foreach ($group in (Get-StudentWordGroups $Phones).Values) {
+    foreach ($group in (Get-StudentWordGroups $PhoneList).Values) {
         $phones = @($group | Sort-Object Offset)
         $match = Find-StudentControlRecording $Library $phones[0].Word $phones[-1]
         if ($null -eq $match) { continue }
@@ -3487,24 +3487,24 @@ function Get-StudentReplayResidual($Entry, [object] $Phone, [int] $Tick, [int] $
     $value = $curve[$at]; if ([double]::IsNaN($value)) { 0.0 } else { $value }
 }
 
-function New-StudentProsodyStream($Rules, [object[]] $Phones, $Library = $null) {
+function New-StudentProsodyStream($Rules, [object[]] $PhoneList, $Library = $null) {
     # The controls for phone occurrences in token order (pads included): durations in frames, and f0 and N on the tick
     # clock (two ticks per frame). Each phone's rule targets are adjusted by its word's control recording when one
     # matches (duration ratio, pitch and energy residuals by relative time in the word), then approached by
     # StudentControlResponse per tick.
-    $replay = Get-StudentReplayPlan $Library $Phones
-    $durations = [int[]]::new($Phones.Count); $frames = 0; $first = @{}
-    for ($o = 0; $o -lt $Phones.Count; $o++) {
-        $d = $Rules.Frames($Phones[$o]); $entry = $replay.Phone[$Phones[$o]]
+    $replay = Get-StudentReplayPlan $Library $PhoneList
+    $durations = [int[]]::new($PhoneList.Count); $frames = 0; $first = @{}
+    for ($o = 0; $o -lt $PhoneList.Count; $o++) {
+        $d = $Rules.Frames($PhoneList[$o]); $entry = $replay.Phone[$PhoneList[$o]]
         if ($null -ne $entry) { $d = [Math]::Max(0, [int][Math]::Round($d * $entry.Ratio)) }
-        $durations[$o] = $d; $first[$Phones[$o]] = 2 * $frames; $frames += $d
+        $durations[$o] = $d; $first[$PhoneList[$o]] = 2 * $frames; $frames += $d
     }
     $ticks = 2 * $frames; $f0 = [float[]]::new($ticks); $energy = [float[]]::new($ticks)
     $at = 0; $pitch = [double]::NaN; $level = [double]::NaN
-    for ($o = 0; $o -lt $Phones.Count; $o++) {
-        $phone = $Phones[$o]; $target = $Rules.Targets($phone); $entry = $replay.Phone[$phone]
+    for ($o = 0; $o -lt $PhoneList.Count; $o++) {
+        $phone = $PhoneList[$o]; $target = $Rules.Targets($phone); $entry = $replay.Phone[$phone]
         $wordFirst = 0; $wordTicks = 0
-        if ($null -ne $entry) { $wordFirst = $first[$entry.Word[0]]; $last = $entry.Word[-1]; $wordTicks = $first[$last] + 2 * $durations[[Array]::IndexOf($Phones, $last)] - $wordFirst }
+        if ($null -ne $entry) { $wordFirst = $first[$entry.Word[0]]; $last = $entry.Word[-1]; $wordTicks = $first[$last] + 2 * $durations[[Array]::IndexOf($PhoneList, $last)] - $wordFirst }
         for ($t = 0; $t -lt 2 * $durations[$o]; $t++) {
             $energyTarget = $target.Energy; $pitchTarget = $target.LogHz
             if ($null -ne $entry) { $energyTarget += Get-StudentReplayResidual $entry $phone $at $wordFirst $wordTicks 'Energy'; $pitchTarget += Get-StudentReplayResidual $entry $phone $at $wordFirst $wordTicks 'Pitch' }
