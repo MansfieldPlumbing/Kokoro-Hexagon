@@ -1948,7 +1948,10 @@ class CorePolish {
         [CoreToken]$t=$tokens[$index]
         [string]$lower=[CorePolish]::Lower($tokens,$index)
         if($lower -ceq 'read'){
-            [string]$previous=' '+[CorePolish]::Lower($tokens,$index-1)+' '
+            # The word before it, stepping back over up to three adverbs ("had already read", "has never really read").
+            [int]$back=$index-1
+            while($back -gt $index-4 -and [CorePolish]::IsWord($engine,$back) -and ([CorePolish]::Lower($tokens,$back).EndsWith('ly',[StringComparison]::Ordinal) -or ' already just never ever not also still only recently since once all both '.Contains(' '+[CorePolish]::Lower($tokens,$back)+' '))){$back--}
+            [string]$previous=' '+[CorePolish]::Lower($tokens,$back)+' '
             [bool]$past=' had has have was were been is are be ''ve ''d he she it '.Contains($previous)
             for([int]$j=$index+1;$j -lt $tokens.Length;$j++){if(' yesterday ago last '.Contains(' '+[CorePolish]::Lower($tokens,$j)+' ')){$past=$true}}
             if($past){return [CorePolish]::Lexical($t.LexicalId,3)}
