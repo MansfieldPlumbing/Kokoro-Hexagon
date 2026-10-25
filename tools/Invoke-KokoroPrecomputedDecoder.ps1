@@ -1597,7 +1597,9 @@ function Invoke-OfflineSpeech {
     $ids.Add(0); $tokenIds = $ids.ToArray(); $t = $tokenIds.Length
     if ($t -gt 512) { throw 'More than 510 phonemes; stock splits longer input.' }
     $style = Read-OfflineVoiceRow $Voice $Phonemes.Length
-    $supplied = $null -ne $SuppliedDurations -or $null -ne $SuppliedF0 -or $null -ne $SuppliedN
+    # With -SuppliedF0 every control is supplied. Without it, -SuppliedDurations (and -SuppliedN) replace the predictor's
+    # durations (and N) while its F0 branch runs on those durations.
+    $supplied = $null -ne $SuppliedF0
     if ($supplied) {
         if ($null -eq $SuppliedDurations -or $null -eq $SuppliedF0 -or $null -eq $SuppliedN) { throw 'Supplied prosody needs -SuppliedDurations, -SuppliedF0 and -SuppliedN together.' }
         if ($SuppliedDurations.Length -ne $t) { throw "SuppliedDurations has $($SuppliedDurations.Length) values for $t token ids." }
@@ -1617,6 +1619,10 @@ function Invoke-OfflineSpeech {
     $durationFeatures = $x
     $logits = Invoke-OfflineLinear (Invoke-OfflineLstm $durationFeatures $t 'predictor.module.lstm') $t 'predictor.module.duration_proj.linear_layer'
     $durations = $upstreamMath::Durations($logits, $t, 50, $Speed)
+    if ($null -ne $SuppliedDurations) {
+        if ($SuppliedDurations.Length -ne $t) { throw "SuppliedDurations has $($SuppliedDurations.Length) values for $t token ids." }
+        $durations = [int[]]$SuppliedDurations
+    }
     $frames = 0; foreach ($duration in $durations) { $frames += $duration }
     $aligned = $upstreamMath::ExpandChannels($durationFeatures, $t, 640, $durations)
     $shared = Invoke-OfflineLstm ($upstreamMath::ChannelsToRows($aligned, 640, $frames)) $frames 'predictor.module.shared'
@@ -1629,6 +1635,10 @@ function Invoke-OfflineSpeech {
             if ($block -eq 1) { $curveFrames *= 2 }
         }
         $curves[$curve] = Invoke-OfflineConv $values $curveFrames "$($curve)_proj" -Module 'predictor.module.'
+    }
+    if ($null -ne $SuppliedN) {
+        if ($SuppliedN.Length -ne 2 * $frames) { throw 'SuppliedN needs two values per duration frame.' }
+        $curves['N'] = $SuppliedN
     }
     }
     $encoderWatch = [Diagnostics.Stopwatch]::StartNew()

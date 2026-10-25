@@ -3633,19 +3633,92 @@ function Invoke-StudentAblation {
             D = @([int[]]$stock.Durations, $onStock.F0, $onStock.N, 'stock durations, Student f0 and N')
             E = @($own.Durations, $own.F0, $own.N, 'Student durations, f0 and N')
             F = @($own.Durations, (Get-StudentWarpedCurve ([float[]]$stock.F0) ([int[]]$stock.Durations) $own.Durations), (Get-StudentWarpedCurve ([float[]]$stock.N) ([int[]]$stock.Durations) $own.Durations), 'Student durations, stock f0 and N warped onto them') }
+        # G: the Student's durations and N, with Kokoro's own F0 branch run on the Student's durations.
+        $plan['G'] = @($own.Durations, $null, $own.N, 'Student durations and N, Kokoro predictor f0 on them')
         foreach ($name in $plan.Keys) {
             $entry = $plan[$name]
-            $speech = Invoke-OfflineSpeech -Phonemes $phonemes -Voice $Voice -SuppliedDurations $entry[0] -SuppliedF0 $entry[1] -SuppliedN $entry[2]
+            $speech = if ($null -eq $entry[1]) { Invoke-OfflineSpeech -Phonemes $phonemes -Voice $Voice -SuppliedDurations $entry[0] -SuppliedN $entry[2] }
+                else { Invoke-OfflineSpeech -Phonemes $phonemes -Voice $Voice -SuppliedDurations $entry[0] -SuppliedF0 $entry[1] -SuppliedN $entry[2] }
             $wave = Join-Path $out ('{0}.wav' -f $name); [IO.File]::WriteAllBytes($wave, (ConvertTo-StudentWave $speech.Pcm))
-            $rows.Add([pscustomobject]@{ PSTypeName = 'Kokoro.StudentAblationRender'; Render = $name; Controls = $entry[3]; Seconds = [Math]::Round($speech.Pcm.Length / 24000.0, 3)
+            $assessment = Measure-StudentRender $Text $wave ([float[]]$speech.Pcm) ([int[]]$speech.Durations) ([float[]]$speech.F0) ([float[]]$speech.N) $stock
+            $rows.Add([pscustomobject]@{ PSTypeName = 'Kokoro.StudentAblationRender'; Render = $name; Controls = $entry[3]; Seconds = [Math]::Round($speech.Pcm.Length / 24000.0, 3); Assessment = $assessment
                 PcmSnrDb = $(if ($speech.Pcm.Length -eq $stock.Pcm.Length) { Get-StudentAblationSnr $stock.Pcm $speech.Pcm } else { $null }); Wave = $wave })
         }
         $stockWave = Join-Path $out 'stock.wav'; [IO.File]::WriteAllBytes($stockWave, (ConvertTo-StudentWave $stock.Pcm))
+        $stockAssessment = Measure-StudentRender $Text $stockWave ([float[]]$stock.Pcm) ([int[]]$stock.Durations) ([float[]]$stock.F0) ([float[]]$stock.N) $stock
         Export-Clixml -LiteralPath (Join-Path $out 'controls.clixml') -InputObject ([pscustomobject]@{ Phonemes = $phonemes; StockDurations = [int[]]$stock.Durations
             StockF0 = [float[]]$stock.F0; StockN = [float[]]$stock.N; StudentF0OnStock = $onStock.F0; StudentNOnStock = $onStock.N })
     }
     finally { Remove-Module -ModuleInfo $syllabus -Force }
-    [pscustomobject]@{ PSTypeName = 'Kokoro.StudentAblation'; Text = $Text; Phonemes = $phonemes; Renders = $rows.ToArray(); StockWave = $stockWave; Directory = $out }
+    [pscustomobject]@{ PSTypeName = 'Kokoro.StudentAblation'; Text = $Text; Phonemes = $phonemes; Renders = $rows.ToArray(); StockWave = $stockWave; StockAssessment = $stockAssessment; Directory = $out }
+}
+
+# Automatic assessment of a render against stock Kokoro on the same phonemes, phone by phone on each render's own
+# timing (so durations may differ): Windows dictation word error rate against the text (intelligibility); per-phone
+# pitch, energy and duration agreement with stock; and per-phone spectral distance (five octave bands, dB) to stock's
+# render.
+function Get-StudentDictationWords([string] $WavePath) {
+    Add-Type -Path (Join-Path $PSHOME 'System.Speech.dll')
+    $engine = [System.Speech.Recognition.SpeechRecognitionEngine]::new([Globalization.CultureInfo]'en-US')
+    try {
+        $engine.LoadGrammar([System.Speech.Recognition.DictationGrammar]::new()); $engine.SetInputToWaveFile($WavePath)
+        $text = [Collections.Generic.List[string]]::new()
+        while ($true) { $result = $null; try { $result = $engine.Recognize() } catch { break }; if ($null -eq $result) { break }; $text.Add($result.Text) }
+        , @(($text -join ' ').ToLowerInvariant().Split([char[]]" .,;:!?""'", [StringSplitOptions]::RemoveEmptyEntries))
+    } finally { $engine.Dispose() }
+}
+
+function Get-StudentWordErrorRate([string[]] $Reference, [string[]] $Hypothesis) {
+    $n = $Reference.Length; $m = $Hypothesis.Length; $d = [int[,]]::new($n + 1, $m + 1)
+    for ($i = 0; $i -le $n; $i++) { $d[$i, 0] = $i }; for ($j = 0; $j -le $m; $j++) { $d[0, $j] = $j }
+    for ($i = 1; $i -le $n; $i++) { for ($j = 1; $j -le $m; $j++) { $cost = if ($Reference[$i - 1] -ceq $Hypothesis[$j - 1]) { 0 } else { 1 }; $d[$i, $j] = [Math]::Min([Math]::Min($d[($i - 1), $j] + 1, $d[$i, ($j - 1)] + 1), $d[($i - 1), ($j - 1)] + $cost) } }
+    [Math]::Round($d[$n, $m] / [Math]::Max(1, $n), 3)
+}
+
+function Get-StudentPhoneMeans([int[]] $Durations, [float[]] $Curve, [bool] $LogPitch) {
+    # Per token, the mean of the curve over its ticks (two per frame); for pitch, log f0 over ticks of at least 50 Hz.
+    $means = [double[]]::new($Durations.Length); $at = 0
+    for ($o = 0; $o -lt $Durations.Length; $o++) {
+        $s = 0.0; $k = 0
+        for ($t = $at; $t -lt $at + 2 * $Durations[$o]; $t++) { if ($LogPitch) { if ($Curve[$t] -ge $script:StudentPitchedHz) { $s += [Math]::Log($Curve[$t]); $k++ } } else { $s += $Curve[$t]; $k++ } }
+        $means[$o] = if ($k) { $s / $k } else { [double]::NaN }; $at += 2 * $Durations[$o]
+    }
+    , $means
+}
+
+function Get-StudentAgreement([double[]] $A, [double[]] $B) {
+    # Correlation and spread ratio (B against A) over positions where both are defined.
+    $x = [Collections.Generic.List[double]]::new(); $y = [Collections.Generic.List[double]]::new()
+    for ($i = 0; $i -lt [Math]::Min($A.Length, $B.Length); $i++) { if (-not ([double]::IsNaN($A[$i]) -or [double]::IsNaN($B[$i]))) { $x.Add($A[$i]); $y.Add($B[$i]) } }
+    if ($x.Count -lt 3) { return [pscustomobject]@{ Correlation = $null; SpreadRatio = $null } }
+    $mx = 0.0; $my = 0.0; foreach ($v in $x) { $mx += $v }; foreach ($v in $y) { $my += $v }; $mx /= $x.Count; $my /= $y.Count
+    $sxy = 0.0; $sxx = 0.0; $syy = 0.0; for ($i = 0; $i -lt $x.Count; $i++) { $sxy += ($x[$i] - $mx) * ($y[$i] - $my); $sxx += ($x[$i] - $mx) * ($x[$i] - $mx); $syy += ($y[$i] - $my) * ($y[$i] - $my) }
+    [pscustomobject]@{ Correlation = [Math]::Round($sxy / [Math]::Sqrt([Math]::Max(1e-30, $sxx * $syy)), 2); SpreadRatio = [Math]::Round([Math]::Sqrt($syy / [Math]::Max(1e-30, $sxx)), 2) }
+}
+
+function Get-StudentPhoneSpectra([float[]] $Pcm, [int[]] $Durations) {
+    # Per token, the mean of five octave-band levels (dB) over its ticks (300 samples each).
+    $bands = (Import-StudentKernels).SpectralBands.Invoke($Pcm, 24000, 300, 600); $frames = [int]($bands.Length / 5)
+    $means = [double[][]]::new($Durations.Length); $at = 0
+    for ($o = 0; $o -lt $Durations.Length; $o++) {
+        $s = [double[]]::new(5); $k = 0
+        for ($t = $at; $t -lt $at + 2 * $Durations[$o] -and $t -lt $frames; $t++) { for ($b = 0; $b -lt 5; $b++) { $s[$b] += $bands[5 * $t + $b] }; $k++ }
+        $means[$o] = if ($k) { for ($b = 0; $b -lt 5; $b++) { $s[$b] /= $k }; $s } else { $null }; $at += 2 * $Durations[$o]
+    }
+    , $means
+}
+
+function Measure-StudentRender([string] $Text, [string] $WavePath, [float[]] $Pcm, [int[]] $Durations, [float[]] $F0, [float[]] $N, $Stock) {
+    $reference = @($Text.ToLowerInvariant().Split([char[]]" .,;:!?""'", [StringSplitOptions]::RemoveEmptyEntries))
+    $pitch = Get-StudentAgreement (Get-StudentPhoneMeans ([int[]]$Stock.Durations) ([float[]]$Stock.F0) $true) (Get-StudentPhoneMeans $Durations $F0 $true)
+    $energy = Get-StudentAgreement (Get-StudentPhoneMeans ([int[]]$Stock.Durations) ([float[]]$Stock.N) $false) (Get-StudentPhoneMeans $Durations $N $false)
+    $duration = Get-StudentAgreement ([double[]]([int[]]$Stock.Durations)) ([double[]]$Durations)
+    $stockSpectra = Get-StudentPhoneSpectra ([float[]]$Stock.Pcm) ([int[]]$Stock.Durations); $spectra = Get-StudentPhoneSpectra $Pcm $Durations
+    $distance = 0.0; $count = 0
+    for ($o = 0; $o -lt [Math]::Min($spectra.Length, $stockSpectra.Length); $o++) { if ($null -eq $spectra[$o] -or $null -eq $stockSpectra[$o]) { continue }; $s = 0.0; for ($b = 0; $b -lt 5; $b++) { $d = $spectra[$o][$b] - $stockSpectra[$o][$b]; $s += $d * $d }; $distance += [Math]::Sqrt($s / 5); $count++ }
+    [pscustomobject]@{ PSTypeName = 'Kokoro.StudentRenderAssessment'; WordErrorRate = Get-StudentWordErrorRate $reference (Get-StudentDictationWords $WavePath)
+        PitchCorrelation = $pitch.Correlation; PitchSpread = $pitch.SpreadRatio; EnergyCorrelation = $energy.Correlation; DurationCorrelation = $duration.Correlation
+        SpectralDistanceDb = $(if ($count) { [Math]::Round($distance / $count, 2) } else { $null }) }
 }
 
 function Get-StudentWarpedCurve([float[]] $Curve, [int[]] $FromDurations, [int[]] $ToDurations) {
