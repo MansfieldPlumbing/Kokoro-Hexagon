@@ -1246,7 +1246,9 @@ $script:Kernels=@(
             if($GeneratorSource){ $harness.Source=$true }
             if($GeneratorStopAfterSpanStage){ $harness.StopAfterSpanStage=$GeneratorStopAfterSpanStage }
             if($GeneratorPoolWait){ $harness.PoolWait=$GeneratorPoolWait }
-            if($GeneratorSuppliedSource){ $harness.SuppliedSource=$true; $harness.SpanTiles=$GeneratorSpanTiles }
+            if($GeneratorSuppliedSource){ $harness.SuppliedSource=$true }
+            if($GeneratorSuppliedSource -or $GeneratorSource){ $harness.SpanTiles=$GeneratorSpanTiles }
+            if($GeneratorSource -and $GeneratorSourceChunkTiles -ne 128){ $harness.SourceChunkTiles=$GeneratorSourceChunkTiles }
             if($GeneratorExportFrontTensors){ $harness.ExportFrontTensors=$true }
             if($GeneratorSuppliedSectionInputs.Count){ $harness.SuppliedSectionInputs=$GeneratorSuppliedSectionInputs }
         $run=New-KokoroGenerator60x16RunSteps -Frames $ResBlockFrames -HvxThreads $ResidentHvxThreads -BatchTiles $ResidentBatchTiles -StopAfterStage $Stage16StopAfter -DumpPoint $Stage16DumpPoint -Kernels $Stage16Kernels -RuntimeFrames:$GeneratorRuntimeFrames @pmu @harness
@@ -1435,7 +1437,9 @@ param(
     [string] $GeneratorStopAfterSpanStage = '',
     # KokoroGenerator60x16Run: how HVX workers wait (-PoolWait Futex or Spin; default by schedule).
     [ValidateSet('','Futex','Spin')][string] $GeneratorPoolWait = '',
-    # KokoroGenerator60x16Run with supplied sources: 256-channel tiles per span (-SpanTiles).
+    # KokoroGenerator60x16Run depth-first with the source on the DSP: har tiles per source chunk (-SourceChunkTiles).
+    [ValidateRange(16,4096)][int] $GeneratorSourceChunkTiles = 128,
+    # KokoroGenerator60x16Run spans: 256-channel tiles per span (-SpanTiles).
     [ValidateRange(10,1280)][int] $GeneratorSpanTiles = 20,
     # KokoroGenerator60x16Run, KokoroDecoderGenerator16Run layer fronts: also export each add's upsampled input U (-ExportFrontTensors).
     [switch] $GeneratorExportFrontTensors,

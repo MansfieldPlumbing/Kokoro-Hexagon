@@ -39,16 +39,21 @@ function Get-KokoroHarmonicSourceConstants {
 # Scalar: f0 frames -> Psi (even samples at r2, odd at r3, word each, so a 64-sample block is one vector of each) and
 # per-sample halfword masks: uv (0xFFFF voiced) at r4, sign (0xFFFF where the sines change sign) at r4 + r5, amp at
 # r4 + 2 r5. r0 f0 (int32 Q16, L frames), r1 L >= 2, r5 bytes per halfword array, r6 constants record. Samples 300 L.
+# -Part runs one piece, for a source computed in chunks (r2..r4 at the piece's first sample): Head (150 samples; leaves
+# P_0 in r9), Segments (r0 at frame k, r9 = P_k, r1 >= 1 segments from k; leaves P_(k + r1) in r9) and Tail
+# (r9 = P_(L-1)).
 function New-KokoroSourcePhaseSteps {
-    param([string]$LabelPrefix='sourcephase',[switch]$NoReturn)
+    param([string]$LabelPrefix='sourcephase',[switch]$NoReturn,[ValidateSet('Whole','Head','Segments','Tail')][string]$Part='Whole')
     $s = [Collections.Generic.List[hashtable]]::new()
     $lbl = { param([string]$n) "${LabelPrefix}_$n" }
     $s.Add(@{Op='load';d=7;s=6;Offset=0})                                  # r7 M
     $s.Add(@{Op='imm';d=13;i=0})                                            # r13 zero
+    if ($Part -in 'Segments','Tail') { $s.Add(@{Op='imm';d=14;i=0}) }       # the caller's bases are at the piece's first sample
     # inc of frame at r0 + 4 m: r8 = (f0 M) >> 24; r12 = 0 or -1 (f0 < 0) replicated as two halfwords.
     # (The product goes to r11:r10 so that r9 keeps P_k; r12 is free between segments.)
     $incOf = { param([int]$off) $s.Add(@{Op='load';d=12;s=0;Offset=$off}); $s.Add(@{Op='mpy-d';d=10;s=12;t=7}); $s.Add(@{Op='asr-d-i';d=10;s=10;i=24}); $s.Add(@{Op='addi';d=8;s=10;i=0}); $s.Add(@{Op='asr-i';d=12;s=12;i=31}) }
     # Store r9 (even sample) and r9 + r8 (odd) at r2/r3 + 2 j (r14 = 2 j bytes), the sign word at r4 + r5 + 2 j.
+    if ($Part -in 'Whole','Head') {
     & $incOf 0
     $s.Add(@{Op='imm';d=11;i=300}); $s.Add(@{Op='mpy-d';d=10;s=8;t=11})      # r10 = 300 inc_0 (low word)
     $s.Add(@{Op='addi';d=9;s=10;i=0})                                       # r9 = P_0
@@ -59,8 +64,10 @@ function New-KokoroSourcePhaseSteps {
     $s.Add(@{Op='add';d=10;s=3;t=14}); $s.Add(@{Op='store';s=10;t=9;Offset=0})
     $s.Add(@{Op='add';d=10;s=4;t=5}); $s.Add(@{Op='add';d=10;s=10;t=14}); $s.Add(@{Op='store';s=10;t=13;Offset=0})
     $s.Add(@{Op='addi';d=14;s=14;i=4}); $s.Add(@{Op='addi';d=15;s=15;i=-1}); $s.Add(@{Op='gtu';d=0;s=15;t=13}); $s.Add(@{Op='jump-p';u=0;Label=(& $lbl 'head')})
+    }
     # Segments k = 0 .. L - 2: r9 holds P_k on entry; frame pointer r0 advances.
-    $s.Add(@{Op='addi';d=1;s=1;i=-1})
+    if ($Part -eq 'Whole') { $s.Add(@{Op='addi';d=1;s=1;i=-1}) }
+    if ($Part -in 'Whole','Segments') {
     $s.Add(@{Op='label';Name=(& $lbl 'segment')})
     $s.Add(@{Op='addi';d=0;s=0;i=4})
     & $incOf 0
@@ -76,13 +83,16 @@ function New-KokoroSourcePhaseSteps {
     # P_(k+1) = P_k + 300 inc_(k+1).
     $s.Add(@{Op='imm';d=11;i=300}); $s.Add(@{Op='mpy-d';d=10;s=8;t=11}); $s.Add(@{Op='add';d=9;s=9;t=10})
     $s.Add(@{Op='addi';d=1;s=1;i=-1}); $s.Add(@{Op='gtu';d=0;s=1;t=13}); $s.Add(@{Op='jump-p';u=0;Label=(& $lbl 'segment')})
+    }
     # Tail: 150 samples at P_(L-1).
+    if ($Part -in 'Whole','Tail') {
     $s.Add(@{Op='imm';d=15;i=75})
     $s.Add(@{Op='label';Name=(& $lbl 'tail')})
     $s.Add(@{Op='add';d=10;s=2;t=14}); $s.Add(@{Op='store';s=10;t=9;Offset=0})
     $s.Add(@{Op='add';d=10;s=3;t=14}); $s.Add(@{Op='store';s=10;t=9;Offset=0})
     $s.Add(@{Op='add';d=10;s=4;t=5}); $s.Add(@{Op='add';d=10;s=10;t=14}); $s.Add(@{Op='store';s=10;t=13;Offset=0})
     $s.Add(@{Op='addi';d=14;s=14;i=4}); $s.Add(@{Op='addi';d=15;s=15;i=-1}); $s.Add(@{Op='gtu';d=0;s=15;t=13}); $s.Add(@{Op='jump-p';u=0;Label=(& $lbl 'tail')})
+    }
     if (-not $NoReturn) { $s.Add(@{Op='return'}) }
     $s.ToArray()
 }
@@ -216,15 +226,18 @@ function Get-KokoroSourceNoise {
     , $out
 }
 
+# -Ends Front or Back pads one end only (a source computed in chunks pads its first chunk's front and its last chunk's back).
 function New-KokoroSourceReflectSteps {
-    param([string]$LabelPrefix='sourcereflect',[switch]$NoReturn)
+    param([string]$LabelPrefix='sourcereflect',[switch]$NoReturn,[ValidateSet('Both','Front','Back')][string]$Ends='Both')
     $s = [Collections.Generic.List[hashtable]]::new()
     $copy = { param([int]$fromReg,[int]$fromOff,[int]$toReg,[int]$toOff)
         $s.Add(@{Op='load-ub';d=10;s=$fromReg;Offset=$fromOff}); $s.Add(@{Op='load-ub';d=11;s=$fromReg;Offset=($fromOff+1)})
         $s.Add(@{Op='asl-i';d=11;s=11;i=8}); $s.Add(@{Op='or';d=10;s=10;t=11}); $s.Add(@{Op='store-h';s=$toReg;t=10;Offset=$toOff}) }
-    for ($k = 1; $k -le 10; $k++) { & $copy 0 (2 * (64 + $k)) 0 (2 * (64 - $k)) }
-    $s.Add(@{Op='add';d=2;s=1;t=1}); $s.Add(@{Op='add';d=2;s=2;t=0})        # r2 = buffer + 2 N
-    for ($k = 1; $k -le 10; $k++) { & $copy 2 (2 * (63 - $k)) 2 (2 * (63 + $k)) }
+    if ($Ends -ne 'Back') { for ($k = 1; $k -le 10; $k++) { & $copy 0 (2 * (64 + $k)) 0 (2 * (64 - $k)) } }
+    if ($Ends -ne 'Front') {
+        $s.Add(@{Op='add';d=2;s=1;t=1}); $s.Add(@{Op='add';d=2;s=2;t=0})    # r2 = buffer + 2 N
+        for ($k = 1; $k -le 10; $k++) { & $copy 2 (2 * (63 - $k)) 2 (2 * (63 + $k)) }
+    }
     if (-not $NoReturn) { $s.Add(@{Op='return'}) }
     $s.ToArray()
 }

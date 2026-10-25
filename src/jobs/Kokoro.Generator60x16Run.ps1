@@ -113,6 +113,9 @@ function New-KokoroGenerator60x16RunSteps {
         # workspace; each section's VTCM state is saved there after its steps and restored before its next ones, so VTCM
         # does not grow with the length.
         [ValidateRange(10,1280)][int]$SpanTiles=20,
+        # Depth-first with the source on the DSP: the harmonic source and its STFT run in chunks of this many har tiles (a
+        # multiple of 16), so their VTCM does not grow with the length.
+        [ValidateRange(16,4096)][int]$SourceChunkTiles=128,
         # Spans: the sections listed here take their supplied stream as the add's result Y (the section input) instead of
         # the source N added to U; the front still computes U (exported with -ExportFrontTensors).
         [int[]]$SuppliedSectionInputs=@(),
@@ -165,7 +168,8 @@ function New-KokoroGenerator60x16RunSteps {
         $upFramesWhole=[int](($Frames-1)/6); if(6*$upFramesWhole+1 -ne $Frames){throw 'Frames is not 6 m + 1'}
         $sections=@(@{Channels=256;Frames=$upFramesWhole;Front=$true;Tail=$false;Chained=$false;Suffix='_c256'},@{Channels=128;Frames=$Frames;Front=$true;Tail=$true;Chained=$true;Suffix='_c128'})
         if($Source){
-            $sourceFrames=$Frames; $sourceLayout=Get-KokoroHarmonicSource16Layout -Frames $sourceFrames
+            $chunkTilesOfSource=if($Schedule -ne 'Layer'){$SourceChunkTiles}else{0}
+            $sourceFrames=$Frames; $sourceLayout=Get-KokoroHarmonicSource16Layout -Frames $sourceFrames -ChunkTiles $chunkTilesOfSource
             $tiles60=$sourceLayout.Tiles; $tiles10=[int][math]::Ceiling(($upFramesWhole+1)/32)
             $har60At=0L; $harPmAt=[long]([math]::Ceiling(2L*$tiles60*4096/4096)*4096); $sourceDdrBytes=[long]([math]::Ceiling(($harPmAt+2L*$tiles10*16384)/4096)*4096)
             $sections[0].HarReg=25; $sections[0].HarAt=$harPmAt; $sections[1].HarReg=25; $sections[1].HarAt=$har60At
@@ -421,7 +425,8 @@ function New-KokoroGenerator60x16RunSteps {
         $totalInput+=$sourceLayout.InputBytes; $totalWeights+=$sourceLayout.WeightBytes; $totalParameters+=$sourceLayout.ParameterBytes
         # The phase-major gather uses VTCM from 0: both 60x har planes, then both phase-major planes.
         $gHi=0L; $gLo=[long]([math]::Ceiling($tiles60*4096/65536)*65536); $gPmHi=2*$gLo; $gPmLo=$gPmHi+[long]([math]::Ceiling($tiles10*16384/65536)*65536)
-        $vtcmTotal=[math]::Max($vtcmTotal,[math]::Max($sourceLayout.VtcmBytes,$gPmLo+$tiles10*16384L))
+        # Spans lay out the phase-major har in chunks of 8 slow tiles ($harLayoutChunks), not whole.
+        $vtcmTotal=[math]::Max($vtcmTotal,[math]::Max($sourceLayout.VtcmBytes,$(if($spanMode){4L*65536*[math]::Ceiling((6*8+1)*4096/65536.0)}else{$gPmLo+$tiles10*16384L})))
         if($Decoder){ $decInOff=$totalInput; $decWOff=$totalWeights; $decPOff=$totalParameters; $totalInput+=$decLayout.InputBytes; $totalWeights+=$decLayout.WeightBytes; $totalParameters+=$(if($DecoderMoments -eq 'Constants'){$decLayout.ConstantsParameterBytes}else{$decLayout.ParameterBytes}); $vtcmTotal=[math]::Max($vtcmTotal,$decLayout.VtcmBytes) }
     }
     $bind={param([int]$i) $q=$bases[$i]; . $configure $sections[$i] $q[0] $q[1] $q[2] $q[3]}
@@ -590,8 +595,10 @@ function New-KokoroGenerator60x16RunSteps {
                     $value=if($Moments -and $i -eq 1){$privateMoments[$k]}elseif($perTile[$i]){$off[$i]+$o*$tileBytes}else{$off[$i]}; & $ptr 0 18 $value
                     $s.Add(@{Op='store';s=6;t=0;Offset=(4*$i)})
                 }
-                & $imm 0 $c; $s.Add(@{Op='store';s=6;t=0;Offset=(4*$n)})
-                # Workers of a job with a chunked section take r5 from slot 56 last: a five-argument call's count goes there too.
+                # Offset 4 n is the count's slot below five arguments. At five it is the worker's report word (offset 20), which
+                # the join reads: workers of a job with a chunked section take the count from slot 56 instead, and a count stored
+                # at 20 could equal the pool sequence and end the join early. (Layer jobs keep their pinned emission.)
+                & $imm 0 $c; if(-not ($anyChunked -and $n -ge 5)){ $s.Add(@{Op='store';s=6;t=0;Offset=(4*$n)}) }
                 if($anyChunked -and $n -ge 5){ $s.Add(@{Op='store';s=6;t=0;Offset=56}) }
                 & $addr 0 $body; $s.Add(@{Op='store';s=6;t=0;Offset=44})
             }
@@ -826,14 +833,41 @@ function New-KokoroGenerator60x16RunSteps {
         & $mark 'Unmarked' -site 28; & $padRows ($offResidual+($tiles-1)*$tileBytes) 0x8000
         & $mark 'Unmarked' -site 29; & $sync; & $dma 25 $r0Slot 18 $offResidual $tensorBytes
     }
+    # The 10x front's phase-major har in chunks of slow tiles, so VTCM does not grow with the length (spans): each chunk
+    # loads the 60x har tiles its rows read (output row m' reads har rows 6 m' .. 6 m' + 5; the last also row 6 m' + 6),
+    # runs the same bodies with virtual base pointers (chunk buffer minus chunk start), and writes its tiles to the
+    # workspace. Complete output tiles are independent; the partial tile and the last row are done where they fall.
+    $harLayoutChunks={
+        $chunk=8; $phaseTileCount=[int][math]::Floor($upFramesWhole/32)
+        $al64={param([long]$v) [long]([math]::Ceiling($v/65536)*65536)}
+        $cHi=0L; $cLo=& $al64 ((6L*$chunk+1)*4096); $cPmHi=2*$cLo; $cPmLo=$cPmHi+(& $al64 ([long]$chunk*16384))
+        for($a=0;$a -lt $tiles10;$a+=$chunk){
+            $b=[math]::Min($tiles10,$a+$chunk); $srcFirst=6*$a; $srcEnd=[math]::Min($tiles60,6*$b+1); $n=$srcEnd-$srcFirst
+            & $dma 18 $cHi 25 ($har60At+$srcFirst*4096L) ($n*4096L); & $dma 18 $cLo 25 ($har60At+$tiles60*4096L+$srcFirst*4096L) ($n*4096L)
+            & $fillVectors $cPmHi (($b-$a)*128) 0x80008000L; & $fillVectors $cPmLo (($b-$a)*128) 0
+            & $sync
+            $vHi=$cHi-$srcFirst*4096L; $vLo=$cLo-$srcFirst*4096L; $vPmHi=$cPmHi-$a*16384L; $vPmLo=$cPmLo-$a*16384L
+            $full=[math]::Min($b,$phaseTileCount)-$a
+            if(-not $RuntimeFrames -and $full -gt 0){ & $parallel 'body_har_phase_major_tiles' @($vHi,$vLo,$cPmHi,$cPmLo,$vPmHi) @($false,$false,$true,$true,$false) $full }
+            if($upFramesWhole%32 -and $phaseTileCount -ge $a -and $phaseTileCount -lt $b){
+                & $imm 0 ($upFramesWhole%32); & $ptr 1 18 $vHi; & $ptr 2 18 $vLo; & $ptr 3 18 $vPmHi; & $ptr 4 18 $vPmLo; & $imm 5 (32*$phaseTileCount)
+                & $call 'body_har_phase_major'
+            }
+            if($b -eq $tiles10){ & $imm 0 1; & $ptr 1 18 $vHi; & $ptr 2 18 $vLo; & $ptr 3 18 $vPmHi; & $ptr 4 18 $vPmLo; & $imm 5 $upFramesWhole; & $call 'body_har_phase_major_last' }
+            & $sync
+            & $dma 25 ($harPmAt+$a*16384L) 18 $cPmHi (($b-$a)*16384L); & $dma 25 ($harPmAt+$tiles10*16384L+$a*16384L) 18 $cPmLo (($b-$a)*16384L)
+        }
+    }
     & $poolStart
     $stopped=$false
     if($Decoder){ & $mark 'Boundary' 'Decoder'; $decJob=Add-KokoroDecoder16JobSteps -Steps $s -Calls $calls -Frames $decIn -InputBase 20 -InputOffset $decInOff -WeightsBase 21 -WeightsOffset $decWOff -TablesBase 22 -TablesOffset $decPOff -OutputBase 25 -OutputOffset $decSlot -Moments $DecoderMoments; & $mark 'Decoder' 'Setup'; & $mark 'Unmarked' -site 30; & $sync }
     if($Source){
         & $mark 'Boundary' 'Source'
-        Add-KokoroHarmonicSource16JobSteps -Steps $s -Calls $calls -Frames $sourceFrames -InputBase 20 -InputOffset $sourceIn -WeightsBase 21 -WeightsOffset $sourceW -TablesBase 22 -TablesOffset $sourceP -HarBase 25 -HarOffset $har60At -SeededNoise:$SeededNoise
+        Add-KokoroHarmonicSource16JobSteps -Steps $s -Calls $calls -Frames $sourceFrames -InputBase 20 -InputOffset $sourceIn -WeightsBase 21 -WeightsOffset $sourceW -TablesBase 22 -TablesOffset $sourceP -HarBase 25 -HarOffset $har60At -SeededNoise:$SeededNoise -ChunkTiles $chunkTilesOfSource
         & $mark 'Source' 'HarLayout'
         & $mark 'Unmarked' -site 31; & $sync
+        if($spanMode){ . $harLayoutChunks }
+        else {
         & $dma 18 $gHi 25 $har60At ($tiles60*4096L); & $dma 18 $gLo 25 ($har60At+$tiles60*4096L) ($tiles60*4096L)
         & $fillVectors $gPmHi ($tiles10*128) 0x80008000L; & $fillVectors $gPmLo ($tiles10*128) 0
         & $mark 'Unmarked' -site 32; & $sync
@@ -850,6 +884,7 @@ function New-KokoroGenerator60x16RunSteps {
         & $call 'body_har_phase_major_last'
         & $mark 'Unmarked' -site 33; & $sync
         & $dma 25 $harPmAt 18 $gPmHi ($tiles10*16384L); & $dma 25 ($harPmAt+$tiles10*16384L) 18 $gPmLo ($tiles10*16384L)
+        }
         & $mark 'Unmarked' -site 34; & $sync
     }
     # Backward schedule (see -Schedule). A step moves a block of $batch tiles. A block operand is a constant block index
@@ -1630,7 +1665,7 @@ function New-KokoroGenerator60x16RunSteps {
     }
     if($Decoder){ foreach($pair in (Get-KokoroDecoder16Bodies -Job $decJob)){ $bodies.Add($pair) } }
     if($Source){
-        foreach($pair in (Get-KokoroHarmonicSource16Bodies -PlaneStride $sourceLayout.Stft.PlaneStride -SeededNoise:$SeededNoise)){ $bodies.Add($pair) }
+        foreach($pair in (Get-KokoroHarmonicSource16Bodies -PlaneStride $sourceLayout.Stft.PlaneStride -SeededNoise:$SeededNoise -Chunked:($chunkTilesOfSource -gt 0))){ $bodies.Add($pair) }
         $bodies.Add(@('body_har_phase_major',@(New-KokoroHarPhaseMajor16Steps -Phases 6)))
         $bodies.Add(@('body_har_phase_major_tiles',@(New-KokoroHarPhaseMajor16Steps -Phases 6 -TileBatch -LabelPrefix 'harphasemajor16tiles')))
         $bodies.Add(@('body_har_phase_major_last',@(New-KokoroHarPhaseMajor16Steps -Phases 1 -LabelPrefix 'harphasemajor16last')))
@@ -1704,6 +1739,8 @@ function New-KokoroGenerator60x16RunSteps {
     # Each section's tensors in the workspace: its input after the front (fronted sections) and its output.
     $resultLayout.Sections=@(for($i=0;$i -lt $sections.Count;$i++){ . $bind $i
         [pscustomobject]@{Section=$i;Channels=$Channels;Tiles=$tiles;Bytes=$tensorBytes;InputWorkspaceOffset=$(if($Front){$r0Slot}else{-1L});FinalWorkspaceOffset=$finalOffset;SourceOf=$(if($sec.Source){[int]$sec.Of}else{-1});Schedule=$sectionSchedule;StateBytes=$(if($spanMode -and $sectionSchedule -ne 'Layer'){[long]$stateBytes}else{0L})} })
+    # The har tensors in the workspace: the 60x planes and the 10x front's phase-major planes.
+    if($Source){ $resultLayout.Har=[pscustomobject]@{SixtyOffset=$har60At;SixtyBytes=2L*$tiles60*4096;PhaseMajorOffset=$harPmAt;PhaseMajorBytes=2L*$tiles10*16384} }
     if($Source){ $resultLayout.SourceNoise=[pscustomobject]@{InputOffset=$sourceIn+$sourceLayout.F0Bytes;Bytes=$sourceLayout.HalfwordBytes;Seeded=$SeededNoise.IsPresent} }
     if($ControllerContact){ $resultLayout.ControllerContact=[pscustomobject]@{Offset=$contactOffset;SensitivityBytesPerStage=8L*$Channels;ControllerOffset=$contactOffset+18L*8*$Channels;ControllerBytes=$controllerBytes;Tiles=$tiles} }
     if($PmuEvents){$resultLayout.PmuProfile=[pscustomobject]@{Categories=$pmuCategories;SiteRecordOffset=$pmuSiteOffset;SiteRecordCount=$pmuSiteRecordCount;Sites=$pmuSites}}

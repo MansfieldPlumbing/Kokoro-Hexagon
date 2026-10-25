@@ -12,7 +12,7 @@
 # (tiles * 4096 B each).
 
 function Get-KokoroHarmonicStft16Layout {
-    param([ValidateRange(2,32768)][int]$Frames=7801,[ValidateRange(2,64)][int]$BatchTiles=16)
+    param([ValidateRange(2,1048576)][int]$Frames=7801,[ValidateRange(2,64)][int]$BatchTiles=16)
     if ($BatchTiles % 2) { throw 'Window preparation works on tile pairs: use an even batch' }
     $tiles=[int][math]::Ceiling($Frames/32); $pairs=[int][math]::Ceiling($tiles/2)
     # Signal buffer (Kokoro.StftWindow16.ps1): sample j at halfword 64 + j; the last pair reads 896 bytes from its start.
@@ -34,18 +34,24 @@ function Get-KokoroHarmonicStft16Layout {
 # HarOffset (high) and + tiles * 4096 (low). Uses r0..r15 only; the caller provides r18 and r24 (DMA descriptor slots).
 function Add-KokoroHarmonicStft16JobSteps {
     param([Parameter(Mandatory)][AllowEmptyCollection()][Collections.Generic.List[hashtable]]$Steps,[Parameter(Mandatory)][AllowEmptyCollection()][Collections.Generic.List[object]]$Calls,
-        [ValidateRange(2,32768)][int]$Frames=7801,[ValidateRange(2,64)][int]$BatchTiles=16,
+        [ValidateRange(2,1048576)][int]$Frames=7801,[ValidateRange(2,64)][int]$BatchTiles=16,
         [int]$InputBase=20,[long]$InputOffset=0,[int]$WeightsBase=21,[long]$WeightsOffset=0,[int]$TablesBase=22,[long]$TablesOffset=0,
         [int]$HarBase=23,[long]$HarOffset=256,
         # The signal buffer is already in VTCM (Kokoro.HarmonicSource16Run.ps1 writes it): no signal DMA.
-        [switch]$SignalInVtcm)
+        [switch]$SignalInVtcm,
+        # A source computed in chunks: -Setup Only (weights, tables, har fills) once, then -Setup Skip per chunk for the
+        # batches from -FirstTile to -EndTile, with -SignalOffset the VTCM offset where halfword 0 of the whole signal
+        # would be (the chunk's buffer minus its first halfword; may be negative). -Regions places the VTCM buffers.
+        [ValidateSet('Include','Only','Skip')][string]$Setup='Include',[int]$FirstTile=0,[int]$EndTile=-1,[Nullable[long]]$SignalOffset=$null,
+        [Collections.IDictionary]$Regions=$null)
     $layout=Get-KokoroHarmonicStft16Layout -Frames $Frames -BatchTiles $BatchTiles
-    $tiles=$layout.Tiles; $batch=$BatchTiles; $reg=$layout.Regions
+    $tiles=$layout.Tiles; $batch=$BatchTiles; $reg=if($Regions){$Regions}else{$layout.Regions}
+    $signalAt=if($null -ne $SignalOffset){[long]$SignalOffset}else{[long]$reg.Signal.Offset}; $endAt=if($EndTile -ge 0){$EndTile}else{$tiles}
     $s=$Steps; $calls=$Calls
     $imm={param([int]$r,[long]$v) $u=[long]([uint32]($v -band 0xffffffffL));$s.Add(@{Op='lo';x=$r;i=($u -band 65535)});$s.Add(@{Op='hi';x=$r;i=($u -shr 16)})}
     $ptr={param([int]$r,[int]$baseReg,[long]$offset) $offsetReg=if($r -eq $baseReg){15}else{$r}; & $imm $offsetReg $offset;$s.Add(@{Op='add';d=$r;s=$baseReg;t=$offsetReg}) }
     $call={param([string]$label) $pc=@{Op='add-pc';d=14;i=0};$lo=@{Op='lo';x=15;i=0};$hi=@{Op='hi';x=15;i=0};$s.Add($pc);$s.Add($lo);$s.Add($hi);$s.Add(@{Op='add';d=14;s=14;t=15});$s.Add(@{Op='callr';s=14});$calls.Add(@{pc=$pc;low=$lo;high=$hi;label=$label})}
-    $script:__h16=0
+    if($Setup -ne 'Skip'){ $script:__h16=0 }
     $label={ $script:__h16++; "h16_$($script:__h16)" }
     $dma={param([int]$destBase,[long]$destOff,[int]$srcBase,[long]$srcOff,[long]$length)
         if($length -lt 2 -or $length -ge 2*16777215){throw 'DMA length out of range'}
@@ -66,15 +72,19 @@ function Add-KokoroHarmonicStft16JobSteps {
             $s.Add(@{Op='label';Name=$n});$s.Add(@{Op='load';d=0;s=4;Offset=0});$s.Add(@{Op='and';d=0;s=0;t=6});$s.Add(@{Op='or';d=0;s=0;t=8});$s.Add(@{Op='store';s=4;t=0;Offset=0});$s.Add(@{Op='addi';d=4;s=4;i=4});$s.Add(@{Op='addi';d=5;s=5;i=-1});$s.Add(@{Op='gtu';d=0;s=5;t=7});$s.Add(@{Op='jump-p';u=0;Label=$n})
         }
     }
+    if($Setup -ne 'Skip'){
     if(-not $SignalInVtcm){ & $dma 18 $reg.Signal.Offset $InputBase $InputOffset $layout.SignalBytes }
     & $dma 18 $reg.Weights.Offset $WeightsBase $WeightsOffset 24576
     & $dma 18 $reg.Tables.Offset $TablesBase $TablesOffset 16384
     # har block 1 (channels 32..63) stays zero; block 0 is rewritten per batch.
     & $fill $reg.HarHigh.Offset ($batch*32) 0x80008000L; & $fill $reg.HarLow.Offset ($batch*32) 0
     $s.Add(@{Op='syncht'})
-    for($startTile=0;$startTile -lt $tiles;$startTile+=$batch){
-        $count=[math]::Min($batch,$tiles-$startTile)
-        & $ptr 0 18 ($reg.Signal.Offset+320L*$startTile); & $ptr 1 18 ($reg.Window.Offset+4096); & $ptr 2 18 ($reg.WindowLow.Offset+4096); & $imm 3 ([math]::Ceiling($count/2))
+    }
+    if($Setup -eq 'Only'){ return }
+    if($FirstTile%$batch){ throw 'A chunk starts on a batch boundary' }
+    for($startTile=$FirstTile;$startTile -lt $endAt;$startTile+=$batch){
+        $count=[math]::Min($batch,$endAt-$startTile)
+        & $ptr 0 18 ($signalAt+320L*$startTile); & $ptr 1 18 ($reg.Window.Offset+4096); & $ptr 2 18 ($reg.WindowLow.Offset+4096); & $imm 3 ([math]::Ceiling($count/2))
         & $call 'body_stft_window'
         $s.Add(@{Op='syncht'})
         & $ptr 0 18 ($reg.Window.Offset+4096); & $ptr 1 18 ($reg.WindowLow.Offset+4096); & $ptr 2 18 $reg.Weights.Offset; & $ptr 3 18 $reg.Tables.Offset; & $imm 4 $count; & $ptr 5 18 $reg.Planes.Offset
@@ -85,7 +95,7 @@ function Add-KokoroHarmonicStft16JobSteps {
         $s.Add(@{Op='syncht'})
         & $ptr 0 18 $reg.Spectrum.Offset; & $ptr 1 18 $reg.HarHigh.Offset; & $ptr 2 18 $reg.HarLow.Offset; & $ptr 3 18 ($reg.Tables.Offset+8192); & $imm 4 $count
         & $call 'body_stft_polar'
-        if($startTile+$count -eq $tiles){ & $padRows ($reg.HarHigh.Offset+($count-1)*4096L) 0x8000; & $padRows ($reg.HarLow.Offset+($count-1)*4096L) 0 }
+        if($startTile+$count -eq $tiles -and $endAt -eq $tiles){ & $padRows ($reg.HarHigh.Offset+($count-1)*4096L) 0x8000; & $padRows ($reg.HarLow.Offset+($count-1)*4096L) 0 }
         $s.Add(@{Op='syncht'})
         & $dma $HarBase ($HarOffset+4096L*$startTile) 18 $reg.HarHigh.Offset (4096L*$count)
         & $dma $HarBase ($HarOffset+4096L*$tiles+4096L*$startTile) 18 $reg.HarLow.Offset (4096L*$count)
@@ -102,7 +112,7 @@ function Get-KokoroHarmonicStft16Bodies {
 }
 
 function New-KokoroHarmonicStft16RunSteps {
-    param([ValidateRange(2,32768)][int]$Frames=7801,[ValidateRange(2,64)][int]$BatchTiles=16)
+    param([ValidateRange(2,1048576)][int]$Frames=7801,[ValidateRange(2,64)][int]$BatchTiles=16)
     . (Join-Path $PSScriptRoot 'Kokoro.ResBlockRun.ps1')
     foreach($file in '../kernels/Kokoro.HmxConvPlanes.ps1','../kernels/Kokoro.PlaneCombine.ps1','../kernels/Kokoro.StftWindow16.ps1','../kernels/Kokoro.StftPolar16.ps1','../hexagon/Kokoro.DmaCopy.ps1') { . (Join-Path $PSScriptRoot $file) }
     $layout=Get-KokoroHarmonicStft16Layout -Frames $Frames -BatchTiles $BatchTiles

@@ -39,6 +39,7 @@ reference: given the same integer weights and inputs, the depth-first job must p
 |---|---:|---|
 | Generator with its source on the DSP, from x and F0 to PCM, 1.625 s of speech | **61.75 ms, 26.3× real time**; PCM byte-identical to the layer reference | [source on the DSP](docs/results/generator-source-on-dsp-sm8550-20261024.md) |
 | The same job's source part (harmonic source, STFT, `noise_convs`, `noise_res`) | about 23.2 ms of the 61.75 ms | same |
+| Generator with its source on the DSP, 11.375 s of speech in 15 spans | 358.70 ms, 31.7× real time, 7.6 MB VTCM; identical across span sizes | [source in chunks](docs/results/generator-source-chunked-sm8550-20261024.md) |
 | Generator sections and tail with the source supplied, 24.4 s of speech in 31 spans | 438.13 ms, 1.11 MB library, 7.6 MB VTCM | [span loop](docs/results/generator-span-loop-sm8550-20261023.md) |
 | Stock decoder, harmonic source and generator, layer by layer, one dispatch, 2.125 s of speech | 113.6 ms, 18.7× real time | [phase-major pool](docs/results/generator16-phase-major-pool-sm8550-20261012.md) |
 | Phonemizer on the phone, warm median per sentence | 57.8 µs (challenge set), 96.6 µs (held out) | [phonemizer](docs/results/phonemizer-polish-sm8550-20261008.md) |
@@ -51,9 +52,9 @@ text processing and the Student are not included.
 | | |
 |---|---|
 | Depth-first generator, both sections, joints, tail, any length up to 1,048,576 frames (source supplied) | Measured; byte-identical to the layer reference |
-| Source branches on the DSP, connected to the depth-first generator | Measured; byte-identical; limited to about 2 s because the harmonic source and the `har` layouts still run over the whole input |
+| Source branches on the DSP, connected to the depth-first generator, at any length | Measured; byte-identical; the harmonic source, STFT and `har` layouts run in chunks ([record](docs/results/generator-source-chunked-sm8550-20261024.md)) |
 | A source without `noise_convs` and `noise_res` (gain and offset on the upsampled signal) | Measured and rejected: about 0 dB PCM SNR against the layer reference ([record](docs/results/generator-source-boundary-sm8550-20261024.md)) |
-| The harmonic source in spans; weight DMA overlapped with computation; the 128-channel source on the resident schedule | Next |
+| A runtime loop over uniform source chunks; weight DMA overlapped with computation; the 128-channel source on the resident schedule | Next |
 | Student producing x, F0 and the controller stream from unseen text | In progress |
 | Phonemizer, Student and generator together on the phone, streaming PCM to AAudio | Not yet built |
 | Time to first audio, end to end | Not yet measured |
