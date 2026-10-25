@@ -3172,7 +3172,8 @@ function Get-StudentPhoneOccurrences($Windows) {
             }
             # Phrase context: the punctuation that ends this phone's phrase, and its place between phrase boundaries.
             $into = 0; for ($j = $i - 1; $j -ge 0 -and -not $script:StudentPhraseMarks.Contains([string]$phonemes[$j]); $j--) { $into++ }
-            $toEnd = 0; $boundary = '$'; for ($j = $i + 1; $j -lt $n; $j++) { if ($script:StudentPhraseMarks.Contains([string]$phonemes[$j])) { $boundary = [string]$phonemes[$j]; break }; $toEnd++ }
+            $toEnd = 0; $boundary = '$'; $wordsAfter = 0; for ($j = $i + 1; $j -lt $n; $j++) { if ($script:StudentPhraseMarks.Contains([string]$phonemes[$j])) { $boundary = [string]$phonemes[$j]; break }; if ($phonemes[$j] -eq ' ') { $wordsAfter++ }; $toEnd++ }
+            $wordsBefore = 0; for ($j = $i - 1; $j -ge 0 -and -not $script:StudentPhraseMarks.Contains([string]$phonemes[$j]); $j--) { if ($phonemes[$j] -eq ' ') { $wordsBefore++ } }
             $identity = if ($null -eq $word) { "$($window.Index):$symbol" } else { "$($word.Book):$($word.FirstToken):$offset" }
             $phone = [pscustomobject]@{ PSTypeName = 'Kokoro.StudentPhoneOccurrence'; Identity = $identity; Window = $window; Index = $i; Symbol = $symbol
                 Stressed = $stressed; Vowel = $script:StudentVowels.Contains($symbol); Word = $word; Offset = $offset
@@ -3180,7 +3181,8 @@ function Get-StudentPhoneOccurrences($Windows) {
                 Previous = $(if ($i -le 0) { '^' } else { [string]$phonemes[$i - 1] }); Next = $(if ($i + 1 -ge $n) { '$' } else { [string]$phonemes[$i + 1] })
                 FirstTick = 2 * $frameStart[$i + 1]; Ticks = 2 * $evidence.Durations[$i + 1]
                 Margin = [Math]::Min($i + 1, $n - $i); HeldOut = $false; Development = $false; Used = $true; Type = -1
-                Boundary = $boundary; IntoPhrase = $into; ToBoundary = $toEnd }
+                Boundary = $boundary; IntoPhrase = $into; ToBoundary = $toEnd
+                WordsToBoundary = [Math]::Max(0, $wordsAfter - $(if ($boundary -ceq '$') { 0 } else { 1 })); PhraseInitialWord = $wordsBefore -eq 0 }
             if ($null -ne $word) {
                 $block = [int][Math]::Floor($word.FirstToken / 64) % 8
                 $phone.HeldOut = $block -eq 7; $phone.Development = $block -eq 6
@@ -3203,6 +3205,8 @@ function Get-StudentTypeName($Phone, [bool] $SplitStress) {
 
 # Controls approach their per-tick targets by this fraction per tick (pitch within a voiced run, energy throughout).
 $script:StudentControlResponse = 0.5
+# Pitch moves more slowly than energy, so word and phone joins stay smooth.
+$script:StudentPitchResponse = 0.25
 # Phrasing reach: declination is linear in phones into the phrase up to StudentPhraseReach; the final pitch movement
 # covers the last StudentFinalReach phones before a boundary.
 $script:StudentPhraseReach = 80
@@ -3237,6 +3241,24 @@ function Add-StudentPhrasingRules($Rules, [object[]] $Training) {
         for ($t = $phone.FirstTick; $t -lt $phone.FirstTick + $phone.Ticks; $t++) { if ($f0[$t] -ge $script:StudentPitchedHz) { $finalSum[$phone.Boundary] = [double]$finalSum[$phone.Boundary] + [Math]::Log($f0[$t]) - $target.LogHz; $finalCount[$phone.Boundary] = [int]$finalCount[$phone.Boundary] + 1 } }
     }
     foreach ($key in $finalCount.Keys) { if ($finalCount[$key] -ge 20) { $Rules.FinalPitch[$key] = $finalSum[$key] / $finalCount[$key] } }
+    # Accent: each training word's mean pitch residual against the rules so far, by word class (how common its phonemes
+    # are), place in the phrase and whether it carries primary stress.
+    foreach ($phone in $Training) { if ($phone.Offset -eq 0) { $Rules.WordCounts[$phone.Word.Phonemes] = [int]$Rules.WordCounts[$phone.Word.Phonemes] + 1 } }
+    $accentSum = @{}; $accentCount = @{}
+    foreach ($phone in $Training) {
+        if ($phone.Offset -lt 0) { continue }
+        $cell = Get-StudentAccentCell $Rules $phone; $f0 = $phone.Window.Evidence.F0; $target = $Rules.Targets($phone)
+        for ($t = $phone.FirstTick; $t -lt $phone.FirstTick + $phone.Ticks; $t++) { if ($f0[$t] -ge $script:StudentPitchedHz) { $accentSum[$cell] = [double]$accentSum[$cell] + [Math]::Log($f0[$t]) - $target.LogHz; $accentCount[$cell] = [int]$accentCount[$cell] + 1 } }
+    }
+    foreach ($key in $accentCount.Keys) { if ($accentCount[$key] -ge 40) { $Rules.Accent[$key] = $accentSum[$key] / $accentCount[$key] } }
+}
+
+function Get-StudentAccentCell($Rules, $Phone) {
+    $count = [int]$Rules.WordCounts[$Phone.Word.Phonemes]
+    $class = if ($count -gt 200) { 'common' } elseif ($count -gt 20) { 'frequent' } elseif ($count -gt 2) { 'known' } else { 'rare' }
+    $place = if ($Phone.WordsToBoundary -eq 0) { 'last' } elseif ($Phone.WordsToBoundary -eq 1) { 'penultimate' } elseif ($Phone.PhraseInitialWord) { 'initial' } else { 'medial' }
+    $stress = if ($Phone.Word.Phonemes.Contains('ˈ')) { 'stressed' } else { 'unstressed' }
+    "$class|$place|$stress|$($Phone.Boundary)"
 }
 
 function New-StudentProsodyRules([object[]] $Training, [bool] $SplitStress, [bool] $TypePitch, [bool] $Phrasing = $false) {
@@ -3260,7 +3282,7 @@ function New-StudentProsodyRules([object[]] $Training, [bool] $SplitStress, [boo
     $rules = [pscustomobject]@{ PSTypeName = 'Kokoro.StudentProsodyRules'; SplitStress = $SplitStress; TypePitch = $TypePitch
         Duration = @{}; Voiced = @{}; Pitch = @{}; Energy = @{}; MeanDuration = $allDuration / $Training.Count; VoiceLogHz = $voiceLog; MeanEnergy = $allEnergy / $allTicks
         WordFinal = 0.0; Stressed = 0.0; StressedPitch = 0.0
-        Phrasing = $false; FinalDuration = @{}; DeclinationLevel = 0.0; DeclinationSlope = 0.0; FinalPitch = @{} }
+        Phrasing = $false; FinalDuration = @{}; DeclinationLevel = 0.0; DeclinationSlope = 0.0; FinalPitch = @{}; WordCounts = @{}; Accent = @{} }
     foreach ($name in $durationCount.Keys) {
         $rules.Duration[$name] = $durationSum[$name] / $durationCount[$name]
         $rules.Voiced[$name] = [int]$voiced[$name] / [Math]::Max(1, [int]$ticks[$name])
@@ -3294,6 +3316,7 @@ function New-StudentProsodyRules([object[]] $Training, [bool] $SplitStress, [boo
         if ($this.Phrasing) {
             $logHz += $this.DeclinationLevel + $this.DeclinationSlope * [Math]::Min($Phone.IntoPhrase, $script:StudentPhraseReach)
             if ($Phone.ToBoundary -le $script:StudentFinalReach -and $this.FinalPitch.ContainsKey($Phone.Boundary)) { $logHz += $this.FinalPitch[$Phone.Boundary] }
+            if ($null -ne $Phone.Word -and $Phone.Offset -ge 0) { $cell = Get-StudentAccentCell $this $Phone; if ($this.Accent.ContainsKey($cell)) { $logHz += $this.Accent[$cell] } }
         }
         [pscustomobject]@{ Voiced = $known -and [double]$this.Voiced[$name] -ge 0.5; LogHz = $logHz
             Energy = $(if ($known) { [double]$this.Energy[$name] } else { $this.MeanEnergy }) } }
@@ -3395,7 +3418,7 @@ function Measure-StudentReplay($Rules, $Library, [object[]] $PhoneList) {
         $agree = 0; $pitchSquares = 0.0; $pitchTicks = 0; $energySquares = 0.0
         for ($t = $phone.FirstTick; $t -lt $phone.FirstTick + $phone.Ticks; $t++) {
             $logHz = $target.LogHz; $e = $target.Energy
-            if ($null -ne $entry) { $logHz += Get-StudentReplayResidual $entry $phone $t $wordFirst $wordTicks 'Pitch'; $e += Get-StudentReplayResidual $entry $phone $t $wordFirst $wordTicks 'Energy' }
+            if ($null -ne $entry) { if ($entry.Pitch) { $logHz += Get-StudentReplayResidual $entry $phone $t $wordFirst $wordTicks 'Pitch' }; $e += Get-StudentReplayResidual $entry $phone $t $wordFirst $wordTicks 'Energy' }
             $voiced = if ($null -ne $entry) { (Get-StudentReplayResidual $entry $phone $t $wordFirst $wordTicks 'Voicing') -ge 0.5 } else { $target.Voiced }
             if (($f0[$t] -gt $script:StudentVoicedHz) -eq $voiced) { $agree++ }
             if ($f0[$t] -ge $script:StudentPitchedHz -and $voiced) { $d = 20 * ($logHz - [Math]::Log($f0[$t])) / [Math]::Log(10); $pitchSquares += $d * $d; $pitchTicks++; $spread.Pitch[0].Add([Math]::Log($f0[$t])); $spread.Pitch[1].Add($logHz) }
@@ -3476,7 +3499,8 @@ function Get-StudentReplayPlan($Library, [object[]] $PhoneList) {
         $level = $match.Key.Split(':')[0] + ':' + ($match.Key.Split('|').Count); $used[$level] = [int]$used[$level] + 1
         $same = $match.Recording.Phonemes -ceq $phones[0].Word.Phonemes
         for ($o = 0; $o -lt $phones.Count; $o++) {
-            $plan[$phones[$o]] = [pscustomobject]@{ Recording = $match.Recording; Word = $phones; Ratio = $(if ($same) { $match.Recording.DurationRatios[$o] } else { $match.Recording.WordRatio }) }
+            # Pitch movement transfers only from the same word in the same phrase place; accent elsewhere is the rules'.
+            $plan[$phones[$o]] = [pscustomobject]@{ Recording = $match.Recording; Word = $phones; Ratio = $(if ($same) { $match.Recording.DurationRatios[$o] } else { $match.Recording.WordRatio }); Pitch = $match.Key.StartsWith('w:') -and $match.Key.Split('|').Count -eq 3 }
         }
     }
     [pscustomobject]@{ Phone = $plan; Keys = $used }
@@ -3510,11 +3534,11 @@ function New-StudentProsodyStream($Rules, [object[]] $PhoneList, $Library = $nul
         if ($null -ne $entry) { $wordFirst = $first[$entry.Word[0]]; $last = $entry.Word[-1]; $wordTicks = $first[$last] + 2 * $durations[[Array]::IndexOf($PhoneList, $last)] - $wordFirst }
         for ($t = 0; $t -lt 2 * $durations[$o]; $t++) {
             $energyTarget = $target.Energy; $pitchTarget = $target.LogHz
-            if ($null -ne $entry) { $energyTarget += Get-StudentReplayResidual $entry $phone $at $wordFirst $wordTicks 'Energy'; $pitchTarget += Get-StudentReplayResidual $entry $phone $at $wordFirst $wordTicks 'Pitch' }
+            if ($null -ne $entry) { $energyTarget += Get-StudentReplayResidual $entry $phone $at $wordFirst $wordTicks 'Energy'; if ($entry.Pitch) { $pitchTarget += Get-StudentReplayResidual $entry $phone $at $wordFirst $wordTicks 'Pitch' } }
             $level = if ([double]::IsNaN($level)) { $energyTarget } else { $level + $script:StudentControlResponse * ($energyTarget - $level) }
             $energy[$at] = [float]$level
             $voiced = if ($null -ne $entry) { (Get-StudentReplayResidual $entry $phone $at $wordFirst $wordTicks 'Voicing') -ge 0.5 } else { $target.Voiced }
-            if ($voiced) { $pitch = if ([double]::IsNaN($pitch)) { $pitchTarget } else { $pitch + $script:StudentControlResponse * ($pitchTarget - $pitch) }; $f0[$at] = [float][Math]::Exp($pitch) }
+            if ($voiced) { $pitch = if ([double]::IsNaN($pitch)) { $pitchTarget } else { $pitch + $script:StudentPitchResponse * ($pitchTarget - $pitch) }; $f0[$at] = [float][Math]::Exp($pitch) }
             else { $pitch = [double]::NaN }
             $at++
         }
@@ -3610,6 +3634,8 @@ function Invoke-StudentAblation {
                 PcmSnrDb = $(if ($speech.Pcm.Length -eq $stock.Pcm.Length) { Get-StudentAblationSnr $stock.Pcm $speech.Pcm } else { $null }); Wave = $wave })
         }
         $stockWave = Join-Path $out 'stock.wav'; [IO.File]::WriteAllBytes($stockWave, (ConvertTo-StudentWave $stock.Pcm))
+        Export-Clixml -LiteralPath (Join-Path $out 'controls.clixml') -InputObject ([pscustomobject]@{ Phonemes = $phonemes; StockDurations = [int[]]$stock.Durations
+            StockF0 = [float[]]$stock.F0; StockN = [float[]]$stock.N; StudentF0OnStock = $onStock.F0; StudentNOnStock = $onStock.N })
     }
     finally { Remove-Module -ModuleInfo $syllabus -Force }
     [pscustomobject]@{ PSTypeName = 'Kokoro.StudentAblation'; Text = $Text; Phonemes = $phonemes; Renders = $rows.ToArray(); StockWave = $stockWave; Directory = $out }
