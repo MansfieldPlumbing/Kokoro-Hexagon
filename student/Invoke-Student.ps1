@@ -3217,6 +3217,12 @@ function Test-StudentPhraseFinalWord($Phone) {
     $null -ne $Phone.Word -and $Phone.Boundary -cne '$' -and $Phone.ToBoundary - ($Phone.Word.Phonemes.Length - 1 - $Phone.Offset) -le 1
 }
 
+function Get-StudentFinalDurationKey($Phone) {
+    # Phrase-final lengthening by boundary, vowel class and whether the phone ends the word (Kokoro's alignment puts
+    # the time before a boundary into the word's last phone).
+    "$($Phone.Boundary)|$($Phone.Vowel)|$($Phone.Offset -eq $Phone.Word.Phonemes.Length - 1)"
+}
+
 function Add-StudentPhrasingRules($Rules, [object[]] $Training) {
     # Phrasing, fitted to what the type rules leave: lengthening of the phrase-final word by boundary and vowel class,
     # pitch declination (level and slope in phones into the phrase, capped at StudentPhraseReach), and the pitch of the
@@ -3225,7 +3231,7 @@ function Add-StudentPhrasingRules($Rules, [object[]] $Training) {
     $sx = 0.0; $sy = 0.0; $sxx = 0.0; $sxy = 0.0; $n = 0
     foreach ($phone in $Training) {
         if (Test-StudentPhraseFinalWord $phone) {
-            $key = "$($phone.Boundary)|$($phone.Vowel)"; $residual = [Math]::Log($phone.Ticks / 2 + 1) - $Rules.BaseLogFrames($phone)
+            $key = Get-StudentFinalDurationKey $phone; $residual = [Math]::Log($phone.Ticks / 2 + 1) - $Rules.BaseLogFrames($phone)
             $durationSum[$key] = [double]$durationSum[$key] + $residual; $durationCount[$key] = [int]$durationCount[$key] + 1
         }
         $f0 = $phone.Window.Evidence.F0; $target = $Rules.Targets($phone); $x = [double][Math]::Min($phone.IntoPhrase, $script:StudentPhraseReach)
@@ -3306,7 +3312,7 @@ function New-StudentProsodyRules([object[]] $Training, [bool] $SplitStress, [boo
         $d }
     $rules | Add-Member -MemberType ScriptMethod -Name Frames -Value { param($Phone)
         $d = $this.BaseLogFrames($Phone)
-        if ($this.Phrasing -and (Test-StudentPhraseFinalWord $Phone)) { $key = "$($Phone.Boundary)|$($Phone.Vowel)"; if ($this.FinalDuration.ContainsKey($key)) { $d += $this.FinalDuration[$key] } }
+        if ($this.Phrasing -and (Test-StudentPhraseFinalWord $Phone)) { $key = Get-StudentFinalDurationKey $Phone; if ($this.FinalDuration.ContainsKey($key)) { $d += $this.FinalDuration[$key] } }
         [Math]::Max(0, [int][Math]::Round([Math]::Exp($d) - 1)) }
     $rules | Add-Member -MemberType ScriptMethod -Name Targets -Value { param($Phone)
         # Per-tick targets of one occurrence: voiced, log f0 and energy.
@@ -3625,7 +3631,8 @@ function Invoke-StudentAblation {
             B = @([int[]]$stock.Durations, $onStock.F0, [float[]]$stock.N, 'stock durations and N, Student f0')
             C = @([int[]]$stock.Durations, [float[]]$stock.F0, $onStock.N, 'stock durations and f0, Student N')
             D = @([int[]]$stock.Durations, $onStock.F0, $onStock.N, 'stock durations, Student f0 and N')
-            E = @($own.Durations, $own.F0, $own.N, 'Student durations, f0 and N') }
+            E = @($own.Durations, $own.F0, $own.N, 'Student durations, f0 and N')
+            F = @($own.Durations, (Get-StudentWarpedCurve ([float[]]$stock.F0) ([int[]]$stock.Durations) $own.Durations), (Get-StudentWarpedCurve ([float[]]$stock.N) ([int[]]$stock.Durations) $own.Durations), 'Student durations, stock f0 and N warped onto them') }
         foreach ($name in $plan.Keys) {
             $entry = $plan[$name]
             $speech = Invoke-OfflineSpeech -Phonemes $phonemes -Voice $Voice -SuppliedDurations $entry[0] -SuppliedF0 $entry[1] -SuppliedN $entry[2]
@@ -3639,6 +3646,18 @@ function Invoke-StudentAblation {
     }
     finally { Remove-Module -ModuleInfo $syllabus -Force }
     [pscustomobject]@{ PSTypeName = 'Kokoro.StudentAblation'; Text = $Text; Phonemes = $phonemes; Renders = $rows.ToArray(); StockWave = $stockWave; Directory = $out }
+}
+
+function Get-StudentWarpedCurve([float[]] $Curve, [int[]] $FromDurations, [int[]] $ToDurations) {
+    # A per-tick curve on one set of phone durations resampled phone by phone onto another (two ticks per frame).
+    $total = 0; foreach ($d in $ToDurations) { $total += 2 * $d }
+    $out = [float[]]::new($total); $from = 0; $to = 0
+    for ($o = 0; $o -lt $ToDurations.Length; $o++) {
+        $a = 2 * $FromDurations[$o]; $b = 2 * $ToDurations[$o]
+        for ($t = 0; $t -lt $b; $t++) { $out[$to + $t] = if ($a -gt 0) { $Curve[$from + [Math]::Min($a - 1, [int][Math]::Floor(($t + 0.5) * $a / $b))] } elseif ($from -gt 0) { $Curve[$from - 1] } else { $Curve[0] } }
+        $from += $a; $to += $b
+    }
+    , $out
 }
 
 function Get-StudentAblationSnr([float[]] $Reference, [float[]] $Candidate) {
