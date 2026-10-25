@@ -73,7 +73,7 @@ Run from a PowerShell prompt: pwsh -File passes every argument as a string, so a
 #requires -Version 7.7
 [CmdletBinding()]
 param(
-    [ValidateSet('Console', 'Render', 'Corpus', 'Pronunciation', 'Normalize', 'Syllabus', 'Recordings', 'Listen', 'Stems', 'Alignment', 'Percepts', 'Describe', 'Learn', 'Audit', 'Discriminate', 'Reconsider', 'Inventory', 'Speak')][string] $Step = 'Console',
+    [ValidateSet('Console', 'Render', 'Corpus', 'Pronunciation', 'Normalize', 'Syllabus', 'Recordings', 'Listen', 'Stems', 'Alignment', 'Percepts', 'Describe', 'Learn', 'Audit', 'Discriminate', 'Reconsider', 'Inventory', 'Speak', 'Ablate')][string] $Step = 'Console',
     [ValidateRange(2, 64)][int] $Threads = [Math]::Max(2, [Environment]::ProcessorCount),
     [string] $Text = '',
     [string] $Voice = 'af_heart',
@@ -3489,7 +3489,7 @@ function Get-StudentReplayResidual($Entry, [object] $Phone, [int] $Tick, [int] $
     $value = $curve[$at]; if ([double]::IsNaN($value)) { 0.0 } else { $value }
 }
 
-function New-StudentProsodyStream($Rules, [object[]] $PhoneList, $Library = $null) {
+function New-StudentProsodyStream($Rules, [object[]] $PhoneList, $Library = $null, [int[]] $FixedDurations = $null) {
     # The controls for phone occurrences in token order (pads included): durations in frames, and f0 and N on the tick
     # clock (two ticks per frame). Each phone's rule targets are adjusted by its word's control recording when one
     # matches (duration ratio, pitch and energy residuals by relative time in the word), then approached by
@@ -3499,6 +3499,7 @@ function New-StudentProsodyStream($Rules, [object[]] $PhoneList, $Library = $nul
     for ($o = 0; $o -lt $PhoneList.Count; $o++) {
         $d = $Rules.Frames($PhoneList[$o]); $entry = $replay.Phone[$PhoneList[$o]]
         if ($null -ne $entry) { $d = [Math]::Max(0, [int][Math]::Round($d * $entry.Ratio)) }
+        if ($null -ne $FixedDurations) { $d = $FixedDurations[$o] }
         $durations[$o] = $d; $first[$PhoneList[$o]] = 2 * $frames; $frames += $d
     }
     $ticks = 2 * $frames; $f0 = [float[]]::new($ticks); $energy = [float[]]::new($ticks)
@@ -3573,6 +3574,53 @@ function Invoke-StudentSpeakOnDsp($Inventory, [string] $Phonemes, $Stream, [stri
         HostTextEncoderSeconds = [Math]::Round($encoderSeconds, 2); VoiceBase = $basePath; Wave = $wave; Directory = $Out; MachineSHA256 = $script:StudentMachineSHA256 }
 }
 
+function Invoke-StudentAblation {
+    # Which control makes the Student's speech differ from stock: the same phonemes through the syllabus port's text
+    # encoder, decoder and generator with each control taken from stock Kokoro or the Student. The Student's f0 and N
+    # are computed on the stock durations where those are kept. A: all stock (checks the supplied-prosody path);
+    # B: Student f0; C: Student N; D: Student f0 and N; E: all Student.
+    if (-not $Text.Trim()) { throw 'Ablate needs -Text.' }
+    $out = Get-StudentOutputPath 'Ablate'
+    $inventory = Invoke-StudentInventory
+    $phonemize = Import-StudentPhonemizer
+    $pronunciation = $phonemize.Invoke($Text)
+    if (-not $pronunciation.Complete -or -not $pronunciation.KokoroPhones) { throw 'The phonemizer could not resolve -Text.' }
+    $phonemes = [string]$pronunciation.KokoroPhones
+    $words = [Collections.Generic.List[object]]::new(); $start = 0; $token = 0
+    foreach ($part in $phonemes.Split(' ')) { if ($part.Length) { $words.Add([pscustomobject]@{ Book = 'text'; FirstToken = $token; Kind = 'Word'; Phonemes = $part; Start = $start }); $token++ }; $start += $part.Length + 1 }
+    $window = [pscustomobject]@{ Index = -1; Ticks = 0; Occurrences = $words.ToArray(); Evidence = [pscustomobject]@{ Phonemes = $phonemes; Durations = [int[]]::new($phonemes.Length + 2) } }
+    $phones = @(Get-StudentPhoneOccurrences @($window))
+    $syllabus = Import-StudentSyllabus (Join-Path $out 'syllabus')
+    $rows = [Collections.Generic.List[object]]::new()
+    try {
+        $stock = Invoke-OfflineSpeech -Phonemes $phonemes -Voice $Voice
+        $onStock = New-StudentProsodyStream $inventory.Rules $phones $inventory.Recordings ([int[]]$stock.Durations)
+        $own = New-StudentProsodyStream $inventory.Rules $phones $inventory.Recordings
+        $plan = [ordered]@{
+            A = @([int[]]$stock.Durations, [float[]]$stock.F0, [float[]]$stock.N, 'stock durations, f0 and N')
+            B = @([int[]]$stock.Durations, $onStock.F0, [float[]]$stock.N, 'stock durations and N, Student f0')
+            C = @([int[]]$stock.Durations, [float[]]$stock.F0, $onStock.N, 'stock durations and f0, Student N')
+            D = @([int[]]$stock.Durations, $onStock.F0, $onStock.N, 'stock durations, Student f0 and N')
+            E = @($own.Durations, $own.F0, $own.N, 'Student durations, f0 and N') }
+        foreach ($name in $plan.Keys) {
+            $entry = $plan[$name]
+            $speech = Invoke-OfflineSpeech -Phonemes $phonemes -Voice $Voice -SuppliedDurations $entry[0] -SuppliedF0 $entry[1] -SuppliedN $entry[2]
+            $wave = Join-Path $out ('{0}.wav' -f $name); [IO.File]::WriteAllBytes($wave, (ConvertTo-StudentWave $speech.Pcm))
+            $rows.Add([pscustomobject]@{ PSTypeName = 'Kokoro.StudentAblationRender'; Render = $name; Controls = $entry[3]; Seconds = [Math]::Round($speech.Pcm.Length / 24000.0, 3)
+                PcmSnrDb = $(if ($speech.Pcm.Length -eq $stock.Pcm.Length) { Get-StudentAblationSnr $stock.Pcm $speech.Pcm } else { $null }); Wave = $wave })
+        }
+        $stockWave = Join-Path $out 'stock.wav'; [IO.File]::WriteAllBytes($stockWave, (ConvertTo-StudentWave $stock.Pcm))
+    }
+    finally { Remove-Module -ModuleInfo $syllabus -Force }
+    [pscustomobject]@{ PSTypeName = 'Kokoro.StudentAblation'; Text = $Text; Phonemes = $phonemes; Renders = $rows.ToArray(); StockWave = $stockWave; Directory = $out }
+}
+
+function Get-StudentAblationSnr([float[]] $Reference, [float[]] $Candidate) {
+    $signal = 0.0; $error_ = 0.0
+    for ($i = 0; $i -lt $Reference.Length; $i++) { $d = [double]$Reference[$i] - $Candidate[$i]; $signal += [double]$Reference[$i] * $Reference[$i]; $error_ += $d * $d }
+    if ($error_ -eq 0) { return [double]::PositiveInfinity }; [Math]::Round(10 * [Math]::Log10($signal / $error_), 2)
+}
+
 function Invoke-StudentSpeak {
     # Text through our phonemizer and the Student's prosody rules into the syllabus port's text encoder, decoder and
     # generator (-SuppliedDurations, -SuppliedF0, -SuppliedN: PL-BERT and the predictor do not run), and the same
@@ -3631,6 +3679,7 @@ $script:StudentSteps = [ordered]@{
     Reconsider = { $image = Invoke-StudentPercepts; $image.Reconsider() }
     Inventory = { Invoke-StudentInventory }
     Speak = { Invoke-StudentSpeak }
+    Ablate = { Invoke-StudentAblation }
 }
 }
 & $studentOwner { & $script:StudentSteps[$Step] }
