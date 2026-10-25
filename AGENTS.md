@@ -7,7 +7,7 @@ Follow [the shared agent rules](../Pwsh-Development/AGENTS.md).
 - Run and measure on the phone through the existing emitted DSP path, and lower hot code. Never substitute interpreted host PowerShell or the offline float tools.
 - Entrypoint: `pwsh -NoProfile -File ./Invoke-KokoroDevelopment.ps1`. Run it with `-h` to have it describe its commands before working. Run `Verify` before every commit.
 - Directives live in this file and in [student/AGENTS.md](student/AGENTS.md), which governs Student and generator work. Read it before that work.
-- Handoffs and result records live outside this repository in [../Pwsh-Development/docs/kokoro-hexagon](../Pwsh-Development/docs/kokoro-hexagon). They are historical evidence, not directives; earlier design documents there, including the Student contract, are superseded where they differ from these two files. Write new result records there, never under this repository.
+- Result records are published in [docs/results](docs/results): one Markdown record per measurement, with no machine paths or personal data. Write new result records there. Handoffs and design notes live outside this repository in [../Pwsh-Development/docs/kokoro-hexagon](../Pwsh-Development/docs/kokoro-hexagon). Records and notes are historical evidence, not directives; earlier design documents there, including the Student contract, are superseded where they differ from these two files.
 - New work extends an owning module under `tools/` or `src/` and is reached through an entrypoint command. No standalone one-off scripts, copies of existing files, or work outside this repository.
 - No hard-coded machine paths (drive letters, user profiles, home directories, other checkouts or worktrees) in code, data or docs. Resolve from `$PSScriptRoot`, a parameter, or an environment variable, and fail with a message naming what's missing.
 - Names state what the thing is or measures. No nicknames, metaphors, version tags or experiment code names in files, identifiers, docs or commits.
@@ -37,7 +37,7 @@ This repository grew to 131 files across 14 folders because agents did the follo
 - **One-off probes and measurement scripts.** A question about hardware or numerics gets an option on an existing command, and its answer becomes a record or a note.
 - **Re-deriving hardware facts.** Agents re-read the V73 manual for every task. Instruction forms, operands, register effects, semantics and manual references live as records in the builder; look them up there, and add a missing one there.
 - **Forks and parallel copies.** Separate repositories, worktrees and copied files for one experiment (Kodeko, the drum worktree, a forked emitter) left work stranded. Work happens in this checkout, in the owners.
-- **Results, receipts and handoffs in the repository.** They go to the project notes.
+- **Receipts and handoffs in the repository.** Receipts stay under the ignored `build/` directory and handoffs go to the project notes; only result records are published, in `docs/results`.
 - **Finishing a task without consolidating.** Every change leaves the repository with no more files than before, unless the team lead approved a new one, and leaves behavior byte-identical where it claims to (see `Verify` and the recipe gate).
 
 ## PowerShell is not bash

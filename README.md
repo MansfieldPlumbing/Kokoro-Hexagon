@@ -37,11 +37,11 @@ reference: given the same integer weights and inputs, the depth-first job must p
 
 | Measurement | Result | Record |
 |---|---:|---|
-| Generator with its source on the DSP, from x and F0 to PCM, 1.625 s of speech | **61.75 ms, 26.3× real time**; PCM byte-identical to the layer reference | [source on the DSP](../Pwsh-Development/docs/kokoro-hexagon/results/generator-source-on-dsp-sm8550-20261024.md) |
+| Generator with its source on the DSP, from x and F0 to PCM, 1.625 s of speech | **61.75 ms, 26.3× real time**; PCM byte-identical to the layer reference | [source on the DSP](docs/results/generator-source-on-dsp-sm8550-20261024.md) |
 | The same job's source part (harmonic source, STFT, `noise_convs`, `noise_res`) | about 23.2 ms of the 61.75 ms | same |
-| Generator sections and tail with the source supplied, 24.4 s of speech in 31 spans | 438.13 ms, 1.11 MB library, 7.6 MB VTCM | [span loop](../Pwsh-Development/docs/kokoro-hexagon/results/generator-span-loop-sm8550-20261023.md) |
-| Stock decoder, harmonic source and generator, layer by layer, one dispatch, 2.125 s of speech | 113.6 ms, 18.7× real time | [phase-major pool](../Pwsh-Development/docs/kokoro-hexagon/results/generator16-phase-major-pool-sm8550-20261012.md) |
-| Phonemizer on the phone, warm median per sentence | 57.8 µs (challenge set), 96.6 µs (held out) | [phonemizer](../Pwsh-Development/docs/kokoro-hexagon/results/phonemizer-polish-sm8550-20261008.md) |
+| Generator sections and tail with the source supplied, 24.4 s of speech in 31 spans | 438.13 ms, 1.11 MB library, 7.6 MB VTCM | [span loop](docs/results/generator-span-loop-sm8550-20261023.md) |
+| Stock decoder, harmonic source and generator, layer by layer, one dispatch, 2.125 s of speech | 113.6 ms, 18.7× real time | [phase-major pool](docs/results/generator16-phase-major-pool-sm8550-20261012.md) |
+| Phonemizer on the phone, warm median per sentence | 57.8 µs (challenge set), 96.6 µs (held out) | [phonemizer](docs/results/phonemizer-polish-sm8550-20261008.md) |
 
 Times are DSP times of warm runs. The generator rows take the generator's inputs from captured stock Kokoro runs, so
 text processing and the Student are not included.
@@ -52,7 +52,7 @@ text processing and the Student are not included.
 |---|---|
 | Depth-first generator, both sections, joints, tail, any length up to 1,048,576 frames (source supplied) | Measured; byte-identical to the layer reference |
 | Source branches on the DSP, connected to the depth-first generator | Measured; byte-identical; limited to about 2 s because the harmonic source and the `har` layouts still run over the whole input |
-| A source without `noise_convs` and `noise_res` (gain and offset on the upsampled signal) | Measured and rejected: about 0 dB PCM SNR against the layer reference ([record](../Pwsh-Development/docs/kokoro-hexagon/results/generator-source-boundary-sm8550-20261024.md)) |
+| A source without `noise_convs` and `noise_res` (gain and offset on the upsampled signal) | Measured and rejected: about 0 dB PCM SNR against the layer reference ([record](docs/results/generator-source-boundary-sm8550-20261024.md)) |
 | The harmonic source in spans; weight DMA overlapped with computation; the 128-channel source on the resident schedule | Next |
 | Student producing x, F0 and the controller stream from unseen text | In progress |
 | Phonemizer, Student and generator together on the phone, streaming PCM to AAudio | Not yet built |
@@ -105,8 +105,8 @@ Each subsystem is one file of declared records and steps, reached through `Invok
 | `phonemizer/Invoke-EnglishPhonemizer.ps1` | The English phonemizer and its compiled driver |
 | `tools/Invoke-KokoroPrecomputedDecoder.ps1` | The lowered host port of stock Kokoro used as the syllabus |
 
-Kernels and jobs under `src/` are being folded into the Hexagon file. Result records are kept outside the repository,
-under [`../Pwsh-Development/docs/kokoro-hexagon`](../Pwsh-Development/docs/kokoro-hexagon).
+Kernels and jobs under `src/` are being folded into the Hexagon file. Result records, one per measurement, are in
+[`docs/results`](docs/results).
 
 ## Published comparisons
 
@@ -115,8 +115,8 @@ reference points, not a matched ranking. The other projects' figures were checke
 
 | Build | Device | Timed scope | Speed |
 |---|---|---|---:|
-| Kokoro-Hexagon, depth-first ([record](../Pwsh-Development/docs/kokoro-hexagon/results/generator-source-on-dsp-sm8550-20261024.md)) | SM8550 | Harmonic source and generator from x and F0; DSP only; 1.625 s audio | **26.3×** |
-| Kokoro-Hexagon, layer by layer ([record](../Pwsh-Development/docs/kokoro-hexagon/results/generator16-phase-major-pool-sm8550-20261012.md)) | SM8550 | Stock decoder, harmonic source and generator; DSP only; 2.125 s audio | 18.7× |
+| Kokoro-Hexagon, depth-first ([record](docs/results/generator-source-on-dsp-sm8550-20261024.md)) | SM8550 | Harmonic source and generator from x and F0; DSP only; 1.625 s audio | **26.3×** |
+| Kokoro-Hexagon, layer by layer ([record](docs/results/generator16-phase-major-pool-sm8550-20261012.md)) | SM8550 | Stock decoder, harmonic source and generator; DSP only; 2.125 s audio | 18.7× |
 | [laishere/kokoro-coreml](https://github.com/laishere/kokoro-coreml#ios), comparison `484907d` | iPhone 16 Pro | Warm phonemes-to-PCM chain; six passages; G2P and load excluded | 16.9× mean |
 | [Soniqo speech-swift](https://github.com/soniqo/speech-swift/blob/main/docs/benchmarks/ios-coreml.md) | iPhone 16 Pro | Core ML Kokoro, warm release benchmark | 12.5× |
 | [kokoro-offline-tts-android](https://github.com/cedgeremek/kokoro-offline-tts-android#real-device-demo) | S24 Ultra / SM8650 | QNN HTP generator; separately reports 306 ms warm request-to-first-audio | 3.78× |
