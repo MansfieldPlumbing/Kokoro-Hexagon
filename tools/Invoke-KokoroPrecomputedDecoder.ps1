@@ -1587,13 +1587,25 @@ function Invoke-OfflineSpeech {
     # Stock KModel.forward_with_tokens on the host: phonemes to PCM, every intermediate returned.
     # -SkipGenerator stops at the decoder: Pcm is $null. Teacher evidence for the Student
     # (durations, F0, N, encodings and the generator input Features) does not need PCM.
-    param([Parameter(Mandatory)][string] $Phonemes, [string] $Voice = 'af_heart', [double] $Speed = 1, [switch] $SkipGenerator)
+    # -SuppliedDurations (one per token id, pads included), -SuppliedF0 and -SuppliedN (two per duration frame) supply the
+    # prosody: ALBERT, bert_encoder and the predictor are skipped, and only the text encoder, decoder and generator run.
+    param([Parameter(Mandatory)][string] $Phonemes, [string] $Voice = 'af_heart', [double] $Speed = 1, [switch] $SkipGenerator,
+        [int[]] $SuppliedDurations = $null, [float[]] $SuppliedF0 = $null, [float[]] $SuppliedN = $null)
     $config = Get-Content -LiteralPath (Join-Path $InputRepository "build/inputs/kokoro/f3ff3571791e39611d31c381e3a41a3af07b4987/config.json") -Raw | ConvertFrom-Json -AsHashtable
     $ids = [Collections.Generic.List[int]]::new(); $ids.Add(0)
     foreach ($symbol in $Phonemes.ToCharArray()) { $id = $config.vocab[[string]$symbol]; if ($null -ne $id) { $ids.Add([int]$id) } }
     $ids.Add(0); $tokenIds = $ids.ToArray(); $t = $tokenIds.Length
     if ($t -gt 512) { throw 'More than 510 phonemes; stock splits longer input.' }
     $style = Read-OfflineVoiceRow $Voice $Phonemes.Length
+    $supplied = $null -ne $SuppliedDurations -or $null -ne $SuppliedF0 -or $null -ne $SuppliedN
+    if ($supplied) {
+        if ($null -eq $SuppliedDurations -or $null -eq $SuppliedF0 -or $null -eq $SuppliedN) { throw 'Supplied prosody needs -SuppliedDurations, -SuppliedF0 and -SuppliedN together.' }
+        if ($SuppliedDurations.Length -ne $t) { throw "SuppliedDurations has $($SuppliedDurations.Length) values for $t token ids." }
+        $frames = 0; foreach ($duration in $SuppliedDurations) { $frames += $duration }
+        if ($SuppliedF0.Length -ne 2 * $frames -or $SuppliedN.Length -ne 2 * $frames) { throw 'SuppliedF0 and SuppliedN need two values per duration frame.' }
+        $bert = $null; $durationFeatures = $null; $durations = [int[]]$SuppliedDurations; $curves = @{ F0 = $SuppliedF0; N = $SuppliedN }
+    }
+    else {
     $bert = Invoke-OfflineAlbert $tokenIds
     $durationInput = Invoke-OfflineLinear $bert $t 'bert_encoder.module'
     $x = $upstreamMath::AppendStyle($durationInput, $t, 512, $style.Prosody)
@@ -1617,6 +1629,7 @@ function Invoke-OfflineSpeech {
             if ($block -eq 1) { $curveFrames *= 2 }
         }
         $curves[$curve] = Invoke-OfflineConv $values $curveFrames "$($curve)_proj" -Module 'predictor.module.'
+    }
     }
     $encoderWatch = [Diagnostics.Stopwatch]::StartNew()
     if ($null -eq $script:OfflineTextEncoder) {

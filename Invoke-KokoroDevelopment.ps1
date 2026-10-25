@@ -1958,6 +1958,16 @@ function Test-KokoroGeneratorTileEquivalence {
         $gain=(& $dot $tileValues $layerValues)/[math]::Max(1e-9,(& $dot $tileValues $tileValues)); $matched=[float[]]::new($tileValues.Length); for($i=0;$i -lt $matched.Length;$i++){ $matched[$i]=[float]($gain*$tileValues[$i]) }
         $pcm=[pscustomobject]@{Samples=[int]$tile.Layout.Samples;SnrDb=(Get-KokoroSnr $tileValues $layerValues);LevelMatchedSnrDb=(Get-KokoroSnr $matched $layerValues);LayerRms=(& $rms $layerValues);TileRms=(& $rms $tileValues);LevelErrorDb=[math]::Round(20*[math]::Log10([math]::Max(1e-9,(& $rms $tileValues))/[math]::Max(1e-9,(& $rms $layerValues))),2);Identical=([Convert]::ToHexString([Security.Cryptography.SHA256]::HashData($layerPcm)) -ceq [Convert]::ToHexString([Security.Cryptography.SHA256]::HashData($tilePcm)))
             LayerSHA256=[Convert]::ToHexString([Security.Cryptography.SHA256]::HashData($layerPcm));TileSHA256=[Convert]::ToHexString([Security.Cryptography.SHA256]::HashData($tilePcm))}
+        # Against stock Kokoro's PCM for the same captured inputs, where the fixture carries it (float32, full scale 1).
+        $stockPath=Join-Path $FixtureDirectory 'expected-pcm-f32.bin'
+        if(Test-Path -LiteralPath $stockPath){
+            $stockBytes=[IO.File]::ReadAllBytes($stockPath)
+            if($stockBytes.Length -eq 4*$layerValues.Length){
+                $stock=[float[]]::new($layerValues.Length); [Buffer]::BlockCopy($stockBytes,0,$stock,0,$stockBytes.Length); for($i=0;$i -lt $stock.Length;$i++){ $stock[$i]=32768*$stock[$i] }
+                $pcm | Add-Member -NotePropertyName LayerStockSnrDb -NotePropertyValue (Get-KokoroSnr $layerValues $stock)
+                $pcm | Add-Member -NotePropertyName TileStockSnrDb -NotePropertyValue (Get-KokoroSnr $tileValues $stock)
+            }
+        }
     }
     $report=[pscustomobject]@{Soc=$Soc;Fixture=$FixtureDirectory;Joint=$Joint;SourceStreams=$SourceStreams;Model=$modelReport;Pcm=$pcm;Sections=$sectionReport;Channels=$Channels;Schedule=$tileParameters.GeneratorSchedule;Tiles=[int]$fixture.Tiles;TileBlock=$TileBlock;WeightPlanes=$WeightPlanes;TensorBytes=$tensorBytes;ByteIdentical=($different -eq 0);DifferentBytes=$different;FirstDifference=$first;DifferingTiles=$differingTiles.ToArray()
         LayerDspMs=$layerRun.MedianMs;TileDspMs=$tileRun.MedianMs;LayerVtcmBytes=$layer.Layout.VtcmBytes;TileVtcmBytes=$tile.Layout.VtcmBytes;LayerLibraryBytes=$layer.Bytes;TileLibraryBytes=$tile.Bytes
