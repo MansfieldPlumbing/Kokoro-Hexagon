@@ -1974,8 +1974,11 @@ class CorePolish {
         if($n -ge 4 -and $w.EndsWith('ies',[StringComparison]::Ordinal)){
             $base=[CorePolish]::Base($w.Substring(0,$n-3)+'y',$nounRole);if(-not [object]::ReferenceEquals($null,$base)){return $base+'z'}
         }
+        # -es after a sibilant or o (boxes, wishes, churches, heroes); otherwise the stem keeps its e (pipes, not pips).
         if($n -ge 4 -and $w.EndsWith('es',[StringComparison]::Ordinal)){
-            $base=[CorePolish]::Base($w.Substring(0,$n-2),$nounRole);if(-not [object]::ReferenceEquals($null,$base)){return [CorePolish]::SuffixS($base)}
+            [string]$stem=$w.Substring(0,$n-2)
+            [bool]$sibilant=$stem.EndsWith('s',[StringComparison]::Ordinal) -or $stem.EndsWith('x',[StringComparison]::Ordinal) -or $stem.EndsWith('z',[StringComparison]::Ordinal) -or $stem.EndsWith('ch',[StringComparison]::Ordinal) -or $stem.EndsWith('sh',[StringComparison]::Ordinal) -or $stem.EndsWith('o',[StringComparison]::Ordinal)
+            if($sibilant){$base=[CorePolish]::Base($stem,$nounRole);if(-not [object]::ReferenceEquals($null,$base)){return [CorePolish]::SuffixS($base)}}
         }
         if($n -ge 3 -and $w.EndsWith('s',[StringComparison]::Ordinal) -and -not $w.EndsWith('ss',[StringComparison]::Ordinal)){
             $base=[CorePolish]::Base($w.Substring(0,$n-1),$nounRole);if(-not [object]::ReferenceEquals($null,$base)){return [CorePolish]::SuffixS($base)}

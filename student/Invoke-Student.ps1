@@ -123,8 +123,8 @@ $script:StudentContext = [ordered]@{
 # phonemizer/Invoke-EnglishPhonemizer.ps1; the syllabus is tools/Invoke-KokoroPrecomputedDecoder.ps1.
 $script:StudentInputs = [ordered]@{
     Phonemizer = [ordered]@{
-        Directory = 'build/phonemizer/english/driver/F42F2BC784941C86C011863441C425F43EB870666AD47CA62B2E843573F9C1F0-library-dll'
-        SHA256 = '779567C7B8223E4FDEB4BBCAB03C475ED4B728E5125DC700726DE4C6F51C75E0'
+        Directory = 'build/phonemizer/english/driver/E8BB6AD454496486459F93AB4BF42D8F9AD1D5798CE75A474AC00BF79EA3390C-library-dll'
+        SHA256 = 'B5486F5CDDCA2E12D795003473F16F400E05A95BE2F8C2D972561993D1E07E87'
     }
     Syllabus = 'tools/Invoke-KokoroPrecomputedDecoder.ps1'
     Manifest = 'lib/manifest.json'
