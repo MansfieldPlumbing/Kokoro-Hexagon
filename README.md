@@ -7,14 +7,14 @@ machine code and the ELF itself. No C or C++, LLVM, QNN or ONNX Runtime is invol
 ## Design
 
 ```text
-Text → phonemizer (CoreCLR, phone CPU) → Student (phone CPU) → x, F0 and AdaIN coefficients
-     → Hexagon: harmonic source → generator, depth-first in spans → PCM → AAudio
+Text → phonemizer (CoreCLR, phone CPU) → Student (phone CPU) → phonemes, durations, F0 and N
+     → Kokoro's text encoder and decoder → x → Hexagon: harmonic source → generator, depth-first in spans → PCM → AAudio
 ```
 
-- **The Student** replaces everything in Kokoro up to and including the decoder. It produces the generator's inputs:
-  `x` (512 channels per generator tick), F0, and every AdaIN site's coefficients from a controller stream. Kokoro's
-  front end, predictors and decoder do not run. The Student is a procedural learning system of typed objects, not a
-  neural network ([student/AGENTS.md](student/AGENTS.md)).
+- **The Student** replaces Kokoro's PL-BERT, `bert_encoder` and predictor. From typed text it produces the low-rate
+  controls: each phoneme's duration, and F0 and energy (N) on the generator's tick clock. Kokoro's text encoder and
+  decoder are kept and turn those controls into `x`. The Student is a procedural learning system of typed objects, not
+  a neural network ([student/AGENTS.md](student/AGENTS.md)).
 - **The generator** runs depth-first: each 32-frame tile passes through all of a section's stages while it stays in
   VTCM.
   - The 256-channel section streams its weights per stage over a block of tiles.
@@ -55,7 +55,7 @@ text processing and the Student are not included.
 | Source branches on the DSP, connected to the depth-first generator, at any length | Measured; byte-identical; the harmonic source, STFT and `har` layouts run in chunks ([record](docs/results/generator-source-chunked-sm8550-20261024.md)) |
 | A source without `noise_convs` and `noise_res` (gain and offset on the upsampled signal) | Measured and rejected: about 0 dB PCM SNR against the layer reference ([record](docs/results/generator-source-boundary-sm8550-20261024.md)) |
 | A runtime loop over uniform source chunks; weight DMA overlapped with computation; the 128-channel source on the resident schedule | Next |
-| Student producing x, F0 and the controller stream from unseen text | In progress |
+| Student producing durations, F0 and N from unseen text, through Kokoro's text encoder and decoder | In progress ([stage 1](docs/results/student-stage1-audition-sm8550-20261025.md)) |
 | Phonemizer, Student and generator together on the phone, streaming PCM to AAudio | Not yet built |
 | Time to first audio, end to end | Not yet measured |
 | SM8635 | Not yet run |
@@ -123,7 +123,8 @@ reference points, not a matched ranking. The other projects' figures were checke
 | [kokoro-offline-tts-android](https://github.com/cedgeremek/kokoro-offline-tts-android#real-device-demo) | S24 Ultra / SM8650 | QNN HTP generator; separately reports 306 ms warm request-to-first-audio | 3.78× |
 
 The kokoro-coreml figures cover phonemes to PCM, including the text encoder and predictors. Ours cover the generator
-only: in this design the Student replaces Kokoro's text encoder, predictors and decoder, and it is not yet timed.
+only: in this design the Student replaces Kokoro's PL-BERT and predictors, and neither it nor the kept text encoder
+and decoder is timed end to end yet.
 
 ## Provenance
 

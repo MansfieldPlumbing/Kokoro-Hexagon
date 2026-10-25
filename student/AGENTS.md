@@ -8,8 +8,8 @@ contract, are historical evidence and results, not constraints.
 ## Mission
 
 Kokoro text-to-speech for arbitrary text on Android, with on-device performance
-as the primary measured objective: our phonemizer on CoreCLR, the Student, and
-Kokoro's frozen generator on Hexagon. The Student learns from training text,
+as the primary measured objective: our phonemizer on CoreCLR, the Student,
+Kokoro's frozen text encoder and decoder, and its frozen generator on Hexagon. The Student learns from training text,
 retains what it has learned as stored percepts, and generalizes to unseen text.
 
 The Student is a procedural learning system, not a neural network or
@@ -38,7 +38,7 @@ as if it were stock Kokoro with faster kernels.
 | --- | --- |
 | Input is a string: `KModel.forward(phonemes: str, ref_s)` | No strings. Text enters as typed token occurrences with global identity (book, paragraph, token index, source offset) |
 | The pipeline splits text with regular expressions and chunks it at punctuation into pieces of at most 510 phonemes | No sentences, spans or windows. The system is object-based, not token-based: typed objects (occurrences, percepts, closures, the controller, voices) hold state and act on messages; tokens are only how text enters. Context is carried state, at any distance |
-| PL-BERT, predictor and decoder run over the whole chunk | The Student replaces everything up to and including the decoder |
+| PL-BERT and the predictor run over the whole chunk | The Student replaces PL-BERT, `bert_encoder` and the predictor; Kokoro's text encoder and decoder are kept and realize the Student's controls as `x` |
 | AdaIN normalizes with moments over the whole utterance | AdaIN normalization is the Student's controller stream: the Student holds a dual-analog controller, and conditioning is held controller state |
 | Audio is returned per chunk, after the chunk is complete | The generator runs continuously on its cadence with resident weights; audio starts at the first controller state and has no utterance boundary |
 
@@ -52,25 +52,35 @@ This document describes two designs. v1 is current work. v2 follows v1 and is
 not current work. The Student is being rebuilt; these names are unrelated to
 earlier StudentV2 work.
 
-## v1: the Student at the generator boundary
+## v1: the Student at the prosody boundary
 
 ### Boundary
 
-The Student replaces everything in Kokoro up to and including the decoder and
-drives the frozen generator. Stock Kokoro calls it as
-`Generator.forward(x, s, f0)` in upstream `kokoro/istftnet.py`; here `s` is
-not used, and AdaIN conditioning comes from the Student's controller stream:
+The Student supplies the low-rate controls and Kokoro's frozen networks realize
+them. From typed text the Student produces, per phoneme token, its symbol (our
+phonemizer) and its duration, and on the tick clock (80 per second) `f0` and
+`N`. Kokoro's text encoder encodes the phoneme ids, the Student's durations
+align the encoding, and Kokoro's decoder (`encode`, four `decode` blocks,
+`F0_conv`, `N_conv`, `asr_res`) turns the aligned encoding, `f0`, `N` and the
+voice's style into `x`, which drives the frozen generator
+(`Generator.forward(x, s, f0)` in upstream `kokoro/istftnet.py`):
 
-| Input | Shape | Rate |
+| Student output | Shape | Rate |
 | --- | --- | --- |
-| `x` | 512 channels | one vector per generator tick (300 samples at 24 kHz, 80 per second) |
+| Phoneme token | Kokoro symbol id | one per phone, from our phonemizer |
+| Duration | decoder frames | one per token (two generator ticks per frame) |
 | `f0` | 1 value | one per tick; zero is unvoiced |
-| `s` | 128 values | stock only, not used here: per utterance, `ref_s[:, :128]`, the voice-pack row selected by phoneme count (`pipeline.py`: `pack[len(ps)-1]`) |
+| `N` | 1 value | one per tick |
 
-Kokoro components the Student replaces: PL-BERT and `bert_encoder`, the
-duration predictor, the F0 and N predictor (`F0Ntrain`), the text encoder, the
-alignment, and the decoder (`encode`, four `decode` blocks, `F0_conv`,
-`N_conv`, `asr_res`). N fed only the decoder and is not produced.
+Kokoro components the Student replaces: PL-BERT and `bert_encoder`, and the
+predictor (its text encoder and LSTMs, the duration projection, and the F0 and
+N blocks, `F0Ntrain`). Kept: the text encoder, the decoder and the generator.
+
+The Student does not produce `x`. Percept codes for `x` were measured and
+rejected: chosen by phone type and neighbouring symbols, they reached 3.9 dB
+`x` SNR on held-out text against 5.8 to 7.1 dB for each occurrence's own mean
+code, while the Student's held-out durations (1.66 ticks mean error) and pitch
+(1.82 dB) were usable (`student-stage1-audition-sm8550-20261025.md`).
 
 Paths into the generator that matter for accuracy:
 
@@ -118,8 +128,9 @@ can start before the utterance is complete:
   supplied coefficients do not depend on where tiles are cut. Its one
   obligation is to run ahead of playback by at least one tile plus the
   generator's convolution lookahead.
-- Generator stream: per tick, `x` (512 channels) and `f0`; and the
-  coefficients of every AdaIN site, expanded from the control stream. The
+- Renderer stream: per token, the phoneme id and its duration; per tick,
+  `f0` and `N`; and the coefficients of every AdaIN site, expanded from the
+  control stream. The text encoder and decoder produce `x` from them. The
   source is produced on the DSP from the VTCM phase loop and seeded noise
   counters (see Generator implementation), so `x_source` is never
   transferred.
@@ -145,6 +156,13 @@ supplied coefficients the generator runs depth-first in time tiles, and its
 working memory is only the per-layer context buffers, which fit in the VTCM
 that remains after the resident weights (see Generator implementation, item
 1). Any Student design that cannot supply the coefficients is rejected.
+
+Supplied coefficients must match the activations of the `x` being rendered:
+constants exported from a different stream removed the output level of every
+stream far from it, and the same streams rendered at the reference level with
+their own exported constants (`student-stage1-audition-sm8550-20261025.md`). How
+the kept decoder's AdaIN sites are normalized (by the moments of their own
+input, as stock does, or by supplied values) is decided by measurement.
 
 `v(t)` is the control stream's continuous state (k values, at most the six
 continuous controls of one record); `base` and `P` (channels by k) are per
@@ -223,10 +241,10 @@ or of evaluation, and no special or hand-picked sentences are used.
 - Learning is organized as typed objects, one type per semantic layer (phone,
   syllable, word, phrase and so on). Each type carries ETS-bound behaviours
   (members and bindings added with `Update-TypeData`), such as timing, pitch,
-  loudness and the stretch of `x` it produces, learned from every occurrence
+  loudness and duration, learned from every occurrence
   of that type in the syllabus evidence.
 - Syllabus evidence is grouped by type, never by sentence: each occurrence
-  contributes its aligned stretch of `x` and `f0` to its type.
+  contributes its duration, `f0` and `N` to its type.
 - Interpretation is incremental, through closures: each word is a closure over
   what it still awaits; the next word applies it, extends it or opens a new
   one. Prosody reads the open-closure state (an unapplied expectation means a
@@ -262,7 +280,7 @@ or of evaluation, and no special or hand-picked sentences are used.
 ### Percepts
 
 A percept is a typed object's stored behaviour: a reusable program that
-produces its stretch of `x` and `f0` in context. Kokoro token IDs are kept as
+produces its duration, pitch and energy in context. Kokoro token IDs are kept as
 one of its fields and may be removed later. Percepts store how to produce
 values, not recordings of them. No unit bank is stored; units are generated on
 demand.
@@ -283,9 +301,9 @@ Percepts are linked by typed edges, so the Student is a sparse typed graph:
   error. An edge is added only where held-out evidence supports it.
 - Only edges active in the current context are evaluated, so producing
   output stays sparse and runs ahead of the DSP on the CPU.
-- An edge's contribution is a stretch of `x` (512 channels), stored as a
-  low-rank program, never as a dense matrix, so the graph does not rebuild
-  the weight problem the Student removes.
+- An edge's contribution is a change in the controls it governs (timing,
+  pitch, energy), stored as a small program, never as a dense matrix, so the
+  graph does not rebuild the weight problem the Student removes.
 - Every node and edge has a type and is listed by the tool's description of
   itself; nothing in the graph is opaque.
 
@@ -330,14 +348,11 @@ predictors and decoder on every utterance:
   - each AdaIN site's `base` and `P`: how the voice responds to the
     controller, in place of the generator style rows (`ref_s[:, :128]`)
     and the `fc` layers, with no dependence on phoneme count;
-  - a transform of `x` across all 512 channels (per-channel scale and bias plus a
-    residual), since the decoder imposed the voice on `x` largely through AdaIN;
+  - the voice pack's acoustic style (`ref_s[:, :128]`) for the kept decoder
+    and generator;
   - prosody style (timing and pitch behavior), which replaces the role of
     `ref_s[:, 128:]` in the removed predictors.
 - Switching voices replaces the record. Blending records is possible.
-
-Measure before building: the fraction of the difference in `x` between voices
-explained by a per-channel scale and bias.
 
 ### Syllabi are adapters
 
@@ -346,7 +361,7 @@ and prosody behaviours in physical units (durations in seconds, pitch in hertz,
 energy, emphasis). Nothing in the core refers to a syllabus's frames, token IDs
 or channels. Each syllabus has an adapter that converts its evidence into those
 units and binds the Student's neutral output to its renderer's input (for
-Kokoro: `x`, `f0` and the controller's expansion into each AdaIN site). Only the renderer binding is
+Kokoro: phoneme tokens, durations, `f0`, `N` and the controller's expansion into each AdaIN site). Only the renderer binding is
 syllabus-specific and is retrained per syllabus. Evidence records which syllabus
 produced it, so evidence from several syllabi for the same typed objects
 coexists. A later syllabus (for example Chatterbox Turbo) is added as a lowered
@@ -389,7 +404,7 @@ on Hexagon. Its purpose is that this project never needs Python again.
   counter-example sections); and measured context sensitivity, obtained by
   rendering the same span inside windows with different preceding context
   and carrying the measured effect beyond 510 phonemes. Kokoro remains the
-  reference for local sound (`x` and voice).
+  reference for local sound, through its kept text encoder, decoder and voice.
 - The 510-phoneme window is Kokoro's limitation (upstream `pipeline.py`
   rejects longer phoneme strings), not the Student's. It is a pragmatic scope
   for learning from Kokoro. Chatterbox, the next target, is not bound by
@@ -439,21 +454,27 @@ on Hexagon. Its purpose is that this project never needs Python again.
 
 ### Training and evaluation
 
-- The Student matches the decoder's `x` and the predictor's F0 for the same
-  text. A change is kept only if held-out end-to-end PCM SNR does not drop; a
-  separate untouched test split gives the final score. Held-out PCM SNR below
-  40 dB is a failure.
-- End-to-end goal: generator PCM above 50 dB SNR against stock Kokoro for the
-  same text, voice and source draws, on held-out text. Errors from the Student
-  and from the generator's on-device implementation add in power, so both must
-  clear 50 dB with margin. The generator alone measured 42.05 dB on SM8550 from
-  captured decoder output (`generator-whole-sm8550-20261008.md`).
+- The Student matches the predictor's durations, `f0` and `N` for the same
+  text. Each is scored on held-out occurrences in its own domain (duration
+  error in ticks, voicing agreement, pitch error in dB of the `f0` ratio on
+  voiced ticks, `N` error), stratified by typed novelty, with no occurrence's
+  own evidence available to it. A change is kept only if these scores do not
+  drop; a separate untouched test split gives the final score.
+- Waveform SNR against stock Kokoro is a diagnostic, never the gate for the
+  Student: any duration or pitch decision that differs from the syllabus
+  decorrelates the waveform (a constant 0.1% `f0` offset leaves 2 dB,
+  `generator-propagation-sm8550-20261020.md`). Speech is judged by listening,
+  separately from the component scores.
+- The content path (text encoder, decoder, generator) is held to PCM SNR
+  against stock Kokoro given the same prosody inputs and source draws; the
+  target is 40 dB. The generator with its source on the DSP measured 37.24 dB
+  at 16-bit weights, and stock float32 against a float64 harmonic source is
+  40.83 dB (`generator-whole-source-sm8550-20261008.md`).
 - Measure how error in `x` and `f0` propagates to PCM by adding noise of known
   level to the stock decoder output and running the generator; this converts
   boundary dB into output dB.
-- Learning stays separable where the boundary allows it: prosody (durations
-  and `f0`), voice, and phonetic content of `x`, each corrected against its own
-  error.
+- Learning stays separable where the boundary allows it: durations, `f0`,
+  `N` and voice, each corrected against its own error.
 - Throughput: seconds of speech trained per second of wall-clock time.
 - Utterances have arbitrary length. With the generator's weights resident
   (see Generator implementation), each time tile runs through every layer in
@@ -474,7 +495,7 @@ is reached.
 
 | Stage | Learns | Evidence | Gate |
 | --- | --- | --- | --- |
-| 1. Sound inventory | Phone percepts; `af_heart`'s voice record and AdaIN `base` | Short windows | Each phone's stretch of `x`, and the generator PCM it produces |
+| 1. Sound inventory | Phone percepts: duration, voicing, pitch and energy; `af_heart`'s voice record | Short windows | Each phone's duration, pitch and energy, and speech through the content path |
 | 2. Words | Word percepts; sequence edges | Short windows | Held-out words assembled from percepts |
 | 3. Phrases | Containment edges; phrase closures; duration and `f0` contours | Medium windows | Held-out phrases |
 | 4. Long-range context | Closures at any distance, across paragraphs and sections, with lifetimes, expiry and reopening; prosody-rulebook candidate types; counter-examples | Windows up to 510 phonemes and long-horizon sources | Held-out paragraphs; closure expiry and reopening rates |
@@ -618,7 +639,7 @@ Plan:
 8. The Student learns against the on-device generator (its quantized weights
    and resident state), not against the stock generator, so what it supplies
    can compensate for the generator's implementation error. Its levers are
-   every generator input it provides: `x`, `f0`, the scale and bias of each AdaIN site (a
+   every input it provides: durations, `f0`, `N`, the scale and bias of each AdaIN site (a
    per-channel correction at every normalization point), the Lock operating
    points and phase state, and the noise seed.
 
