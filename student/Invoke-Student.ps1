@@ -41,6 +41,10 @@ Steps:
 Corpus directory for Pronunciation; defaults to the latest build/corpus-* with corpus.clixml.
 .PARAMETER ParagraphLimit
 Corpus: read at most this many paragraphs per book (0 reads all).
+.PARAMETER OutputPath
+Audition and Speak: a new directory under build/ for the WAVs and the result (default build/student-<step>-<UTC time>).
+.PARAMETER BindingRank
+Inventory: axes of the voice binding x = mean + axes c (the controller state's dimension).
 .PARAMETER WindowLimit
 Syllabus: process at most this many windows in corpus order (0 processes all).
 .PARAMETER Recordings
@@ -71,7 +75,7 @@ Run from a PowerShell prompt: pwsh -File passes every argument as a string, so a
 #requires -Version 7.7
 [CmdletBinding()]
 param(
-    [ValidateSet('Console', 'Render', 'Corpus', 'Pronunciation', 'Normalize', 'Syllabus', 'Recordings', 'Listen', 'Stems', 'Alignment', 'Percepts', 'Describe', 'Learn', 'Audit', 'Discriminate', 'Reconsider')][string] $Step = 'Console',
+    [ValidateSet('Console', 'Render', 'Corpus', 'Pronunciation', 'Normalize', 'Syllabus', 'Recordings', 'Listen', 'Stems', 'Alignment', 'Percepts', 'Describe', 'Learn', 'Audit', 'Discriminate', 'Reconsider', 'Inventory', 'Audition', 'Speak')][string] $Step = 'Console',
     [ValidateRange(2, 64)][int] $Threads = [Math]::Max(2, [Environment]::ProcessorCount),
     [string] $Text = '',
     [string] $Voice = 'af_heart',
@@ -88,7 +92,9 @@ param(
     [ValidateRange(0, [int]::MaxValue)][int] $ParagraphLimit = 0,
     [ValidateRange(0, [int]::MaxValue)][int] $WindowLimit = 0,
     [string] $Recordings = '',
-    [ValidateRange(0, [int]::MaxValue)][int] $RecordingLimit = 0
+    [ValidateRange(0, [int]::MaxValue)][int] $RecordingLimit = 0,
+    [ValidateRange(1, 128)][int] $BindingRank = 128,
+    [string] $OutputPath = ''
 )
 $studentInvocation = @{}
 foreach ($parameterName in $MyInvocation.MyCommand.Parameters.Keys) {
@@ -842,6 +848,141 @@ class StudentTextKernels {
         }
         return $out
     }
+    # Sound kernels for the voice binding x = mean + axes c. x is channel-major ([channel][tick], 512 channels);
+    # coordinates are axis-major ([axis][tick]); axes are axis-major ([axis][channel]).
+    static [int] AccumulateMoments([float[]] $x, [int] $ticks, [int[]] $useTick, [int] $stride, [double[]] $sum, [double[]] $cross) {
+        # Sums and upper-triangle cross products of the ticks with useTick 1, every stride-th of them.
+        $v = [double[]]::new(512); $seen = 0; $count = 0
+        for ($t = 0; $t -lt $ticks; $t++) {
+            if ($useTick[$t] -eq 0) { continue }
+            $seen++
+            if (($seen % $stride) -ne 0) { continue }
+            for ($c = 0; $c -lt 512; $c++) { $v[$c] = [double]$x[$c * $ticks + $t]; $sum[$c] = $sum[$c] + $v[$c] }
+            for ($c = 0; $c -lt 512; $c++) {
+                $vc = $v[$c]; $row = $c * 512
+                for ($d = $c; $d -lt 512; $d++) { $cross[$row + $d] = $cross[$row + $d] + $vc * $v[$d] }
+            }
+            $count++
+        }
+        return $count
+    }
+    static [double[]] LeadingAxes([double[]] $covariance, [int] $n, [int] $r, [int] $iterations) {
+        # Subspace iteration on a symmetric n x n matrix (full storage): the r leading eigenvectors (axis-major),
+        # then their Rayleigh quotients, from a fixed deterministic start.
+        $q = [double[]]::new($r * $n); $z = [double[]]::new($r * $n); $state = [uint32]2463534242
+        for ($i = 0; $i -lt $r * $n; $i++) {
+            $state = $state -bxor ($state -shl 13); $state = $state -bxor ($state -shr 17); $state = $state -bxor ($state -shl 5)
+            $q[$i] = [double]$state / 4294967296.0 - 0.5
+        }
+        for ($pass = 0; $pass -le $iterations; $pass++) {
+            # Orthonormalize q (modified Gram-Schmidt).
+            for ($k = 0; $k -lt $r; $k++) {
+                for ($j = 0; $j -lt $k; $j++) {
+                    $dot = 0.0
+                    for ($i = 0; $i -lt $n; $i++) { $dot = $dot + $q[$k * $n + $i] * $q[$j * $n + $i] }
+                    for ($i = 0; $i -lt $n; $i++) { $q[$k * $n + $i] = $q[$k * $n + $i] - $dot * $q[$j * $n + $i] }
+                }
+                $norm = 0.0
+                for ($i = 0; $i -lt $n; $i++) { $norm = $norm + $q[$k * $n + $i] * $q[$k * $n + $i] }
+                $norm = [Math]::Sqrt($norm); if ($norm -le 0.0) { $norm = 1.0 }
+                for ($i = 0; $i -lt $n; $i++) { $q[$k * $n + $i] = $q[$k * $n + $i] / $norm }
+            }
+            if ($pass -eq $iterations) { break }
+            for ($k = 0; $k -lt $r; $k++) {
+                for ($i = 0; $i -lt $n; $i++) {
+                    $s = 0.0; $row = $i * $n
+                    for ($j = 0; $j -lt $n; $j++) { $s = $s + $covariance[$row + $j] * $q[$k * $n + $j] }
+                    $z[$k * $n + $i] = $s
+                }
+            }
+            for ($i = 0; $i -lt $r * $n; $i++) { $q[$i] = $z[$i] }
+        }
+        $out = [double[]]::new($r * $n + $r)
+        for ($k = 0; $k -lt $r; $k++) {
+            $value = 0.0
+            for ($i = 0; $i -lt $n; $i++) {
+                $s = 0.0; $row = $i * $n
+                for ($j = 0; $j -lt $n; $j++) { $s = $s + $covariance[$row + $j] * $q[$k * $n + $j] }
+                $value = $value + $q[$k * $n + $i] * $s
+                $out[$k * $n + $i] = $q[$k * $n + $i]
+            }
+            $out[$r * $n + $k] = $value
+        }
+        return $out
+    }
+    static [float[]] Coordinates([float[]] $x, [int] $ticks, [double[]] $mean, [double[]] $axes, [int] $r) {
+        $out = [float[]]::new($r * $ticks)
+        for ($t = 0; $t -lt $ticks; $t++) {
+            for ($k = 0; $k -lt $r; $k++) {
+                $s = 0.0; $at = $k * 512
+                for ($c = 0; $c -lt 512; $c++) { $s = $s + $axes[$at + $c] * ([double]$x[$c * $ticks + $t] - $mean[$c]) }
+                $out[$k * $ticks + $t] = [float]$s
+            }
+        }
+        return $out
+    }
+    static [float[]] Realize([float[]] $coordinates, [int] $ticks, [double[]] $mean, [double[]] $axes, [int] $r) {
+        $out = [float[]]::new(512 * $ticks)
+        for ($c = 0; $c -lt 512; $c++) {
+            for ($t = 0; $t -lt $ticks; $t++) {
+                $s = $mean[$c]
+                for ($k = 0; $k -lt $r; $k++) { $s = $s + $axes[$k * 512 + $c] * [double]$coordinates[$k * $ticks + $t] }
+                $out[$c * $ticks + $t] = [float]$s
+            }
+        }
+        return $out
+    }
+    # Percept codes: an occurrence is three codes in the binding (the means of its coordinates over the thirds of its
+    # ticks: entry, middle, exit). SegmentMeans takes them from evidence, AccumulateCodes sums them by percept key, and
+    # HoldCodes realizes a stream of occurrences, each third holding its code.
+    static [float[]] SegmentMeans([float[]] $coordinates, [int] $ticks, [int] $r, [int[]] $firsts, [int[]] $counts, [int] $parts) {
+        $n = $firsts.Length; $out = [float[]]::new($n * $parts * $r)
+        for ($o = 0; $o -lt $n; $o++) {
+            for ($part = 0; $part -lt $parts; $part++) {
+                $a = $firsts[$o] + [int][Math]::Floor([double]($part * $counts[$o]) / [double]$parts); $b = $firsts[$o] + [int][Math]::Floor([double](($part + 1) * $counts[$o]) / [double]$parts)
+                if ($b -le $a) { $a = $firsts[$o] + [int][Math]::Floor([double]$counts[$o] * ([double]$part + 0.5) / [double]$parts); $b = $a + 1 }
+                if ($counts[$o] -eq 0 -or $a -ge $ticks) { continue }
+                for ($k = 0; $k -lt $r; $k++) {
+                    $s = 0.0; for ($t = $a; $t -lt $b; $t++) { $s = $s + [double]$coordinates[$k * $ticks + $t] }
+                    $out[($o * $parts + $part) * $r + $k] = [float]($s / [double]($b - $a))
+                }
+            }
+        }
+        return $out
+    }
+    static [int] AccumulateCodes([float[]] $codes, [int] $width, [int[]] $keys, [double[]] $sums, [int[]] $counts) {
+        # Occurrence o adds its width values to key keys[o] (keys below zero are skipped).
+        $added = 0
+        for ($o = 0; $o -lt $keys.Length; $o++) {
+            $key = $keys[$o]; if ($key -lt 0) { continue }
+            for ($i = 0; $i -lt $width; $i++) { $sums[$key * $width + $i] = $sums[$key * $width + $i] + [double]$codes[$o * $width + $i] }
+            $counts[$key] = $counts[$key] + 1; $added++
+        }
+        return $added
+    }
+    static [float[]] HoldCodes([float[]] $table, [int] $r, [int] $parts, [int[]] $codeOf, [int[]] $firsts, [int[]] $counts, [int] $ticks) {
+        # Coordinates (axis-major) of a stream: occurrence o holds row codeOf[o] of the table ([row][part][axis]) over its thirds.
+        $out = [float[]]::new($r * $ticks)
+        for ($o = 0; $o -lt $codeOf.Length; $o++) {
+            for ($part = 0; $part -lt $parts; $part++) {
+                $a = $firsts[$o] + [int][Math]::Floor([double]($part * $counts[$o]) / [double]$parts); $b = $firsts[$o] + [int][Math]::Floor([double](($part + 1) * $counts[$o]) / [double]$parts)
+                $at = ($codeOf[$o] * $parts + $part) * $r
+                for ($t = $a; $t -lt $b -and $t -lt $ticks; $t++) { for ($k = 0; $k -lt $r; $k++) { $out[$k * $ticks + $t] = $table[$at + $k] } }
+            }
+        }
+        return $out
+    }
+    static [double[]] StretchError([float[]] $reference, [float[]] $candidate, [int] $ticks, [int] $first, [int] $count) {
+        # Signal and error energy of ticks first .. first + count - 1 over 512 channels.
+        $out = [double[]]::new(2)
+        for ($c = 0; $c -lt 512; $c++) {
+            for ($t = $first; $t -lt $first + $count; $t++) {
+                $a = [double]$reference[$c * $ticks + $t]; $b = [double]$candidate[$c * $ticks + $t]
+                $out[0] = $out[0] + $a * $a; $out[1] = $out[1] + ($a - $b) * ($a - $b)
+            }
+        }
+        return $out
+    }
 }
 
 $script:StudentTokenKinds = @{ 1 = 'Word'; 2 = 'Number'; 3 = 'Ordinal'; 4 = 'Punctuation'; 5 = 'Quote'; 6 = 'Symbol'; 7 = 'Note' }
@@ -1027,6 +1168,14 @@ function Import-StudentKernels {
         BandMeans = $type.GetMethod('BandMeans').CreateDelegate([Func[float[],int[],float[]]])
         ContrastThreshold = $type.GetMethod('ContrastThreshold').CreateDelegate([Func[float[],int[],int[],double[]]])
         ContrastDecisions = $type.GetMethod('ContrastDecisions').CreateDelegate([Func[float[],int,double,int,int[]]])
+        AccumulateMoments = $type.GetMethod('AccumulateMoments').CreateDelegate([Func[float[],int,int[],int,double[],double[],int]])
+        LeadingAxes = $type.GetMethod('LeadingAxes').CreateDelegate([Func[double[],int,int,int,double[]]])
+        Coordinates = $type.GetMethod('Coordinates').CreateDelegate([Func[float[],int,double[],double[],int,float[]]])
+        Realize = $type.GetMethod('Realize').CreateDelegate([Func[float[],int,double[],double[],int,float[]]])
+        SegmentMeans = $type.GetMethod('SegmentMeans').CreateDelegate([Func[float[],int,int,int[],int[],int,float[]]])
+        AccumulateCodes = $type.GetMethod('AccumulateCodes').CreateDelegate([Func[float[],int,int[],double[],int[],int]])
+        HoldCodes = $type.GetMethod('HoldCodes').CreateDelegate([Func[float[],int,int,int[],int[],int[],int,float[]]])
+        StretchError = $type.GetMethod('StretchError').CreateDelegate([Func[float[],float[],int,int,int,double[]]])
     }
     $script:StudentContext.Kernels
 }
@@ -3125,6 +3274,423 @@ Update-TypeData -TypeName 'Kokoro.StudentPercept' -MemberType ScriptMethod -Memb
     $this.Image.Observe($this.Identity, $Observation, $Role)
 } -Force
 
+# Stage 1, the sound inventory. Phone percepts are codes in the voice binding x = mean + axes c, held over the thirds
+# of each occurrence and specialized by neighbouring symbols where training supports it. Durations and pitch are rules
+# over typed context. Everything is fitted from training occurrences of the cached syllabus evidence and
+# scored on held-out occurrences, each in its own domain, by typed novelty.
+$script:StudentVowels = 'aeiouæɑɒɔəɚɛɜɪʊʌAIOWYᵊɐɝɘɵ'
+$script:StudentStressMarks = 'ˈˌ'
+# Voicing at the generator's threshold (SineGen voiced_threshold); pitch is fitted and scored where f0 is clearly
+# pitched (the syllabus f0 is continuous and dips toward zero between voiced stretches).
+$script:StudentVoicedHz = 10.0
+$script:StudentPitchedHz = 50.0
+
+function Get-StudentPhoneOccurrences($Windows) {
+    # Each phoneme character of each window is a phone occurrence (spaces and punctuation included; the two pads are
+    # typed '^' and '$'). An occurrence is identified by its word token and its offset in the word, and is kept from the
+    # window where it sits farthest from the window's ends; copies in other windows are marked unused.
+    $all = [Collections.Generic.List[object]]::new(); $best = @{}
+    foreach ($window in $Windows) {
+        $evidence = $window.Evidence; $phonemes = $evidence.Phonemes; $n = $phonemes.Length
+        $frameStart = [int[]]::new($evidence.Durations.Length + 1)
+        for ($i = 0; $i -lt $evidence.Durations.Length; $i++) { $frameStart[$i + 1] = $frameStart[$i] + $evidence.Durations[$i] }
+        $owner = [int[]]::new($n); [Array]::Fill($owner, -1)
+        $occurrences = @($window.Occurrences)
+        for ($o = 0; $o -lt $occurrences.Count; $o++) { for ($k = 0; $k -lt $occurrences[$o].Phonemes.Length; $k++) { $owner[$occurrences[$o].Start + $k] = $o } }
+        for ($i = -1; $i -le $n; $i++) {
+            $symbol = if ($i -lt 0) { '^' } elseif ($i -eq $n) { '$' } else { [string]$phonemes[$i] }
+            $word = $null; $offset = -1; $wordIndex = -1
+            if ($i -ge 0 -and $i -lt $n) {
+                $wordIndex = $owner[$i]
+                # A space belongs to the word that follows it.
+                if ($wordIndex -lt 0) { for ($j = $i + 1; $j -lt $n -and $wordIndex -lt 0; $j++) { $wordIndex = $owner[$j] } }
+                if ($wordIndex -ge 0) { $word = $occurrences[$wordIndex]; $offset = $i - $word.Start }
+            }
+            $stressed = $false
+            if ($null -ne $word -and $offset -ge 0 -and $script:StudentVowels.Contains($symbol)) {
+                for ($j = $i - 1; $j -ge $word.Start; $j--) {
+                    $previous = [string]$phonemes[$j]
+                    if ($script:StudentStressMarks.Contains($previous)) { $stressed = $previous -ceq 'ˈ'; break }
+                    if ($script:StudentVowels.Contains($previous)) { break }
+                }
+            }
+            $identity = if ($null -eq $word) { "$($window.Index):$symbol" } else { "$($word.Book):$($word.FirstToken):$offset" }
+            $phone = [pscustomobject]@{ PSTypeName = 'Kokoro.StudentPhoneOccurrence'; Identity = $identity; Window = $window; Index = $i; Symbol = $symbol
+                Stressed = $stressed; Vowel = $script:StudentVowels.Contains($symbol); Word = $word; Offset = $offset
+                WordFinal = ($null -ne $word -and $offset -eq $word.Phonemes.Length - 1)
+                Previous = $(if ($i -le 0) { '^' } else { [string]$phonemes[$i - 1] }); Next = $(if ($i + 1 -ge $n) { '$' } else { [string]$phonemes[$i + 1] })
+                FirstTick = 2 * $frameStart[$i + 1]; Ticks = 2 * $evidence.Durations[$i + 1]
+                Margin = [Math]::Min($i + 1, $n - $i); HeldOut = $false; Development = $false; Used = $true; Type = -1 }
+            if ($null -ne $word) {
+                $block = [int][Math]::Floor($word.FirstToken / 64) % 8
+                $phone.HeldOut = $block -eq 7; $phone.Development = $block -eq 6
+            }
+            $all.Add($phone)
+            if ($null -ne $word) {
+                if ($best.ContainsKey($identity)) {
+                    if ($best[$identity].Margin -lt $phone.Margin) { $best[$identity].Used = $false; $best[$identity] = $phone } else { $phone.Used = $false }
+                } else { $best[$identity] = $phone }
+            }
+        }
+    }
+    $all.ToArray()
+}
+
+function Get-StudentTypeName($Phone, [bool] $SplitStress) {
+    if ($SplitStress -and $Phone.Vowel -and $Phone.Stressed) { return $Phone.Symbol + 'ˈ' }
+    $Phone.Symbol
+}
+
+# Percept keys of a phone occurrence, general to specific: its type, previous symbol and type, type and next symbol, and
+# all three. Row 0 is the binding mean (a zero code), for an occurrence with no known key.
+function New-StudentCodeModel([bool] $SplitStress, [int] $Parts, [int] $Rank) {
+    $model = [pscustomobject]@{ PSTypeName = 'Kokoro.StudentCodeModel'; SplitStress = $SplitStress; Parts = $Parts; Rank = $Rank; MinCount = 1
+        Keys = [Collections.Generic.Dictionary[string,int]]::new([StringComparer]::Ordinal); Types = [ordered]@{}; Rows = 1
+        Sums = [double[]]::new($Parts * $Rank); Counts = [int[]]::new(1); Table = $null }
+    $model | Add-Member -MemberType ScriptMethod -Name KeyText -Value { param([int] $Level, $Phone)
+        $type = Get-StudentTypeName $Phone $this.SplitStress
+        switch ($Level) { 0 { "0:$type" } 1 { "1:$($Phone.Previous)|$type" } 2 { "2:$type|$($Phone.Next)" } 3 { "3:$($Phone.Previous)|$type|$($Phone.Next)" } } }
+    $model | Add-Member -MemberType ScriptMethod -Name Row -Value { param([int] $Level, $Phone, [bool] $Create)
+        $text = $this.KeyText($Level, $Phone); $row = 0
+        if ($this.Keys.TryGetValue($text, [ref]$row)) { return $row }
+        if (-not $Create) { return -1 }
+        if ($Level -eq 0) { $this.Types[(Get-StudentTypeName $Phone $this.SplitStress)] = $this.Rows }
+        $this.Keys[$text] = $this.Rows; $this.Rows = $this.Rows + 1; $this.Rows - 1 }
+    $model | Add-Member -MemberType ScriptMethod -Name Grow -Value {
+        $width = $this.Parts * $this.Rank
+        if ($this.Counts.Length -lt $this.Rows) { $sums = [double[]]::new($this.Rows * $width); [Array]::Copy($this.Sums, $sums, $this.Sums.Length); $this.Sums = $sums; $counts = [int[]]::new($this.Rows); [Array]::Copy($this.Counts, $counts, $this.Counts.Length); $this.Counts = $counts } }
+    $model | Add-Member -MemberType ScriptMethod -Name Finish -Value {
+        $width = $this.Parts * $this.Rank; $table = [float[]]::new($this.Rows * $width)
+        for ($row = 1; $row -lt $this.Rows; $row++) { if ($this.Counts[$row] -gt 0) { for ($i = 0; $i -lt $width; $i++) { $table[$row * $width + $i] = [float]($this.Sums[$row * $width + $i] / $this.Counts[$row]) } } }
+        $this.Table = $table }
+    $model | Add-Member -MemberType ScriptMethod -Name Lookup -Value { param($Phone)
+        $rows = [int[]]::new(4); $support = [int[]]::new(4)
+        for ($level = 0; $level -lt 4; $level++) { $rows[$level] = $this.Row($level, $Phone, $false); $support[$level] = if ($rows[$level] -gt 0) { $this.Counts[$rows[$level]] } else { 0 } }
+        if ($support[3] -ge $this.MinCount) { return $rows[3] }
+        $side = if ($support[1] -ge $support[2]) { 1 } else { 2 }
+        if ($support[$side] -ge $this.MinCount) { return $rows[$side] }
+        if ($support[0] -gt 0) { return $rows[0] }
+        0 }
+    $model
+}
+
+function Get-StudentCodeStream($Model, [object[]] $Phones, [int] $Ticks, [double[]] $Mean, [double[]] $Axes) {
+    # x for phone occurrences covering ticks 0 .. Ticks - 1, each third holding its looked-up percept code.
+    $kernels = Import-StudentKernels
+    $codeOf = [int[]]::new($Phones.Count); $firsts = [int[]]::new($Phones.Count); $counts = [int[]]::new($Phones.Count)
+    for ($o = 0; $o -lt $Phones.Count; $o++) { $codeOf[$o] = $Model.Lookup($Phones[$o]); $firsts[$o] = $Phones[$o].FirstTick; $counts[$o] = $Phones[$o].Ticks }
+    $coordinates = $kernels.HoldCodes.Invoke($Model.Table, $Model.Rank, $Model.Parts, $codeOf, $firsts, $counts, $Ticks)
+    $kernels.Realize.Invoke($coordinates, $Ticks, $Mean, $Axes, $Model.Rank)
+}
+
+function Invoke-StudentInventory {
+    $kernels = Import-StudentKernels
+    $watch = [Diagnostics.Stopwatch]::StartNew()
+    $syllabus = Invoke-StudentSyllabus
+    if ($syllabus.Rendered) { Write-Verbose "Syllabus rendered $($syllabus.Rendered) new windows." }
+    $windows = @($syllabus.Windows)
+    $phones = Get-StudentPhoneOccurrences $windows
+    $byWindow = @{}; foreach ($phone in $phones) { if (-not $byWindow.ContainsKey($phone.Window.Index)) { $byWindow[$phone.Window.Index] = [Collections.Generic.List[object]]::new() }; $byWindow[$phone.Window.Index].Add($phone) }
+    $role = { param($Phone) if (-not $Phone.Used) { 'Unused' } elseif ($Phone.HeldOut) { 'HeldOut' } elseif ($Phone.Development) { 'Development' } elseif ($null -eq $Phone.Word) { 'Unused' } else { 'Training' } }
+    # Per-window tick masks: the ticks whose phone occurrence trains, or chooses the type set and rate.
+    $useMasks = @{}
+    foreach ($window in $windows) {
+        foreach ($wanted in 'Training', 'Development') { $useMasks["$($window.Index):$wanted"] = [int[]]::new($window.Ticks) }
+        foreach ($phone in $byWindow[$window.Index]) {
+            $phoneRole = & $role $phone; if ($phoneRole -cnotin 'Training', 'Development') { continue }
+            $mask = $useMasks["$($window.Index):$phoneRole"]; for ($t = $phone.FirstTick; $t -lt $phone.FirstTick + $phone.Ticks; $t++) { $mask[$t] = 1 }
+        }
+    }
+    $useOf = { param($Window, [string]$Wanted) $useMasks["$($Window.Index):$Wanted"] }
+
+    # Voice binding: mean and leading axes of the training ticks' x.
+    $sum = [double[]]::new(512); $cross = [double[]]::new(512 * 512); $count = 0
+    foreach ($window in $windows) { $count += $kernels.AccumulateMoments.Invoke($window.Evidence.X, $window.Ticks, (& $useOf $window 'Training'), 4, $sum, $cross) }
+    $mean = [double[]]::new(512); for ($c = 0; $c -lt 512; $c++) { $mean[$c] = $sum[$c] / $count }
+    $covariance = [double[]]::new(512 * 512)
+    for ($c = 0; $c -lt 512; $c++) { for ($d = $c; $d -lt 512; $d++) { $v = $cross[$c * 512 + $d] / $count - $mean[$c] * $mean[$d]; $covariance[$c * 512 + $d] = $v; $covariance[$d * 512 + $c] = $v } }
+    $leading = $kernels.LeadingAxes.Invoke($covariance, 512, $BindingRank, 40)
+    $axes = [double[]]::new($BindingRank * 512); [Array]::Copy($leading, $axes, $axes.Length)
+    $axisVariance = [double[]]::new($BindingRank); [Array]::Copy($leading, $axes.Length, $axisVariance, 0, $BindingRank)
+    $totalVariance = 0.0; for ($c = 0; $c -lt 512; $c++) { $totalVariance += $covariance[$c * 512 + $c] }
+    $coordinates = @{}; foreach ($window in $windows) { $coordinates[$window.Index] = $kernels.Coordinates.Invoke($window.Evidence.X, $window.Ticks, $mean, $axes, $BindingRank) }
+
+    # Percept codes: every occurrence's three codes (entry, middle, exit) from its coordinates; each percept key (the type,
+    # the type after its previous symbol, before its next symbol, or between both) holds the training mean of its
+    # occurrences' codes. An occurrence takes the most specific key with at least MinCount training occurrences, else its
+    # type. The development occurrences choose MinCount and whether stressed vowels are their own types.
+    $parts = 3; $width = $parts * $BindingRank
+    $occurrenceCodes = @{}
+    foreach ($window in $windows) {
+        $list = $byWindow[$window.Index]; $firsts = [int[]]::new($list.Count); $counts = [int[]]::new($list.Count)
+        for ($o = 0; $o -lt $list.Count; $o++) { $firsts[$o] = $list[$o].FirstTick; $counts[$o] = $list[$o].Ticks }
+        $occurrenceCodes[$window.Index] = [pscustomobject]@{ Firsts = $firsts; Counts = $counts; Codes = $kernels.SegmentMeans.Invoke($coordinates[$window.Index], $window.Ticks, $BindingRank, $firsts, $counts, $parts) }
+    }
+    $codeModels = foreach ($split in $false, $true) {
+        $model = New-StudentCodeModel $split $parts $BindingRank
+        foreach ($window in $windows) {
+            $list = $byWindow[$window.Index]; $keys = [int[][]]::new(4); for ($level = 0; $level -lt 4; $level++) { $keys[$level] = [int[]]::new($list.Count) }
+            for ($o = 0; $o -lt $list.Count; $o++) {
+                $train = (& $role $list[$o]) -ceq 'Training' -and $list[$o].Ticks -gt 0
+                for ($level = 0; $level -lt 4; $level++) { $keys[$level][$o] = if ($train) { $model.Row($level, $list[$o], $true) } else { -1 } }
+            }
+            $model.Grow()
+            for ($level = 0; $level -lt 4; $level++) { $null = $kernels.AccumulateCodes.Invoke($occurrenceCodes[$window.Index].Codes, $width, $keys[$level], $model.Sums, $model.Counts) }
+        }
+        $model.Finish()
+        foreach ($minimum in 1, 2, 4, 8, 16, 32, [int]::MaxValue) {
+            $model.MinCount = $minimum; $signal = 0.0; $error_ = 0.0
+            foreach ($window in $windows) {
+                $x = Get-StudentCodeStream $model @($byWindow[$window.Index]) $window.Ticks $mean $axes
+                foreach ($phone in $byWindow[$window.Index]) {
+                    if ((& $role $phone) -cne 'Development' -or $phone.Ticks -eq 0) { continue }
+                    $e = $kernels.StretchError.Invoke($window.Evidence.X, $x, $window.Ticks, $phone.FirstTick, $phone.Ticks); $signal += $e[0]; $error_ += $e[1]
+                }
+            }
+            [pscustomobject]@{ SplitStress = $split; MinCount = $minimum; Model = $model; DevelopmentSnrDb = [Math]::Round(10 * [Math]::Log10($signal / $error_), 2) }
+        }
+    }
+    $chosen = @($codeModels | Sort-Object DevelopmentSnrDb -Descending)[0]; $chosen.Model.MinCount = $chosen.MinCount
+    $chosen | Add-Member -NotePropertyName TypeIndex -NotePropertyValue $chosen.Model.Types
+
+    # Durations: per type the training mean of log(ticks + 1), then additive terms for word-final and stressed
+    # occurrences fitted to the residuals. Voicing: per type the training fraction of voiced ticks.
+    $typeName = { param($Phone) Get-StudentTypeName $Phone $chosen.SplitStress }
+    $training = @($phones | Where-Object { (& $role $_) -ceq 'Training' })
+    $logSum = @{}; $logCount = @{}; $voiced = @{}; $typeTicks = @{}; $logPitch = @{}; $pitchTicks = @{}
+    foreach ($phone in $training) {
+        $name = & $typeName $phone
+        $logSum[$name] = [double]$logSum[$name] + [Math]::Log($phone.Ticks + 1); $logCount[$name] = [int]$logCount[$name] + 1
+        $f0 = $phone.Window.Evidence.F0
+        for ($t = $phone.FirstTick; $t -lt $phone.FirstTick + $phone.Ticks; $t++) {
+            $typeTicks[$name] = [int]$typeTicks[$name] + 1
+            if ($f0[$t] -gt $script:StudentVoicedHz) { $voiced[$name] = [int]$voiced[$name] + 1 }
+            if ($f0[$t] -ge $script:StudentPitchedHz) { $logPitch[$name] = [double]$logPitch[$name] + [Math]::Log($f0[$t]); $pitchTicks[$name] = [int]$pitchTicks[$name] + 1 }
+        }
+    }
+    $allLogSum = 0.0; foreach ($phone in $training) { $allLogSum += [Math]::Log($phone.Ticks + 1) }
+    $durationBase = @{}; foreach ($name in $chosen.TypeIndex.Keys) { $durationBase[$name] = if ($logCount[$name]) { $logSum[$name] / $logCount[$name] } else { $allLogSum / $training.Count } }
+    $residual = { param($Phone) [Math]::Log($Phone.Ticks + 1) - $durationBase[(& $typeName $Phone)] }
+    $termMean = { param([scriptblock]$Where) $s = 0.0; $n = 0; foreach ($phone in $training) { if (& $Where $phone) { $s += & $residual $phone; $n++ } }; if ($n) { $s / $n } else { 0.0 } }
+    $finalTerm = & $termMean { param($p) $p.WordFinal }
+    $stressTerm = if ($chosen.SplitStress) { 0.0 } else { & $termMean { param($p) $p.Vowel -and $p.Stressed } }
+    $voicedFraction = @{}; foreach ($name in $chosen.TypeIndex.Keys) { $voicedFraction[$name] = if ($typeTicks[$name]) { [int]$voiced[$name] / $typeTicks[$name] } else { 0.0 } }
+    $allPitch = 0.0; $allPitchTicks = 0; foreach ($name in $logPitch.Keys) { $allPitch += $logPitch[$name]; $allPitchTicks += $pitchTicks[$name] }
+    $voiceLogPitch = $allPitch / $allPitchTicks
+    $stressPitch = 0.0; $stressPitchTicks = 0
+    foreach ($phone in $training) { if (-not ($phone.Vowel -and $phone.Stressed)) { continue }; $f0 = $phone.Window.Evidence.F0; for ($t = $phone.FirstTick; $t -lt $phone.FirstTick + $phone.Ticks; $t++) { if ($f0[$t] -ge $script:StudentPitchedHz) { $stressPitch += [Math]::Log($f0[$t]) - $voiceLogPitch; $stressPitchTicks++ } } }
+    $stressPitch = if ($stressPitchTicks) { $stressPitch / $stressPitchTicks } else { 0.0 }
+    $durationOf = { param($Phone) $d = $durationBase[(& $typeName $Phone)]; if ($Phone.WordFinal) { $d += $finalTerm }; if ($Phone.Vowel -and $Phone.Stressed) { $d += $stressTerm }; [Math]::Max(0, [int][Math]::Round([Math]::Exp($d) - 1)) }
+
+    # Held-out scoring, each component in its own domain, with the evidence's own timing for x and f0.
+    $seenPrevious = [Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal); $seenNext = [Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal); $seenWords = [Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
+    foreach ($phone in $training) { $name = & $typeName $phone; $null = $seenPrevious.Add($phone.Previous + '>' + $name); $null = $seenNext.Add($name + '>' + $phone.Next); $null = $seenWords.Add($phone.Word.Phonemes) }
+    $rows = [Collections.Generic.List[object]]::new(); $projectionSignal = 0.0; $projectionError = 0.0; $meanSignal = 0.0; $meanError = 0.0
+    $meanOnly = [float[]]::new(0)
+    foreach ($window in $windows) {
+        $x = Get-StudentCodeStream $chosen.Model @($byWindow[$window.Index]) $window.Ticks $mean $axes
+        $projected = $kernels.Realize.Invoke($coordinates[$window.Index], $window.Ticks, $mean, $axes, $BindingRank)
+        $flat = $kernels.Realize.Invoke([float[]]::new($BindingRank * $window.Ticks), $window.Ticks, $mean, $axes, $BindingRank)
+        $f0 = $window.Evidence.F0
+        foreach ($phone in $byWindow[$window.Index]) {
+            if ((& $role $phone) -cne 'HeldOut') { continue }
+            $name = & $typeName $phone
+            $xs = if ($phone.Ticks) { $kernels.StretchError.Invoke($window.Evidence.X, $x, $window.Ticks, $phone.FirstTick, $phone.Ticks) } else { [double[]]@(0, 0) }
+            if ($phone.Ticks) {
+                $ps = $kernels.StretchError.Invoke($window.Evidence.X, $projected, $window.Ticks, $phone.FirstTick, $phone.Ticks); $projectionSignal += $ps[0]; $projectionError += $ps[1]
+                $ms = $kernels.StretchError.Invoke($window.Evidence.X, $flat, $window.Ticks, $phone.FirstTick, $phone.Ticks); $meanSignal += $ms[0]; $meanError += $ms[1]
+            }
+            $pitchError = 0.0; $pitchTicks_ = 0; $voicingAgree = 0
+            $predictVoiced = $voicedFraction[$name] -ge 0.5
+            $predictLog = $voiceLogPitch + $(if ($phone.Vowel -and $phone.Stressed) { $stressPitch } else { 0.0 })
+            for ($t = $phone.FirstTick; $t -lt $phone.FirstTick + $phone.Ticks; $t++) {
+                if (($f0[$t] -gt $script:StudentVoicedHz) -eq $predictVoiced) { $voicingAgree++ }
+                if ($f0[$t] -ge $script:StudentPitchedHz -and $predictVoiced) { $d = 20 * ($predictLog - [Math]::Log($f0[$t])) / [Math]::Log(10); $pitchError += $d * $d; $pitchTicks_++ }
+            }
+            $rows.Add([pscustomobject]@{ PSTypeName = 'Kokoro.StudentInventoryScore'; Identity = $phone.Identity; Symbol = $phone.Symbol; Type = $name
+                Class = $(if ($null -eq $phone.Word -or $phone.Symbol -eq ' ') { 'Space' } elseif ($phone.Vowel -and $phone.Stressed) { 'StressedVowel' } elseif ($phone.Vowel) { 'Vowel' } elseif ($script:StudentStressMarks.Contains($phone.Symbol)) { 'StressMark' } elseif ([char]::IsLetter($phone.Symbol, 0)) { 'Consonant' } else { 'Punctuation' })
+                Novelty = $(if (-not $seenWords.Contains($phone.Word.Phonemes)) { 'NewWord' } elseif (-not ($seenPrevious.Contains($phone.Previous + '>' + $name) -and $seenNext.Contains($name + '>' + $phone.Next))) { 'NewTransition' } else { 'SeenContext' })
+                Ticks = $phone.Ticks; PredictedTicks = (& $durationOf $phone); XSignal = $xs[0]; XError = $xs[1]
+                PitchSquares = $pitchError; PitchTicks = $pitchTicks_; VoicingAgree = $voicingAgree })
+        }
+    }
+    $summarize = { param($Group, [string]$Name)
+        $xSignal = 0.0; $xError = 0.0; $durationError = 0.0; $pitch = 0.0; $pitchCount = 0; $agree = 0; $ticks = 0
+        foreach ($row in $Group) { $xSignal += $row.XSignal; $xError += $row.XError; $durationError += [Math]::Abs($row.PredictedTicks - $row.Ticks); $pitch += $row.PitchSquares; $pitchCount += $row.PitchTicks; $agree += $row.VoicingAgree; $ticks += $row.Ticks }
+        [pscustomobject]@{ PSTypeName = 'Kokoro.StudentInventoryStratum'; Stratum = $Name; Occurrences = @($Group).Count; Ticks = $ticks
+            XSnrDb = $(if ($xError -gt 0) { [Math]::Round(10 * [Math]::Log10($xSignal / $xError), 2) } else { $null })
+            DurationErrorTicks = [Math]::Round($durationError / [Math]::Max(1, @($Group).Count), 2)
+            PitchErrorDb = $(if ($pitchCount) { [Math]::Round([Math]::Sqrt($pitch / $pitchCount), 2) } else { $null })
+            VoicingAgreement = $(if ($ticks) { [Math]::Round($agree / $ticks, 3) } else { $null }) } }
+    $strata = [Collections.Generic.List[object]]::new()
+    $strata.Add((& $summarize $rows 'All'))
+    foreach ($group in ($rows | Group-Object Novelty | Sort-Object Name)) { $strata.Add((& $summarize $group.Group "Novelty.$($group.Name)")) }
+    foreach ($group in ($rows | Group-Object Class | Sort-Object Name)) { $strata.Add((& $summarize $group.Group "Class.$($group.Name)")) }
+    $explained = 0.0; foreach ($v in $axisVariance) { $explained += $v }
+    [pscustomobject]@{ PSTypeName = 'Kokoro.StudentInventory'; Voice = $Voice; Corpus = $syllabus.Corpus; Windows = $windows.Count
+        PhoneOccurrences = $phones.Count; Training = $training.Count; HeldOut = $rows.Count; BindingRank = $BindingRank
+        Binding = [pscustomobject]@{ PSTypeName = 'Kokoro.StudentVoiceBinding'; Voice = $Voice; Mean = $mean; Axes = $axes; AxisVariance = $axisVariance; ExplainedVariance = [Math]::Round($explained / $totalVariance, 4) }
+        SplitStress = $chosen.SplitStress; MinCount = $chosen.MinCount; Types = [string[]]@($chosen.TypeIndex.Keys); Codes = $chosen.Model
+        Development = @($codeModels | Select-Object SplitStress, MinCount, @{ n = 'Keys'; e = { $_.Model.Rows } }, DevelopmentSnrDb)
+        Duration = [pscustomobject]@{ Base = $durationBase; WordFinal = $finalTerm; Stressed = $stressTerm }
+        Pitch = [pscustomobject]@{ VoicedFraction = $voicedFraction; VoiceLogHz = $voiceLogPitch; StressedLog = $stressPitch }
+        HeldOutCeilings = [pscustomobject]@{ ProjectionXSnrDb = [Math]::Round(10 * [Math]::Log10($projectionSignal / $projectionError), 2); MeanXSnrDb = [Math]::Round(10 * [Math]::Log10($meanSignal / $meanError), 2) }
+        Strata = $strata.ToArray(); Scores = $rows.ToArray(); Seconds = [Math]::Round($watch.Elapsed.TotalSeconds, 1)
+        SyllabusWindows = $windows; Phones = $phones }
+}
+
+# The controller stream realized through the voice binding: each phone occurrence holds its percept's codes over the
+# thirds of its ticks (Get-StudentCodeStream), x = mean + axes c. Phones carry FirstTick and Ticks (from the evidence or
+# the duration rule). F0 is supplied, or follows the pitch rule: voiced where the percept is voiced, at the voice's
+# level with the stressed-vowel term, approached by StudentPitchResponse per tick.
+$script:StudentPitchResponse = 0.5
+function New-StudentStream($Inventory, [object[]] $Phones, [float[]] $F0 = $null) {
+    $ticks = 0; foreach ($phone in $Phones) { $ticks = [Math]::Max($ticks, $phone.FirstTick + $phone.Ticks) }
+    $x = Get-StudentCodeStream $Inventory.Codes $Phones $ticks $Inventory.Binding.Mean $Inventory.Binding.Axes
+    if ($null -eq $F0) {
+        $pitchTarget = [double[]]::new($ticks); [Array]::Fill($pitchTarget, [double]::NaN)
+        foreach ($phone in $Phones) {
+            $name = Get-StudentTypeName $phone $Inventory.SplitStress; if (-not $Inventory.Pitch.VoicedFraction.ContainsKey($name)) { $name = $phone.Symbol }
+            if ([double]$Inventory.Pitch.VoicedFraction[$name] -lt 0.5) { continue }
+            $level = $Inventory.Pitch.VoiceLogHz + $(if ($phone.Vowel -and $phone.Stressed) { $Inventory.Pitch.StressedLog } else { 0.0 })
+            for ($t = $phone.FirstTick; $t -lt $phone.FirstTick + $phone.Ticks; $t++) { $pitchTarget[$t] = $level }
+        }
+        $F0 = [float[]]::new($ticks); $state = [double]::NaN
+        for ($t = 0; $t -lt $ticks; $t++) {
+            if ([double]::IsNaN($pitchTarget[$t])) { $state = [double]::NaN; continue }
+            $state = if ([double]::IsNaN($state)) { $pitchTarget[$t] } else { $state + $script:StudentPitchResponse * ($pitchTarget[$t] - $state) }
+            $F0[$t] = [float][Math]::Exp($state)
+        }
+    }
+    [pscustomobject]@{ PSTypeName = 'Kokoro.StudentStream'; Ticks = $ticks; X = $x; F0 = $F0 }
+}
+
+function Get-StudentStreamSlice($Stream, [int] $First, [int] $Count) {
+    $x = [float[]]::new(512 * $Count); for ($c = 0; $c -lt 512; $c++) { [Array]::Copy($Stream.X, $c * $Stream.Ticks + $First, $x, $c * $Count, $Count) }
+    $f0 = [float[]]::new($Count); [Array]::Copy($Stream.F0, $First, $f0, 0, $Count)
+    [pscustomobject]@{ PSTypeName = 'Kokoro.StudentStream'; Ticks = $Count; X = $x; F0 = $f0 }
+}
+
+function Get-StudentRoleStretches($Inventory, [string] $Wanted, [int] $Ticks, [int] $Limit) {
+    # Stretches of Ticks consecutive ticks whose phone occurrences all have the wanted role (one per window, in order).
+    $found = [Collections.Generic.List[object]]::new(); $byWindow = $Inventory.Phones | Group-Object { $_.Window.Index } -AsHashTable
+    foreach ($window in $Inventory.SyllabusWindows) {
+        if ($found.Count -ge $Limit) { break }
+        $mask = [bool[]]::new($window.Ticks)
+        foreach ($phone in @($byWindow[$window.Index])) {
+            $ok = $phone.Used -and $null -ne $phone.Word -and $(switch ($Wanted) { 'HeldOut' { $phone.HeldOut } 'Training' { -not $phone.HeldOut -and -not $phone.Development } })
+            if ($ok) { for ($t = $phone.FirstTick; $t -lt $phone.FirstTick + $phone.Ticks; $t++) { $mask[$t] = $true } }
+        }
+        $run = 0
+        for ($t = 0; $t -lt $window.Ticks; $t++) {
+            if ($mask[$t]) { $run++ } else { $run = 0 }
+            if ($run -eq $Ticks) { $found.Add([pscustomobject]@{ Window = $window; First = $t - $Ticks + 1; Ticks = $Ticks }); break }
+        }
+    }
+    $found.ToArray()
+}
+
+function Get-StudentOutputPath([string] $StepName) {
+    $path = if ($OutputPath) { [IO.Path]::GetFullPath($OutputPath) } else { Join-Path $script:StudentBuild ('student-{0}-{1:yyyyMMddTHHmmss}' -f $StepName.ToLowerInvariant(), [DateTime]::UtcNow) }
+    if (-not $path.StartsWith([IO.Path]::GetFullPath($script:StudentBuild) + [IO.Path]::DirectorySeparatorChar, [StringComparison]::OrdinalIgnoreCase)) { throw 'OutputPath must be under build/.' }
+    [void][IO.Directory]::CreateDirectory($path); $path
+}
+
+function Get-StudentPcmSnr([float[]] $Reference, [float[]] $Candidate) {
+    $signal = 0.0; $error_ = 0.0
+    for ($i = 0; $i -lt $Reference.Length; $i++) { $d = [double]$Reference[$i] - $Candidate[$i]; $signal += [double]$Reference[$i] * $Reference[$i]; $error_ += $d * $d }
+    if ($error_ -eq 0) { return [double]::PositiveInfinity }; [Math]::Round(10 * [Math]::Log10($signal / $error_), 2)
+}
+
+function Invoke-StudentAudition {
+    # Held-out syllabus stretches rendered by the renderer binding (-State) with the syllabus f0: the syllabus x, its
+    # projection through the binding, the Student's inferred x (its percept codes, with the syllabus timing) and the
+    # binding's mean, each with the syllabus stretch's AdaIN constants; the inferred and mean x also with their own
+    # exported constants (each site normalized by the moments of its own activations, as stock Kokoro does).
+    if ($null -eq $State -or $State.PSObject.TypeNames -notcontains 'Kokoro.GeneratorRenderer') { throw 'Audition needs a renderer in -State (Run -Case student-audition).' }
+    $out = Get-StudentOutputPath 'Audition'; $kernels = Import-StudentKernels
+    $inventory = Invoke-StudentInventory
+    $stretches = @(Get-StudentRoleStretches $inventory 'HeldOut' 130 3)
+    if (-not $stretches.Count) { throw 'No held-out stretch of 130 ticks.' }
+    $streams = @{}
+    foreach ($stretch in $stretches) {
+        $window = $stretch.Window; $rank = $inventory.BindingRank
+        $phones = @($inventory.Phones | Where-Object { $_.Window.Index -eq $window.Index } | Sort-Object FirstTick)
+        $coordinates = $kernels.Coordinates.Invoke($window.Evidence.X, $window.Ticks, $inventory.Binding.Mean, $inventory.Binding.Axes, $rank)
+        $whole = [ordered]@{
+            Syllabus = [pscustomobject]@{ Ticks = $window.Ticks; X = $window.Evidence.X; F0 = $window.Evidence.F0 }
+            Projection = [pscustomobject]@{ Ticks = $window.Ticks; X = $kernels.Realize.Invoke($coordinates, $window.Ticks, $inventory.Binding.Mean, $inventory.Binding.Axes, $rank); F0 = $window.Evidence.F0 }
+            Inferred = New-StudentStream $inventory $phones $window.Evidence.F0
+            Mean = [pscustomobject]@{ Ticks = $window.Ticks; X = $kernels.Realize.Invoke([float[]]::new($rank * $window.Ticks), $window.Ticks, $inventory.Binding.Mean, $inventory.Binding.Axes, $rank); F0 = $window.Evidence.F0 } }
+        $slices = [ordered]@{}; foreach ($name in $whole.Keys) { $slices[$name] = Get-StudentStreamSlice $whole[$name] $stretch.First $stretch.Ticks }
+        $streams[$stretch] = $slices
+    }
+    # Every export runs before the first render: the renders are one-shot jobs, after which the resident listener that
+    # the export job uses is gone.
+    $exports = @{}
+    foreach ($stretch in $stretches) { foreach ($name in 'Syllabus', 'Inferred', 'Mean') { $exports["$($stretch.Window.Index):$name"] = $State.Constants($streams[$stretch][$name]) } }
+    $rows = [Collections.Generic.List[object]]::new()
+    foreach ($stretch in $stretches) {
+        $window = $stretch.Window; $slices = $streams[$stretch]; $reference = $slices['Syllabus']; $syllabusPcm = $null
+        $plan = @(@('Syllabus', 'Syllabus', 'Syllabus'), @('Projection', 'Projection', 'Syllabus'), @('Inferred', 'Inferred', 'Syllabus'), @('InferredOwnAdaIn', 'Inferred', 'Inferred'), @('Mean', 'Mean', 'Syllabus'), @('MeanOwnAdaIn', 'Mean', 'Mean'))
+        foreach ($entry in $plan) {
+            $slice = $slices[$entry[1]]; $rendering = $State.Render($slice, $exports["$($window.Index):$($entry[2])"].Tables)
+            if ($null -eq $syllabusPcm) { $syllabusPcm = $rendering.Pcm }
+            $wave = Join-Path $out ('window{0}-tick{1}-{2}.wav' -f $window.Index, $stretch.First, $entry[0].ToLowerInvariant())
+            [IO.File]::WriteAllBytes($wave, (ConvertTo-StudentWave $rendering.Pcm))
+            $xError = $kernels.StretchError.Invoke($reference.X, $slice.X, $stretch.Ticks, 0, $stretch.Ticks)
+            $energy = 0.0; foreach ($sample in $rendering.Pcm) { $energy += [double]$sample * $sample }
+            $rows.Add([pscustomobject]@{ PSTypeName = 'Kokoro.StudentAuditionRow'; Window = $window.Index; FirstTick = $stretch.First; Ticks = $stretch.Ticks; Render = $entry[0]; X = $entry[1]; AdaIn = $entry[2]
+                XSnrDb = $(if ($xError[1] -gt 0) { [Math]::Round(10 * [Math]::Log10($xError[0] / $xError[1]), 2) } else { [double]::PositiveInfinity })
+                PcmSnrDb = (Get-StudentPcmSnr $syllabusPcm $rendering.Pcm); PcmRms = [Math]::Round([Math]::Sqrt($energy / $rendering.Pcm.Length), 4); Saturated = $rendering.Saturated; DspMs = $rendering.DspMs; Wave = $wave })
+        }
+    }
+    $result = [pscustomobject]@{ PSTypeName = 'Kokoro.StudentAudition'; Voice = $Voice; Directory = $out; BindingRank = $inventory.BindingRank; MinCount = $inventory.MinCount
+        SplitStress = $inventory.SplitStress; Strata = $inventory.Strata; Rows = $rows.ToArray(); MachineSHA256 = $script:StudentMachineSHA256 }
+    Export-Clixml -LiteralPath (Join-Path $out 'audition.clixml') -InputObject $result -Depth 4
+    $result
+}
+
+function Invoke-StudentSpeak {
+    # Text through our phonemizer and the Student's inference (phone percepts, duration and pitch rules, the voice
+    # binding) to the renderer binding (-State), with the voice-base AdaIN constants from training stretches.
+    if (-not $Text.Trim()) { throw 'Speak needs -Text.' }
+    if ($null -eq $State -or $State.PSObject.TypeNames -notcontains 'Kokoro.GeneratorRenderer') { throw 'Speak needs a renderer in -State (Run -Case student-speech).' }
+    $out = Get-StudentOutputPath 'Speak'
+    $inventory = Invoke-StudentInventory
+    # Voice base: exported constants of training stretches only, cached by the stretches' identity.
+    $training = @(Get-StudentRoleStretches $inventory 'Training' 130 8)
+    $key = [Convert]::ToHexString([Security.Cryptography.SHA256]::HashData([Text.Encoding]::UTF8.GetBytes((@($training | ForEach-Object { "$($_.Window.Key):$($_.First)" }) -join "`n") + "`n" + [Convert]::ToHexString([Security.Cryptography.SHA256]::HashData($State.Statistics)))))
+    $baseDirectory = Join-Path $script:StudentBuild "student/voice/$Voice"; [void][IO.Directory]::CreateDirectory($baseDirectory)
+    $basePath = Join-Path $baseDirectory "adain-base-$key.bin"
+    if (Test-Path -LiteralPath $basePath) { $base = [IO.File]::ReadAllBytes($basePath) }
+    else {
+        $exports = @(foreach ($stretch in $training) { $State.Constants((Get-StudentStreamSlice ([pscustomobject]@{ Ticks = $stretch.Window.Ticks; X = $stretch.Window.Evidence.X; F0 = $stretch.Window.Evidence.F0 }) $stretch.First 130)) })
+        $base = $State.VoiceBase($exports); [IO.File]::WriteAllBytes($basePath, $base)
+    }
+    $phonemize = Import-StudentPhonemizer
+    $pronunciation = $phonemize.Invoke($Text)
+    if (-not $pronunciation.Complete -or -not $pronunciation.KokoroPhones) { throw 'The phonemizer could not resolve -Text.' }
+    $phonemes = [string]$pronunciation.KokoroPhones
+    # The text's words as occurrences of a stream with no evidence: phones get their typed context, then durations.
+    $words = [Collections.Generic.List[object]]::new(); $start = 0; $token = 0
+    foreach ($part in $phonemes.Split(' ')) { if ($part.Length) { $words.Add([pscustomobject]@{ Book = 'text'; FirstToken = $token; Kind = 'Word'; Phonemes = $part; Start = $start }); $token++ }; $start += $part.Length + 1 }
+    $window = [pscustomobject]@{ Index = -1; Ticks = 0; Occurrences = $words.ToArray(); Evidence = [pscustomobject]@{ Phonemes = $phonemes; Durations = [int[]]::new($phonemes.Length + 2) } }
+    $phones = @(Get-StudentPhoneOccurrences @($window))
+    $typeName = { param($Phone) Get-StudentTypeName $Phone $inventory.SplitStress }
+    foreach ($phone in $phones) {
+        $name = & $typeName $phone; $d = $inventory.Duration.Base[$name]; if ($null -eq $d) { $d = $inventory.Duration.Base[$phone.Symbol] }
+        if ($phone.WordFinal) { $d += $inventory.Duration.WordFinal }; if ($phone.Vowel -and $phone.Stressed) { $d += $inventory.Duration.Stressed }
+        $phone.Ticks = [Math]::Max(0, [int][Math]::Round([Math]::Exp($d) - 1))
+    }
+    $at = 0; foreach ($phone in $phones) { $phone.FirstTick = $at; $at += $phone.Ticks }
+    $stream = New-StudentStream $inventory $phones
+    $rendering = $State.Render($stream, $base)
+    $wave = Join-Path $out 'speech.wav'; [IO.File]::WriteAllBytes($wave, (ConvertTo-StudentWave $rendering.Pcm))
+    [pscustomobject]@{ PSTypeName = 'Kokoro.StudentSpeech'; Text = $Text; Phonemes = $phonemes; Voice = $Voice; Ticks = $stream.Ticks; AudioSeconds = $stream.Ticks / 80.0
+        DspMs = $rendering.DspMs; Saturated = $rendering.Saturated; VoiceBase = $basePath; Wave = $wave; Directory = $out; MachineSHA256 = $script:StudentMachineSHA256 }
+}
+
 $script:StudentSteps = [ordered]@{
     Console = { Show-StudentConsole }
     Render = { Invoke-StudentRender }
@@ -3142,6 +3708,9 @@ $script:StudentSteps = [ordered]@{
     Audit = { Invoke-StudentAlignmentAudit }
     Discriminate = { Invoke-StudentDiscrimination }
     Reconsider = { $image = Invoke-StudentPercepts; $image.Reconsider() }
+    Inventory = { Invoke-StudentInventory }
+    Audition = { Invoke-StudentAudition }
+    Speak = { Invoke-StudentSpeak }
 }
 }
 & $studentOwner { & $script:StudentSteps[$Step] }

@@ -1249,6 +1249,7 @@ $script:Kernels=@(
             if($GeneratorSuppliedSource){ $harness.SuppliedSource=$true }
             if($GeneratorSuppliedSource -or $GeneratorSource){ $harness.SpanTiles=$GeneratorSpanTiles }
             if($GeneratorSource -and $GeneratorSourceChunkTiles -ne 128){ $harness.SourceChunkTiles=$GeneratorSourceChunkTiles }
+            if($GeneratorSource -and $SourceSeededNoise){ $harness.SeededNoise=$true }
             if($GeneratorExportFrontTensors){ $harness.ExportFrontTensors=$true }
             if($GeneratorSuppliedSectionInputs.Count){ $harness.SuppliedSectionInputs=$GeneratorSuppliedSectionInputs }
         $run=New-KokoroGenerator60x16RunSteps -Frames $ResBlockFrames -HvxThreads $ResidentHvxThreads -BatchTiles $ResidentBatchTiles -StopAfterStage $Stage16StopAfter -DumpPoint $Stage16DumpPoint -Kernels $Stage16Kernels -RuntimeFrames:$GeneratorRuntimeFrames @pmu @harness
