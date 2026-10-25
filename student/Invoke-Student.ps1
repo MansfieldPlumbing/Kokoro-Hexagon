@@ -3307,7 +3307,7 @@ function Invoke-StudentInventory {
     [pscustomobject]@{ PSTypeName = 'Kokoro.StudentInventory'; Voice = $Voice; Corpus = $syllabus.Corpus; Windows = $windows.Count
         PhoneOccurrences = $phones.Count; Training = $training.Count; Development = $development.Count; HeldOut = $heldOut.Count
         Rules = $chosen; Choices = @($candidates | ForEach-Object { [pscustomobject]@{ SplitStress = $_.Rules.SplitStress; TypePitch = $_.Rules.TypePitch; DurationErrorFrames = $_.Summary.DurationErrorFrames; PitchErrorDb = $_.Summary.PitchErrorDb } })
-        Strata = $strata.ToArray(); Seconds = [Math]::Round($watch.Elapsed.TotalSeconds, 1) }
+        Strata = $strata.ToArray(); Seconds = [Math]::Round($watch.Elapsed.TotalSeconds, 1); SyllabusWindows = $windows; Phones = $phones }
 }
 
 function New-StudentProsodyStream($Rules, [object[]] $Phones) {
@@ -3336,6 +3336,52 @@ function Get-StudentOutputPath([string] $StepName) {
     [void][IO.Directory]::CreateDirectory($path); $path
 }
 
+function Get-StudentTrainingStretches($Inventory, [int] $Ticks, [int] $Limit) {
+    # Stretches of Ticks consecutive ticks whose phone occurrences all train (one per window, in window order).
+    $found = [Collections.Generic.List[object]]::new(); $byWindow = $Inventory.Phones | Group-Object { $_.Window.Index } -AsHashTable
+    foreach ($window in $Inventory.SyllabusWindows) {
+        if ($found.Count -ge $Limit) { break }
+        $mask = [bool[]]::new($window.Ticks)
+        foreach ($phone in @($byWindow[$window.Index])) { if ($phone.Used -and $null -ne $phone.Word -and -not $phone.HeldOut -and -not $phone.Development) { for ($t = $phone.FirstTick; $t -lt $phone.FirstTick + $phone.Ticks; $t++) { $mask[$t] = $true } } }
+        $run = 0
+        for ($t = 0; $t -lt $window.Ticks; $t++) { if ($mask[$t]) { $run++ } else { $run = 0 }; if ($run -eq $Ticks) { $found.Add([pscustomobject]@{ Window = $window; First = $t - $Ticks + 1 }); break } }
+    }
+    $found.ToArray()
+}
+
+function Invoke-StudentSpeakOnDsp($Inventory, [string] $Phonemes, $Stream, [string] $Out) {
+    # The renderer binding in -State (Run -Case student-speech): the voice-base AdaIN constants for the generator (the
+    # mean of exported constants over training stretches of syllabus x, cached by their identity), Kokoro's text encoder
+    # on the host, then the decoder and the generator on the DSP. Exports run before the one-shot generator render.
+    $renderer = $State; $kernels = $null
+    $stretches = @(Get-StudentTrainingStretches $Inventory 130 8)
+    $key = [Convert]::ToHexString([Security.Cryptography.SHA256]::HashData([Text.Encoding]::UTF8.GetBytes((@($stretches | ForEach-Object { "$($_.Window.Key):$($_.First)" }) -join "`n") + "`n" + [Convert]::ToHexString([Security.Cryptography.SHA256]::HashData($renderer.Statistics)))))
+    $baseDirectory = Join-Path $script:StudentBuild "student/voice/$Voice"; [void][IO.Directory]::CreateDirectory($baseDirectory)
+    $basePath = Join-Path $baseDirectory "adain-base-$key.bin"
+    if (Test-Path -LiteralPath $basePath) { $base = [IO.File]::ReadAllBytes($basePath) }
+    else {
+        $exports = @(foreach ($stretch in $stretches) {
+            $window = $stretch.Window; $x = [float[]]::new(512 * 130); for ($c = 0; $c -lt 512; $c++) { [Array]::Copy($window.Evidence.X, $c * $window.Ticks + $stretch.First, $x, $c * 130, 130) }
+            $f0 = [float[]]::new(130); [Array]::Copy($window.Evidence.F0, $stretch.First, $f0, 0, 130)
+            $renderer.Constants($renderer.EncodeX($x, 130), $f0, 130) })
+        $base = $renderer.VoiceBase($exports); [IO.File]::WriteAllBytes($basePath, $base)
+    }
+    $syllabus = Import-StudentSyllabus (Join-Path $Out 'syllabus')
+    try {
+        $watch = [Diagnostics.Stopwatch]::StartNew()
+        $encoded = Invoke-OfflineSpeech -Phonemes $Phonemes -Voice $Voice -SuppliedDurations $Stream.Durations -SuppliedF0 $Stream.F0 -SuppliedN $Stream.N -SkipDecoder
+        $encoderSeconds = $watch.Elapsed.TotalSeconds
+    }
+    finally { Remove-Module -ModuleInfo $syllabus -Force }
+    $decoded = $renderer.Decode([float[]]$encoded.Aligned, $Stream.F0, $Stream.N)
+    $rendering = $renderer.Render($decoded.XCroutons, $Stream.F0, $decoded.Ticks, $base)
+    $wave = Join-Path $Out 'speech-dsp.wav'; [IO.File]::WriteAllBytes($wave, (ConvertTo-StudentWave $rendering.Pcm))
+    $seconds = $decoded.Ticks / 80.0
+    [pscustomobject]@{ PSTypeName = 'Kokoro.StudentSpeech'; Text = $Text; Phonemes = $Phonemes; Voice = $Voice; AudioSeconds = $seconds
+        DecoderDspMs = $decoded.DspMs; GeneratorDspMs = $rendering.DspMs; DspTimesRealTime = [Math]::Round(1000 * $seconds / ($decoded.DspMs + $rendering.DspMs), 1)
+        HostTextEncoderSeconds = [Math]::Round($encoderSeconds, 2); VoiceBase = $basePath; Wave = $wave; Directory = $Out; MachineSHA256 = $script:StudentMachineSHA256 }
+}
+
 function Invoke-StudentSpeak {
     # Text through our phonemizer and the Student's prosody rules into the syllabus port's text encoder, decoder and
     # generator (-SuppliedDurations, -SuppliedF0, -SuppliedN: PL-BERT and the predictor do not run), and the same
@@ -3352,6 +3398,7 @@ function Invoke-StudentSpeak {
     $window = [pscustomobject]@{ Index = -1; Ticks = 0; Occurrences = $words.ToArray(); Evidence = [pscustomobject]@{ Phonemes = $phonemes; Durations = [int[]]::new($phonemes.Length + 2) } }
     $phones = @(Get-StudentPhoneOccurrences @($window))
     $stream = New-StudentProsodyStream $inventory.Rules $phones
+    if ($null -ne $State -and $State.PSObject.TypeNames -contains 'Kokoro.SpeechRenderer') { return Invoke-StudentSpeakOnDsp $inventory $phonemes $stream $out }
     $syllabus = Import-StudentSyllabus (Join-Path $out 'syllabus')
     try {
         $watch = [Diagnostics.Stopwatch]::StartNew()

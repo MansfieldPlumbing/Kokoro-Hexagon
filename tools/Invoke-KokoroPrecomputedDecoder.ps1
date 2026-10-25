@@ -1590,7 +1590,7 @@ function Invoke-OfflineSpeech {
     # -SuppliedDurations (one per token id, pads included), -SuppliedF0 and -SuppliedN (two per duration frame) supply the
     # prosody: ALBERT, bert_encoder and the predictor are skipped, and only the text encoder, decoder and generator run.
     param([Parameter(Mandatory)][string] $Phonemes, [string] $Voice = 'af_heart', [double] $Speed = 1, [switch] $SkipGenerator,
-        [int[]] $SuppliedDurations = $null, [float[]] $SuppliedF0 = $null, [float[]] $SuppliedN = $null)
+        [int[]] $SuppliedDurations = $null, [float[]] $SuppliedF0 = $null, [float[]] $SuppliedN = $null, [switch] $SkipDecoder)
     $config = Get-Content -LiteralPath (Join-Path $InputRepository "build/inputs/kokoro/f3ff3571791e39611d31c381e3a41a3af07b4987/config.json") -Raw | ConvertFrom-Json -AsHashtable
     $ids = [Collections.Generic.List[int]]::new(); $ids.Add(0)
     foreach ($symbol in $Phonemes.ToCharArray()) { $id = $config.vocab[[string]$symbol]; if ($null -ne $id) { $ids.Add([int]$id) } }
@@ -1653,7 +1653,12 @@ function Invoke-OfflineSpeech {
     } else { $script:OfflineTextEncoder.Convolution = $null }
     $textEncoding = $script:OfflineTextEncoder.Run($tokenIds, $t)
     $profile.Add([pscustomobject]@{ Stage = 'text_encoder'; Kind = 'TextEncoderTotal'; Milliseconds = $encoderWatch.Elapsed.TotalMilliseconds; Frames = $t })
-    $decoded = Invoke-OfflineDecoder ($align.Invoke($textEncoding, $durations)) $curves.F0 $curves.N $style.Acoustic -TokenDurations $durations
+    # Aligned: the decoder's asr input, [channel][frame] at the duration frames. -SkipDecoder stops here.
+    $aligned = $align.Invoke($textEncoding, $durations)
+    if ($SkipDecoder) {
+        return [pscustomobject]@{ Phonemes = $Phonemes; Voice = $Voice; TokenIds = $tokenIds; Durations = $durations; F0 = $curves.F0; N = $curves.N; TextEncoding = $textEncoding; Aligned = $aligned }
+    }
+    $decoded = Invoke-OfflineDecoder $aligned $curves.F0 $curves.N $style.Acoustic -TokenDurations $durations
     $pcm = $null
     if (-not $SkipGenerator) {
         $sourceDraws = New-OfflineDraws ($curves.F0.Length * 300)

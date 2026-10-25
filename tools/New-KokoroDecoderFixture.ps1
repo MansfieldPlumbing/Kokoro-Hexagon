@@ -20,7 +20,11 @@ param(
     # tools/New-KokoroGeneratorFront10x16Fixture.ps1 output: its DecoderScales are the decoder output's units.
     [Parameter(Mandatory)][string] $FrontFixture,
     [Parameter(Mandatory)][string] $OutputDirectory,
-    [ValidateRange(1.0, 4.0)][double] $Margin = 1.25
+    [ValidateRange(1.0, 4.0)][double] $Margin = 1.25,
+    # -CapacityFrames: a capacity frame count for a -DecoderRuntimeFrames job (default: the capture's). The capture then supplies the
+    # checkpoint tensors and the voice's style only; activations.bin and expected-*.bin are written only when its frame
+    # count equals the capacity. fixture.json records the input units (AsrScales, F0CurveScale, NCurveScale).
+    [ValidateRange(0, 4096)][int] $CapacityFrames = 0
 )
 $ErrorActionPreference = 'Stop'
 $build = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '../build')) + [IO.Path]::DirectorySeparatorChar
@@ -36,7 +40,8 @@ $cals = @(foreach ($d in $CalibrationDirectory) { Read-KokoroCapture -Directory 
 $read = { param($c, [string]$n) , (Read-KokoroCaptureTensor -Capture $c -Name "decoder.$n") }
 $front = Get-Content -LiteralPath (Join-Path ([IO.Path]::GetFullPath($FrontFixture)) 'fixture.json') -Raw | ConvertFrom-Json
 $sD = [double[]]@($front.DecoderScales); if ($sD.Count -ne 512) { throw 'Expected 512 decoder scales.' }
-$asr = & $read $cap 'input.0'; $F = $asr.Length / 512
+$asr = & $read $cap 'input.0'; $captureFrames = $asr.Length / 512; $F = if ($CapacityFrames) { $CapacityFrames } else { $captureFrames }
+$withInputs = $captureFrames -eq $F
 $L = Get-KokoroDecoder16Layout -Frames $F
 $T = $L.Tiles; $T2 = $L.Tiles2
 # Per-channel calibration peak of a [channel][frame] tensor over the calibration captures.
@@ -130,12 +135,14 @@ function Add-AdaIn([string]$norm, [int]$cReal, [int]$cPad, [double[]]$inScale, [
 
 # Inputs.
 $act = [byte[]]::new($L.InputBytes)
+if ($withInputs) {
 $z = [uint16[]]::new($T * 16384); [Array]::Fill($z, [uint16]0x8000); [Buffer]::BlockCopy($z, 0, $act, 0, $T * 32768)
 $asrCroutons = [byte[]]::new($T * 32768); [Buffer]::BlockCopy($z, 0, $asrCroutons, 0, $asrCroutons.Length)
 (Get-QuantizeCroutons16Kernel).Invoke($asr, $F, $sAsr, $asrCroutons); [Array]::Copy($asrCroutons, 0, $act, $L.Input.Asr, $asrCroutons.Length)
 foreach ($pair in @(@('input.1', $L.Input.F0), @('input.2', $L.Input.N))) {
     $curve = & $read $cap $pair[0]; if ($curve.Length -ne 2 * $F) { throw 'Curve length is not 2F' }
     for ($i = 0; $i -lt 2 * $F; $i++) { [BitConverter]::GetBytes([int](Get-Even ($curve[$i] / $curveScale[$pair[0]]))).CopyTo($act, $pair[1] + 4 * $i) } }
+}
 
 # F0_conv, N_conv: v_L = (sum W_k c_L + B + 2^14) >> 15.
 foreach ($pair in @(@('F0_conv', 'input.1', $sF0, $L.Params.F0), @('N_conv', 'input.2', $sN, $L.Params.N))) {
@@ -218,15 +225,15 @@ for ($j = 0; $j -lt 5; $j++) {
 }
 
 [void][IO.Directory]::CreateDirectory($out)
-$files = @(@('activations.bin', $act), @('weights.bin', $weights), @('tables.bin', $tables))
-foreach ($e in @(@('expected-decoder-f32.bin', 'generator.input.0'), @('expected-encode-f32.bin', 'encode.output'), @('expected-decode0-f32.bin', 'decode.0.output'), @('expected-decode1-f32.bin', 'decode.1.output'), @('expected-decode2-f32.bin', 'decode.2.output'),
+$files = @(@('weights.bin', $weights), @('tables.bin', $tables)); if ($withInputs) { $files += , @('activations.bin', $act) }
+if ($withInputs) { foreach ($e in @(@('expected-decoder-f32.bin', 'generator.input.0'), @('expected-encode-f32.bin', 'encode.output'), @('expected-decode0-f32.bin', 'decode.0.output'), @('expected-decode1-f32.bin', 'decode.1.output'), @('expected-decode2-f32.bin', 'decode.2.output'),
     @('expected-encode-conv1x1-f32.bin', 'encode.conv1x1.output'), @('expected-encode-conv1-f32.bin', 'encode.conv1.output'), @('expected-decode0-conv1x1-f32.bin', 'decode.0.conv1x1.output'), @('expected-decode0-conv1-f32.bin', 'decode.0.conv1.output'), @('expected-decode3-conv1x1-f32.bin', 'decode.3.conv1x1.output'), @('expected-decode3-conv1-f32.bin', 'decode.3.conv1.output'))) {
-    $v = & $read $cap $e[1]; $bytes = [byte[]]::new(4 * $v.Length); [Buffer]::BlockCopy($v, 0, $bytes, 0, $bytes.Length); $files += , @($e[0], $bytes) }
+    $v = & $read $cap $e[1]; $bytes = [byte[]]::new(4 * $v.Length); [Buffer]::BlockCopy($v, 0, $bytes, 0, $bytes.Length); $files += , @($e[0], $bytes) } }
 foreach ($file in $files) { [IO.File]::WriteAllBytes((Join-Path $out $file[0]), $file[1]) }
 $fileList = @(Get-ChildItem -LiteralPath $out -File | ForEach-Object { [ordered]@{ Name = $_.Name; Bytes = $_.Length; SHA256 = (Get-FileHash $_.FullName).Hash } })
 [ordered]@{ Graph = 'Decoder16'; Frames = $F; Tiles = $T; Tiles2 = $T2; Margin = $Margin; DecoderScales = $sD
     BlockOutputScales = [ordered]@{ encode = $report['encode.OutputScales']; 'decode.0' = $report['decode.0.OutputScales']; 'decode.1' = $report['decode.1.OutputScales']; 'decode.2' = $report['decode.2.OutputScales'] }
-    AsrResUnits = $uAsrRes; Conv1Units = $conv1Units; Decode3OutputScales = $report['decode.3.OutputScales']; PoolInputScales = $poolInputScales; F0Scale = $sF0; NScale = $sN; Report = ($report.Keys | Where-Object { $_ -notlike '*OutputScales' } | ForEach-Object { [ordered]@{ Name = $_; Value = $report[$_] } })
+    AsrResUnits = $uAsrRes; Conv1Units = $conv1Units; Decode3OutputScales = $report['decode.3.OutputScales']; PoolInputScales = $poolInputScales; F0Scale = $sF0; NScale = $sN; AsrScales = $sAsr; F0CurveScale = $curveScale['input.1']; NCurveScale = $curveScale['input.2']; CaptureFrames = $captureFrames; Report = ($report.Keys | Where-Object { $_ -notlike '*OutputScales' } | ForEach-Object { [ordered]@{ Name = $_; Value = $report[$_] } })
     Capture = $cap.Root; CalibrationCaptures = @($cals | ForEach-Object { $_.Root }); FrontFixture = [IO.Path]::GetFullPath($FrontFixture); Files = $fileList } |
     ConvertTo-Json -Depth 6 | Set-Content -LiteralPath (Join-Path $out 'fixture.json') -Encoding utf8NoBOM
 [pscustomobject]@{ Directory = $out; Frames = $F; InputBytes = $act.Length; WeightBytes = $weights.Length; TableBytes = $tables.Length }
