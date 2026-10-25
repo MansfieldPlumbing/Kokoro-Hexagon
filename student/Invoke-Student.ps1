@@ -3252,7 +3252,8 @@ function New-StudentProsodyRules([object[]] $Training, [bool] $SplitStress, [boo
         for ($t = $phone.FirstTick; $t -lt $phone.FirstTick + $phone.Ticks; $t++) {
             $ticks[$name] = [int]$ticks[$name] + 1; $energySum[$name] = [double]$energySum[$name] + $energy[$t]; $allEnergy += $energy[$t]; $allTicks++
             if ($f0[$t] -gt $script:StudentVoicedHz) { $voiced[$name] = [int]$voiced[$name] + 1 }
-            if ($f0[$t] -ge $script:StudentPitchedHz) { $pitchSum[$name] = [double]$pitchSum[$name] + [Math]::Log($f0[$t]); $pitchCount[$name] = [int]$pitchCount[$name] + 1; $allPitch += [Math]::Log($f0[$t]); $allPitchTicks++ }
+            if ($f0[$t] -gt $script:StudentVoicedHz) { $pitchSum[$name] = [double]$pitchSum[$name] + [Math]::Log($f0[$t]); $pitchCount[$name] = [int]$pitchCount[$name] + 1 }
+            if ($f0[$t] -ge $script:StudentPitchedHz) { $allPitch += [Math]::Log($f0[$t]); $allPitchTicks++ }
         }
     }
     $voiceLog = $allPitch / $allPitchTicks
@@ -3336,19 +3337,19 @@ function New-StudentControlRecordings($Rules, [object[]] $Training) {
     $groups = Get-StudentWordGroups $Training
     foreach ($group in $groups.Values) {
         $phones = @($group | Sort-Object Offset); if ($phones.Count -ne $phones[0].Word.Phonemes.Length) { continue }
-        $ratios = [double[]]::new($phones.Count); $pitch = [Collections.Generic.List[double]]::new(); $energy = [Collections.Generic.List[double]]::new()
+        $ratios = [double[]]::new($phones.Count); $pitch = [Collections.Generic.List[double]]::new(); $energy = [Collections.Generic.List[double]]::new(); $voicing = [Collections.Generic.List[double]]::new()
         for ($o = 0; $o -lt $phones.Count; $o++) {
             $phone = $phones[$o]; $ruleFrames = [Math]::Max(1, $Rules.Frames($phone)); $ratios[$o] = ($phone.Ticks / 2) / $ruleFrames
             $target = $Rules.Targets($phone); $f0 = $phone.Window.Evidence.F0; $n = $phone.Window.Evidence.N
             for ($t = $phone.FirstTick; $t -lt $phone.FirstTick + $phone.Ticks; $t++) {
-                $pitch.Add($(if ($f0[$t] -ge $script:StudentPitchedHz -and $target.Voiced) { [Math]::Log($f0[$t]) - $target.LogHz } else { [double]::NaN }))
-                $energy.Add($n[$t] - $target.Energy)
+                $pitch.Add($(if ($f0[$t] -gt $script:StudentVoicedHz -and $target.Voiced) { [Math]::Log($f0[$t]) - $target.LogHz } else { [double]::NaN }))
+                $energy.Add($n[$t] - $target.Energy); $voicing.Add($(if ($f0[$t] -gt $script:StudentVoicedHz) { 1.0 } else { 0.0 }))
             }
         }
         if ($pitch.Count -eq 0) { continue }
         $recording = [pscustomobject]@{ PSTypeName = 'Kokoro.StudentControlRecording'; Occurrence = $phones[0].Identity; Phonemes = $phones[0].Word.Phonemes
             DurationRatios = $ratios; WordRatio = (($phones | Measure-Object Ticks -Sum).Sum / 2) / [Math]::Max(1, ($phones | ForEach-Object { $Rules.Frames($_) } | Measure-Object -Sum).Sum)
-            Pitch = $pitch.ToArray(); Energy = $energy.ToArray() }
+            Pitch = $pitch.ToArray(); Energy = $energy.ToArray(); Voicing = $voicing.ToArray() }
         foreach ($key in (Get-StudentRecordingKeys $phones[0].Word $phones[-1])) {
             if (-not $library.ContainsKey($key)) { $library[$key] = [Collections.Generic.List[object]]::new() }
             if ($library[$key].Count -lt 64) { $library[$key].Add($recording) }
@@ -3395,8 +3396,9 @@ function Measure-StudentReplay($Rules, $Library, [object[]] $PhoneList) {
         for ($t = $phone.FirstTick; $t -lt $phone.FirstTick + $phone.Ticks; $t++) {
             $logHz = $target.LogHz; $e = $target.Energy
             if ($null -ne $entry) { $logHz += Get-StudentReplayResidual $entry $phone $t $wordFirst $wordTicks 'Pitch'; $e += Get-StudentReplayResidual $entry $phone $t $wordFirst $wordTicks 'Energy' }
-            if (($f0[$t] -gt $script:StudentVoicedHz) -eq $target.Voiced) { $agree++ }
-            if ($f0[$t] -ge $script:StudentPitchedHz -and $target.Voiced) { $d = 20 * ($logHz - [Math]::Log($f0[$t])) / [Math]::Log(10); $pitchSquares += $d * $d; $pitchTicks++; $spread.Pitch[0].Add([Math]::Log($f0[$t])); $spread.Pitch[1].Add($logHz) }
+            $voiced = if ($null -ne $entry) { (Get-StudentReplayResidual $entry $phone $t $wordFirst $wordTicks 'Voicing') -ge 0.5 } else { $target.Voiced }
+            if (($f0[$t] -gt $script:StudentVoicedHz) -eq $voiced) { $agree++ }
+            if ($f0[$t] -ge $script:StudentPitchedHz -and $voiced) { $d = 20 * ($logHz - [Math]::Log($f0[$t])) / [Math]::Log(10); $pitchSquares += $d * $d; $pitchTicks++; $spread.Pitch[0].Add([Math]::Log($f0[$t])); $spread.Pitch[1].Add($logHz) }
             $energySquares += ($e - $energy[$t]) * ($e - $energy[$t]); $spread.Energy[0].Add($energy[$t]); $spread.Energy[1].Add($e)
         }
         $spread.Duration[0].Add($phone.Ticks / 2); $spread.Duration[1].Add($predicted)
@@ -3429,7 +3431,7 @@ function Invoke-StudentInventory {
     $training = @($byRole['Training']); $development = @($byRole['Development']); $heldOut = @($byRole['HeldOut'])
     # The development occurrences choose whether stressed vowels are their own types (by duration error) and whether
     # types carry their own pitch offset (by pitch error).
-    $candidates = foreach ($split in $false, $true) { foreach ($typePitch in $false, $true) { foreach ($phrasing in $false, $true) {
+    $candidates = foreach ($split in $false, $true) { foreach ($typePitch in @($true)) { foreach ($phrasing in $false, $true) {
         $rules = New-StudentProsodyRules $training $split $typePitch $phrasing
         [pscustomobject]@{ Rules = $rules; Summary = Get-StudentProsodySummary @(Measure-StudentProsody $rules $development) "Development" }
     } } }
@@ -3482,7 +3484,7 @@ function Get-StudentReplayPlan($Library, [object[]] $PhoneList) {
 
 function Get-StudentReplayResidual($Entry, [object] $Phone, [int] $Tick, [int] $WordFirst, [int] $WordTicks, [string] $Kind) {
     # The recording's residual at the same relative time within the word.
-    $curve = if ($Kind -ceq 'Pitch') { $Entry.Recording.Pitch } else { $Entry.Recording.Energy }
+    $curve = switch ($Kind) { 'Pitch' { $Entry.Recording.Pitch } 'Voicing' { $Entry.Recording.Voicing } default { $Entry.Recording.Energy } }
     $at = [int][Math]::Floor(($Tick - $WordFirst + 0.5) / [Math]::Max(1, $WordTicks) * $curve.Length); $at = [Math]::Min($curve.Length - 1, [Math]::Max(0, $at))
     $value = $curve[$at]; if ([double]::IsNaN($value)) { 0.0 } else { $value }
 }
@@ -3510,7 +3512,8 @@ function New-StudentProsodyStream($Rules, [object[]] $PhoneList, $Library = $nul
             if ($null -ne $entry) { $energyTarget += Get-StudentReplayResidual $entry $phone $at $wordFirst $wordTicks 'Energy'; $pitchTarget += Get-StudentReplayResidual $entry $phone $at $wordFirst $wordTicks 'Pitch' }
             $level = if ([double]::IsNaN($level)) { $energyTarget } else { $level + $script:StudentControlResponse * ($energyTarget - $level) }
             $energy[$at] = [float]$level
-            if ($target.Voiced) { $pitch = if ([double]::IsNaN($pitch)) { $pitchTarget } else { $pitch + $script:StudentControlResponse * ($pitchTarget - $pitch) }; $f0[$at] = [float][Math]::Exp($pitch) }
+            $voiced = if ($null -ne $entry) { (Get-StudentReplayResidual $entry $phone $at $wordFirst $wordTicks 'Voicing') -ge 0.5 } else { $target.Voiced }
+            if ($voiced) { $pitch = if ([double]::IsNaN($pitch)) { $pitchTarget } else { $pitch + $script:StudentControlResponse * ($pitchTarget - $pitch) }; $f0[$at] = [float][Math]::Exp($pitch) }
             else { $pitch = [double]::NaN }
             $at++
         }
@@ -3596,6 +3599,10 @@ function Invoke-StudentSpeak {
         $stockSeconds = $watch.Elapsed.TotalSeconds
     }
     finally { Remove-Module -ModuleInfo $syllabus -Force }
+    # Both renders' controls, for comparing the Student's with stock Kokoro's on the same phonemes.
+    Export-Clixml -LiteralPath (Join-Path $out 'controls.clixml') -InputObject ([pscustomobject]@{ PSTypeName = 'Kokoro.StudentSpeechControls'; Phonemes = $phonemes
+        Student = [pscustomobject]@{ Durations = $stream.Durations; F0 = $stream.F0; N = $stream.N; ReplayKeys = $stream.ReplayKeys }
+        Stock = [pscustomobject]@{ Durations = [int[]]$stock.Durations; F0 = [float[]]$stock.F0; N = [float[]]$stock.N } })
     $studentWave = Join-Path $out 'student-prosody.wav'; [IO.File]::WriteAllBytes($studentWave, (ConvertTo-StudentWave $student.Pcm))
     $stockWave = Join-Path $out 'stock.wav'; [IO.File]::WriteAllBytes($stockWave, (ConvertTo-StudentWave $stock.Pcm))
     [pscustomobject]@{ PSTypeName = 'Kokoro.StudentSpeech'; Text = $Text; Phonemes = $phonemes; Voice = $Voice
