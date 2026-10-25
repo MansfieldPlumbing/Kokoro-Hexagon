@@ -1535,7 +1535,9 @@ function Test-KokoroGeneratorTileEquivalence {
         # Spans: past the layer job's length. x and the two source streams the layer job computed are repeated frame by
         # frame Repeat times (any content serves; the check is self-consistency), and the span job runs that input at
         # each of SpanSizes: every section's output and the PCM must be equal byte for byte across span sizes.
-        [ValidateSet('Section','Front','Whole','Spans')][string]$Joint='Section',
+        # WholeSource: the whole generator with its source computed on the DSP (harmonic source, STFT, noise_convs and noise_res
+        # as one-branch depth-first sections), against the layer job with its source, from f0 and the noise draws.
+        [ValidateSet('Section','Front','Whole','Spans','WholeSource')][string]$Joint='Section',
         # Front and Whole: the depth-first job runs in spans of this many 256-channel tiles, each section's state saved
         # and restored between them.
         [int]$SpanTiles=20,[ValidateRange(2,64)][int]$Repeat=4,[int[]]$SpanSizes=@(20,40),
@@ -1551,7 +1553,13 @@ function Test-KokoroGeneratorTileEquivalence {
         # first pass gives section 1's own U and a second pass injects its Y^. Inverse (diagnostic): the supplied source N^
         # that the add turns into Y^, each section's U from the layer job.
         [ValidateSet('Output','Inverse')][string]$ModelInjection='Output',
-        [string]$FixtureDirectory=(Join-Path $Build $(switch($Joint){'Front'{'speak-20261010-h0-fast/job-input/front10-stage-fixture-20261008'}{$_ -in 'Whole','Spans'}{'generator-whole-fixture-20261008'}default{if($Channels -eq 256){'speak-20261010-h0-fast/job-input/g256-fixture-20261008'}else{'speak-20261010-h0-fast/job-input/generator60x16-fixture-20261008-holdout2'}}})),[ValidateRange(1,21)][int]$Runs=3,
+        # Diagnosis: the depth-first job ends after this stage of its first span (its outputs are then incomplete).
+        [string]$StopAfterSpanStage='',
+        # Diagnosis: the depth-first job's HVX worker wait (Futex or Spin; default by schedule).
+        [string]$PoolWait='',
+        # Diagnosis: the layer job's HVX worker wait and tiles per batch (default Futex, 22).
+        [string]$LayerPoolWait='',[int]$LayerBatchTiles=22,
+        [string]$FixtureDirectory=(Join-Path $Build $(switch($Joint){'Front'{'speak-20261010-h0-fast/job-input/front10-stage-fixture-20261008'}{$_ -in 'Whole','Spans'}{'generator-whole-fixture-20261008'}'WholeSource'{'generator-whole-source-fixture-20261008'}default{if($Channels -eq 256){'speak-20261010-h0-fast/job-input/g256-fixture-20261008'}else{'speak-20261010-h0-fast/job-input/generator60x16-fixture-20261008-holdout2'}}})),[ValidateRange(1,21)][int]$Runs=3,
         # Tiles per step, one per HVX thread.
         [ValidateSet(2,4)][int]$TileBlock=4,
         # 1: both jobs run int8 weights q = round(w / 256) (clamped to +-127) stored as 256 q, table biases corrected; the
@@ -1583,16 +1591,19 @@ function Test-KokoroGeneratorTileEquivalence {
             $depthFirst=if($Channels -eq 256){'Chunked'}else{'Backward'}
         }
         'Front' { if($fixture.Graph -cne 'Generator60x16' -or $null -ne $fixture.Module){throw 'The fixture is not the 256-channel front and section.'}; $common.Stage16Channels=256; $common.GeneratorFront=$true; $depthFirst='Chunked' }
-        {$_ -in 'Whole','Spans'} { if($fixture.Graph -cne 'Generator16Whole'){throw 'The fixture is not the whole generator.'}; $common.GeneratorWhole=$true; $depthFirst='Backward' }
+        {$_ -in 'Whole','Spans','WholeSource'} { if($fixture.Graph -cne 'Generator16Whole'){throw 'The fixture is not the whole generator.'}; $common.GeneratorWhole=$true; $depthFirst='Backward'; if($Joint -eq 'WholeSource'){ $common.GeneratorSource=$true } }
     }
     $tileBytes=64*$Channels
     # A job with a tail returns only its header and PCM through the resident listener; the workspace needs a one-shot run.
-    $oneShot=$Joint -in 'Whole','Spans'
+    $oneShot=$Joint -in 'Whole','Spans','WholeSource'
     $export=Invoke-KokoroEmission -Kernel KokoroGenerator60x16Run -Parameters ($common+@{ResidentBatchTiles=22;GeneratorMoments='Export';GeneratorSchedule='Layer'})
-    $layerParameters=$common+@{ResidentBatchTiles=22;GeneratorMoments='Constants';GeneratorSchedule='Layer'}; if($SourceStreams -eq 'Model'){ $layerParameters.GeneratorExportFrontTensors=$true }
+    $layerParameters=$common+@{ResidentBatchTiles=$LayerBatchTiles;GeneratorMoments='Constants';GeneratorSchedule='Layer'}; if($LayerPoolWait){ $layerParameters.GeneratorPoolWait=$LayerPoolWait }; if($SourceStreams -eq 'Model'){ $layerParameters.GeneratorExportFrontTensors=$true }
     $layer=Invoke-KokoroEmission -Kernel KokoroGenerator60x16Run -Parameters $layerParameters
     $tileParameters=$common+@{ResidentBatchTiles=$TileBlock;GeneratorMoments='Constants';GeneratorSchedule=$depthFirst;GeneratorWeightPlanes=$WeightPlanes;GeneratorControllerContact=$ControllerContact.IsPresent;GeneratorVectorPackets=$VectorPackets.IsPresent}
-    if($Joint -ne 'Section'){ $tileParameters.GeneratorSuppliedSource=$true; $tileParameters.GeneratorSpanTiles=$SpanTiles }
+    if($Joint -notin 'Section','WholeSource'){ $tileParameters.GeneratorSuppliedSource=$true }
+    if($Joint -ne 'Section'){ $tileParameters.GeneratorSpanTiles=$SpanTiles }
+    if($StopAfterSpanStage){ $tileParameters.GeneratorStopAfterSpanStage=$StopAfterSpanStage }
+    if($PoolWait){ $tileParameters.GeneratorPoolWait=$PoolWait }
     if($SourceStreams -eq 'Model'){ $tileParameters.GeneratorExportFrontTensors=$true; if($ModelInjection -eq 'Output'){ $tileParameters.GeneratorSuppliedSectionInputs=$ModelSections } }
     if($SourceStreams -eq 'LayerOutput'){ $tileParameters.GeneratorSuppliedSectionInputs=$ModelSections }
     $tile=Invoke-KokoroEmission -Kernel KokoroGenerator60x16Run -Parameters $tileParameters
@@ -1615,9 +1626,9 @@ function Test-KokoroGeneratorTileEquivalence {
         # The main path's resblocks only: the source branch (noise_res) runs only in the layer job, which computes the
         # supplied streams from its own weights.
         $records=@{}; foreach($site in $layer.Layout.ConstantPacking.MomentSites){ $records["$($site.Module).$($site.Block).$($site.Stage)"]=[long]$site.RecordOffset }
-        foreach($region in @($layer.Layout.WeightRegions | Where-Object { $_.Part -ceq 'Main' -and $_.Format -ceq 'ResblockW16' })){
+        foreach($region in @($layer.Layout.WeightRegions | Where-Object { $_.Format -ceq 'ResblockW16' -and ($_.Part -ceq 'Main' -or $Joint -eq 'WholeSource') })){
             $width=[int]$region.Channels; $kernel=[int]$region.Kernel; $count=$width*$width*$kernel; $blocks=$width/32
-            $block=$(if($width -eq 256){0}else{3})+[Array]::IndexOf([int[]]@(3,7,11),$kernel)
+            $module=if($region.Part -ceq 'Source'){'noise_res'}else{'resblocks'}; $block=if($module -eq 'noise_res'){[int]($region.Name.Split('.')[-1])}else{$(if($width -eq 256){0}else{3})+[Array]::IndexOf([int[]]@(3,7,11),$kernel)}
             for($st=0;$st -lt 6;$st++){
                 $high=[long]$region.Offset+2L*$count*$st; $low=$high+$count
                 $deltaHigh=[long[]]::new($width); $sumLow=[long[]]::new($width)
@@ -1629,7 +1640,7 @@ function Test-KokoroGeneratorTileEquivalence {
                     $runWeights[$high+$at]=[byte]($q -band 255); $runWeights[$low+$at]=0
                     $deltaHigh[$o]+=$q-$hb; $sumLow[$o]+=$lb
                 }
-                $record=$records["resblocks.$block.$st"]
+                $record=$records["$module.$block.$st"]
                 for($o=0;$o -lt $width;$o++){
                     for($plane=0;$plane -lt 4;$plane++){
                         $at=[int]($record+32L*$width+(6*[math]::Floor($o/32)+$plane)*256+128+4*($o%32))
@@ -1647,7 +1658,7 @@ function Test-KokoroGeneratorTileEquivalence {
     # The DDR workspace starts at the first 128-byte boundary at least 64 bytes into the output buffer.
     $tensorBytes=[long]$fixture.Tiles*$tileBytes
     $tileInput=$constantsInput
-    if($Joint -ne 'Section'){
+    if($Joint -notin 'Section','WholeSource'){
         # Each source stream the layer job parked in its workspace becomes the depth-first job's supplied input there.
         if($SourceStreams -eq 'Model'){
             if(-not $SourceModel){throw 'SourceStreams Model needs -SourceModel (a generator-source-boundary receipt).'}
@@ -1805,10 +1816,12 @@ function Test-KokoroGeneratorTileEquivalence {
     for($i=0;$i -lt $tensorBytes;$i++){if($layerTensor[$i] -ne $tileTensor[$i]){$different++; if($first -lt 0){$first=$i}; $t=[int][math]::Floor($i/$tileBytes); if($differingTiles.Count -eq 0 -or $differingTiles[-1] -ne $t){$differingTiles.Add($t)}}}
     # Each section's input after its front and its output, compared in the two jobs' workspaces.
     $sectionReport=@(foreach($section in @($tile.Layout.Sections)){
-        $reference=@($layer.Layout.Sections)[$section.Section]
-        foreach($part in @(@('Input','InputWorkspaceOffset'),@('Output','FinalWorkspaceOffset'))){
+        # A computed source's output N against the source the layer job parked for that front.
+        if($null -ne $section.SourceOf -and [int]$section.SourceOf -ge 0){ $parts=@(,@('Source','FinalWorkspaceOffset',[long]@($layer.Layout.SourceStreams)[[int]$section.SourceOf].WorkspaceOffset)) }
+        else { $reference=@($layer.Layout.Sections)[$section.Section]; $parts=@(@('Input','InputWorkspaceOffset',[long]$reference.InputWorkspaceOffset),@('Output','FinalWorkspaceOffset',[long]$reference.FinalWorkspaceOffset)) }
+        foreach($part in $parts){
             if([long]$section.($part[1]) -lt 0){ continue }
-            $a=[long]$reference.($part[1])+128; $b=[long]$section.($part[1])+128; $bad=0; $firstBad=-1
+            $a=[long]$part[2]+128; $b=[long]$section.($part[1])+128; $bad=0; $firstBad=-1
             for($i=0L;$i -lt $section.Bytes;$i++){ if($layerRun.Output[$a+$i] -ne $tileRun.Output[$b+$i]){ $bad++; if($firstBad -lt 0){$firstBad=$i} } }
             [pscustomobject]@{Section=$section.Section;Channels=$section.Channels;Tensor=$part[0];DifferentBytes=$bad;FirstDifferingTile=$(if($firstBad -ge 0){[int][math]::Floor($firstBad/(64*$section.Channels))}else{-1})}
         }
