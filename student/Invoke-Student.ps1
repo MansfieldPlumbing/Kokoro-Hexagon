@@ -3045,10 +3045,7 @@ function Invoke-StudentProsodyProgram($Image, $Context) {
     foreach ($neighbor in @(Get-StudentImageNeighborhood $Image ([float[]](0,1,0,0)) 1)) {
         foreach ($rule in $neighbor.Percept.Rules) {
             if ($rule.Kind -ceq 'Prosody' -and $rule.State -ceq 'Admitted' -and $rule.Style -ceq $style -and $rule.BoundaryKind -ceq $Context.BoundaryKind) {
-                return [pscustomobject]@{ PSTypeName = 'Kokoro.StudentBoundaryAction'; Rule = $rule.Identity
-                    PauseSeconds = $(if ($rule.PauseAdmitted) { $rule.PauseSeconds } else { $rule.Fallback.PauseSeconds })
-                    PitchResetCents = $(if ($rule.PitchAdmitted) { $rule.PitchResetCents } else { $rule.Fallback.PitchResetCents })
-                    HasRest = $(if ($rule.BoundaryAdmitted) { $rule.HasRest } else { $rule.Fallback.HasRest }) }
+                return ConvertTo-StudentBoundaryAction $rule
             }
         }
     }
@@ -3203,7 +3200,7 @@ function Get-StudentPhoneOccurrences($Windows) {
                 Boundary = $boundary; IntoPhrase = $into; ToBoundary = $toEnd
                 WordsToBoundary = [Math]::Max(0, $wordsAfter - $(if ($boundary -ceq '$') { 0 } else { 1 })); PhraseInitialWord = $wordsBefore -eq 0
                 Given = $(if ($null -ne $word) { $given[$wordIndex] } else { $false })
-                SyllableStress = $(if ($null -ne $word -and $offset -ge 0) { $syllable[$wordIndex][$offset] } else { '-' }) }
+                SyllableStress = $(if ($null -ne $word -and $offset -ge 0) { $syllable[$wordIndex][$offset] } else { '-' }); Closure = 'Unscanned'; PitchEvent = $null }
             if ($null -ne $word) {
                 $block = [int][Math]::Floor($word.FirstToken / 64) % 8
                 # Blocks 7, 6 and 5 of 8: held out (reported), development (choices), test (untouched until a milestone).
@@ -3328,7 +3325,7 @@ function New-StudentProsodyRules([object[]] $Training, [bool] $SplitStress, [boo
     $rules = [pscustomobject]@{ PSTypeName = 'Kokoro.StudentProsodyRules'; SplitStress = $SplitStress; TypePitch = $TypePitch
         Duration = @{}; Voiced = @{}; Pitch = @{}; Energy = @{}; MeanDuration = $allDuration / $Training.Count; VoiceLogHz = $voiceLog; MeanEnergy = $allEnergy / $allTicks
         WordFinal = 0.0; Stressed = 0.0; StressedPitch = 0.0
-        Phrasing = $false; FinalDuration = @{}; DeclinationLevel = 0.0; DeclinationSlope = 0.0; FinalPitch = @{}; WordCounts = @{}; Accent = @{}; PitchMinCount = 200; ReplayPitchWeight = 1.0; SymbolVoiced = @{}; VoicingEdges = @{} }
+        Phrasing = $false; FinalDuration = @{}; DeclinationLevel = 0.0; DeclinationSlope = 0.0; FinalPitch = @{}; WordCounts = @{}; Accent = @{}; PitchMinCount = 200; ReplayPitchWeight = 1.0; SymbolVoiced = @{}; VoicingEdges = @{}; BoundaryPrograms = @(); BoundaryEvents = $true }
     foreach ($name in $durationCount.Keys) {
         $rules.Duration[$name] = $durationSum[$name] / $durationCount[$name]
         $rules.Voiced[$name] = [int]$voiced[$name] / [Math]::Max(1, [int]$ticks[$name])
@@ -3398,6 +3395,7 @@ function New-StudentProsodyRules([object[]] $Training, [bool] $SplitStress, [boo
             if ($Phone.ToBoundary -le $script:StudentFinalReach -and $this.FinalPitch.ContainsKey($Phone.Boundary)) { $terms.Add([pscustomobject]@{ Behaviour = 'FinalPitch'; Key = $Phone.Boundary; Value = $this.FinalPitch[$Phone.Boundary] }) }
             if ($null -ne $Phone.Word -and $Phone.Offset -ge 0 -and $this.Accent.Count) { foreach ($key in (Get-StudentPitchKeys $this $Phone)) { $cell = $this.Accent[$key]; if ($null -ne $cell -and $cell[1] -ge $this.PitchMinCount) { $terms.Add([pscustomobject]@{ Behaviour = 'PitchCell'; Key = $key; Value = $cell[0] / $cell[1] }); break } } }
         }
+        if ($this.BoundaryEvents -and $null -ne $Phone.PSObject.Properties['PitchEvent'] -and $null -ne $Phone.PitchEvent) { $terms.Add([pscustomobject]@{ Behaviour = 'BoundaryAction'; Key = $Phone.PitchEvent.Context; Value = $Phone.PitchEvent.DeltaLogHz }) }
         $logHz = $terms[0].Value; for ($i = 1; $i -lt $terms.Count; $i++) { $logHz += $terms[$i].Value }
         [pscustomobject]@{ Voiced = $known -and [double]$this.Voiced[$name] -ge 0.5; LogHz = $logHz
             Energy = $(if ($known) { [double]$this.Energy[$name] } else { $this.MeanEnergy }); PitchTerms = $terms } }
@@ -3571,6 +3569,7 @@ function Invoke-StudentInventory {
     $windows = @($syllabus.Windows)
     if (@($windows | Where-Object { $null -eq $_.Evidence.PSObject.Properties['N'] -or $null -eq $_.Evidence.N }).Count) { throw 'Syllabus evidence without N: re-render it (Syllabus step).' }
     $phones = Get-StudentPhoneOccurrences $windows
+    $clauses = Set-StudentClauseStatus $phones
     $role = { param($Phone) if (-not $Phone.Used -or $null -eq $Phone.Word) { 'Unused' } elseif ($Phone.HeldOut) { 'HeldOut' } elseif ($Phone.Development) { 'Development' } elseif ($Phone.Test) { 'Test' } else { 'Training' } }
     $byRole = $phones | Group-Object { & $role $_ } -AsHashTable
     $training = @($byRole['Training']); $development = @($byRole['Development']); $heldOut = @($byRole['HeldOut']); $test = @($byRole['Test'])
@@ -3608,10 +3607,18 @@ function Invoke-StudentInventory {
     $chosen.PitchMinCount = @($pitchChoices | Sort-Object Score -Descending)[0].PitchMinCount
     $weightChoices = foreach ($weight in 0.0, 0.25, 0.5, 1.0) { $chosen.ReplayPitchWeight = $weight; $g = (Measure-StudentReplay $chosen $library $development).Gate; [pscustomobject]@{ ReplayPitchWeight = $weight; Correlation = $g.PhonePitchCorrelation; Spread = $g.PhonePitchSpread; Score = & $gateScore $g } }
     $chosen.ReplayPitchWeight = @($weightChoices | Sort-Object Score -Descending)[0].ReplayPitchWeight
+    # Boundary actions: pitch-reset programs by boundary context (the mark and the clause closure there), admitted on
+    # development; admitted ones run as controller events. Held-out scores are reported with and without them.
+    $chosen.BoundaryPrograms = @(Add-StudentBoundaryPrograms $chosen $phones $Voice)
+    $controllerEvents = @(Set-StudentBoundaryEvents $chosen $phones)
+    $chosen.BoundaryEvents = $false; $withoutEvents = Measure-StudentReplay $chosen $library $heldOut; $chosen.BoundaryEvents = $true
+    $heldOutEvents = @($controllerEvents | Where-Object { $_.Phones[0].Used -and $_.Phones[0].HeldOut })
+    $boundaryScores = [pscustomobject]@{ Clause = $clauses; Programs = @($chosen.BoundaryPrograms | Select-Object Context, State, TrainingCount, DevelopmentCount, PitchResetCents, DevelopmentScore, HeldOutScore)
+        Events = $controllerEvents.Count; HeldOutEvents = $heldOutEvents.Count; HeldOutEventEvidence = @($heldOutEvents | ForEach-Object { "$($_.Rule.Substring(0, 12)) $($_.Context) $($_.Occurrence)" }); ReplayGateWithoutEvents = $withoutEvents.Gate }
     $replayed = Measure-StudentReplay $chosen $library $heldOut; $rulesOnly = Measure-StudentReplay $chosen $null $heldOut
     $replayScores = [pscustomobject]@{ Rules = (Get-StudentProsodySummary $rulesOnly.Rows 'Rules'); Replay = (Get-StudentProsodySummary $replayed.Rows 'Replay')
         RulesSpread = $rulesOnly.SpreadRatio; ReplaySpread = $replayed.SpreadRatio; RulesGate = $rulesOnly.Gate; ReplayGate = $replayed.Gate; ReplayKeys = $replayed.Keys; Keys = $library.Count
-        PitchChoices = @($pitchChoices); WeightChoices = @($weightChoices) }
+        PitchChoices = @($pitchChoices); WeightChoices = @($weightChoices); Boundary = $boundaryScores }
     $strata = [Collections.Generic.List[object]]::new(); $strata.Add((Get-StudentProsodySummary $scores 'All'))
     foreach ($group in ($scores | Group-Object Novelty | Sort-Object Name)) { $strata.Add((Get-StudentProsodySummary @($group.Group) "Novelty.$($group.Name)")) }
     foreach ($group in ($scores | Group-Object Class | Sort-Object Name)) { $strata.Add((Get-StudentProsodySummary @($group.Group) "Class.$($group.Name)")) }
@@ -3653,6 +3660,7 @@ function New-StudentProsodyStream($Rules, [object[]] $PhoneList, $Library = $nul
     # clock (two ticks per frame). Each phone's rule targets are adjusted by its word's control recording when one
     # matches (duration ratio, pitch and energy residuals by relative time in the word), then approached by
     # StudentControlResponse per tick.
+    $controllerEvents = @(Set-StudentBoundaryEvents $Rules $PhoneList)
     $replay = Get-StudentReplayPlan $Library $PhoneList
     $durations = [int[]]::new($PhoneList.Count); $frames = 0; $first = @{}
     for ($o = 0; $o -lt $PhoneList.Count; $o++) {
@@ -3661,6 +3669,7 @@ function New-StudentProsodyStream($Rules, [object[]] $PhoneList, $Library = $nul
         if ($null -ne $FixedDurations) { $d = $FixedDurations[$o] }
         $durations[$o] = $d; $first[$PhoneList[$o]] = 2 * $frames; $frames += $d
     }
+    foreach ($controllerEvent in $controllerEvents) { $controllerEvent.FirstTick = $first[$controllerEvent.Phones[0]]; $last = $controllerEvent.Phones[-1]; $controllerEvent.Ticks = $first[$last] + 2 * $durations[[Array]::IndexOf($PhoneList, $last)] - $controllerEvent.FirstTick }
     $ticks = 2 * $frames; $f0 = [float[]]::new($ticks); $energy = [float[]]::new($ticks)
     $at = 0; $pitch = [double]::NaN; $level = [double]::NaN
     for ($o = 0; $o -lt $PhoneList.Count; $o++) {
@@ -3678,7 +3687,7 @@ function New-StudentProsodyStream($Rules, [object[]] $PhoneList, $Library = $nul
             $at++
         }
     }
-    [pscustomobject]@{ PSTypeName = 'Kokoro.StudentProsodyStream'; Durations = $durations; Frames = $frames; F0 = $f0; N = $energy; ReplayKeys = $replay.Keys }
+    [pscustomobject]@{ PSTypeName = 'Kokoro.StudentProsodyStream'; Durations = $durations; Frames = $frames; F0 = $f0; N = $energy; ReplayKeys = $replay.Keys; Events = $controllerEvents }
 }
 
 function Get-StudentOutputPath([string] $StepName) {
@@ -3733,6 +3742,176 @@ function Invoke-StudentSpeakOnDsp($Inventory, [string] $Phonemes, $Stream, [stri
         HostTextEncoderSeconds = [Math]::Round($encoderSeconds, 2); VoiceBase = $basePath; Wave = $wave; Directory = $Out; MachineSHA256 = $script:StudentMachineSHA256 }
 }
 
+function Get-StudentClauseStatus([string] $Text, [object[]] $Spans) {
+    # The compiled interpretation engine's clause state after each occurrence, keyed by source offset: one engine per
+    # sentence span (the engine holds one clause), with the status of its subject-awaiting-predicate closure (Inactive,
+    # Open, Ambiguous, Satisfied, Unresolved) from its prosody transitions. A sentence it cannot hold is counted and
+    # left out.
+    if ($null -eq $script:StudentContext.InterpretationType) { $null = Import-StudentPhonemizer }
+    $status = [Collections.Generic.Dictionary[int,string]]::new(); $failed = 0
+    foreach ($span in $Spans) {
+        $state = New-StudentInterpretationState "clause:$($span[0])"
+        try { $null = Add-StudentInterpretationText $state $Text.Substring($span[0], $span[1] - $span[0]) $true } catch { $failed++; continue }
+        $byToken = @{}; foreach ($transition in $state.Transitions) { $byToken[[int]$transition.Token] = [string]$transition.Status }
+        $current = 'Inactive'
+        foreach ($occurrence in $state.Engine.Occurrences) { if ($byToken.ContainsKey([int]$occurrence.Identity)) { $current = $byToken[[int]$occurrence.Identity] }; $status[$span[0] + $occurrence.Start] = $current }
+    }
+    [pscustomobject]@{ PSTypeName = 'Kokoro.StudentClauseStatus'; Status = $status; Sentences = $Spans.Count; Failed = $failed }
+}
+
+function Set-StudentClauseStatus([object[]] $PhoneList) {
+    # Syllabus occurrences: every source sentence holding a window's words goes through Get-StudentClauseStatus, and each
+    # word phone takes its word's closure status by the token's source offset ('Unscanned' where none was recorded).
+    $tokens = @{}
+    foreach ($phone in $PhoneList) { if ($null -ne $phone.Word) { if (-not $tokens.ContainsKey($phone.Word.Book)) { $tokens[$phone.Word.Book] = [Collections.Generic.HashSet[int]]::new() }; $null = $tokens[$phone.Word.Book].Add($phone.Word.FirstToken) } }
+    $books = @{}; $statusByBook = @{}; $sentences = 0; $failed = 0
+    foreach ($name in $tokens.Keys) {
+        $book = @(Get-StudentBooks -Name $name)[0]; $books[$name] = $book; $spans = [Collections.Generic.List[object]]::new()
+        for ($s = 0; $s -lt ($book.Sentences.Length -shr 1); $s++) {
+            $first = $book.Sentences[2 * $s]; $last = $book.Sentences[2 * $s + 1]; $hit = $false
+            for ($k = $first; $k -le $last -and -not $hit; $k++) { $hit = $tokens[$name].Contains($k) }
+            if ($hit) { $spans.Add([int[]]@($book.Tokens[4 * $first + 1], ($book.Tokens[4 * $last + 1] + $book.Tokens[4 * $last + 2]))) }
+        }
+        $clause = Get-StudentClauseStatus $book.Text $spans.ToArray(); $statusByBook[$name] = $clause.Status; $sentences += $clause.Sentences; $failed += $clause.Failed
+    }
+    $words = @{}
+    foreach ($phone in $PhoneList) {
+        if ($null -eq $phone.Word) { continue }
+        $found = $null; $start = $books[$phone.Word.Book].Tokens[4 * $phone.Word.FirstToken + 1]
+        $phone.Closure = if ($statusByBook[$phone.Word.Book].TryGetValue($start, [ref]$found)) { $found } else { 'Unscanned' }
+        $words["$($phone.Word.Book):$($phone.Word.FirstToken)"] = $phone.Closure
+    }
+    $counts = [ordered]@{}; foreach ($group in ($words.Values | Group-Object | Sort-Object Name)) { $counts[$group.Name] = $group.Count }
+    [pscustomobject]@{ Sentences = $sentences; Failed = $failed; Words = $words.Count; Status = [pscustomobject]$counts }
+}
+
+function New-StudentTextPhones([string] $Text) {
+    # Live text as typed occurrences: one interpretation of the text gives its pronunciation and tokens; each token with
+    # phonemes is a word occurrence carrying its identity, source offset and span in the phoneme string, and each
+    # sentence's clause state binds to its words by source offset.
+    $phonemize = Import-StudentPhonemizer
+    $state = New-StudentInterpretationState 'text'
+    $normalization = Add-StudentInterpretationText $state $Text $true
+    if (-not $normalization.Complete -or -not $normalization.Phones) { throw 'The phonemizer could not resolve -Text.' }
+    $phonemes = [string]$normalization.Phones
+    if ($phonemes -cne [string]$phonemize.Invoke($Text).KokoroPhones) { throw 'The interpretation and the phonemizer disagree on -Text.' }
+    $words = [Collections.Generic.List[object]]::new(); $spans = [Collections.Generic.List[object]]::new(); $sentenceStart = -1; $end = 0
+    foreach ($token in $state.Result.Tokens) {
+        if ($sentenceStart -lt 0) { $sentenceStart = [int]$token.SourceStart }
+        if ($token.EmissionEnd -gt $token.EmissionStart) {
+            if ($token.EmissionStart -lt $end) { throw 'Interpretation tokens overlap in the phoneme string.' }
+            $end = [int]$token.EmissionEnd
+            $words.Add([pscustomobject]@{ PSTypeName = 'Kokoro.StudentOccurrence'; Book = 'text'; FirstToken = [int]$token.Identity; LastToken = [int]$token.Identity
+                Kind = $(if ([char]::IsLetterOrDigit([string]$token.Word, 0)) { 'Word' } else { 'Punctuation' }); SourceStart = [int]$token.SourceStart
+                Phonemes = $phonemes.Substring($token.EmissionStart, $token.EmissionEnd - $token.EmissionStart); Start = [int]$token.EmissionStart; FirstTick = 0; Ticks = 0 })
+        }
+        if ([string]$token.Word -cin '.', '!', '?') { $spans.Add([int[]]@($sentenceStart, [int]$token.SourceEnd)); $sentenceStart = -1 }
+    }
+    if ($sentenceStart -ge 0) { $spans.Add([int[]]@($sentenceStart, $Text.Length)) }
+    $window = [pscustomobject]@{ Index = -1; Ticks = 0; Occurrences = $words.ToArray(); Evidence = [pscustomobject]@{ Phonemes = $phonemes; Durations = [int[]]::new($phonemes.Length + 2) } }
+    $phones = @(Get-StudentPhoneOccurrences @($window))
+    $clause = Get-StudentClauseStatus $Text $spans.ToArray()
+    foreach ($phone in $phones) { if ($null -ne $phone.Word) { $found = $null; $phone.Closure = if ($clause.Status.TryGetValue($phone.Word.SourceStart, [ref]$found)) { $found } else { 'Unscanned' } } }
+    [pscustomobject]@{ PSTypeName = 'Kokoro.StudentTextPhones'; Phonemes = $phonemes; Phones = $phones; Clause = $clause; Interpretation = $state }
+}
+
+function Get-StudentBoundaries([object[]] $PhoneList) {
+    # Each phrase mark between two spoken words of one window: the mark's phone and the phones of the word before it
+    # and of the word after it (the first mark where several stand together).
+    foreach ($group in ($PhoneList | Group-Object { $_.Window.Index })) {
+        $runs = [Collections.Generic.List[object]]::new(); $marks = [Collections.Generic.List[object]]::new(); $key = $null
+        foreach ($phone in @($group.Group | Sort-Object Index)) {
+            if ($null -ne $phone.Word -and $phone.Offset -ge 0 -and $phone.Word.Kind -cnotin 'Punctuation', 'Quote') {
+                $wordKey = "$($phone.Word.Book):$($phone.Word.FirstToken)"
+                if ($wordKey -cne $key) { $runs.Add([Collections.Generic.List[object]]::new()); $key = $wordKey }
+                $runs[$runs.Count - 1].Add($phone)
+            }
+            elseif ($script:StudentPhraseMarks.Contains([string]$phone.Symbol) -and ($marks.Count -eq 0 -or $marks[$marks.Count - 1].Run -ne $runs.Count)) { $marks.Add([pscustomobject]@{ Phone = $phone; Run = $runs.Count }); $key = $null }
+        }
+        foreach ($mark in $marks) { if ($mark.Run -ge 1 -and $mark.Run -lt $runs.Count) { [pscustomobject]@{ Phone = $mark.Phone; Previous = $runs[$mark.Run - 1].ToArray(); Next = $runs[$mark.Run].ToArray() } } }
+    }
+}
+
+function Get-StudentBoundaryContext($Boundary) {
+    # The mark and whether the clause's subject still awaits its predicate after the word before it.
+    $status = $Boundary.Previous[-1].Closure
+    $closure = if ($status -cin 'Open', 'Ambiguous') { 'Open' } elseif ($status -ceq 'Unscanned') { 'Unscanned' } else { 'Closed' }
+    "$($Boundary.Phone.Symbol)|$closure"
+}
+
+function Get-StudentWordLogHz($Rules, [object[]] $Word) {
+    # With Rules: the rules' log f0 over the word's voiced phones weighted by their frames; without: the evidence's mean
+    # log f0 over its pitched ticks. NaN where there is none.
+    $s = 0.0; $w = 0.0
+    foreach ($phone in $Word) {
+        if ($null -ne $Rules) { $target = $Rules.Targets($phone); if ($target.Voiced) { $f = [Math]::Max(1, $Rules.Frames($phone)); $s += $f * $target.LogHz; $w += $f } }
+        else { $f0 = $phone.Window.Evidence.F0; for ($t = $phone.FirstTick; $t -lt $phone.FirstTick + $phone.Ticks; $t++) { if ($f0[$t] -ge $script:StudentPitchedHz) { $s += [Math]::Log($f0[$t]); $w++ } } }
+    }
+    if ($w) { $s / $w } else { [double]::NaN }
+}
+
+function Add-StudentBoundaryPrograms($Rules, [object[]] $PhoneList, [string] $Style) {
+    # Pitch reset across a phrase mark (the next word's mean log f0 less the previous word's), one program per boundary
+    # context from training boundaries whose mark and both words train. A program is admitted when its reset beats the
+    # rules' own reset on development boundaries; held-out boundaries are scored, never used to choose.
+    $byRole = @{ Training = [Collections.Generic.List[object]]::new(); Development = [Collections.Generic.List[object]]::new(); HeldOut = [Collections.Generic.List[object]]::new() }
+    $roleOf = { param($Phone) if (-not $Phone.Used) { 'Unused' } elseif ($Phone.HeldOut) { 'HeldOut' } elseif ($Phone.Development) { 'Development' } elseif ($Phone.Test) { 'Test' } else { 'Training' } }
+    foreach ($boundary in (Get-StudentBoundaries $PhoneList)) {
+        $role = & $roleOf $boundary.Phone
+        if (-not $byRole.ContainsKey($role) -or (& $roleOf $boundary.Previous[0]) -cne $role -or (& $roleOf $boundary.Next[0]) -cne $role) { continue }
+        $measured = (Get-StudentWordLogHz $null $boundary.Next) - (Get-StudentWordLogHz $null $boundary.Previous)
+        $predicted = (Get-StudentWordLogHz $Rules $boundary.Next) - (Get-StudentWordLogHz $Rules $boundary.Previous)
+        if ([double]::IsNaN($measured) -or [double]::IsNaN($predicted)) { continue }
+        $byRole[$role].Add([pscustomobject]@{ Identity = $boundary.Phone.Identity; Context = Get-StudentBoundaryContext $boundary; Measured = $measured; Rules = $predicted })
+    }
+    $cents = 1200 / [Math]::Log(2)
+    foreach ($group in ($byRole.Training | Group-Object Context | Sort-Object Name)) {
+        if ($group.Count -lt 8) { continue }
+        $reset = ($group.Group | Measure-Object Measured -Average).Average
+        $score = { param($Rows) if (-not $Rows.Count) { return $null }; $programError = 0.0; $rulesError = 0.0; foreach ($row in $Rows) { $programError += [Math]::Abs($row.Measured - $reset); $rulesError += [Math]::Abs($row.Measured - $row.Rules) }; [pscustomobject]@{ Boundaries = $Rows.Count; ProgramErrorCents = [Math]::Round($cents * $programError / $Rows.Count, 1); RulesErrorCents = [Math]::Round($cents * $rulesError / $Rows.Count, 1) } }
+        $development = @($byRole.Development | Where-Object Context -CEQ $group.Name); $heldOut = @($byRole.HeldOut | Where-Object Context -CEQ $group.Name)
+        $developmentScore = & $score $development
+        $admitted = $development.Count -ge 4 -and $developmentScore.ProgramErrorCents -lt $developmentScore.RulesErrorCents
+        $mark, $closure = $group.Name.Split('|')
+        $identityText = "${Style}:$($group.Name):$($group.Count):" + $reset.ToString('R', [Globalization.CultureInfo]::InvariantCulture)
+        [pscustomobject]@{ PSTypeName = 'Kokoro.StudentProsodyProgram'; Kind = 'Prosody'; Identity = [Convert]::ToHexString([Security.Cryptography.SHA256]::HashData([Text.Encoding]::UTF8.GetBytes($identityText)))
+            Style = $Style; BoundaryKind = $mark; Closure = $closure; Context = $group.Name; State = $(if ($admitted) { 'Admitted' } else { 'Rejected' })
+            PauseSeconds = 0.0; PitchResetCents = $cents * $reset; HasRest = $false; PauseAdmitted = $false; PitchAdmitted = $admitted; BoundaryAdmitted = $false
+            Fallback = [pscustomobject]@{ PauseSeconds = 0.0; PitchResetCents = [double]::NaN; HasRest = $false }
+            TrainingCount = $group.Count; DevelopmentCount = $development.Count; Evidence = @($group.Group | ForEach-Object Identity)
+            DevelopmentScore = $developmentScore; HeldOutScore = & $score $heldOut }
+    }
+}
+
+function ConvertTo-StudentBoundaryAction($Rule) {
+    # An admitted program's action: each part it was admitted for, otherwise its fallback.
+    [pscustomobject]@{ PSTypeName = 'Kokoro.StudentBoundaryAction'; Rule = $Rule.Identity
+        PauseSeconds = $(if ($Rule.PauseAdmitted) { $Rule.PauseSeconds } else { $Rule.Fallback.PauseSeconds })
+        PitchResetCents = $(if ($Rule.PitchAdmitted) { $Rule.PitchResetCents } else { $Rule.Fallback.PitchResetCents })
+        HasRest = $(if ($Rule.BoundaryAdmitted) { $Rule.HasRest } else { $Rule.Fallback.HasRest }) }
+}
+
+function Set-StudentBoundaryEvents($Rules, [object[]] $PhoneList) {
+    # Each boundary whose context has an admitted program runs its action as a controller event: a pitch reset scoped
+    # to the next word's phones, the difference between the action's reset and the rules' own (with earlier events in
+    # place), entered in each of those phones' targets. Returns the events in order.
+    foreach ($phone in $PhoneList) { $phone.PitchEvent = $null }
+    $admitted = @{}; foreach ($program in @($Rules.BoundaryPrograms)) { if ($program.State -ceq 'Admitted' -and $program.PitchAdmitted) { $admitted[$program.Context] = $program } }
+    if (-not $admitted.Count) { return }
+    $cents = 1200 / [Math]::Log(2)
+    foreach ($boundary in (Get-StudentBoundaries $PhoneList)) {
+        $context = Get-StudentBoundaryContext $boundary; $program = $admitted[$context]; if ($null -eq $program) { continue }
+        $rulesReset = (Get-StudentWordLogHz $Rules $boundary.Next) - (Get-StudentWordLogHz $Rules $boundary.Previous)
+        if ([double]::IsNaN($rulesReset)) { continue }
+        $action = ConvertTo-StudentBoundaryAction $program
+        $event = [pscustomobject]@{ PSTypeName = 'Kokoro.StudentControllerEvent'; Behaviour = 'PitchReset'; Action = $action; Rule = $program.Identity; Context = $context
+            Occurrence = $boundary.Phone.Identity; ClosureWord = "$($boundary.Previous[0].Word.Book):$($boundary.Previous[0].Word.FirstToken)"; Closure = $boundary.Previous[-1].Closure
+            Evidence = $program.TrainingCount; DeltaLogHz = $action.PitchResetCents / $cents - $rulesReset; Phones = $boundary.Next; FirstTick = -1; Ticks = 0 }
+        foreach ($phone in $boundary.Next) { $phone.PitchEvent = $event }
+        $event
+    }
+}
+
 function Invoke-StudentTrace {
     # What reaches the renderer from the typed Student, for the first syllabus window with held-out occurrences: per
     # phone occurrence its identity, split and typed context; every duration and pitch term with the behaviour that
@@ -3741,9 +3920,23 @@ function Invoke-StudentTrace {
     # of which behaviours decided the controls.
     $inventory = Invoke-StudentInventory
     $byWindow = $inventory.Phones | Group-Object { $_.Window.Index } -AsHashTable
-    $window = @($inventory.SyllabusWindows | Where-Object { @($byWindow[$_.Index] | Where-Object { $_.Used -and $_.HeldOut }).Count })[0]
+    $candidates = @($inventory.SyllabusWindows | Where-Object { @($byWindow[$_.Index] | Where-Object { $_.Used -and $_.HeldOut }).Count })
+    $withEvent = @($candidates | Where-Object { @($byWindow[$_.Index] | Where-Object { $null -ne $_.PitchEvent -and $_.Used -and $_.HeldOut }).Count })
+    $window = if ($withEvent.Count) { $withEvent[0] } else { $candidates[0] }
     $phones = @($byWindow[$window.Index] | Sort-Object { $_.Index })
-    $rules = $inventory.Rules; $stream = New-StudentProsodyStream $rules $phones $inventory.Recordings
+    # Equivalence: with the boundary events off the durations and N are identical, and f0 differs only inside an event's
+    # scope or its response tail (to the next unvoiced tick). With no admitted program, every program runs for this
+    # check only (Mechanism: rejected programs), so the scope is exercised; the trace rows use the admitted ones.
+    $rules = $inventory.Rules; $admittedPrograms = $rules.BoundaryPrograms; $mechanism = 'admitted programs'
+    if (-not @($admittedPrograms | Where-Object State -CEQ 'Admitted').Count) { $rules.BoundaryPrograms = @($admittedPrograms | ForEach-Object { $copy = $_.PSObject.Copy(); $copy.State = 'Admitted'; $copy.PitchAdmitted = $true; $copy }); $mechanism = 'rejected programs, executed for the scope check only' }
+    $rules.BoundaryEvents = $false; $fallback = New-StudentProsodyStream $rules $phones $inventory.Recordings; $rules.BoundaryEvents = $true
+    $stream = New-StudentProsodyStream $rules $phones $inventory.Recordings
+    if (-not [Linq.Enumerable]::SequenceEqual([int[]]$stream.Durations, [int[]]$fallback.Durations) -or -not [Linq.Enumerable]::SequenceEqual([float[]]$stream.N, [float[]]$fallback.N)) { throw 'Boundary events changed durations or N.' }
+    $scope = [bool[]]::new($stream.F0.Length)
+    foreach ($controllerEvent in $stream.Events) { for ($t = $controllerEvent.FirstTick; $t -lt $controllerEvent.FirstTick + $controllerEvent.Ticks; $t++) { $scope[$t] = $true }; for ($t = $controllerEvent.FirstTick + $controllerEvent.Ticks; $t -lt $scope.Length -and $stream.F0[$t] -gt 0; $t++) { $scope[$t] = $true } }
+    $inside = 0; $outside = 0; for ($t = 0; $t -lt $scope.Length; $t++) { if ($stream.F0[$t] -ne $fallback.F0[$t]) { if ($scope[$t]) { $inside++ } else { $outside++ } } }
+    if ($outside) { throw "Boundary events changed f0 on $outside ticks outside their scope." }
+    $checkEvents = @($stream.Events); $rules.BoundaryPrograms = $admittedPrograms; $stream = New-StudentProsodyStream $rules $phones $inventory.Recordings
     $replay = Get-StudentReplayPlan $inventory.Recordings $phones; $means = Get-StudentPhoneMeans $stream.Durations $stream.F0 $true
     $role = { param($Phone) if ($Phone.HeldOut) { 'HeldOut' } elseif ($Phone.Development) { 'Development' } elseif ($Phone.Test) { 'Test' } else { 'Training' } }
     $describe = { param($Terms) @($Terms | ForEach-Object { '{0}[{1}]={2:N3}' -f $_.Behaviour, $_.Key, $_.Value }) -join ' + ' }
@@ -3764,6 +3957,8 @@ function Invoke-StudentTrace {
     $behaviours = @{}; foreach ($phone in $phones) { if ($null -eq $phone.Word -or $phone.Offset -lt 0) { continue }; foreach ($term in @($rules.DurationTerms($phone, $true)) + @($rules.Targets($phone).PitchTerms)) { $behaviours[$term.Behaviour] = [int]$behaviours[$term.Behaviour] + 1 } }
     [pscustomobject]@{ PSTypeName = 'Kokoro.StudentTrace'; Window = $window.Index; Phones = $rows.Count; Words = @($rows | Select-Object -ExpandProperty Identity | ForEach-Object { $_.Substring(0, $_.LastIndexOf(':')) } | Select-Object -Unique).Count
         Behaviours = $behaviours; ReplayedPhones = @($rows | Where-Object Replay).Count; PitchReplayedPhones = @($rows | Where-Object { $_.Replay.EndsWith('(pitch)') }).Count
+        Mechanism = $mechanism; Events = @($checkEvents | ForEach-Object { [pscustomobject]@{ Behaviour = $_.Behaviour; Context = $_.Context; Rule = $_.Rule.Substring(0, 12); Occurrence = $_.Occurrence; ClosureWord = $_.ClosureWord; Closure = $_.Closure; Evidence = $_.Evidence; DeltaCents = [Math]::Round(1200 * $_.DeltaLogHz / [Math]::Log(2), 1); FirstTick = $_.FirstTick; Ticks = $_.Ticks } })
+        ChangedTicksInScope = $inside; ChangedTicksOutsideScope = $outside; ScopeTicks = @($scope | Where-Object { $_ }).Count
         Stream = 'per token durations, per tick f0 and N'; Path = (Join-Path $out 'trace.json'); Rows = $rows }
 }
 
@@ -3809,14 +4004,7 @@ function Invoke-StudentAblation {
     if (-not $Text.Trim()) { throw 'Ablate needs -Text.' }
     $out = Get-StudentOutputPath 'Ablate'
     $inventory = Invoke-StudentInventory
-    $phonemize = Import-StudentPhonemizer
-    $pronunciation = $phonemize.Invoke($Text)
-    if (-not $pronunciation.Complete -or -not $pronunciation.KokoroPhones) { throw 'The phonemizer could not resolve -Text.' }
-    $phonemes = [string]$pronunciation.KokoroPhones
-    $words = [Collections.Generic.List[object]]::new(); $start = 0; $token = 0
-    foreach ($part in $phonemes.Split(' ')) { if ($part.Length) { $words.Add([pscustomobject]@{ Book = 'text'; FirstToken = $token; Kind = 'Word'; Phonemes = $part; Start = $start }); $token++ }; $start += $part.Length + 1 }
-    $window = [pscustomobject]@{ Index = -1; Ticks = 0; Occurrences = $words.ToArray(); Evidence = [pscustomobject]@{ Phonemes = $phonemes; Durations = [int[]]::new($phonemes.Length + 2) } }
-    $phones = @(Get-StudentPhoneOccurrences @($window))
+    $spoken = New-StudentTextPhones $Text; $phonemes = $spoken.Phonemes; $phones = $spoken.Phones
     $syllabus = Import-StudentSyllabus (Join-Path $out 'syllabus')
     $rows = [Collections.Generic.List[object]]::new()
     try {
@@ -3943,14 +4131,7 @@ function Invoke-StudentSpeak {
     if (-not $Text.Trim()) { throw 'Speak needs -Text.' }
     $out = Get-StudentOutputPath 'Speak'
     $inventory = Invoke-StudentInventory
-    $phonemize = Import-StudentPhonemizer
-    $pronunciation = $phonemize.Invoke($Text)
-    if (-not $pronunciation.Complete -or -not $pronunciation.KokoroPhones) { throw 'The phonemizer could not resolve -Text.' }
-    $phonemes = [string]$pronunciation.KokoroPhones
-    $words = [Collections.Generic.List[object]]::new(); $start = 0; $token = 0
-    foreach ($part in $phonemes.Split(' ')) { if ($part.Length) { $words.Add([pscustomobject]@{ Book = 'text'; FirstToken = $token; Kind = 'Word'; Phonemes = $part; Start = $start }); $token++ }; $start += $part.Length + 1 }
-    $window = [pscustomobject]@{ Index = -1; Ticks = 0; Occurrences = $words.ToArray(); Evidence = [pscustomobject]@{ Phonemes = $phonemes; Durations = [int[]]::new($phonemes.Length + 2) } }
-    $phones = @(Get-StudentPhoneOccurrences @($window))
+    $spoken = New-StudentTextPhones $Text; $phonemes = $spoken.Phonemes; $phones = $spoken.Phones
     $stream = New-StudentProsodyStream $inventory.Rules $phones $inventory.Recordings
     if ($null -ne $State -and $State.PSObject.TypeNames -contains 'Kokoro.SpeechRenderer') { return Invoke-StudentSpeakOnDsp $inventory $phonemes $stream $out }
     $syllabus = Import-StudentSyllabus (Join-Path $out 'syllabus')
