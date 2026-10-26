@@ -1360,11 +1360,11 @@ class CoreNormalizationDecision {
     [bool]$Stress
     [bool]$Flap
     [string] Realize() {
-        [string]$phone=$null
+        [string]$phone=[CorePolish]::None()
         if($this.Operation -ceq 'Number'){$phone=[CorePolish]::Number($this.Operand,$this.PreviousWord)}
         elseif($this.Operation -ceq 'Morphology'){$phone=[CorePolish]::Inflect($this.Operand,$this.Role)}
         else{throw [InvalidOperationException]::new('Unsupported normalization operation.')}
-        if([object]::ReferenceEquals($null,$phone)){throw [InvalidOperationException]::new('Normalization operands are unresolved.')}
+        if([CorePolish]::IsNone($phone)){throw [InvalidOperationException]::new('Normalization operands are unresolved.')}
         if($this.Stress){$phone=[CorePolish]::Stress($phone)}
         if($this.Flap){$phone=[CorePolish]::Flap($phone)}
         return $phone
@@ -1377,7 +1377,10 @@ class CoreToken {
     [string]$Word
     [int]$SourceStart
     [int]$SourceEnd
-    [string]$Pron
+    [string]$Pron=''
+    # Unresolved (no pronunciation chosen), Resolved (Pron holds its phones) or Suppressed (deliberately silent); set with
+    # its phones by Resolve, never by assigning Pron.
+    [string]$PronState='Unresolved'
     [string]$PronunciationSource='CompiledLexicon'
     [string]$Polish=''
     [CoreNormalizationDecision]$Normalization
@@ -1387,6 +1390,11 @@ class CoreToken {
     [string]$Status
     [System.Nullable[int]]$EmissionStart
     [System.Nullable[int]]$EmissionEnd
+    [void] Resolve([string]$phones) {
+        $this.Pron=$phones
+        if($phones.Length -gt 0){$this.PronState='Resolved'}else{$this.PronState='Suppressed'}
+    }
+    [bool] IsUnresolved() {return $this.PronState -ceq 'Unresolved'}
 }
 class CoreResult {
     CoreResult() {}
@@ -1702,8 +1710,8 @@ class CoreEngine {
             [CoreToken]$t=[CoreToken]::new();$t.Identity=$o.Identity;$t.LexicalId=$o.LexicalId;$t.Word=$o.Text;$t.SourceStart=$o.Start;$t.SourceEnd=$o.End
             [Collections.Generic.List[int]]$roles=[Collections.Generic.List[int]]::new()
             [Collections.Generic.List[string]]$alternatives=[Collections.Generic.List[string]]::new()
-            [string]$phone=$null;[string]$reason=$null
-            if($o.Kind -ceq 'Boundary'){if([Phonology]::SymbolId($o.Text.get_Chars(0)) -ge 0){$phone=$o.Text}else{$reason='UnsupportedSymbol'}}
+            [string]$phone='';[bool]$found=$false;[string]$reason=$null
+            if($o.Kind -ceq 'Boundary'){if([Phonology]::SymbolId($o.Text.get_Chars(0)) -ge 0){$phone=$o.Text;$found=$true}else{$reason='UnsupportedSymbol'}}
             elseif($o.LexicalId -lt 0){$reason='UnknownLexicalIdentity'}
             elseif($clauseViable.Count -eq 0){$reason='NoAdmittedRelationship'}
             else{
@@ -1713,20 +1721,20 @@ class CoreEngine {
                     [int]$role=0
                     foreach($role in $roles.ToArray()){[CoreEngine]::Alternatives($alternatives,$o.LexicalId,$role)}
                     $alternatives.Sort()
-                    if($alternatives.Count -eq 1){$phone=$alternatives.get_Item(0)}else{$reason='PronunciationAmbiguous'}
+                    if($alternatives.Count -eq 1){$phone=$alternatives.get_Item(0);$found=$true}else{$reason='PronunciationAmbiguous'}
                 }
             }
-            if([object]::ReferenceEquals($null,$phone) -and $o.LexicalId -ge 0){
+            if(-not $found -and $o.LexicalId -ge 0){
                 [Collections.Generic.List[string]]$all=[Collections.Generic.List[string]]::new()
                 for([int]$role=0;$role -lt 5;$role++){[CoreEngine]::Alternatives($all,$o.LexicalId,$role)}
-                if($all.Count -eq 1){$phone=$all.get_Item(0);$reason=$null}
+                if($all.Count -eq 1){$phone=$all.get_Item(0);$found=$true;$reason=$null}
             }
             if($roles.Count -eq 1 -and $roles.get_Item(0) -ge 0 -and $this.Corrections.Count -gt 0){
                 [string]$key=$o.Text.ToLowerInvariant()+':'+[Convert]::ToString($roles.get_Item(0))+':'+[Convert]::ToString($this.FollowingVowel($o))
-                if($this.Corrections.ContainsKey($key)){$phone=$this.Corrections.get_Item($key);$reason=$null;$t.PronunciationSource='ZiraCorrection'}
+                if($this.Corrections.ContainsKey($key)){$phone=$this.Corrections.get_Item($key);$found=$true;$reason=$null;$t.PronunciationSource='ZiraCorrection'}
             }
-            $t.Pron=$phone;$t.Roles=$roles.ToArray();$t.Alternatives=$alternatives.ToArray()
-            if([object]::ReferenceEquals($null,$phone)){$t.Status=$reason}else{$t.Status='Valid'}
+            if($found){$t.Resolve($phone)};$t.Roles=$roles.ToArray();$t.Alternatives=$alternatives.ToArray()
+            if($found){$t.Status='Valid'}else{$t.Status=$reason}
             $tokens.Add($t);if($roles.Count -gt 1 -or $alternatives.Count -gt 1){$ambiguous.Add($t)}
         }
         # Emission follows the optional polish pass; an empty phone (a hyphen, an abbreviation's period) is silent.
@@ -1735,7 +1743,7 @@ class CoreEngine {
         [CoreToken]$e=$null
         foreach($e in $emitted){
             [Collections.Generic.List[int]]$tokenIds=[Collections.Generic.List[int]]::new()
-            if(-not [object]::ReferenceEquals($null,$e.Pron)){
+            if(-not $e.IsUnresolved()){
                 if($e.Pron.Length -gt 0){
                     if($phones.Length -gt 0){[void]$phones.Append(' ');$ids.Add(16)}
                     $e.EmissionStart=[System.Nullable[int]]::new($phones.Length)
@@ -1812,7 +1820,10 @@ class CorePolish {
         }
         return [CorePolish]::AbbreviationTable
     }
-    static [string] None() {[string]$none=$null;return $none}
+    # No answer: a NUL character, which no pronunciation contains. A null string cannot carry this, since PowerShell
+    # stores null as an empty string in string-typed variables and members while the lowered code keeps it null.
+    static [string] None() {return [Convert]::ToString([Convert]::ToChar(0))}
+    static [bool] IsNone([string]$s) {return [object]::ReferenceEquals($null,$s) -or ($s.Length -eq 1 -and $s.get_Chars(0) -ceq [Convert]::ToChar(0))}
     static [bool] IsVowel([char]$c) {return 'AIOWYɑɔəæɛɜɪiʊuʌɐᵻaeoɚ'.IndexOf($c) -ge 0}
     static [bool] IsStress([char]$c) {return $c -ceq [Convert]::ToChar(712) -or $c -ceq [Convert]::ToChar(716)}
     static [string] Item([string]$list,[int]$index) {
@@ -1901,13 +1912,13 @@ class CorePolish {
         [char]$first=$s.get_Chars(0)
         if($first -ceq [Convert]::ToChar(45)){
             [string]$rest=[CorePolish]::Number($s.Substring(1),'')
-            if([object]::ReferenceEquals($null,$rest)){return $rest}
+            if([CorePolish]::IsNone($rest)){return $rest}
             return 'mˈInəs '+$rest
         }
         if($first -ceq [Convert]::ToChar(36)){return [CorePolish]::Money($s.Substring(1))}
         if($s.get_Chars($s.Length-1) -ceq [Convert]::ToChar(37)){
             [string]$percent=[CorePolish]::Number($s.Substring(0,$s.Length-1),'')
-            if([object]::ReferenceEquals($null,$percent)){return $percent}
+            if([CorePolish]::IsNone($percent)){return $percent}
             return $percent+' pəɹsˈɛnt'
         }
         [string[]]$parts=$s.Split([Convert]::ToChar(58),[StringSplitOptions]::None)
@@ -1944,7 +1955,7 @@ class CorePolish {
             [string]$group=''
             foreach($group in $parts){
                 [string]$digits=[CorePolish]::Digits($group)
-                if([object]::ReferenceEquals($null,$digits) -or $group.Length -lt 1){return [CorePolish]::None()}
+                if([CorePolish]::IsNone($digits) -or $group.Length -lt 1){return [CorePolish]::None()}
                 if($spoken.Length -gt 0){[void]$spoken.Append(' ')}
                 [void]$spoken.Append($digits)
             }
@@ -1966,7 +1977,7 @@ class CorePolish {
             [string]$fraction=[CorePolish]::Digits($parts[1])
             [string]$integer=[CorePolish]::Number($parts[0],'')
             if($parts[0].Length -eq 0){$integer='zˈiɹO'}
-            if([object]::ReferenceEquals($null,$fraction) -or $parts[1].Length -lt 1 -or [object]::ReferenceEquals($null,$integer)){return [CorePolish]::None()}
+            if([CorePolish]::IsNone($fraction) -or $parts[1].Length -lt 1 -or [CorePolish]::IsNone($integer)){return [CorePolish]::None()}
             return $integer+' pˈYnt '+$fraction
         }
         [string]$plain=$s.Replace(',','')
@@ -2069,7 +2080,7 @@ class CorePolish {
     }
     static [string] Lexical([int]$id,[int]$role) {
         [string]$phone=[CorePolish]::Pick($id,$role)
-        for([int]$r=0;$r -lt 5 -and [object]::ReferenceEquals($null,$phone);$r++){$phone=[CorePolish]::Pick($id,$r)}
+        for([int]$r=0;$r -lt 5 -and [CorePolish]::IsNone($phone);$r++){$phone=[CorePolish]::Pick($id,$r)}
         return $phone
     }
     static [string] Lower([CoreToken[]]$tokens,[int]$index) {
@@ -2116,34 +2127,34 @@ class CorePolish {
     # Regular inflection of a lexicon word: -s/-es/-ies, -ed/-ied, -ing, with e-drop and doubled consonants.
     static [string] Inflect([string]$w,[int]$nounRole) {
         [int]$n=$w.Length
-        [string]$base=$null
+        [string]$base=[CorePolish]::None()
         if($n -ge 4 -and $w.EndsWith('ies',[StringComparison]::Ordinal)){
-            $base=[CorePolish]::Base($w.Substring(0,$n-3)+'y',$nounRole);if(-not [object]::ReferenceEquals($null,$base)){return $base+'z'}
+            $base=[CorePolish]::Base($w.Substring(0,$n-3)+'y',$nounRole);if(-not [CorePolish]::IsNone($base)){return $base+'z'}
         }
         # -es after a sibilant or o (boxes, wishes, churches, heroes); otherwise the stem keeps its e (pipes, not pips).
         if($n -ge 4 -and $w.EndsWith('es',[StringComparison]::Ordinal)){
             [string]$stem=$w.Substring(0,$n-2)
             [bool]$sibilant=$stem.EndsWith('s',[StringComparison]::Ordinal) -or $stem.EndsWith('x',[StringComparison]::Ordinal) -or $stem.EndsWith('z',[StringComparison]::Ordinal) -or $stem.EndsWith('ch',[StringComparison]::Ordinal) -or $stem.EndsWith('sh',[StringComparison]::Ordinal) -or $stem.EndsWith('o',[StringComparison]::Ordinal)
-            if($sibilant){$base=[CorePolish]::Base($stem,$nounRole);if(-not [object]::ReferenceEquals($null,$base)){return [CorePolish]::SuffixS($base)}}
+            if($sibilant){$base=[CorePolish]::Base($stem,$nounRole);if(-not [CorePolish]::IsNone($base)){return [CorePolish]::SuffixS($base)}}
         }
         if($n -ge 3 -and $w.EndsWith('s',[StringComparison]::Ordinal) -and -not $w.EndsWith('ss',[StringComparison]::Ordinal)){
-            $base=[CorePolish]::Base($w.Substring(0,$n-1),$nounRole);if(-not [object]::ReferenceEquals($null,$base)){return [CorePolish]::SuffixS($base)}
+            $base=[CorePolish]::Base($w.Substring(0,$n-1),$nounRole);if(-not [CorePolish]::IsNone($base)){return [CorePolish]::SuffixS($base)}
         }
         if($n -ge 4 -and $w.EndsWith('ied',[StringComparison]::Ordinal)){
-            $base=[CorePolish]::Base($w.Substring(0,$n-3)+'y',1);if(-not [object]::ReferenceEquals($null,$base)){return $base+'d'}
+            $base=[CorePolish]::Base($w.Substring(0,$n-3)+'y',1);if(-not [CorePolish]::IsNone($base)){return $base+'d'}
         }
         if($n -ge 4 -and $w.EndsWith('ed',[StringComparison]::Ordinal)){
-            $base=[CorePolish]::Base($w.Substring(0,$n-1),1);if(-not [object]::ReferenceEquals($null,$base)){return [CorePolish]::SuffixD($base)}
-            $base=[CorePolish]::Base($w.Substring(0,$n-2),1);if(-not [object]::ReferenceEquals($null,$base)){return [CorePolish]::SuffixD($base)}
+            $base=[CorePolish]::Base($w.Substring(0,$n-1),1);if(-not [CorePolish]::IsNone($base)){return [CorePolish]::SuffixD($base)}
+            $base=[CorePolish]::Base($w.Substring(0,$n-2),1);if(-not [CorePolish]::IsNone($base)){return [CorePolish]::SuffixD($base)}
             if($n -ge 5 -and $w.get_Chars($n-3) -ceq $w.get_Chars($n-4)){
-                $base=[CorePolish]::Base($w.Substring(0,$n-3),1);if(-not [object]::ReferenceEquals($null,$base)){return [CorePolish]::SuffixD($base)}
+                $base=[CorePolish]::Base($w.Substring(0,$n-3),1);if(-not [CorePolish]::IsNone($base)){return [CorePolish]::SuffixD($base)}
             }
         }
         if($n -ge 5 -and $w.EndsWith('ing',[StringComparison]::Ordinal)){
-            $base=[CorePolish]::Base($w.Substring(0,$n-3),1);if(-not [object]::ReferenceEquals($null,$base)){return $base+'ɪŋ'}
-            $base=[CorePolish]::Base($w.Substring(0,$n-3)+'e',1);if(-not [object]::ReferenceEquals($null,$base)){return $base+'ɪŋ'}
+            $base=[CorePolish]::Base($w.Substring(0,$n-3),1);if(-not [CorePolish]::IsNone($base)){return $base+'ɪŋ'}
+            $base=[CorePolish]::Base($w.Substring(0,$n-3)+'e',1);if(-not [CorePolish]::IsNone($base)){return $base+'ɪŋ'}
             if($n -ge 6 -and $w.get_Chars($n-4) -ceq $w.get_Chars($n-5)){
-                $base=[CorePolish]::Base($w.Substring(0,$n-4),1);if(-not [object]::ReferenceEquals($null,$base)){return $base+'ɪŋ'}
+                $base=[CorePolish]::Base($w.Substring(0,$n-4),1);if(-not [CorePolish]::IsNone($base)){return $base+'ɪŋ'}
             }
         }
         return [CorePolish]::None()
@@ -2155,12 +2166,12 @@ class CorePolish {
         [string]$suffix=$w.Substring($at)
         if($suffix -ceq '''t' -and $at -ge 2 -and $w.get_Chars($at-1) -ceq [Convert]::ToChar(110)){
             [string]$stem=[CorePolish]::Base($w.Substring(0,$at-1),1)
-            if([object]::ReferenceEquals($null,$stem)){return $stem}
+            if([CorePolish]::IsNone($stem)){return $stem}
             if([CorePolish]::IsVowel($stem.get_Chars($stem.Length-1))){return $stem+'nt'}
             return $stem+'ənt'
         }
         [string]$base=[CorePolish]::Base($w.Substring(0,$at),$nounRole)
-        if([object]::ReferenceEquals($null,$base)){return $base}
+        if([CorePolish]::IsNone($base)){return $base}
         if($suffix -ceq ''''){return $base}
         if($suffix -ceq '''s'){return [CorePolish]::SuffixS($base)}
         [bool]$open=[CorePolish]::IsVowel($base.get_Chars($base.Length-1))
@@ -2236,32 +2247,32 @@ class CorePolish {
             if([CorePolish]::Units().ContainsKey($unit)){
                 [int]$form=1
                 if($tokens[$i-1].Word -ceq '1' -or $tokens[$i-1].Word -ceq '-1'){$form=0}
-                $t.Pron=[CorePolish]::Item([CorePolish]::Units().get_Item($unit),$form)+$per;$t.PronunciationSource='Unit';return
+                $t.Resolve([CorePolish]::Item([CorePolish]::Units().get_Item($unit),$form)+$per);$t.PronunciationSource='Unit';return
             }
         }
-        if([CorePolish]::IsAcronym($text)){$t.Pron=[CorePolish]::Spell($text);$t.PronunciationSource='Acronym';return}
-        if(-not [object]::ReferenceEquals($null,$t.Pron)){return}
+        if([CorePolish]::IsAcronym($text)){$t.Resolve([CorePolish]::Spell($text));$t.PronunciationSource='Acronym';return}
+        if(-not $t.IsUnresolved()){return}
         if($o.LexicalId -ge 0){
             [string]$chosen=[CorePolish]::Heteronym($engine,$tokens,$i)
-            if(-not [object]::ReferenceEquals($null,$chosen)){$t.Pron=$chosen;$t.PronunciationSource='HeteronymDefault'}
+            if(-not [CorePolish]::IsNone($chosen)){$t.Resolve($chosen);$t.PronunciationSource='HeteronymDefault'}
             return
         }
-        [string]$phone=$null;[string]$source='Number';[int]$normalizationRole=0
+        [string]$phone=[CorePolish]::None();[string]$source='Number';[int]$normalizationRole=0
         if([CorePolish]::IsNumber($text)){$phone=[CorePolish]::Number($text,$previous)}
         elseif([CorePolish]::Abbreviations().ContainsKey($text) -and [CorePolish]::IsPeriod($engine,$i+1)){
             $source='Abbreviation';$phone=[CorePolish]::Abbreviations().get_Item($text)
             if($text -ceq 'St' -and [CorePolish]::IsWord($engine,$i+2) -and [char]::IsUpper($tokens[$i+2].Word.get_Chars(0))){$phone='sˈAnt'}
             # The abbreviation's period is not a sentence stop when more words follow.
-            for([int]$j=$i+2;$j -lt $tokens.Length;$j++){if([CorePolish]::IsWord($engine,$j)){$tokens[$i+1].Pron='';$tokens[$i+1].PronunciationSource='Abbreviation';break}}
+            for([int]$j=$i+2;$j -lt $tokens.Length;$j++){if([CorePolish]::IsWord($engine,$j)){$tokens[$i+1].Resolve('');$tokens[$i+1].PronunciationSource='Abbreviation';break}}
         }
         elseif($lower.IndexOf([Convert]::ToChar(39)) -ge 0){
             $source='Contraction'
             $phone=[CorePolish]::Lexical2($lower)
-            if([object]::ReferenceEquals($null,$phone)){$phone=[CorePolish]::Contract($lower,[CorePolish]::Role($engine,$tokens,$i,0))}
+            if([CorePolish]::IsNone($phone)){$phone=[CorePolish]::Contract($lower,[CorePolish]::Role($engine,$tokens,$i,0))}
         }
         else{$source='Morphology';$normalizationRole=[CorePolish]::Role($engine,$tokens,$i,0);$phone=[CorePolish]::Inflect($lower,$normalizationRole)}
-        if(-not [object]::ReferenceEquals($null,$phone)){
-            $t.Pron=$phone;$t.PronunciationSource=$source
+        if(-not [CorePolish]::IsNone($phone)){
+            $t.Resolve($phone);$t.PronunciationSource=$source
             if($source -ceq 'Number' -or $source -ceq 'Morphology'){
                 [CoreNormalizationDecision]$decision=[CoreNormalizationDecision]::new()
                 $decision.Operation=$source;$decision.Operand=$text
@@ -2286,9 +2297,9 @@ class CorePolish {
         for([int]$i=0;$i -lt $tokens.Length;$i++){
             [CoreToken]$t=$tokens[$i]
             if($engine.Occurrences.get_Item($i).Kind -ceq 'Boundary'){
-                if([object]::ReferenceEquals($null,$t.Pron)){
+                if($t.IsUnresolved()){
                     [string]$symbol=[CorePolish]::Symbol($t.Word)
-                    if(-not [object]::ReferenceEquals($null,$symbol)){$t.Pron=$symbol;$t.PronunciationSource='Symbol'}
+                    if(-not [CorePolish]::IsNone($symbol)){$t.Resolve($symbol);$t.PronunciationSource='Symbol'}
                 }
                 continue
             }
@@ -2296,7 +2307,7 @@ class CorePolish {
         }
         for([int]$i=0;$i -lt $tokens.Length;$i++){
             [CoreToken]$t=$tokens[$i]
-            if(-not [CorePolish]::IsWord($engine,$i) -or [object]::ReferenceEquals($null,$t.Pron) -or $t.Pron.Length -eq 0){continue}
+            if(-not [CorePolish]::IsWord($engine,$i) -or $t.PronState -cne 'Resolved'){continue}
             [string]$lower=[CorePolish]::Lower($tokens,$i)
             [string]$source=$t.PronunciationSource
             [bool]$lexical=$source -ceq 'CompiledLexicon' -or $source -ceq 'HeteronymDefault'
@@ -2305,7 +2316,7 @@ class CorePolish {
             [string]$phone=$t.Pron
             # Function words stay unstressed; the weak form replaces only a lexicon or default choice.
             if($function -and $lexical){
-                if([CorePolish]::IsWord($engine,$i+1) -and $i+1 -lt $tokens.Length -and -not [object]::ReferenceEquals($null,$tokens[$i+1].Pron) -and $tokens[$i+1].Pron.Length -gt 0){
+                if([CorePolish]::IsWord($engine,$i+1) -and $i+1 -lt $tokens.Length -and $tokens[$i+1].PronState -ceq 'Resolved'){
                     $phone=[CorePolish]::Weak().get_Item($lower)
                     # Zira reads the as ðɪ before a vowel (158 of 984 captured).
                     if($lower -ceq 'the' -and [CorePolish]::StartsWithVowel($tokens[$i+1].Pron)){$phone='ðɪ'}
@@ -2326,7 +2337,7 @@ class CorePolish {
                 if($flapped -cne $phone){$t.Polish=$t.Polish+'Flap;'}
                 $phone=$flapped
             }
-            $t.Pron=$phone
+            $t.Resolve($phone)
         }
     }
 }
@@ -2391,7 +2402,7 @@ class CoreDriver {
             [void]$b.Append('@{Word=');[void]$b.Append([CoreDriver]::Literal($t.Word))
             [void]$b.Append(';SourceStart=');[void]$b.Append([Convert]::ToString($t.SourceStart))
             [void]$b.Append(';SourceEnd=');[void]$b.Append([Convert]::ToString($t.SourceEnd))
-            [void]$b.Append(';Pron=');[void]$b.Append([CoreDriver]::Literal($t.Pron))
+            [void]$b.Append(';Pron=');if($t.IsUnresolved()){[void]$b.Append('$null')}else{[void]$b.Append([CoreDriver]::Literal($t.Pron))}
             [void]$b.Append(';Status=');[void]$b.Append([CoreDriver]::Literal($t.Status))
             [void]$b.Append(';PronunciationSource=');[void]$b.Append([CoreDriver]::Literal($t.PronunciationSource))
             [void]$b.Append(';Polish=');[void]$b.Append([CoreDriver]::Literal($t.Polish))
@@ -2407,7 +2418,7 @@ class CoreDriver {
             $mapped.KokoroPhones=[CoreDriver]::NormalizeZira($arguments[1]);$mapped.SymbolIds=[CoreDriver]::ZiraTokenIds($arguments[1])
             $mapped.Complete=$true;$mapped.GrammarStatus='ZiraEvents';$mapped.Tokens=[CoreToken[]]::new(1)
             [CoreToken]$token=[CoreToken]::new();$token.Word=$arguments[1];$token.SourceStart=0;$token.SourceEnd=$arguments[1].Length
-            $token.Pron=$mapped.KokoroPhones;$token.PronunciationSource='ZiraEvents';$token.Status='Valid';$token.Roles=[int[]]::new(0)
+            $token.Resolve($mapped.KokoroPhones);$token.PronunciationSource='ZiraEvents';$token.Status='Valid';$token.Roles=[int[]]::new(0)
             $mapped.Tokens[0]=$token
             [IO.File]::WriteAllText($arguments[2],[CoreDriver]::DataFile($mapped));return 0
         }
@@ -3155,6 +3166,19 @@ function Test-EnglishCoreDriver {
         }
         Assert-EnglishContract 'retained teacher corrections reached standalone execution' ($teacherChecks -gt 0)
     }
+    # One source, two runtimes: the driver's class source run live by SMA and its lowered assembly agree, token by token,
+    # on identity, pronunciation state, phones, roles and status, and on clause spans and proposals.
+    $live=New-Module -ScriptBlock ([scriptblock]::Create([IO.File]::ReadAllText((Join-Path ([IO.Path]::GetDirectoryName($driver.Output)) 'driver.ps1'))+"`nfunction Invoke-LiveCore([string]`$Text){[CoreDriver]::Run(`$Text)}"))
+    $describe={param($Result) @(@($Result.Tokens | ForEach-Object {'{0}:{1}:{2}:{3}:{4}' -f $_.Identity,$_.PronState,$_.Pron,($_.Roles -join ','),$_.Status})+@($Result.Clauses | ForEach-Object {'clause {0}-{1}' -f $_.First,$_.Last})+@($Result.Proposals | ForEach-Object {'{0} {1} {2} {3} {4}/{5}' -f $_.Kind,$_.Owner,$_.Anchor,$_.Scope,$_.Support,$_.Viable})) -join '|'}
+    $agreementCases=@($fixtures)+@($polishFixtures | ForEach-Object {$_[0]})+@('They read the record. They had read the record.','Dr. Smith lives on Main St. He left.','The quuxblarg records the record.','Well -- they left; then, at noon, they read it!')
+    foreach($sentence in $agreementCases){
+        $liveResult=& $live {param($Text) Invoke-LiveCore $Text} $sentence
+        Assert-EnglishContract ('live and compiled agree: '+$sentence) ((& $describe $liveResult) -ceq (& $describe $driver.Run.Invoke($sentence)) -and $liveResult.KokoroPhones -ceq $driver.Run.Invoke($sentence).KokoroPhones -and $liveResult.Complete -eq $driver.Run.Invoke($sentence).Complete)
+    }
+    $silent=@($driver.Run.Invoke('Dr. Smith lives on Main St. He left.').Tokens | Where-Object {$_.Word -ceq '.'})
+    Assert-EnglishContract 'an abbreviation period is suppressed, a sentence stop resolved' ($silent.Count -eq 3 -and $silent[0].PronState -ceq 'Suppressed' -and $silent[2].PronState -ceq 'Resolved')
+    $unknown=@($driver.Run.Invoke('The quuxblarg records the record.').Tokens | Where-Object {$_.Word -ceq 'quuxblarg'})
+    Assert-EnglishContract 'an unknown word stays unresolved, not silent' ($unknown.Count -eq 1 -and $unknown[0].PronState -ceq 'Unresolved')
     # Clause lifetime: sentences interpreted together keep the pronunciation each has alone; identities run on across
     # clauses, and the occurrence bound holds per clause, not per text.
     $sentences=@('They read the record.','They had read the record.','After the meeting, they read the record.','The record records the record.')
