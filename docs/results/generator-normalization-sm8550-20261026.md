@@ -74,10 +74,39 @@ The largest LevelShare (0.49) is at stage 0 of `resblocks.3`, `.4` and `.5`, whi
 - Renders run on the resident listener: 5 to 8 s per warm render, about 30 s per one-shot relaunch; the first
   resident job after a one-shot job starts a new listener (about 35 s).
 
+## Gain and offset levels separated
+
+Same streams, renderer and seed; resident renders. Each profiled condition starts from the fitted profile (equal to
+the voice base) and adds the held-out stream's own per-site level to the gain term (`ln(1/std)`), the offset term (the
+mean in std units) or both, at all sites or only at the source-branch (`noise_res`) or `resblocks` sites. The
+harmonic-to-noise ratio is measured over voiced ticks from the energy projected onto the first ten harmonics of each
+tick's f0; over one tick the harmonics are not exactly orthogonal, so it compares renders of the same x and f0 and is
+not an absolute value.
+
+| Condition | Held-out 0 RMS | Held-out 0 HNR change | Held-out 1 RMS | Held-out 1 HNR change |
+| --- | ---: | ---: | ---: | ---: |
+| Matched (6.59 dB; 7.51 dB) | 0.02 | 0 | 0.04 | 0 |
+| Voice base | 0.04 | +1.39 dB | 0.04 | -2.34 dB |
+| Profile, gain and offset levels | 0.02 | +0.44 dB | 0.03 | +0.22 dB |
+| Profile, gain level | 0.02 | -1.17 dB | 0.01 | -2.96 dB |
+| Profile, offset level | 0.04 | +1.72 dB | 0.03 | -2.98 dB |
+| Profile, offset level at `noise_res` | 0.04 | +1.41 dB | 0.04 | -2.41 dB |
+| Profile, offset level at `resblocks` | 0.03 | +1.79 dB | 0.03 | -2.90 dB |
+
+HNR change is against the stream's matched render. The matched, repeat, voice-base and both-levels renders reproduce
+the PCM hashes above. Receipt: `build/generator-normalization-session/run-20261026T121839/normalization.clixml`.
+
+- **The offset level at the source-branch sites leaves the render close to the voice base** (+1.41 against +1.39 dB;
+  -2.41 against -2.34 dB).
+- **The gain level moves both streams the same way.** Against the voice base it lowers RMS (0.04 to 0.02; 0.04 to
+  0.01) and the harmonic-to-noise ratio (by 2.56 dB; by 0.62 dB).
+- **The offset level's effect on the harmonic-to-noise ratio changes sign between the streams** (+1.72 dB; -2.98 dB).
+
 ## Not yet done
 
+- A stream-independent gain control: one uniform offset to `ln(1/std)` at every site, swept, with RMS and the
+  harmonic-to-noise ratio measured at each setting.
 - The same comparison on decoder-produced x (the Student's controls through the DSP decoder).
 - A spectral comparison of the normalization variants.
-- Separating the gain and offset parts of the profile-and-level condition, and the sites where each acts.
 
 Receipt: `build/generator-normalization-session/run-20261026T120330/normalization.clixml`, with the WAVs beside it.

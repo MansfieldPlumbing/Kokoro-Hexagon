@@ -3822,8 +3822,8 @@ function Invoke-StudentRendererNormalization {
     # The renderer alone, no Student (Run -Case generator-normalization): syllabus x and f0 for stretches of 130 ticks from
     # the first windows long enough. Each stretch's exact AdaIN moments are exported; the first eight fit, per site, a
     # channel profile (from the weights' view: the same in every stream) plus one level per stream, and give the voice
-    # base (their mean). Each held-out stretch renders with its own moments, with the voice base, and with the profile
-    # plus its own level per site (one number per site, what a live gain would carry), same x, f0, seed and weights.
+    # base (their mean). Each held-out stretch renders under the declared conditions below, same x, f0, seed and weights,
+    # each with its harmonic-to-noise ratio against the matched render's.
     if ($null -eq $State -or $State.PSObject.TypeNames -notcontains 'Kokoro.SpeechRenderer') { throw 'Normalization needs the speech renderer in -State (Run -Case generator-normalization).' }
     $renderer = $State; $out = Get-StudentOutputPath 'Normalization'; $ticks = 130; $profileCount = 8; $heldCount = 2
     $windows = @((Invoke-StudentSyllabus).Windows | Where-Object { $_.Ticks -ge $ticks })
@@ -3838,23 +3838,29 @@ function Invoke-StudentRendererNormalization {
     $fitted = $streams[0..($profileCount - 1)]; $held = $streams[$profileCount..($streams.Count - 1)]
     $fit = Get-StudentNormalizationProfile @($fitted | ForEach-Object { , $_.Terms })
     $base = $renderer.VoiceBase(@($fitted | ForEach-Object Export))
+    # The conditions each held-out stream renders under. MatchedRepeat is the run-to-run control. The profiled conditions
+    # start from the fitted profile (equal to the voice base) and add the stream's own per-site level to the gain term
+    # (ln 1/std), the offset term (mean in std units) or both, at the sites whose module matches.
+    $conditions = @(
+        @{ Name = 'Matched' }, @{ Name = 'MatchedRepeat' }, @{ Name = 'VoiceBase' }
+        @{ Name = 'ProfileLevel'; Gain = $true; Offset = $true; Modules = '.' }
+        @{ Name = 'ProfileGain'; Gain = $true; Offset = $false; Modules = '.' }
+        @{ Name = 'ProfileOffset'; Gain = $false; Offset = $true; Modules = '.' }
+        @{ Name = 'ProfileOffsetSource'; Gain = $false; Offset = $true; Modules = '^noise_res$' }
+        @{ Name = 'ProfileOffsetResblocks'; Gain = $false; Offset = $true; Modules = '^resblocks$' })
     $renders = @(for ($h = 0; $h -lt $held.Count; $h++) { $stream = $held[$h]
-        $profiled = $renderer.NormalizationTable($stream.Export.Tables, @(Get-StudentProfiledTerms $fit $stream.Terms))
         $matched = $renderer.Render($stream.X, $stream.F0, $ticks, $stream.Export.Tables)
-        # MatchedRepeat renders the matched input again: the run-to-run control for every comparison. The matched input
-        # also runs on the other job path (resident or one-shot), which must give the same PCM.
-        $otherPath = if ($renderer.ResidentRenders) { 'MatchedOneShot' } else { 'MatchedResident' }
-        foreach ($condition in @(@('Matched', $stream.Export.Tables), @('MatchedRepeat', $stream.Export.Tables), @($otherPath, $stream.Export.Tables), @('VoiceBase', $base), @('ProfileLevel', $profiled))) {
-            if ($condition[0] -ceq $otherPath) {
-                # The other job path is a check, not a condition: its failure is recorded and the measurement goes on.
-                try { $rendering = $renderer.Render($stream.X, $stream.F0, $ticks, $condition[1], (-not $renderer.ResidentRenders)) }
-                catch { [pscustomobject]@{ PSTypeName = 'Kokoro.StudentNormalizationRender'; Window = $stream.Window; Condition = $condition[0]; Failure = $_.Exception.Message }; continue }
-            }
-            else { $rendering = if ($condition[0] -ceq 'Matched') { $matched } else { $renderer.Render($stream.X, $stream.F0, $ticks, $condition[1]) } }
-            $wave = Join-Path $out "held$h-$($condition[0].ToLowerInvariant()).wav"; [IO.File]::WriteAllBytes($wave, (ConvertTo-StudentWave $rendering.Pcm))
-            $sites = @(Get-StudentNormalizationDeviation @($renderer.Normalization($condition[1])) $stream.Terms)
+        $matchedHarmonic = Get-StudentHarmonicNoise $matched.Pcm $stream.F0
+        foreach ($condition in $conditions) {
+            $table = if ($condition.Name -clike 'Matched*') { $stream.Export.Tables } elseif ($condition.Name -ceq 'VoiceBase') { $base }
+                else { $renderer.NormalizationTable($stream.Export.Tables, @(Get-StudentProfiledTerms $fit $stream.Terms $condition.Gain $condition.Offset $condition.Modules)) }
+            $rendering = if ($condition.Name -ceq 'Matched') { $matched } else { $renderer.Render($stream.X, $stream.F0, $ticks, $table) }
+            $wave = Join-Path $out "held$h-$($condition.Name.ToLowerInvariant()).wav"; [IO.File]::WriteAllBytes($wave, (ConvertTo-StudentWave $rendering.Pcm))
+            $sites = @(Get-StudentNormalizationDeviation @($renderer.Normalization($table)) $stream.Terms)
             $pcmBytes = [byte[]]::new(4 * $rendering.Pcm.Length); [Buffer]::BlockCopy($rendering.Pcm, 0, $pcmBytes, 0, $pcmBytes.Length)
-            [pscustomobject]@{ PSTypeName = 'Kokoro.StudentNormalizationRender'; Window = $stream.Window; Condition = $condition[0]; Rms = Get-StudentRms $rendering.Pcm
+            $harmonic = Get-StudentHarmonicNoise $rendering.Pcm $stream.F0
+            [pscustomobject]@{ PSTypeName = 'Kokoro.StudentNormalizationRender'; Window = $stream.Window; Condition = $condition.Name; Rms = Get-StudentRms $rendering.Pcm
+                HarmonicNoiseDb = $harmonic; HarmonicNoiseChangeDb = [Math]::Round($harmonic - $matchedHarmonic, 2)
                 PcmSHA256 = [Convert]::ToHexString([Security.Cryptography.SHA256]::HashData($pcmBytes))
                 SnrAgainstMatchedDb = Get-StudentAblationSnr $matched.Pcm $rendering.Pcm; WorstSiteGainErrorDb = if ($sites.Count) { [Math]::Max([Math]::Abs($sites[0].GainErrorDbMin), [Math]::Abs($sites[0].GainErrorDbMax)) } else { 0 }
                 DspMs = $rendering.DspMs; Wave = $wave; Sites = $sites }
@@ -3900,16 +3906,39 @@ function Get-StudentNormalizationProfile([object[]] $Streams) {
     [pscustomobject]@{ Sites = @($summary); Indices = $sites; Log = $profiles.Log; Mean = $profiles.Mean }
 }
 
-function Get-StudentProfiledTerms($Fit, [object[]] $Terms) {
-    # The fitted profile with this stream's own level per site: one ln(1/std) offset and one mean offset per site.
+function Get-StudentProfiledTerms($Fit, [object[]] $Terms, [bool] $Gain = $true, [bool] $Offset = $true, [string] $Modules = '.') {
+    # The fitted profile with this stream's own level per site: one ln(1/std) offset (the gain level) and one mean offset
+    # (the offset level) per site, each applied only when asked and only at sites whose module (resblocks, noise_res)
+    # matches; elsewhere the profile alone.
     $out = [object[]]::new($Terms.Count)
     foreach ($name in $Fit.Indices.Keys) {
         $indices = $Fit.Indices[$name]; $logLevel = 0.0; $meanLevel = 0.0
         foreach ($i in $indices) { $logLevel += [Math]::Log($Terms[$i].Inverse) - $Fit.Log[$i]; $meanLevel += $Terms[$i].Mean * $Terms[$i].Inverse - $Fit.Mean[$i] }
         $logLevel /= $indices.Count; $meanLevel /= $indices.Count
+        $here = $name.Split('.')[1] -match $Modules
+        if (-not ($Gain -and $here)) { $logLevel = 0.0 }; if (-not ($Offset -and $here)) { $meanLevel = 0.0 }
         foreach ($i in $indices) { $inverse = [Math]::Exp($Fit.Log[$i] + $logLevel); $out[$i] = [pscustomobject]@{ Site = $name; Channel = $Terms[$i].Channel; Inverse = $inverse; Mean = ($Fit.Mean[$i] + $meanLevel) / $inverse } }
     }
     $out
+}
+
+function Get-StudentHarmonicNoise([float[]] $Pcm, [float[]] $F0) {
+    # Harmonic-to-noise ratio in dB over the voiced ticks (f0 above 10 Hz, the source's voicing threshold): per tick,
+    # the energy projected onto the first harmonics of its f0 (up to ten, below 11 kHz) against the rest. Over one tick
+    # the harmonics are not exactly orthogonal, so the value compares renders of the same x and f0; it is not absolute.
+    $harmonic = 0.0; $total = 0.0; $n = 300
+    for ($t = 0; $t -lt $F0.Length; $t++) {
+        $f = [double]$F0[$t]; if ($f -le 10) { continue }
+        $at = $n * $t; if ($at + $n -gt $Pcm.Length) { break }
+        for ($i = 0; $i -lt $n; $i++) { $total += [double]$Pcm[$at + $i] * $Pcm[$at + $i] }
+        for ($k = 1; $k -le 10 -and $k * $f -lt 11000; $k++) {
+            $w = 2 * [Math]::PI * $k * $f / 24000; $cw = [Math]::Cos($w); $sw = [Math]::Sin($w); $re = 1.0; $im = 0.0; $c = 0.0; $s = 0.0
+            for ($i = 0; $i -lt $n; $i++) { $v = [double]$Pcm[$at + $i]; $c += $v * $re; $s += $v * $im; $next = $re * $cw - $im * $sw; $im = $re * $sw + $im * $cw; $re = $next }
+            $harmonic += 2 * ($c * $c + $s * $s) / $n
+        }
+    }
+    if ($total -le 0 -or $harmonic -ge $total) { return [double]::NaN }
+    [Math]::Round(10 * [Math]::Log10($harmonic / ($total - $harmonic)), 2)
 }
 
 function Get-StudentRms([float[]] $Pcm) {
