@@ -3301,6 +3301,12 @@ function Get-StudentPitchKeys($Rules, $Phone) {
 
 
 
+function Get-StudentVoicingKeys($Rules, $Phone, [string] $Name) {
+    # From specific to general: the type with both neighbours' voicing, then the type alone.
+    $previous = if ($Rules.SymbolVoiced[$Phone.Previous]) { 'v' } else { 'u' }; $next = if ($Rules.SymbolVoiced[$Phone.Next]) { 'v' } else { 'u' }
+    "$Name|$previous|$next", $Name
+}
+
 function New-StudentProsodyRules([object[]] $Training, [bool] $SplitStress, [bool] $TypePitch, [bool] $Phrasing = $false) {
     # Per type: duration as the mean of log(frames + 1), the fraction of voiced ticks, the pitch offset from the voice's
     # level (TypePitch) and the mean energy; then word-final and stressed-vowel duration terms and a stressed-vowel pitch
@@ -3322,7 +3328,7 @@ function New-StudentProsodyRules([object[]] $Training, [bool] $SplitStress, [boo
     $rules = [pscustomobject]@{ PSTypeName = 'Kokoro.StudentProsodyRules'; SplitStress = $SplitStress; TypePitch = $TypePitch
         Duration = @{}; Voiced = @{}; Pitch = @{}; Energy = @{}; MeanDuration = $allDuration / $Training.Count; VoiceLogHz = $voiceLog; MeanEnergy = $allEnergy / $allTicks
         WordFinal = 0.0; Stressed = 0.0; StressedPitch = 0.0
-        Phrasing = $false; FinalDuration = @{}; DeclinationLevel = 0.0; DeclinationSlope = 0.0; FinalPitch = @{}; WordCounts = @{}; Accent = @{}; PitchMinCount = 200; ReplayPitchWeight = 1.0 }
+        Phrasing = $false; FinalDuration = @{}; DeclinationLevel = 0.0; DeclinationSlope = 0.0; FinalPitch = @{}; WordCounts = @{}; Accent = @{}; PitchMinCount = 200; ReplayPitchWeight = 1.0; SymbolVoiced = @{}; VoicingEdges = @{} }
     foreach ($name in $durationCount.Keys) {
         $rules.Duration[$name] = $durationSum[$name] / $durationCount[$name]
         $rules.Voiced[$name] = [int]$voiced[$name] / [Math]::Max(1, [int]$ticks[$name])
@@ -3340,6 +3346,26 @@ function New-StudentProsodyRules([object[]] $Training, [bool] $SplitStress, [boo
         for ($t = $phone.FirstTick; $t -lt $phone.FirstTick + $phone.Ticks; $t++) { if ($f0[$t] -ge $script:StudentPitchedHz) { $stressedPitch += [Math]::Log($f0[$t]) - $voiceLog - $offset; $stressedTicks++ } }
     }
     if ($stressedTicks) { $rules.StressedPitch = $stressedPitch / $stressedTicks }
+    # Where voicing holds inside a voiced type: the shares of its ticks before the first voiced tick and after the last,
+    # by type and whether its neighbouring symbols are voiced (a symbol is voiced when most of its ticks are).
+    $symbolVoiced = @{}; $symbolTicks = @{}
+    foreach ($phone in $Training) { $f0 = $phone.Window.Evidence.F0; for ($t = $phone.FirstTick; $t -lt $phone.FirstTick + $phone.Ticks; $t++) { $symbolTicks[$phone.Symbol] = [int]$symbolTicks[$phone.Symbol] + 1; if ($f0[$t] -gt $script:StudentVoicedHz) { $symbolVoiced[$phone.Symbol] = [int]$symbolVoiced[$phone.Symbol] + 1 } } }
+    foreach ($symbol in $symbolTicks.Keys) { $rules.SymbolVoiced[$symbol] = [int]$symbolVoiced[$symbol] -ge 0.5 * $symbolTicks[$symbol] }
+    $edges = @{}
+    foreach ($phone in $Training) {
+        $name = Get-StudentTypeName $phone $SplitStress; if ($phone.Ticks -le 0 -or [double]$rules.Voiced[$name] -lt 0.5) { continue }
+        $f0 = $phone.Window.Evidence.F0; $first = -1; $last = -1
+        for ($k = 0; $k -lt $phone.Ticks; $k++) { if ($f0[$phone.FirstTick + $k] -gt $script:StudentVoicedHz) { if ($first -lt 0) { $first = $k }; $last = $k } }
+        $onset = if ($first -lt 0) { 1.0 } else { $first / $phone.Ticks }; $release = if ($first -lt 0) { 0.0 } else { ($phone.Ticks - 1 - $last) / $phone.Ticks }
+        foreach ($key in (Get-StudentVoicingKeys $rules $phone $name)) { if (-not $edges.ContainsKey($key)) { $edges[$key] = [double[]]::new(3) }; $edges[$key][0] += $onset; $edges[$key][1] += $release; $edges[$key][2]++ }
+    }
+    foreach ($key in $edges.Keys) { if ($edges[$key][2] -ge 20) { $rules.VoicingEdges[$key] = [double[]]@(($edges[$key][0] / $edges[$key][2]), ($edges[$key][1] / $edges[$key][2])) } }
+    $rules | Add-Member -MemberType ScriptMethod -Name VoicedAt -Value { param($Phone, $Target, [int] $Tick, [int] $Ticks)
+        # Whether tick Tick of Ticks in the occurrence is voiced: its target's voicing, trimmed at the learned edges.
+        if (-not $Target.Voiced) { return $false }
+        $name = Get-StudentTypeName $Phone $this.SplitStress
+        foreach ($key in (Get-StudentVoicingKeys $this $Phone $name)) { $edge = $this.VoicingEdges[$key]; if ($null -ne $edge) { return $Tick -ge [Math]::Round($edge[0] * $Ticks) -and $Tick -lt $Ticks - [Math]::Round($edge[1] * $Ticks) } }
+        $true }
     $rules | Add-Member -MemberType ScriptMethod -Name BaseLogFrames -Value { param($Phone)
         $name = Get-StudentTypeName $Phone $this.SplitStress; $d = if ($this.Duration.ContainsKey($name)) { $this.Duration[$name] } elseif ($this.Duration.ContainsKey($Phone.Symbol)) { $this.Duration[$Phone.Symbol] } else { $this.MeanDuration }
         if ($Phone.WordFinal) { $d += $this.WordFinal }; if ($Phone.Vowel -and $Phone.Stressed) { $d += $this.Stressed }
@@ -3437,8 +3463,9 @@ function Measure-StudentProsody($Rules, [object[]] $PhoneList) {
         $target = $Rules.Targets($phone); $f0 = $phone.Window.Evidence.F0; $energy = $phone.Window.Evidence.N
         $agree = 0; $pitchSquares = 0.0; $pitchTicks = 0; $energySquares = 0.0
         for ($t = $phone.FirstTick; $t -lt $phone.FirstTick + $phone.Ticks; $t++) {
-            if (($f0[$t] -gt $script:StudentVoicedHz) -eq $target.Voiced) { $agree++ }
-            if ($f0[$t] -ge $script:StudentPitchedHz -and $target.Voiced) { $d = 20 * ($target.LogHz - [Math]::Log($f0[$t])) / [Math]::Log(10); $pitchSquares += $d * $d; $pitchTicks++ }
+            $voicedHere = $Rules.VoicedAt($phone, $target, $t - $phone.FirstTick, $phone.Ticks)
+            if (($f0[$t] -gt $script:StudentVoicedHz) -eq $voicedHere) { $agree++ }
+            if ($f0[$t] -ge $script:StudentPitchedHz -and $voicedHere) { $d = 20 * ($target.LogHz - [Math]::Log($f0[$t])) / [Math]::Log(10); $pitchSquares += $d * $d; $pitchTicks++ }
             $e = $target.Energy - $energy[$t]; $energySquares += $e * $e
         }
         [pscustomobject]@{ PSTypeName = 'Kokoro.StudentProsodyScore'; Phone = $phone; Frames = $phone.Ticks / 2; PredictedFrames = $Rules.Frames($phone); Ticks = $phone.Ticks
@@ -3459,7 +3486,7 @@ function Measure-StudentReplay($Rules, $Library, [object[]] $PhoneList) {
         for ($t = $phone.FirstTick; $t -lt $phone.FirstTick + $phone.Ticks; $t++) {
             $logHz = $target.LogHz; $e = $target.Energy
             if ($null -ne $entry) { if ($entry.Pitch) { $logHz += $Rules.ReplayPitchWeight * (Get-StudentReplayResidual $entry $phone $t $wordFirst $wordTicks 'Pitch') }; $e += Get-StudentReplayResidual $entry $phone $t $wordFirst $wordTicks 'Energy' }
-            $voiced = if ($null -ne $entry) { (Get-StudentReplayResidual $entry $phone $t $wordFirst $wordTicks 'Voicing') -ge 0.5 } else { $target.Voiced }
+            $voiced = if ($null -ne $entry) { (Get-StudentReplayResidual $entry $phone $t $wordFirst $wordTicks 'Voicing') -ge 0.5 } else { $Rules.VoicedAt($phone, $target, $t - $phone.FirstTick, $phone.Ticks) }
             if (($f0[$t] -gt $script:StudentVoicedHz) -eq $voiced) { $agree++ }; if ($f0[$t] -gt $script:StudentVoicedHz) { $voicedActual++ }; if ($voiced) { $voicedPredicted++ }
             if ($f0[$t] -ge $script:StudentPitchedHz -and $voiced) { $d = 20 * ($logHz - [Math]::Log($f0[$t])) / [Math]::Log(10); $pitchSquares += $d * $d; $pitchTicks++; $predictedSum += $logHz; $spread.Pitch[0].Add([Math]::Log($f0[$t])); $spread.Pitch[1].Add($logHz) }
             $energySquares += ($e - $energy[$t]) * ($e - $energy[$t]); $spread.Energy[0].Add($energy[$t]); $spread.Energy[1].Add($e)
@@ -3625,7 +3652,7 @@ function New-StudentProsodyStream($Rules, [object[]] $PhoneList, $Library = $nul
             if ($null -ne $entry) { $energyTarget += Get-StudentReplayResidual $entry $phone $at $wordFirst $wordTicks 'Energy'; if ($entry.Pitch) { $pitchTarget += $Rules.ReplayPitchWeight * (Get-StudentReplayResidual $entry $phone $at $wordFirst $wordTicks 'Pitch') } }
             $level = if ([double]::IsNaN($level)) { $energyTarget } else { $level + $script:StudentControlResponse * ($energyTarget - $level) }
             $energy[$at] = [float]$level
-            $voiced = if ($null -ne $entry) { (Get-StudentReplayResidual $entry $phone $at $wordFirst $wordTicks 'Voicing') -ge 0.5 } else { $target.Voiced }
+            $voiced = if ($null -ne $entry) { (Get-StudentReplayResidual $entry $phone $at $wordFirst $wordTicks 'Voicing') -ge 0.5 } else { $Rules.VoicedAt($phone, $target, $t, 2 * $durations[$o]) }
             if ($voiced) { $pitch = if ([double]::IsNaN($pitch)) { $pitchTarget } else { $pitch + $script:StudentPitchResponse * ($pitchTarget - $pitch) }; $f0[$at] = [float][Math]::Exp($pitch) }
             else { $pitch = [double]::NaN }
             $at++
