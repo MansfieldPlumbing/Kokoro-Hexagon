@@ -73,7 +73,7 @@ Run from a PowerShell prompt: pwsh -File passes every argument as a string, so a
 #requires -Version 7.7
 [CmdletBinding()]
 param(
-    [ValidateSet('Console', 'Render', 'Corpus', 'Pronunciation', 'Normalize', 'Syllabus', 'Recordings', 'Listen', 'Stems', 'Alignment', 'Percepts', 'Describe', 'Learn', 'Audit', 'Discriminate', 'Reconsider', 'Inventory', 'Speak', 'Ablate', 'PitchGate', 'Trace', 'Normalization', 'Score')][string] $Step = 'Console',
+    [ValidateSet('Console', 'Render', 'Corpus', 'Pronunciation', 'Normalize', 'Syllabus', 'Recordings', 'Listen', 'Stems', 'Alignment', 'Percepts', 'Describe', 'Learn', 'Audit', 'Discriminate', 'Reconsider', 'Inventory', 'Speak', 'Ablate', 'PitchGate', 'Trace', 'Normalization', 'Score', 'Residuals')][string] $Step = 'Console',
     [ValidateRange(2, 64)][int] $Threads = [Math]::Max(2, [Environment]::ProcessorCount),
     [string] $Text = '',
     [string] $Voice = 'af_heart',
@@ -1724,6 +1724,9 @@ function Invoke-StudentSyllabus {
     $windows = @($data.Windows); if ($WindowLimit -gt 0 -and $windows.Count -gt $WindowLimit) { $windows = $windows[0..($WindowLimit - 1)] }
     $syllabus = $null; $watch = [Diagnostics.Stopwatch]::StartNew(); $renderSeconds = 0.0
     $records = [Collections.Generic.List[object]]::new()
+    # Evidence is keyed by the syllabus port's hash, so any change to the port re-renders every window: say so first.
+    $uncached = @($windows | Where-Object { -not (Test-Path -LiteralPath (Join-Path $cache ([Convert]::ToHexString([Security.Cryptography.SHA256]::HashData([Text.Encoding]::UTF8.GetBytes("$Voice`n$Speed`n$syllabusHash`n$($_.Phonemes)"))) + '.clixml'))) }).Count
+    if ($uncached) { Write-Warning "Syllabus: $uncached of $($windows.Count) windows are not cached for this port and voice; rendering them runs before anything else." }
     try {
         foreach ($window in $windows) {
             $occurrences = Get-StudentWindowOccurrences $books[$window.Book] $window
@@ -3978,6 +3981,54 @@ function Invoke-StudentRendererScore([string] $Score = 'SolfegeMajorScale') {
     $result
 }
 
+function Invoke-StudentGeneratorResiduals([int] $Stream = 8, [int] $Ticks = 130) {
+    # Which of the generator's residual pairs carry the sound, on the syllabus port (the reference, host): one syllabus
+    # stretch (by default the normalization study's first held-out one) rendered from its own x and f0 with every pair
+    # traced (the RMS of the stream entering the pair and of the correction it adds), then once with each pair's
+    # correction left out, scored against the full render (PCM SNR, RMS, harmonic-to-noise change). Weights per pair are
+    # its two convolutions' parameters.
+    $out = Get-StudentOutputPath 'Residuals'
+    $window = @((Invoke-StudentSyllabus).Windows | Where-Object { $_.Ticks -ge $Ticks })[$Stream]
+    $first = [int][Math]::Floor(($window.Ticks - $Ticks) / 2)
+    $x = [float[]]::new(512 * $Ticks); for ($c = 0; $c -lt 512; $c++) { [Array]::Copy($window.Evidence.X, $c * $window.Ticks + $first, $x, $c * $Ticks, $Ticks) }
+    $f0 = [float[]]::new($Ticks); [Array]::Copy($window.Evidence.F0, $first, $f0, 0, $Ticks); $n = [float[]]::new($Ticks); [Array]::Copy($window.Evidence.N, $first, $n, 0, $Ticks)
+    # The generator alone ignores durations; one token holds every frame so the supplied prosody's shape checks hold.
+    $phonemes = [string]$window.Evidence.Phonemes; $durations = [int[]]::new($phonemes.Length + 2); $durations[0] = $Ticks / 2
+    $syllabus = Import-StudentSyllabus (Join-Path $out 'syllabus')
+    try {
+        $render = { param([string[]] $Drop, [switch] $Trace) Invoke-OfflineSpeech -Phonemes $phonemes -Voice $Voice -SuppliedDurations $durations -SuppliedF0 $f0 -SuppliedN $n -SuppliedFeatures $x -TraceResiduals:$Trace -DropResiduals $Drop }
+        $watch = [Diagnostics.Stopwatch]::StartNew(); $full = & $render @() -Trace; $renderSeconds = $watch.Elapsed.TotalSeconds
+        [IO.File]::WriteAllBytes((Join-Path $out 'full.wav'), (ConvertTo-StudentWave $full.Pcm))
+        $fullHarmonic = Get-StudentHarmonicNoise $full.Pcm $f0
+        # Every residual pair: six resblocks and two noise_res blocks of three pairs each. A traced render gives each
+        # pair's stream and correction RMS; without a trace that column is NaN.
+        $traced = @{}; foreach ($group in @($full.Residuals | Group-Object Pair)) { $traced[$group.Name] = $group.Group }
+        $names = @(foreach ($block in @(0..5 | ForEach-Object { "generator.resblocks.$_" }) + @(0..1 | ForEach-Object { "generator.noise_res.$_" })) { foreach ($stage in 0..2) { "$block.$stage" } })
+        $pairs = @($names | ForEach-Object {
+            $streamRms = [double]::NaN; $correctionRms = [double]::NaN
+            if ($traced.ContainsKey($_)) { $streamRms = ($traced[$_] | Measure-Object StreamRms -Average).Average; $correctionRms = ($traced[$_] | Measure-Object CorrectionRms -Average).Average }
+            # Two convolutions of channels x channels x kernel: resblocks 0-2 and noise_res.0 at 256 channels, the rest at
+            # 128; resblock kernels 3, 7, 11 by branch, noise_res.0 kernel 7 and noise_res.1 kernel 11.
+            $name = $_; $parts = $name.Split('.'); $index = [int]$parts[2]
+            $channels = if (($parts[1] -ceq 'resblocks' -and $index -lt 3) -or ($parts[1] -ceq 'noise_res' -and $index -eq 0)) { 256 } else { 128 }
+            $kernel = if ($parts[1] -ceq 'resblocks') { @(3, 7, 11)[$index % 3] } else { @(7, 11)[$index] }
+            $parameters = 2L * $channels * $channels * $kernel
+            [pscustomobject]@{ Pair = $name; Parameters = $parameters; CorrectionToStreamDb = [Math]::Round(20 * [Math]::Log10([Math]::Max(1e-12, $correctionRms) / [Math]::Max(1e-12, $streamRms)), 2) } })
+        $results = @(foreach ($pair in $pairs) {
+            $dropped = & $render @($pair.Pair)
+            $harmonic = Get-StudentHarmonicNoise $dropped.Pcm $f0
+            [IO.File]::WriteAllBytes((Join-Path $out "drop-$($pair.Pair).wav"), (ConvertTo-StudentWave $dropped.Pcm))
+            [pscustomobject]@{ PSTypeName = 'Kokoro.StudentResidualPair'; Pair = $pair.Pair; Parameters = $pair.Parameters; CorrectionToStreamDb = $pair.CorrectionToStreamDb
+                SnrAgainstFullDb = Get-StudentAblationSnr $full.Pcm $dropped.Pcm; Rms = Get-StudentRms $dropped.Pcm; HarmonicNoiseChangeDb = [Math]::Round($harmonic - $fullHarmonic, 2) } })
+    }
+    finally { Remove-Module -ModuleInfo $syllabus -Force }
+    $result = [pscustomobject]@{ PSTypeName = 'Kokoro.StudentGeneratorResiduals'; Voice = $Voice; Window = $window.Key; First = $first; Ticks = $Ticks
+        FullRms = Get-StudentRms $full.Pcm; FullHarmonicNoiseDb = $fullHarmonic; RenderSeconds = [Math]::Round($renderSeconds, 1)
+        Pairs = @($results | Sort-Object SnrAgainstFullDb -Descending); Directory = $out; MachineSHA256 = $script:StudentMachineSHA256 }
+    Export-Clixml -LiteralPath (Join-Path $out 'residuals.clixml') -InputObject $result -Depth 4
+    $result
+}
+
 function Get-StudentNormalizationProfile([object[]] $Streams) {
     # Per site, ln(1/std) and the mean in std units of each channel and stream as profile(channel) + level(stream): the
     # profile is the channel's mean over streams, the level the stream's mean over channels less the profile's. LevelShare
@@ -4645,6 +4696,7 @@ $script:StudentSteps = [ordered]@{
     Trace = { Invoke-StudentTrace }
     Normalization = { Invoke-StudentRendererNormalization }
     Score = { foreach ($name in $script:StudentScores.Keys) { if (-not $Text -or $name -like $Text) { Invoke-StudentRendererScore $name } } }
+    Residuals = { Invoke-StudentGeneratorResiduals }
 }
 }
 & $studentOwner { & $script:StudentSteps[$Step] }

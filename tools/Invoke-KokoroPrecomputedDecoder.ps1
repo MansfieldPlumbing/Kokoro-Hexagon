@@ -1411,6 +1411,9 @@ function Read-OfflineReference([hashtable] $CaptureCase, [string] $Name) {
     if ($tensor[0].DType -ceq 'int32') { $values = [int[]]::new($raw.Length / 4) }
     [Buffer]::BlockCopy($raw, 0, $values, 0, $raw.Length); return , $values
 }
+function Get-OfflineRms([float[]] $Samples) {
+    $sum = 0.0; foreach ($v in $Samples) { $sum += [double]$v * $v }; [Math]::Sqrt($sum / [Math]::Max(1, $Samples.Length))
+}
 function Invoke-OfflineGeneratorBlock([float[]] $InputValues, [int] $Frames, [float[]] $AcousticStyle, [string] $Name) {
     $channels = [int]($InputValues.Length / $Frames); $x = $InputValues
     for ($stage = 0; $stage -lt 3; $stage++) {
@@ -1423,6 +1426,10 @@ function Invoke-OfflineGeneratorBlock([float[]] $InputValues, [int] $Frames, [fl
         $next = $snake.Invoke($next, (Read-OfflineWeight ('decoder.module.' + $Name + ".alpha2.$stage")), $Frames)
         $conv = Get-OfflineConvolution ($Name + ".convs2.$stage") 1 $false
         $next = Invoke-OfflineConv $next $Frames ($Name + ".convs2.$stage") -Padding ([int](($conv.Kernel - 1) / 2))
+        # The residual pair's correction against the stream it is added to; a dropped pair leaves the stream unchanged.
+        $pair = "$Name.$stage"
+        if ($null -ne $script:OfflineResidualTrace) { $script:OfflineResidualTrace.Add([pscustomobject]@{ Pair = $pair; StreamRms = (Get-OfflineRms $x); CorrectionRms = (Get-OfflineRms $next) }) }
+        if ($null -ne $script:OfflineDroppedResiduals -and $script:OfflineDroppedResiduals.Contains($pair)) { continue }
         $x = $residual.Invoke($next, $x, [float]1)
     }
     return , $x
@@ -1589,8 +1596,16 @@ function Invoke-OfflineSpeech {
     # (durations, F0, N, encodings and the generator input Features) does not need PCM.
     # -SuppliedDurations (one per token id, pads included), -SuppliedF0 and -SuppliedN (two per duration frame) supply the
     # prosody: ALBERT, bert_encoder and the predictor are skipped, and only the text encoder, decoder and generator run.
+    # -SuppliedFeatures (the generator input x, 512 channels per tick, with the supplied prosody) runs the generator
+    # alone. -TraceResiduals returns each generator residual pair's stream and correction RMS (Residuals); -DropResiduals
+    # names pairs (generator.resblocks.B.S, generator.noise_res.B.S) whose correction is left out.
     param([Parameter(Mandatory)][string] $Phonemes, [string] $Voice = 'af_heart', [double] $Speed = 1, [switch] $SkipGenerator,
-        [int[]] $SuppliedDurations = $null, [float[]] $SuppliedF0 = $null, [float[]] $SuppliedN = $null, [switch] $SkipDecoder)
+        [int[]] $SuppliedDurations = $null, [float[]] $SuppliedF0 = $null, [float[]] $SuppliedN = $null, [switch] $SkipDecoder,
+        [float[]] $SuppliedFeatures = $null, [switch] $TraceResiduals, [string[]] $DropResiduals = @())
+    # Assigned in the branches, not from an if expression: an empty collection written to the pipeline would be $null.
+    $script:OfflineResidualTrace = $null; $script:OfflineDroppedResiduals = $null
+    if ($TraceResiduals) { $script:OfflineResidualTrace = [Collections.Generic.List[object]]::new() }
+    if ($DropResiduals.Count) { $script:OfflineDroppedResiduals = [Collections.Generic.HashSet[string]]::new([string[]]$DropResiduals, [StringComparer]::Ordinal) }
     $config = Get-Content -LiteralPath (Join-Path $InputRepository "build/inputs/kokoro/f3ff3571791e39611d31c381e3a41a3af07b4987/config.json") -Raw | ConvertFrom-Json -AsHashtable
     $ids = [Collections.Generic.List[int]]::new(); $ids.Add(0)
     foreach ($symbol in $Phonemes.ToCharArray()) { $id = $config.vocab[[string]$symbol]; if ($null -ne $id) { $ids.Add([int]$id) } }
@@ -1640,6 +1655,13 @@ function Invoke-OfflineSpeech {
         if ($SuppliedN.Length -ne 2 * $frames) { throw 'SuppliedN needs two values per duration frame.' }
         $curves['N'] = $SuppliedN
     }
+    }
+    if ($null -ne $SuppliedFeatures) {
+        if (-not $supplied) { throw 'Supplied features need the supplied prosody (-SuppliedDurations, -SuppliedF0, -SuppliedN).' }
+        $sourceDraws = New-OfflineDraws ($curves.F0.Length * 300)
+        $pcm = Invoke-OfflineGenerator $SuppliedFeatures $style.Acoustic $curves.F0 $sourceDraws.Uniform $sourceDraws.Harmonic $sourceDraws.Extra
+        return [pscustomobject]@{ Phonemes = $Phonemes; Voice = $Voice; Seed = $Seed; Durations = $durations; F0 = $curves.F0; N = $curves.N
+            Features = $SuppliedFeatures; Pcm = $pcm; Residuals = $(if ($null -ne $script:OfflineResidualTrace) { $script:OfflineResidualTrace.ToArray() }) }
     }
     $encoderWatch = [Diagnostics.Stopwatch]::StartNew()
     if ($null -eq $script:OfflineTextEncoder) {
