@@ -3833,7 +3833,7 @@ function Invoke-StudentRendererNormalization {
         $x = [float[]]::new(512 * $ticks); for ($c = 0; $c -lt 512; $c++) { [Array]::Copy($window.Evidence.X, $c * $window.Ticks + $first, $x, $c * $ticks, $ticks) }
         $f0 = [float[]]::new($ticks); [Array]::Copy($window.Evidence.F0, $first, $f0, 0, $ticks)
         [pscustomobject]@{ Window = $window.Key; First = $first; X = $renderer.EncodeX($x, $ticks); F0 = $f0; Export = $null; Terms = $null } })
-    # Exports run on the resident listener; renders are one-shot, so every export runs first.
+    # Every export runs first, then the renders.
     foreach ($stream in $streams) { $stream.Export = $renderer.Constants($stream.X, $stream.F0, $ticks); $stream.Terms = @($renderer.Normalization($stream.Export.Tables)) }
     $fitted = $streams[0..($profileCount - 1)]; $held = $streams[$profileCount..($streams.Count - 1)]
     $fit = Get-StudentNormalizationProfile @($fitted | ForEach-Object { , $_.Terms })
@@ -3841,12 +3841,21 @@ function Invoke-StudentRendererNormalization {
     $renders = @(for ($h = 0; $h -lt $held.Count; $h++) { $stream = $held[$h]
         $profiled = $renderer.NormalizationTable($stream.Export.Tables, @(Get-StudentProfiledTerms $fit $stream.Terms))
         $matched = $renderer.Render($stream.X, $stream.F0, $ticks, $stream.Export.Tables)
-        # MatchedRepeat renders the matched input again: the run-to-run control for every comparison.
-        foreach ($condition in @(@('Matched', $stream.Export.Tables), @('MatchedRepeat', $stream.Export.Tables), @('VoiceBase', $base), @('ProfileLevel', $profiled))) {
-            $rendering = if ($condition[0] -ceq 'Matched') { $matched } else { $renderer.Render($stream.X, $stream.F0, $ticks, $condition[1]) }
+        # MatchedRepeat renders the matched input again: the run-to-run control for every comparison. The matched input
+        # also runs on the other job path (resident or one-shot), which must give the same PCM.
+        $otherPath = if ($renderer.ResidentRenders) { 'MatchedOneShot' } else { 'MatchedResident' }
+        foreach ($condition in @(@('Matched', $stream.Export.Tables), @('MatchedRepeat', $stream.Export.Tables), @($otherPath, $stream.Export.Tables), @('VoiceBase', $base), @('ProfileLevel', $profiled))) {
+            if ($condition[0] -ceq $otherPath) {
+                # The other job path is a check, not a condition: its failure is recorded and the measurement goes on.
+                try { $rendering = $renderer.Render($stream.X, $stream.F0, $ticks, $condition[1], (-not $renderer.ResidentRenders)) }
+                catch { [pscustomobject]@{ PSTypeName = 'Kokoro.StudentNormalizationRender'; Window = $stream.Window; Condition = $condition[0]; Failure = $_.Exception.Message }; continue }
+            }
+            else { $rendering = if ($condition[0] -ceq 'Matched') { $matched } else { $renderer.Render($stream.X, $stream.F0, $ticks, $condition[1]) } }
             $wave = Join-Path $out "held$h-$($condition[0].ToLowerInvariant()).wav"; [IO.File]::WriteAllBytes($wave, (ConvertTo-StudentWave $rendering.Pcm))
             $sites = @(Get-StudentNormalizationDeviation @($renderer.Normalization($condition[1])) $stream.Terms)
+            $pcmBytes = [byte[]]::new(4 * $rendering.Pcm.Length); [Buffer]::BlockCopy($rendering.Pcm, 0, $pcmBytes, 0, $pcmBytes.Length)
             [pscustomobject]@{ PSTypeName = 'Kokoro.StudentNormalizationRender'; Window = $stream.Window; Condition = $condition[0]; Rms = Get-StudentRms $rendering.Pcm
+                PcmSHA256 = [Convert]::ToHexString([Security.Cryptography.SHA256]::HashData($pcmBytes))
                 SnrAgainstMatchedDb = Get-StudentAblationSnr $matched.Pcm $rendering.Pcm; WorstSiteGainErrorDb = if ($sites.Count) { [Math]::Max([Math]::Abs($sites[0].GainErrorDbMin), [Math]::Abs($sites[0].GainErrorDbMax)) } else { 0 }
                 DspMs = $rendering.DspMs; Wave = $wave; Sites = $sites }
         } })

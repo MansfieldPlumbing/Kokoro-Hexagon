@@ -582,9 +582,14 @@ function Invoke-KokoroDeviceJob {
         [switch] $OneShot)
     if ($null -ne $EmissionArtifact -and -not $OneShot) {
         Import-Evaluator
-        return Invoke-KokoroResidentJob -EmissionArtifact $EmissionArtifact -InputDirectory $InputDirectory -Soc $Soc -Runs $Runs -Package $Package
+        # After a one-shot relaunch the listener can accept a connection and drop the first write; jobs are repeatable,
+        # so a failed resident job reconnects and runs once more.
+        try { return Invoke-KokoroResidentJob -EmissionArtifact $EmissionArtifact -InputDirectory $InputDirectory -Soc $Soc -Runs $Runs -Package $Package }
+        catch { try { Stop-KokoroDeviceSession } catch { }; return Invoke-KokoroResidentJob -EmissionArtifact $EmissionArtifact -InputDirectory $InputDirectory -Soc $Soc -Runs $Runs -Package $Package }
     }
     Resume-Phone
+    # A one-shot job relaunches the app: end the resident listener first, so the next resident job starts a new one.
+    if (Get-Command Stop-KokoroDeviceSession -ErrorAction Ignore) { try { Stop-KokoroDeviceSession } catch { } }
     if ($null -ne $EmissionArtifact) {
         $out = & (Join-Path $Root 'tools/Invoke-GeneratorTailProbe.ps1') -EmissionDirectory $EmissionDirectory -EmissionArtifact $EmissionArtifact -FixtureDirectory $InputDirectory -Soc $Soc -Runs $Runs -Package $Package -TimeoutSeconds 300 -Adb (Get-Adb) 2>&1
     } else {
@@ -1590,7 +1595,8 @@ function ConvertTo-KokoroGeneratorInt8 {
 #   Normalization(table): the table's per-channel normalization terms (site, channel, 1/std, mean), after Constants.
 #   NormalizationTable(template, terms): a copy of a constants table with those terms written in.
 #   Render(x croutons, f0, ticks, constants): PCM.
-# Exports run first: renders are one-shot jobs, after which the resident listener the other jobs use is gone.
+# Renders run on the resident listener like exports (ResidentRenders; a one-shot render relaunches the app and starts
+# a new listener for the next resident job).
 function New-KokoroSpeechRenderer {
     param([Parameter(Mandatory)][string]$OutputDirectory,[string]$Soc='SM8550',[string]$Package='dev.mansfieldplumbing.kokoro',
         [string]$DecoderPlan=(Join-Path $Build 'decoder16-plan-af_heart-f128'),
@@ -1608,7 +1614,7 @@ function New-KokoroSpeechRenderer {
         DecoderWeights=[IO.File]::ReadAllBytes((Join-Path $DecoderPlan 'weights.bin'));DecoderTables=[IO.File]::ReadAllBytes((Join-Path $DecoderPlan 'tables.bin'))
         NoiseScale=[int][math]::Round([math]::Sqrt($sum)*4096*65536/37837.2)
         Statistics=[IO.File]::ReadAllBytes((Join-Path $GeneratorFixture 'tables.bin'));Weights=[IO.File]::ReadAllBytes((Join-Path $GeneratorFixture 'weights.bin'))
-        Int8=$null;Packing=$null;InputsSHA256=$null;ConstantsCache=(Join-Path $Build 'generator-constants')}
+        Int8=$null;Packing=$null;InputsSHA256=$null;ConstantsCache=(Join-Path $Build 'generator-constants');ResidentRenders=$true}
     $renderer | Add-Member -MemberType ScriptMethod -Name Run -Value { param($Emission,[byte[]]$Activation,[byte[]]$Tables,[byte[]]$WeightBytes,[bool]$OneShot)
         $this.Runs=$this.Runs+1; $directory=Join-Path $this.Directory ('run-{0:d3}' -f $this.Runs); [void][IO.Directory]::CreateDirectory($directory)
         [IO.File]::WriteAllBytes((Join-Path $directory 'activations.bin'),$Activation); [IO.File]::WriteAllBytes((Join-Path $directory 'tables.bin'),$Tables); [IO.File]::WriteAllBytes((Join-Path $directory 'weights.bin'),$WeightBytes)
@@ -1679,12 +1685,13 @@ function New-KokoroSpeechRenderer {
         $job=$this.Run($emission,$activation,$this.DecoderTables,$this.DecoderWeights,$false)
         $xBytes=[long][math]::Ceiling(2*$frames/32)*32768; $x=[byte[]]::new($xBytes); [Array]::Copy($job.Output,[long]$layout.OutputOffset,$x,0,$xBytes)
         [pscustomobject]@{PSTypeName='Kokoro.DecodedSpeech';Frames=$frames;Ticks=2*$frames;XCroutons=$x;DspMs=$job.MedianMs} }
-    $renderer | Add-Member -MemberType ScriptMethod -Name Render -Value { param([byte[]]$XCroutons,[float[]]$Pitch,[int]$Ticks,[byte[]]$Constants)
+    $renderer | Add-Member -MemberType ScriptMethod -Name Render -Value { param([byte[]]$XCroutons,[float[]]$Pitch,[int]$Ticks,[byte[]]$Constants,[object]$Resident=$null)
+        $onResident=if($null -eq $Resident){[bool]$this.ResidentRenders}else{[bool]$Resident}
         $emission=$this.GeneratorEmission($Ticks,'Constants')
         if($null -eq $this.Int8){ $this.Int8=ConvertTo-KokoroGeneratorInt8 -Tables $Constants -WeightBytes $this.Weights -Layout $emission.Layout -IncludeSource -CacheDirectory (Join-Path $Build 'generator-int8') }
         $tables=[byte[]]$Constants.Clone(); $corrections=$this.Int8.Corrections
         for($i=0;$i -lt $corrections.Length;$i+=2){ $at=[int]$corrections[$i]; [Array]::Copy([BitConverter]::GetBytes([int]([long][BitConverter]::ToInt32($tables,$at)+$corrections[$i+1])),0,$tables,$at,4) }
-        $job=$this.Run($emission,$this.GeneratorInput($emission,$XCroutons,$Pitch,$Ticks),$tables,$this.Int8.Weights,$true)
+        $job=$this.Run($emission,$this.GeneratorInput($emission,$XCroutons,$Pitch,$Ticks),$tables,$this.Int8.Weights,-not $onResident)
         $samples=300*$Ticks; $pcm=[float[]]::new($samples); for($i=0;$i -lt $samples;$i++){ $pcm[$i]=[BitConverter]::ToInt16($job.Output,$emission.Layout.PcmOffset+2*$i)/32768.0 }
         [pscustomobject]@{PSTypeName='Kokoro.GeneratorRendering';Ticks=$Ticks;Pcm=$pcm;DspMs=$job.MedianMs;LibrarySHA256=$emission.LibrarySHA256} }
     $renderer
