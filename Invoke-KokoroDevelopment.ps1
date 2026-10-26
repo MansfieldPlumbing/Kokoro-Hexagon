@@ -1524,10 +1524,31 @@ function Test-KokoroGeneratorWeightPrecision {
 # 128 sum Wl. HMX weight byte order: ((g K + k) CB + blk) 2048 + 1024 hh + 128 (i >> 2) + 4 c + (i & 3). -Layout is a
 # KokoroGenerator60x16Run layout (its ConstantPacking and WeightRegions); -IncludeSource converts noise_res too.
 function ConvertTo-KokoroGeneratorInt8 {
-    param([Parameter(Mandatory)][byte[]]$Tables,[Parameter(Mandatory)][byte[]]$WeightBytes,[Parameter(Mandatory)]$Layout,[switch]$IncludeSource)
+    param([Parameter(Mandatory)][byte[]]$Tables,[Parameter(Mandatory)][byte[]]$WeightBytes,[Parameter(Mandatory)]$Layout,[switch]$IncludeSource,
+        # The int8 weights and the corrections depend only on the weights and the layout: with a directory they are
+        # converted once per weights file and layout, and the tables are corrected from the stored pairs.
+        [string]$CacheDirectory)
     if(-not $Layout.ConstantPacking.MomentSites -or -not $Layout.WeightRegions){throw 'The layout has no AdaIN records or weight regions to convert.'}
-    $runTables=[byte[]]$Tables.Clone(); $runWeights=[byte[]]$WeightBytes.Clone(); $corrections=[Collections.Generic.List[long]]::new()
     $records=@{}; foreach($site in $Layout.ConstantPacking.MomentSites){ $records["$($site.Module).$($site.Block).$($site.Stage)"]=[long]$site.RecordOffset }
+    if($CacheDirectory){
+        $hash=[Security.Cryptography.IncrementalHash]::CreateHash('SHA256'); $hash.AppendData($WeightBytes)
+        $shape=(@($Layout.WeightRegions | ForEach-Object { "$($_.Format)|$($_.Part)|$($_.Name)|$($_.Channels)|$($_.Kernel)|$($_.Offset)" }) + @($records.Keys | Sort-Object | ForEach-Object { "$_=$($records[$_])" }) + "source=$([bool]$IncludeSource)") -join "`n"
+        $hash.AppendData([Text.Encoding]::UTF8.GetBytes($shape)); $key=[Convert]::ToHexString($hash.GetHashAndReset())
+        $weightsPath=Join-Path $CacheDirectory "$key.weights.bin"; $correctionsPath=Join-Path $CacheDirectory "$key.corrections.bin"
+        if((Test-Path -LiteralPath $weightsPath) -and (Test-Path -LiteralPath $correctionsPath)){
+            $stored=[IO.File]::ReadAllBytes($correctionsPath); $pairs=[long[]]::new($stored.Length/8); [Buffer]::BlockCopy($stored,0,$pairs,0,$stored.Length)
+            $runTables=[byte[]]$Tables.Clone()
+            for($i=0;$i -lt $pairs.Length;$i+=2){ $at=[int]$pairs[$i]; $corrected=[long][BitConverter]::ToInt32($runTables,$at)+$pairs[$i+1]
+                if($corrected -lt [int]::MinValue -or $corrected -gt [int]::MaxValue){throw "Table bias overflow at table offset $at."}
+                [Array]::Copy([BitConverter]::GetBytes([int]$corrected),0,$runTables,$at,4) }
+            return [pscustomobject]@{Tables=$runTables;Weights=[IO.File]::ReadAllBytes($weightsPath);Corrections=$pairs}
+        }
+        $converted=ConvertTo-KokoroGeneratorInt8 -Tables $Tables -WeightBytes $WeightBytes -Layout $Layout -IncludeSource:$IncludeSource
+        [void][IO.Directory]::CreateDirectory($CacheDirectory); [IO.File]::WriteAllBytes($weightsPath,$converted.Weights)
+        $stored=[byte[]]::new(8*$converted.Corrections.Length); [Buffer]::BlockCopy([long[]]$converted.Corrections,0,$stored,0,$stored.Length); [IO.File]::WriteAllBytes($correctionsPath,$stored)
+        return $converted
+    }
+    $runTables=[byte[]]$Tables.Clone(); $runWeights=[byte[]]$WeightBytes.Clone(); $corrections=[Collections.Generic.List[long]]::new()
     foreach($region in @($Layout.WeightRegions | Where-Object { $_.Format -ceq 'ResblockW16' -and ($_.Part -ceq 'Main' -or $IncludeSource) })){
         $width=[int]$region.Channels; $kernel=[int]$region.Kernel; $count=$width*$width*$kernel; $blocks=$width/32
         $module=if($region.Part -ceq 'Source'){'noise_res'}else{'resblocks'}; $block=if($module -eq 'noise_res'){[int]($region.Name.Split('.')[-1])}else{$(if($width -eq 256){0}else{3})+[Array]::IndexOf([int[]]@(3,7,11),$kernel)}
@@ -1660,7 +1681,7 @@ function New-KokoroSpeechRenderer {
         [pscustomobject]@{PSTypeName='Kokoro.DecodedSpeech';Frames=$frames;Ticks=2*$frames;XCroutons=$x;DspMs=$job.MedianMs} }
     $renderer | Add-Member -MemberType ScriptMethod -Name Render -Value { param([byte[]]$XCroutons,[float[]]$Pitch,[int]$Ticks,[byte[]]$Constants)
         $emission=$this.GeneratorEmission($Ticks,'Constants')
-        if($null -eq $this.Int8){ $this.Int8=ConvertTo-KokoroGeneratorInt8 -Tables $Constants -WeightBytes $this.Weights -Layout $emission.Layout -IncludeSource }
+        if($null -eq $this.Int8){ $this.Int8=ConvertTo-KokoroGeneratorInt8 -Tables $Constants -WeightBytes $this.Weights -Layout $emission.Layout -IncludeSource -CacheDirectory (Join-Path $Build 'generator-int8') }
         $tables=[byte[]]$Constants.Clone(); $corrections=$this.Int8.Corrections
         for($i=0;$i -lt $corrections.Length;$i+=2){ $at=[int]$corrections[$i]; [Array]::Copy([BitConverter]::GetBytes([int]([long][BitConverter]::ToInt32($tables,$at)+$corrections[$i+1])),0,$tables,$at,4) }
         $job=$this.Run($emission,$this.GeneratorInput($emission,$XCroutons,$Pitch,$Ticks),$tables,$this.Int8.Weights,$true)
