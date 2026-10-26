@@ -3891,6 +3891,9 @@ $script:StudentScores = [ordered]@{
     SustainedAh = @{ VowelFrames = 70; Notes = @(@{ Vowel = 'ɑ'; Semitone = 7 }) }
     SustainedAhVibrato = @{ VowelFrames = 70; Notes = @(@{ Vowel = 'ɑ'; Semitone = 7 }); Vibrato = @{ RateHz = 5.5; DepthCents = 50; OnsetSeconds = 0; RiseSeconds = 0 } }
     SustainedAhDelayedVibrato = @{ VowelFrames = 70; Notes = @(@{ Vowel = 'ɑ'; Semitone = 7 }); Vibrato = @{ RateHz = 5.5; DepthCents = 50; OnsetSeconds = 0.6; RiseSeconds = 0.3 } }
+    # SourceOnly: the decoder makes x from the steady notes; the vibrato reaches only the generator's harmonic source.
+    SustainedAhSourceVibrato = @{ VowelFrames = 70; Notes = @(@{ Vowel = 'ɑ'; Semitone = 7 }); Vibrato = @{ RateHz = 5.5; DepthCents = 50; OnsetSeconds = 0; RiseSeconds = 0; SourceOnly = $true } }
+    SustainedAhSourceDelayedVibrato = @{ VowelFrames = 70; Notes = @(@{ Vowel = 'ɑ'; Semitone = 7 }); Vibrato = @{ RateHz = 5.5; DepthCents = 50; OnsetSeconds = 0.6; RiseSeconds = 0.3; SourceOnly = $true } }
 }
 $script:StudentVoicelessConsonants = 'f', 's', 't', 'k', 'p', 'h', 'θ', 'ʃ', 'ʧ'
 
@@ -3914,7 +3917,7 @@ function Invoke-StudentRendererScore([string] $Score = 'SolfegeMajorScale') {
     # One duration per token, each at least one frame: the pads, then per note its consonant, the stress mark and its
     # vowel (at the note's f0), and one frame for each space (holding the note before it).
     $durations = [Collections.Generic.List[int]]::new(); $durations.Add(1)
-    $tickF0 = [Collections.Generic.List[float]]::new(); $tickN = [Collections.Generic.List[float]]::new(); $noteTicks = [Collections.Generic.List[int[]]]::new()
+    $tickF0 = [Collections.Generic.List[float]]::new(); $tickN = [Collections.Generic.List[float]]::new(); $noteTicks = [Collections.Generic.List[int[]]]::new(); $vibratoTicks = @{}
     $addTicks = { param([int]$frames, [double]$f0, [double]$n) for ($i = 0; $i -lt 2 * $frames; $i++) { $tickF0.Add($f0); $tickN.Add($n) } }
     & $addTicks 1 0 $nUnvoiced
     for ($k = 0; $k -lt $notes.Count; $k++) {
@@ -3930,18 +3933,23 @@ function Invoke-StudentRendererScore([string] $Score = 'SolfegeMajorScale') {
             for ($t = $vowelStart; $t -lt $tickF0.Count; $t++) {
                 $since = ($t - $vowelStart) / 80.0 - $v.OnsetSeconds; if ($since -lt 0) { continue }
                 $depth = if ($v.RiseSeconds -gt 0) { [Math]::Min(1.0, $since / $v.RiseSeconds) } else { 1.0 }
-                $tickF0[$t] = $f0 * [Math]::Pow(2, $depth * $v.DepthCents / 1200.0 * [Math]::Sin(2 * [Math]::PI * $v.RateHz * $since))
+                $vibratoTicks[$t] = $f0 * [Math]::Pow(2, $depth * $v.DepthCents / 1200.0 * [Math]::Sin(2 * [Math]::PI * $v.RateHz * $since))
             }
         }
         if ($k -lt $notes.Count - 1) { $durations.Add(1); & $addTicks 1 $f0 $nVoiced }
         $noteTicks.Add([int[]]@($first, $tickF0.Count, [Math]::Round($f0, 1)))
     }
     $durations.Add(1); & $addTicks 1 0 $nUnvoiced
-    $f0Curve = $tickF0.ToArray(); $nCurve = $tickN.ToArray(); $ticks = $f0Curve.Length
+    # The generator's source takes the performed f0 (vibrato included); the decoder takes it too unless the vibrato is
+    # SourceOnly, in which case it decodes the steady notes.
+    $steadyF0 = $tickF0.ToArray(); $f0Curve = [float[]]$steadyF0.Clone(); foreach ($t in $vibratoTicks.Keys) { $f0Curve[$t] = $vibratoTicks[$t] }
+    $sourceOnly = $record.ContainsKey('Vibrato') -and $record.Vibrato['SourceOnly']
+    $decoderF0 = if ($sourceOnly) { $steadyF0 } else { $f0Curve }
+    $nCurve = $tickN.ToArray(); $ticks = $f0Curve.Length
     $syllabus = Import-StudentSyllabus (Join-Path $out "syllabus-$Score")
-    try { $encoded = Invoke-OfflineSpeech -Phonemes $phonemes -Voice $Voice -SuppliedDurations $durations.ToArray() -SuppliedF0 $f0Curve -SuppliedN $nCurve -SkipDecoder }
+    try { $encoded = Invoke-OfflineSpeech -Phonemes $phonemes -Voice $Voice -SuppliedDurations $durations.ToArray() -SuppliedF0 $decoderF0 -SuppliedN $nCurve -SkipDecoder }
     finally { Remove-Module -ModuleInfo $syllabus -Force }
-    $decoded = $renderer.Decode([float[]]$encoded.Aligned, $f0Curve, $nCurve)
+    $decoded = $renderer.Decode([float[]]$encoded.Aligned, $decoderF0, $nCurve)
     if ($decoded.Ticks -ne $ticks) { throw "The decoder returned $($decoded.Ticks) ticks for a score of $ticks." }
     # The voice base of the normalization study: the eight fitted stretches' exports, cached by their inputs.
     $stretchTicks = 130
@@ -4636,7 +4644,7 @@ $script:StudentSteps = [ordered]@{
     PitchGate = { Invoke-StudentPitchGate }
     Trace = { Invoke-StudentTrace }
     Normalization = { Invoke-StudentRendererNormalization }
-    Score = { foreach ($name in $script:StudentScores.Keys) { Invoke-StudentRendererScore $name } }
+    Score = { foreach ($name in $script:StudentScores.Keys) { if (-not $Text -or $name -like $Text) { Invoke-StudentRendererScore $name } } }
 }
 }
 & $studentOwner { & $script:StudentSteps[$Step] }
