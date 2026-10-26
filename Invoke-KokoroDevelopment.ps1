@@ -1714,6 +1714,14 @@ function Invoke-KokoroGeneratorNormalization {
     & (Join-Path $Root 'student/Invoke-Student.ps1') -Step Normalization -State $renderer -OutputPath $OutputDirectory
 }
 
+# A declared score (Student -Step Score with the renderer, no Student): its phones, durations and notes through the host
+# text encoder, the DSP decoder and the generator, with the voice base and with the score's own moments.
+function Invoke-KokoroGeneratorScore {
+    param([Parameter(Mandatory)][string]$OutputDirectory,[string]$Soc='SM8550',[string]$Package='dev.mansfieldplumbing.kokoro')
+    $renderer=New-KokoroSpeechRenderer -OutputDirectory (Join-Path $OutputDirectory 'renderer') -Soc $Soc -Package $Package
+    & (Join-Path $Root 'student/Invoke-Student.ps1') -Step Score -State $renderer -OutputPath $OutputDirectory
+}
+
 # Depth-first equivalence for the 128-channel residual section (resblocks 3-5 and their mean): the layer schedule exports
 # the section's exact AdaIN values on the phone; the layer and backward schedules then run with those values and the same
 # input and weights, and their output tensors must be byte-identical (the backward job writes each output tile at its
@@ -3244,6 +3252,7 @@ $script:KokoroMeasurementCases = [ordered]@{
     'generator-propagation' = 'Test-KokoroGeneratorPropagation'
     'student-speech' = 'Invoke-KokoroStudentSpeech'
     'generator-normalization' = 'Invoke-KokoroGeneratorNormalization'
+    'generator-score' = 'Invoke-KokoroGeneratorScore'
 }
 
 # Dot-sourced (. ./Invoke-KokoroDevelopment.ps1): the functions above are the API; no command runs.

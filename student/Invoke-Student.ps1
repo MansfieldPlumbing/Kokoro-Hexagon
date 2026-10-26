@@ -73,7 +73,7 @@ Run from a PowerShell prompt: pwsh -File passes every argument as a string, so a
 #requires -Version 7.7
 [CmdletBinding()]
 param(
-    [ValidateSet('Console', 'Render', 'Corpus', 'Pronunciation', 'Normalize', 'Syllabus', 'Recordings', 'Listen', 'Stems', 'Alignment', 'Percepts', 'Describe', 'Learn', 'Audit', 'Discriminate', 'Reconsider', 'Inventory', 'Speak', 'Ablate', 'PitchGate', 'Trace', 'Normalization')][string] $Step = 'Console',
+    [ValidateSet('Console', 'Render', 'Corpus', 'Pronunciation', 'Normalize', 'Syllabus', 'Recordings', 'Listen', 'Stems', 'Alignment', 'Percepts', 'Describe', 'Learn', 'Audit', 'Discriminate', 'Reconsider', 'Inventory', 'Speak', 'Ablate', 'PitchGate', 'Trace', 'Normalization', 'Score')][string] $Step = 'Console',
     [ValidateRange(2, 64)][int] $Threads = [Math]::Max(2, [Environment]::ProcessorCount),
     [string] $Text = '',
     [string] $Voice = 'af_heart',
@@ -3847,12 +3847,18 @@ function Invoke-StudentRendererNormalization {
         @{ Name = 'ProfileGain'; Gain = $true; Offset = $false; Modules = '.' }
         @{ Name = 'ProfileOffset'; Gain = $false; Offset = $true; Modules = '.' }
         @{ Name = 'ProfileOffsetSource'; Gain = $false; Offset = $true; Modules = '^noise_res$' }
-        @{ Name = 'ProfileOffsetResblocks'; Gain = $false; Offset = $true; Modules = '^resblocks$' })
+        @{ Name = 'ProfileOffsetResblocks'; Gain = $false; Offset = $true; Modules = '^resblocks$' }
+        # Matched moments in one stage and the voice base in the other: stage 0 is the 256-channel section and its source
+        # sites, stage 1 the 128-channel section and its source sites.
+        @{ Name = 'MatchedStage0'; Matched = '^generator\.(resblocks\.[012]|noise_res\.0)\.' }
+        @{ Name = 'MatchedStage1'; Matched = '^generator\.(resblocks\.[345]|noise_res\.1)\.' })
+    $baseTerms = @($renderer.Normalization($base))
     $renders = @(for ($h = 0; $h -lt $held.Count; $h++) { $stream = $held[$h]
         $matched = $renderer.Render($stream.X, $stream.F0, $ticks, $stream.Export.Tables)
-        $matchedHarmonic = Get-StudentHarmonicNoise $matched.Pcm $stream.F0
+        $matchedHarmonic = Get-StudentHarmonicNoise $matched.Pcm $stream.F0; $matchedBrightness = Get-StudentBrightness $matched.Pcm
         foreach ($condition in $conditions) {
-            $table = if ($condition.Name -clike 'Matched*') { $stream.Export.Tables } elseif ($condition.Name -ceq 'VoiceBase') { $base }
+            $table = if ($condition.ContainsKey('Matched')) { $renderer.NormalizationTable($stream.Export.Tables, @(for ($i = 0; $i -lt $baseTerms.Count; $i++) { if ($baseTerms[$i].Site -match $condition.Matched) { $stream.Terms[$i] } else { $baseTerms[$i] } })) }
+                elseif ($condition.Name -clike 'Matched*') { $stream.Export.Tables } elseif ($condition.Name -ceq 'VoiceBase') { $base }
                 else { $renderer.NormalizationTable($stream.Export.Tables, @(Get-StudentProfiledTerms $fit $stream.Terms $condition.Gain $condition.Offset $condition.Modules)) }
             $rendering = if ($condition.Name -ceq 'Matched') { $matched } else { $renderer.Render($stream.X, $stream.F0, $ticks, $table) }
             $wave = Join-Path $out "held$h-$($condition.Name.ToLowerInvariant()).wav"; [IO.File]::WriteAllBytes($wave, (ConvertTo-StudentWave $rendering.Pcm))
@@ -3861,6 +3867,7 @@ function Invoke-StudentRendererNormalization {
             $harmonic = Get-StudentHarmonicNoise $rendering.Pcm $stream.F0
             [pscustomobject]@{ PSTypeName = 'Kokoro.StudentNormalizationRender'; Window = $stream.Window; Condition = $condition.Name; Rms = Get-StudentRms $rendering.Pcm
                 HarmonicNoiseDb = $harmonic; HarmonicNoiseChangeDb = [Math]::Round($harmonic - $matchedHarmonic, 2)
+                BrightnessChangeDb = [Math]::Round((Get-StudentBrightness $rendering.Pcm) - $matchedBrightness, 2)
                 PcmSHA256 = [Convert]::ToHexString([Security.Cryptography.SHA256]::HashData($pcmBytes))
                 SnrAgainstMatchedDb = Get-StudentAblationSnr $matched.Pcm $rendering.Pcm; WorstSiteGainErrorDb = if ($sites.Count) { [Math]::Max([Math]::Abs($sites[0].GainErrorDbMin), [Math]::Abs($sites[0].GainErrorDbMax)) } else { 0 }
                 DspMs = $rendering.DspMs; Wave = $wave; Sites = $sites }
@@ -3869,6 +3876,79 @@ function Invoke-StudentRendererNormalization {
         Fitted = @($fitted | ForEach-Object { "$($_.Window):$($_.First)" }); HeldOut = @($held | ForEach-Object { "$($_.Window):$($_.First)" })
         Profile = $fit.Sites; Renders = $renders; Directory = $out; MachineSHA256 = $script:StudentMachineSHA256 }
     Export-Clixml -LiteralPath (Join-Path $out 'normalization.clixml') -InputObject $result -Depth 5
+    $result
+}
+
+# Hand-authored scores for the renderer, played without the Student: each note is a consonant and a stressed vowel in
+# Kokoro symbols, a semitone offset from the score's lowest note, and frames for the consonant and the vowel.
+$script:StudentScores = [ordered]@{
+    SolfegeMajorScale = @(
+        @('d', 'O', 0), @('ɹ', 'A', 2), @('m', 'i', 4), @('f', 'ɑ', 5), @('s', 'O', 7), @('l', 'ɑ', 9), @('t', 'i', 11), @('d', 'O', 12))
+}
+$script:StudentVoicelessConsonants = 'f', 's', 't', 'k', 'p', 'h', 'θ', 'ʃ', 'ʧ'
+
+function Invoke-StudentRendererScore([string] $Score = 'SolfegeMajorScale', [int] $ConsonantFrames = 2, [int] $VowelFrames = 5) {
+    # A declared score on the phone (Run -Case generator-score), no Student: its phones through the host text encoder,
+    # the DSP decoder and the generator, legato with no gaps. The lowest note sits seven semitones below the voice's
+    # median voiced f0 in the syllabus, so the octave spans its range; N is the syllabus median (voiced ticks for voiced
+    # phones, unvoiced ticks for voiceless consonants, which are also unvoiced in f0). The generator renders with the voice
+    # base (the mean of the normalization study's eight fitted streams) and, when the export admits the length, with the
+    # score's own moments.
+    if ($null -eq $State -or $State.PSObject.TypeNames -notcontains 'Kokoro.SpeechRenderer') { throw 'Score needs the speech renderer in -State (Run -Case generator-score).' }
+    if (-not $script:StudentScores.Contains($Score)) { throw "No score $Score; declared: $($script:StudentScores.Keys -join ', ')." }
+    $renderer = $State; $out = Get-StudentOutputPath 'Score'; $notes = $script:StudentScores[$Score]
+    $windows = @((Invoke-StudentSyllabus).Windows)
+    $voicedF0 = [Collections.Generic.List[double]]::new(); $voicedN = [Collections.Generic.List[double]]::new(); $unvoicedN = [Collections.Generic.List[double]]::new()
+    foreach ($window in $windows) { for ($t = 0; $t -lt $window.Evidence.F0.Length; $t++) { if ($window.Evidence.F0[$t] -gt 10) { $voicedF0.Add($window.Evidence.F0[$t]); $voicedN.Add($window.Evidence.N[$t]) } else { $unvoicedN.Add($window.Evidence.N[$t]) } } }
+    $median = { param($list) $a = $list.ToArray(); [Array]::Sort($a); $a[[int][Math]::Floor($a.Length / 2)] }
+    $medianF0 = & $median $voicedF0; $lowest = $medianF0 * [Math]::Pow(2, -7 / 12.0); $nVoiced = & $median $voicedN; $nUnvoiced = & $median $unvoicedN
+    $phonemes = (@($notes | ForEach-Object { "$($_[0])ˈ$($_[1])" }) -join ' ')
+    # One duration per token, each at least one frame: the pads, then per note its consonant, the stress mark and its
+    # vowel (at the note's f0), and one frame for each space (holding the note before it).
+    $durations = [Collections.Generic.List[int]]::new(); $durations.Add(1)
+    $tickF0 = [Collections.Generic.List[float]]::new(); $tickN = [Collections.Generic.List[float]]::new(); $noteTicks = [Collections.Generic.List[int[]]]::new()
+    $addTicks = { param([int]$frames, [double]$f0, [double]$n) for ($i = 0; $i -lt 2 * $frames; $i++) { $tickF0.Add($f0); $tickN.Add($n) } }
+    & $addTicks 1 0 $nUnvoiced
+    for ($k = 0; $k -lt $notes.Count; $k++) {
+        $consonant, $vowel, $semitone = $notes[$k]; $f0 = $lowest * [Math]::Pow(2, $semitone / 12.0)
+        $voiceless = $script:StudentVoicelessConsonants -ccontains $consonant
+        $first = $tickF0.Count
+        $durations.Add($ConsonantFrames); & $addTicks $ConsonantFrames $(if ($voiceless) { 0 } else { $f0 }) $(if ($voiceless) { $nUnvoiced } else { $nVoiced })
+        $durations.Add(1); & $addTicks 1 $f0 $nVoiced; $durations.Add($VowelFrames); & $addTicks $VowelFrames $f0 $nVoiced
+        if ($k -lt $notes.Count - 1) { $durations.Add(1); & $addTicks 1 $f0 $nVoiced }
+        $noteTicks.Add([int[]]@($first, $tickF0.Count, [Math]::Round($f0, 1)))
+    }
+    $durations.Add(1); & $addTicks 1 0 $nUnvoiced
+    $f0Curve = $tickF0.ToArray(); $nCurve = $tickN.ToArray(); $ticks = $f0Curve.Length
+    $syllabus = Import-StudentSyllabus (Join-Path $out 'syllabus')
+    try { $encoded = Invoke-OfflineSpeech -Phonemes $phonemes -Voice $Voice -SuppliedDurations $durations.ToArray() -SuppliedF0 $f0Curve -SuppliedN $nCurve -SkipDecoder }
+    finally { Remove-Module -ModuleInfo $syllabus -Force }
+    $decoded = $renderer.Decode([float[]]$encoded.Aligned, $f0Curve, $nCurve)
+    if ($decoded.Ticks -ne $ticks) { throw "The decoder returned $($decoded.Ticks) ticks for a score of $ticks." }
+    # The voice base of the normalization study: the eight fitted stretches' exports, cached by their inputs.
+    $stretchTicks = 130
+    $fitted = @($windows | Where-Object { $_.Ticks -ge $stretchTicks } | Select-Object -First 8 | ForEach-Object {
+        $first = [int][Math]::Floor(($_.Ticks - $stretchTicks) / 2)
+        $x = [float[]]::new(512 * $stretchTicks); for ($c = 0; $c -lt 512; $c++) { [Array]::Copy($_.Evidence.X, $c * $_.Ticks + $first, $x, $c * $stretchTicks, $stretchTicks) }
+        $f0 = [float[]]::new($stretchTicks); [Array]::Copy($_.Evidence.F0, $first, $f0, 0, $stretchTicks)
+        $renderer.Constants($renderer.EncodeX($x, $stretchTicks), $f0, $stretchTicks) })
+    $base = $renderer.VoiceBase($fitted)
+    $conditions = [ordered]@{ VoiceBase = $base }
+    $exportFailure = $null
+    try { $conditions.Matched = $renderer.Constants($decoded.XCroutons, $f0Curve, $ticks).Tables } catch { $exportFailure = $_.Exception.Message }
+    $renders = @(foreach ($name in $conditions.Keys) {
+        $rendering = $renderer.Render($decoded.XCroutons, $f0Curve, $ticks, $conditions[$name])
+        $wave = Join-Path $out "$($Score.ToLowerInvariant())-$($name.ToLowerInvariant()).wav"; [IO.File]::WriteAllBytes($wave, (ConvertTo-StudentWave $rendering.Pcm))
+        $perNote = @(foreach ($note in $noteTicks) {
+            $pcm = [float[]]::new(300 * ($note[1] - $note[0])); [Array]::Copy($rendering.Pcm, 300 * $note[0], $pcm, 0, $pcm.Length)
+            $f0 = [float[]]::new($note[1] - $note[0]); [Array]::Copy($f0Curve, $note[0], $f0, 0, $f0.Length)
+            [pscustomobject]@{ F0 = $note[2]; Rms = Get-StudentRms $pcm; HarmonicNoiseDb = Get-StudentHarmonicNoise $pcm $f0 } })
+        [pscustomobject]@{ PSTypeName = 'Kokoro.StudentScoreRender'; Condition = $name; Rms = Get-StudentRms $rendering.Pcm; HarmonicNoiseDb = Get-StudentHarmonicNoise $rendering.Pcm $f0Curve
+            DspMs = $rendering.DspMs; Wave = $wave; Notes = $perNote } })
+    $result = [pscustomobject]@{ PSTypeName = 'Kokoro.StudentRendererScore'; Score = $Score; Voice = $Voice; Phonemes = $phonemes; MedianVoicedF0 = [Math]::Round($medianF0, 1)
+        LowestF0 = [Math]::Round($lowest, 1); Ticks = $ticks; Seconds = $ticks / 80.0; DecoderDspMs = $decoded.DspMs; ExportFailure = $exportFailure
+        Controls = [pscustomobject]@{ Durations = $durations.ToArray(); F0 = $f0Curve; N = $nCurve }; Renders = $renders; Directory = $out; MachineSHA256 = $script:StudentMachineSHA256 }
+    Export-Clixml -LiteralPath (Join-Path $out 'score.clixml') -InputObject $result -Depth 5
     $result
 }
 
@@ -3939,6 +4019,15 @@ function Get-StudentHarmonicNoise([float[]] $Pcm, [float[]] $F0) {
     }
     if ($total -le 0 -or $harmonic -ge $total) { return [double]::NaN }
     [Math]::Round(10 * [Math]::Log10($harmonic / ($total - $harmonic)), 2)
+}
+
+function Get-StudentBrightness([float[]] $Pcm) {
+    # The energy of the first difference against the signal's, in dB: a first difference rises 6 dB per octave, so the
+    # value falls when high frequencies lose energy. A comparison between renders of the same input, not a spectrum.
+    $signal = 0.0; $difference = 0.0
+    for ($i = 1; $i -lt $Pcm.Length; $i++) { $v = [double]$Pcm[$i]; $d = $v - $Pcm[$i - 1]; $signal += $v * $v; $difference += $d * $d }
+    if ($signal -le 0) { return [double]::NaN }
+    10 * [Math]::Log10($difference / $signal)
 }
 
 function Get-StudentRms([float[]] $Pcm) {
@@ -4529,6 +4618,7 @@ $script:StudentSteps = [ordered]@{
     PitchGate = { Invoke-StudentPitchGate }
     Trace = { Invoke-StudentTrace }
     Normalization = { Invoke-StudentRendererNormalization }
+    Score = { Invoke-StudentRendererScore }
 }
 }
 & $studentOwner { & $script:StudentSteps[$Step] }
