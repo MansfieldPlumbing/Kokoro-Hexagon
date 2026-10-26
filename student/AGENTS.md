@@ -48,11 +48,12 @@ evidence Kokoro can supply as a syllabus (see Syllabus data).
 The Student's source is `student/Invoke-Student.ps1`, reached through
 `Invoke-KokoroDevelopment.ps1 Student`. Extend that owner.
 
-This document describes two designs. v1 is current work. v2 follows v1 and is
-not current work. The Student is being rebuilt; these names are unrelated to
-earlier StudentV2 work.
+There is one finish line, the mission above, and no versions or stages of the
+design. Work is ordered by dependency: a step starts when what it depends on
+has a measured result. Only actionable results count: a measurement that
+decides what to keep, change or do next. The Student is being rebuilt.
 
-## v1: the Student at the prosody boundary
+## The Student at the prosody boundary
 
 ### Boundary
 
@@ -111,8 +112,8 @@ can start before the utterance is complete:
   Universal MIDI Packet messages (per-note events, velocity, per-note pitch
   bend and per-note controllers, with timestamps) are the interchange and
   inspection format, converted losslessly for the mapped controls and
-  specified from the MIDI 2.0 specification before encoding; v2 uses them
-  for per-note polyphony.
+  specified from the MIDI 2.0 specification before encoding; per-note
+  polyphony uses them.
 - The Student does not depend on the target. Its streams bind to a renderer
   per target (the Hexagon generator, a host emulator of it, later others);
   training against a quantized generator (stage 5) is a refinement of one
@@ -663,15 +664,15 @@ generator, the Student cancels part of the implementation error, so the
 quantization target is set by the end-to-end result, not by the generator
 alone. Every change above is kept only if end-to-end PCM SNR does not drop.
 
-## v2: long-horizon control and generator replacement
+## Long-horizon control and generator replacement
 
-Not current work. The generator's weight size is re-evaluated once v1 is
-complete. When v1 holds its results and the generator can be dismantled, the
-v1 Student becomes the v2 Student; it is not rebuilt.
+These serve the same finish line and start when what they depend on has a
+measured result. The generator's weight size is re-evaluated as its parts are
+replaced. The Student carries over; it is not rebuilt.
 
-- Long-horizon control: v1's control stream (Output streams) extended over
-  long spans (phonetic targets, timing, pitch movement, emphasis). v1's work
-  carries over unchanged: the control stream drives the v2 instrument as it
+- Long-horizon control: the control stream (Output streams) extended over
+  long spans (phonetic targets, timing, pitch movement, emphasis). The work
+  above carries over unchanged: the control stream drives the instrument as it
   drives the generator's AdaIN sites, the per-voice records and sensitivities
   carry over, and the VTCM phase loop serves both the generator and the
   instrument.
@@ -732,7 +733,7 @@ v1 Student becomes the v2 Student; it is not rebuilt.
   alignment and mixing come from superposition on the loop. Replacement is
   incremental: Kokoro's generator stays resident and keeps producing speech
   while its parts are replaced one at a time, starting with the source branch
-  (already on the VTCM loop and seeded noise in v1). Each replaced part is driven by the same
+  (already on the VTCM loop and seeded noise). Each replaced part is driven by the same
   control stream, and a replacement is kept only if end-to-end quality holds
   against the resident generator. The goal is natural human voice produced
   procedurally, with no learned generator weights.
