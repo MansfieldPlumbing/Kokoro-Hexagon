@@ -73,7 +73,7 @@ Run from a PowerShell prompt: pwsh -File passes every argument as a string, so a
 #requires -Version 7.7
 [CmdletBinding()]
 param(
-    [ValidateSet('Console', 'Render', 'Corpus', 'Pronunciation', 'Normalize', 'Syllabus', 'Recordings', 'Listen', 'Stems', 'Alignment', 'Percepts', 'Describe', 'Learn', 'Audit', 'Discriminate', 'Reconsider', 'Inventory', 'Speak', 'Ablate')][string] $Step = 'Console',
+    [ValidateSet('Console', 'Render', 'Corpus', 'Pronunciation', 'Normalize', 'Syllabus', 'Recordings', 'Listen', 'Stems', 'Alignment', 'Percepts', 'Describe', 'Learn', 'Audit', 'Discriminate', 'Reconsider', 'Inventory', 'Speak', 'Ablate', 'PitchGate')][string] $Step = 'Console',
     [ValidateRange(2, 64)][int] $Threads = [Math]::Max(2, [Environment]::ProcessorCount),
     [string] $Text = '',
     [string] $Voice = 'af_heart',
@@ -3421,22 +3421,40 @@ function Measure-StudentReplay($Rules, $Library, [object[]] $PhoneList) {
         $target = $Rules.Targets($phone); $entry = $replay.Phone[$phone]; $f0 = $phone.Window.Evidence.F0; $energy = $phone.Window.Evidence.N
         $predicted = $Rules.Frames($phone); if ($null -ne $entry) { $predicted = [Math]::Max(0, [int][Math]::Round($predicted * $entry.Ratio)) }
         $wordFirst = 0; $wordTicks = 0; if ($null -ne $entry) { $wordFirst = $entry.Word[0].FirstTick; $wordTicks = $entry.Word[-1].FirstTick + $entry.Word[-1].Ticks - $wordFirst }
-        $agree = 0; $pitchSquares = 0.0; $pitchTicks = 0; $energySquares = 0.0
+        $agree = 0; $pitchSquares = 0.0; $pitchTicks = 0; $energySquares = 0.0; $predictedSum = 0.0
         for ($t = $phone.FirstTick; $t -lt $phone.FirstTick + $phone.Ticks; $t++) {
             $logHz = $target.LogHz; $e = $target.Energy
             if ($null -ne $entry) { if ($entry.Pitch) { $logHz += Get-StudentReplayResidual $entry $phone $t $wordFirst $wordTicks 'Pitch' }; $e += Get-StudentReplayResidual $entry $phone $t $wordFirst $wordTicks 'Energy' }
             $voiced = if ($null -ne $entry) { (Get-StudentReplayResidual $entry $phone $t $wordFirst $wordTicks 'Voicing') -ge 0.5 } else { $target.Voiced }
             if (($f0[$t] -gt $script:StudentVoicedHz) -eq $voiced) { $agree++ }
-            if ($f0[$t] -ge $script:StudentPitchedHz -and $voiced) { $d = 20 * ($logHz - [Math]::Log($f0[$t])) / [Math]::Log(10); $pitchSquares += $d * $d; $pitchTicks++; $spread.Pitch[0].Add([Math]::Log($f0[$t])); $spread.Pitch[1].Add($logHz) }
+            if ($f0[$t] -ge $script:StudentPitchedHz -and $voiced) { $d = 20 * ($logHz - [Math]::Log($f0[$t])) / [Math]::Log(10); $pitchSquares += $d * $d; $pitchTicks++; $predictedSum += $logHz; $spread.Pitch[0].Add([Math]::Log($f0[$t])); $spread.Pitch[1].Add($logHz) }
             $energySquares += ($e - $energy[$t]) * ($e - $energy[$t]); $spread.Energy[0].Add($energy[$t]); $spread.Energy[1].Add($e)
         }
         $spread.Duration[0].Add($phone.Ticks / 2); $spread.Duration[1].Add($predicted)
         $rows.Add([pscustomobject]@{ PSTypeName = 'Kokoro.StudentProsodyScore'; Phone = $phone; Frames = $phone.Ticks / 2; PredictedFrames = $predicted; Ticks = $phone.Ticks
-            VoicingAgree = $agree; PitchSquares = $pitchSquares; PitchTicks = $pitchTicks; EnergySquares = $energySquares })
+            VoicingAgree = $agree; PitchSquares = $pitchSquares; PitchTicks = $pitchTicks; EnergySquares = $energySquares
+            PredictedLogHz = $(if ($pitchTicks) { $predictedSum / $pitchTicks } else { [double]::NaN }) })
     }
     $deviation = { param($Values) $mean = 0.0; foreach ($v in $Values) { $mean += $v }; $mean /= [Math]::Max(1, $Values.Count); $s = 0.0; foreach ($v in $Values) { $s += ($v - $mean) * ($v - $mean) }; [Math]::Sqrt($s / [Math]::Max(1, $Values.Count)) }
     $ratios = [ordered]@{}; foreach ($name in 'Duration', 'Pitch', 'Energy') { $ratios[$name] = [Math]::Round((& $deviation $spread[$name][1]) / [Math]::Max(1e-9, (& $deviation $spread[$name][0])), 2) }
-    [pscustomobject]@{ Rows = $rows.ToArray(); SpreadRatio = [pscustomobject]$ratios; Keys = $replay.Keys }
+    # The gate measure that tracked listening: per-phone mean log f0 against the evidence's, by correlation and spread,
+    # within each window (so the voice's level per window does not inflate it), pooled over windows.
+    $phonePitch = @{}
+    foreach ($row in $rows) {
+        if ($row.PitchTicks -eq 0) { continue }
+        $phone = $row.Phone; $f0 = $phone.Window.Evidence.F0; $actual = 0.0; $k = 0
+        for ($t = $phone.FirstTick; $t -lt $phone.FirstTick + $phone.Ticks; $t++) { if ($f0[$t] -ge $script:StudentPitchedHz) { $actual += [Math]::Log($f0[$t]); $k++ } }
+        if (-not $k) { continue }
+        $window = $phone.Window.Index; if (-not $phonePitch.ContainsKey($window)) { $phonePitch[$window] = [Collections.Generic.List[double[]]]::new() }
+        $phonePitch[$window].Add([double[]]@(($actual / $k), $row.PredictedLogHz))
+    }
+    $sxy = 0.0; $sxx = 0.0; $syy = 0.0
+    foreach ($pairs in $phonePitch.Values) {
+        if ($pairs.Count -lt 3) { continue }; $mx = 0.0; $my = 0.0; foreach ($pair in $pairs) { $mx += $pair[0]; $my += $pair[1] }; $mx /= $pairs.Count; $my /= $pairs.Count
+        foreach ($pair in $pairs) { $sxy += ($pair[0] - $mx) * ($pair[1] - $my); $sxx += ($pair[0] - $mx) * ($pair[0] - $mx); $syy += ($pair[1] - $my) * ($pair[1] - $my) }
+    }
+    $gate = [pscustomobject]@{ PhonePitchCorrelation = [Math]::Round($sxy / [Math]::Sqrt([Math]::Max(1e-30, $sxx * $syy)), 3); PhonePitchSpread = [Math]::Round([Math]::Sqrt($syy / [Math]::Max(1e-30, $sxx)), 3) }
+    [pscustomobject]@{ Rows = $rows.ToArray(); SpreadRatio = [pscustomobject]$ratios; Keys = $replay.Keys; Gate = $gate }
 }
 
 function Get-StudentProsodySummary([object[]] $Scores, [string] $Name) {
@@ -3482,7 +3500,7 @@ function Invoke-StudentInventory {
     $library = New-StudentControlRecordings $chosen $training
     $replayed = Measure-StudentReplay $chosen $library $heldOut; $rulesOnly = Measure-StudentReplay $chosen $null $heldOut
     $replayScores = [pscustomobject]@{ Rules = (Get-StudentProsodySummary $rulesOnly.Rows 'Rules'); Replay = (Get-StudentProsodySummary $replayed.Rows 'Replay')
-        RulesSpread = $rulesOnly.SpreadRatio; ReplaySpread = $replayed.SpreadRatio; ReplayKeys = $replayed.Keys; Keys = $library.Count }
+        RulesSpread = $rulesOnly.SpreadRatio; ReplaySpread = $replayed.SpreadRatio; RulesGate = $rulesOnly.Gate; ReplayGate = $replayed.Gate; ReplayKeys = $replayed.Keys; Keys = $library.Count }
     $strata = [Collections.Generic.List[object]]::new(); $strata.Add((Get-StudentProsodySummary $scores 'All'))
     foreach ($group in ($scores | Group-Object Novelty | Sort-Object Name)) { $strata.Add((Get-StudentProsodySummary @($group.Group) "Novelty.$($group.Name)")) }
     foreach ($group in ($scores | Group-Object Class | Sort-Object Name)) { $strata.Add((Get-StudentProsodySummary @($group.Group) "Class.$($group.Name)")) }
@@ -3602,6 +3620,40 @@ function Invoke-StudentSpeakOnDsp($Inventory, [string] $Phonemes, $Stream, [stri
     [pscustomobject]@{ PSTypeName = 'Kokoro.StudentSpeech'; Text = $Text; Phonemes = $Phonemes; Voice = $Voice; AudioSeconds = $seconds
         DecoderDspMs = $decoded.DspMs; GeneratorDspMs = $rendering.DspMs; DspTimesRealTime = [Math]::Round(1000 * $seconds / ($decoded.DspMs + $rendering.DspMs), 1)
         HostTextEncoderSeconds = [Math]::Round($encoderSeconds, 2); VoiceBase = $basePath; Wave = $wave; Directory = $Out; MachineSHA256 = $script:StudentMachineSHA256 }
+}
+
+function Invoke-StudentPitchGate {
+    # The held-out pitch gate for Kokoro's own F0 branch run on the Student's durations (and the Student's pitch on the
+    # same windows): per held-out phone, mean log f0 against the syllabus evidence's, correlation and spread within each
+    # window, pooled. -WindowLimit bounds the windows scored (each runs ALBERT and the predictor on the host).
+    $inventory = Invoke-StudentInventory
+    $byWindow = $inventory.Phones | Group-Object { $_.Window.Index } -AsHashTable
+    $syllabus = Import-StudentSyllabus (Join-Path (Get-StudentOutputPath 'PitchGate') 'syllabus')
+    $sums = @{ Kokoro = [double[]]::new(3); Student = [double[]]::new(3) }; $scored = 0
+    try {
+        foreach ($window in $inventory.SyllabusWindows) {
+            $phones = @($byWindow[$window.Index] | Sort-Object { $_.Index })
+            if (-not @($phones | Where-Object { $_.Used -and $_.HeldOut }).Count) { continue }
+            $own = New-StudentProsodyStream $inventory.Rules $phones $inventory.Recordings
+            $kokoro = Invoke-OfflineSpeech -Phonemes $window.Evidence.Phonemes -Voice $Voice -SuppliedDurations $own.Durations -SuppliedN $own.N -SkipDecoder
+            foreach ($source in @(@('Kokoro', [float[]]$kokoro.F0), @('Student', $own.F0))) {
+                $means = Get-StudentPhoneMeans $own.Durations $source[1] $true
+                $pairs = [Collections.Generic.List[double[]]]::new()
+                for ($o = 0; $o -lt $phones.Count; $o++) {
+                    $phone = $phones[$o]; if (-not ($phone.Used -and $phone.HeldOut) -or [double]::IsNaN($means[$o])) { continue }
+                    $f0 = $window.Evidence.F0; $s = 0.0; $k = 0; for ($t = $phone.FirstTick; $t -lt $phone.FirstTick + $phone.Ticks; $t++) { if ($f0[$t] -ge $script:StudentPitchedHz) { $s += [Math]::Log($f0[$t]); $k++ } }
+                    if ($k) { $pairs.Add([double[]]@(($s / $k), $means[$o])) }
+                }
+                if ($pairs.Count -lt 3) { continue }
+                $mx = 0.0; $my = 0.0; foreach ($pair in $pairs) { $mx += $pair[0]; $my += $pair[1] }; $mx /= $pairs.Count; $my /= $pairs.Count
+                foreach ($pair in $pairs) { $sums[$source[0]][0] += ($pair[0] - $mx) * ($pair[1] - $my); $sums[$source[0]][1] += ($pair[0] - $mx) * ($pair[0] - $mx); $sums[$source[0]][2] += ($pair[1] - $my) * ($pair[1] - $my) }
+            }
+            $scored++; if ($WindowLimit -gt 0 -and $scored -ge $WindowLimit) { break }
+        }
+    }
+    finally { Remove-Module -ModuleInfo $syllabus -Force }
+    $gate = { param($s) [pscustomobject]@{ PhonePitchCorrelation = [Math]::Round($s[0] / [Math]::Sqrt([Math]::Max(1e-30, $s[1] * $s[2])), 3); PhonePitchSpread = [Math]::Round([Math]::Sqrt($s[2] / [Math]::Max(1e-30, $s[1])), 3) } }
+    [pscustomobject]@{ PSTypeName = 'Kokoro.StudentPitchGate'; Windows = $scored; KokoroOnStudentTiming = & $gate $sums.Kokoro; Student = & $gate $sums.Student }
 }
 
 function Invoke-StudentAblation {
@@ -3798,6 +3850,7 @@ $script:StudentSteps = [ordered]@{
     Inventory = { Invoke-StudentInventory }
     Speak = { Invoke-StudentSpeak }
     Ablate = { Invoke-StudentAblation }
+    PitchGate = { Invoke-StudentPitchGate }
 }
 }
 & $studentOwner { & $script:StudentSteps[$Step] }
