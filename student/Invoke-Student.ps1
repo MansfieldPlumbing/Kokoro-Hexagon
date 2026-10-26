@@ -3153,6 +3153,23 @@ function Get-StudentPhoneOccurrences($Windows) {
         $owner = [int[]]::new($n); [Array]::Fill($owner, -1)
         $occurrences = @($window.Occurrences)
         for ($o = 0; $o -lt $occurrences.Count; $o++) { for ($k = 0; $k -lt $occurrences[$o].Phonemes.Length; $k++) { $owner[$occurrences[$o].Start + $k] = $o } }
+        # Per word: whether its phonemes occurred earlier in the passage (given), and per phoneme the stress of its
+        # syllable: the vowel it precedes (onset) or, after the last vowel, the vowel it follows; 1 primary, 2 secondary,
+        # 0 unstressed, '-' for a word without a vowel.
+        $given = [bool[]]::new($occurrences.Count); $said = [Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
+        $syllable = [string[][]]::new($occurrences.Count)
+        for ($o = 0; $o -lt $occurrences.Count; $o++) {
+            $wordText = $occurrences[$o].Phonemes; $given[$o] = -not $said.Add($wordText)
+            $vowelStress = [string[]]::new($wordText.Length); $mark = '0'
+            for ($k = 0; $k -lt $wordText.Length; $k++) { $s = [string]$wordText[$k]; if ($s -ceq 'ˈ') { $mark = '1' } elseif ($s -ceq 'ˌ') { $mark = '2' } elseif ($script:StudentVowels.Contains($s)) { $vowelStress[$k] = $mark; $mark = '0' } }
+            $roles = [string[]]::new($wordText.Length)
+            for ($k = 0; $k -lt $wordText.Length; $k++) {
+                $role = '-'; for ($j = $k; $j -lt $wordText.Length -and $role -ceq '-'; $j++) { if ($null -ne $vowelStress[$j]) { $role = $vowelStress[$j] } }
+                if ($role -ceq '-') { for ($j = $k - 1; $j -ge 0 -and $role -ceq '-'; $j--) { if ($null -ne $vowelStress[$j]) { $role = $vowelStress[$j] } } }
+                $roles[$k] = $role
+            }
+            $syllable[$o] = $roles
+        }
         for ($i = -1; $i -le $n; $i++) {
             $symbol = if ($i -lt 0) { '^' } elseif ($i -eq $n) { '$' } else { [string]$phonemes[$i] }
             $word = $null; $offset = -1; $wordIndex = -1
@@ -3182,7 +3199,9 @@ function Get-StudentPhoneOccurrences($Windows) {
                 FirstTick = 2 * $frameStart[$i + 1]; Ticks = 2 * $evidence.Durations[$i + 1]
                 Margin = [Math]::Min($i + 1, $n - $i); HeldOut = $false; Development = $false; Used = $true; Type = -1
                 Boundary = $boundary; IntoPhrase = $into; ToBoundary = $toEnd
-                WordsToBoundary = [Math]::Max(0, $wordsAfter - $(if ($boundary -ceq '$') { 0 } else { 1 })); PhraseInitialWord = $wordsBefore -eq 0 }
+                WordsToBoundary = [Math]::Max(0, $wordsAfter - $(if ($boundary -ceq '$') { 0 } else { 1 })); PhraseInitialWord = $wordsBefore -eq 0
+                Given = $(if ($null -ne $word) { $given[$wordIndex] } else { $false })
+                SyllableStress = $(if ($null -ne $word -and $offset -ge 0) { $syllable[$wordIndex][$offset] } else { '-' }) }
             if ($null -ne $word) {
                 $block = [int][Math]::Floor($word.FirstToken / 64) % 8
                 $phone.HeldOut = $block -eq 7; $phone.Development = $block -eq 6
@@ -3250,22 +3269,34 @@ function Add-StudentPhrasingRules($Rules, [object[]] $Training) {
     # Accent: each training word's mean pitch residual against the rules so far, by word class (how common its phonemes
     # are), place in the phrase and whether it carries primary stress.
     foreach ($phone in $Training) { if ($phone.Offset -eq 0) { $Rules.WordCounts[$phone.Word.Phonemes] = [int]$Rules.WordCounts[$phone.Word.Phonemes] + 1 } }
-    $accentSum = @{}; $accentCount = @{}
+    # Pitch cells: each phone's pitch residual against the rules so far, filed under its context keys from specific to
+    # general (Get-StudentPitchKeys); a phone takes the most specific cell with at least PitchMinCount training ticks.
+    # While the cells fill, the targets use none of them.
+    $minimum = $Rules.PitchMinCount; $Rules.PitchMinCount = [int]::MaxValue
     foreach ($phone in $Training) {
         if ($phone.Offset -lt 0) { continue }
-        $cell = Get-StudentAccentCell $Rules $phone; $f0 = $phone.Window.Evidence.F0; $target = $Rules.Targets($phone)
-        for ($t = $phone.FirstTick; $t -lt $phone.FirstTick + $phone.Ticks; $t++) { if ($f0[$t] -ge $script:StudentPitchedHz) { $accentSum[$cell] = [double]$accentSum[$cell] + [Math]::Log($f0[$t]) - $target.LogHz; $accentCount[$cell] = [int]$accentCount[$cell] + 1 } }
+        $f0 = $phone.Window.Evidence.F0; $target = $Rules.Targets($phone); $keys = Get-StudentPitchKeys $Rules $phone
+        for ($t = $phone.FirstTick; $t -lt $phone.FirstTick + $phone.Ticks; $t++) {
+            if ($f0[$t] -lt $script:StudentPitchedHz) { continue }
+            $residual = [Math]::Log($f0[$t]) - $target.LogHz
+            foreach ($key in $keys) { $cell = $Rules.Accent[$key]; if ($null -eq $cell) { $cell = [double[]]::new(2); $Rules.Accent[$key] = $cell }; $cell[0] += $residual; $cell[1] += 1 }
+        }
     }
-    foreach ($key in $accentCount.Keys) { if ($accentCount[$key] -ge 40) { $Rules.Accent[$key] = $accentSum[$key] / $accentCount[$key] } }
+    $Rules.PitchMinCount = $minimum
 }
 
-function Get-StudentAccentCell($Rules, $Phone) {
+function Get-StudentPitchKeys($Rules, $Phone) {
+    # Context of a phone's pitch, most specific first: word class (how common its phonemes are), place in the phrase,
+    # boundary, the stress of its syllable with vowel or consonant, whether the word is given, and depth into the phrase.
     $count = [int]$Rules.WordCounts[$Phone.Word.Phonemes]
     $class = if ($count -gt 200) { 'common' } elseif ($count -gt 20) { 'frequent' } elseif ($count -gt 2) { 'known' } else { 'rare' }
     $place = if ($Phone.WordsToBoundary -eq 0) { 'last' } elseif ($Phone.WordsToBoundary -eq 1) { 'penultimate' } elseif ($Phone.PhraseInitialWord) { 'initial' } else { 'medial' }
-    $stress = if ($Phone.Word.Phonemes.Contains('ˈ')) { 'stressed' } else { 'unstressed' }
-    "$class|$place|$stress|$($Phone.Boundary)"
+    $syllable = "$($Phone.SyllableStress)$(if ($Phone.Vowel) { 'V' } else { 'C' })"; $given = if ($Phone.Given) { 'given' } else { 'new' }
+    $depth = if ($Phone.IntoPhrase -lt 10) { 'near' } elseif ($Phone.IntoPhrase -lt 30) { 'mid' } else { 'far' }
+    @("$class|$place|$($Phone.Boundary)|$syllable|$given|$depth", "$class|$place|$($Phone.Boundary)|$syllable|$given", "$class|$place|$syllable|$given", "$class|$syllable", "$syllable")
 }
+
+
 
 function New-StudentProsodyRules([object[]] $Training, [bool] $SplitStress, [bool] $TypePitch, [bool] $Phrasing = $false) {
     # Per type: duration as the mean of log(frames + 1), the fraction of voiced ticks, the pitch offset from the voice's
@@ -3288,7 +3319,7 @@ function New-StudentProsodyRules([object[]] $Training, [bool] $SplitStress, [boo
     $rules = [pscustomobject]@{ PSTypeName = 'Kokoro.StudentProsodyRules'; SplitStress = $SplitStress; TypePitch = $TypePitch
         Duration = @{}; Voiced = @{}; Pitch = @{}; Energy = @{}; MeanDuration = $allDuration / $Training.Count; VoiceLogHz = $voiceLog; MeanEnergy = $allEnergy / $allTicks
         WordFinal = 0.0; Stressed = 0.0; StressedPitch = 0.0
-        Phrasing = $false; FinalDuration = @{}; DeclinationLevel = 0.0; DeclinationSlope = 0.0; FinalPitch = @{}; WordCounts = @{}; Accent = @{} }
+        Phrasing = $false; FinalDuration = @{}; DeclinationLevel = 0.0; DeclinationSlope = 0.0; FinalPitch = @{}; WordCounts = @{}; Accent = @{}; PitchMinCount = 200; ReplayPitchWeight = 1.0 }
     foreach ($name in $durationCount.Keys) {
         $rules.Duration[$name] = $durationSum[$name] / $durationCount[$name]
         $rules.Voiced[$name] = [int]$voiced[$name] / [Math]::Max(1, [int]$ticks[$name])
@@ -3322,7 +3353,7 @@ function New-StudentProsodyRules([object[]] $Training, [bool] $SplitStress, [boo
         if ($this.Phrasing) {
             $logHz += $this.DeclinationLevel + $this.DeclinationSlope * [Math]::Min($Phone.IntoPhrase, $script:StudentPhraseReach)
             if ($Phone.ToBoundary -le $script:StudentFinalReach -and $this.FinalPitch.ContainsKey($Phone.Boundary)) { $logHz += $this.FinalPitch[$Phone.Boundary] }
-            if ($null -ne $Phone.Word -and $Phone.Offset -ge 0) { $cell = Get-StudentAccentCell $this $Phone; if ($this.Accent.ContainsKey($cell)) { $logHz += $this.Accent[$cell] } }
+            if ($null -ne $Phone.Word -and $Phone.Offset -ge 0 -and $this.Accent.Count) { foreach ($key in (Get-StudentPitchKeys $this $Phone)) { $cell = $this.Accent[$key]; if ($null -ne $cell -and $cell[1] -ge $this.PitchMinCount) { $logHz += $cell[0] / $cell[1]; break } } }
         }
         [pscustomobject]@{ Voiced = $known -and [double]$this.Voiced[$name] -ge 0.5; LogHz = $logHz
             Energy = $(if ($known) { [double]$this.Energy[$name] } else { $this.MeanEnergy }) } }
@@ -3424,7 +3455,7 @@ function Measure-StudentReplay($Rules, $Library, [object[]] $PhoneList) {
         $agree = 0; $pitchSquares = 0.0; $pitchTicks = 0; $energySquares = 0.0; $predictedSum = 0.0
         for ($t = $phone.FirstTick; $t -lt $phone.FirstTick + $phone.Ticks; $t++) {
             $logHz = $target.LogHz; $e = $target.Energy
-            if ($null -ne $entry) { if ($entry.Pitch) { $logHz += Get-StudentReplayResidual $entry $phone $t $wordFirst $wordTicks 'Pitch' }; $e += Get-StudentReplayResidual $entry $phone $t $wordFirst $wordTicks 'Energy' }
+            if ($null -ne $entry) { if ($entry.Pitch) { $logHz += $Rules.ReplayPitchWeight * (Get-StudentReplayResidual $entry $phone $t $wordFirst $wordTicks 'Pitch') }; $e += Get-StudentReplayResidual $entry $phone $t $wordFirst $wordTicks 'Energy' }
             $voiced = if ($null -ne $entry) { (Get-StudentReplayResidual $entry $phone $t $wordFirst $wordTicks 'Voicing') -ge 0.5 } else { $target.Voiced }
             if (($f0[$t] -gt $script:StudentVoicedHz) -eq $voiced) { $agree++ }
             if ($f0[$t] -ge $script:StudentPitchedHz -and $voiced) { $d = 20 * ($logHz - [Math]::Log($f0[$t])) / [Math]::Log(10); $pitchSquares += $d * $d; $pitchTicks++; $predictedSum += $logHz; $spread.Pitch[0].Add([Math]::Log($f0[$t])); $spread.Pitch[1].Add($logHz) }
@@ -3498,9 +3529,17 @@ function Invoke-StudentInventory {
     }
     # Control recordings from the training words; held-out scores with them replayed, and the spread of both.
     $library = New-StudentControlRecordings $chosen $training
+    # The development occurrences choose the pitch cells' minimum support and the weight of replayed pitch, by the pitch
+    # gate (per-phone correlation, with spread counted up to the evidence's).
+    $gateScore = { param($Gate) $Gate.PhonePitchCorrelation + 0.25 * [Math]::Min(1.0, $Gate.PhonePitchSpread) }
+    $pitchChoices = foreach ($minimum in 50, 200, 800, 3200) { $chosen.PitchMinCount = $minimum; $g = (Measure-StudentReplay $chosen $null $development).Gate; [pscustomobject]@{ PitchMinCount = $minimum; Correlation = $g.PhonePitchCorrelation; Spread = $g.PhonePitchSpread; Score = & $gateScore $g } }
+    $chosen.PitchMinCount = @($pitchChoices | Sort-Object Score -Descending)[0].PitchMinCount
+    $weightChoices = foreach ($weight in 0.0, 0.25, 0.5, 1.0) { $chosen.ReplayPitchWeight = $weight; $g = (Measure-StudentReplay $chosen $library $development).Gate; [pscustomobject]@{ ReplayPitchWeight = $weight; Correlation = $g.PhonePitchCorrelation; Spread = $g.PhonePitchSpread; Score = & $gateScore $g } }
+    $chosen.ReplayPitchWeight = @($weightChoices | Sort-Object Score -Descending)[0].ReplayPitchWeight
     $replayed = Measure-StudentReplay $chosen $library $heldOut; $rulesOnly = Measure-StudentReplay $chosen $null $heldOut
     $replayScores = [pscustomobject]@{ Rules = (Get-StudentProsodySummary $rulesOnly.Rows 'Rules'); Replay = (Get-StudentProsodySummary $replayed.Rows 'Replay')
-        RulesSpread = $rulesOnly.SpreadRatio; ReplaySpread = $replayed.SpreadRatio; RulesGate = $rulesOnly.Gate; ReplayGate = $replayed.Gate; ReplayKeys = $replayed.Keys; Keys = $library.Count }
+        RulesSpread = $rulesOnly.SpreadRatio; ReplaySpread = $replayed.SpreadRatio; RulesGate = $rulesOnly.Gate; ReplayGate = $replayed.Gate; ReplayKeys = $replayed.Keys; Keys = $library.Count
+        PitchChoices = @($pitchChoices); WeightChoices = @($weightChoices) }
     $strata = [Collections.Generic.List[object]]::new(); $strata.Add((Get-StudentProsodySummary $scores 'All'))
     foreach ($group in ($scores | Group-Object Novelty | Sort-Object Name)) { $strata.Add((Get-StudentProsodySummary @($group.Group) "Novelty.$($group.Name)")) }
     foreach ($group in ($scores | Group-Object Class | Sort-Object Name)) { $strata.Add((Get-StudentProsodySummary @($group.Group) "Class.$($group.Name)")) }
@@ -3558,7 +3597,7 @@ function New-StudentProsodyStream($Rules, [object[]] $PhoneList, $Library = $nul
         if ($null -ne $entry) { $wordFirst = $first[$entry.Word[0]]; $last = $entry.Word[-1]; $wordTicks = $first[$last] + 2 * $durations[[Array]::IndexOf($PhoneList, $last)] - $wordFirst }
         for ($t = 0; $t -lt 2 * $durations[$o]; $t++) {
             $energyTarget = $target.Energy; $pitchTarget = $target.LogHz
-            if ($null -ne $entry) { $energyTarget += Get-StudentReplayResidual $entry $phone $at $wordFirst $wordTicks 'Energy'; if ($entry.Pitch) { $pitchTarget += Get-StudentReplayResidual $entry $phone $at $wordFirst $wordTicks 'Pitch' } }
+            if ($null -ne $entry) { $energyTarget += Get-StudentReplayResidual $entry $phone $at $wordFirst $wordTicks 'Energy'; if ($entry.Pitch) { $pitchTarget += $Rules.ReplayPitchWeight * (Get-StudentReplayResidual $entry $phone $at $wordFirst $wordTicks 'Pitch') } }
             $level = if ([double]::IsNaN($level)) { $energyTarget } else { $level + $script:StudentControlResponse * ($energyTarget - $level) }
             $energy[$at] = [float]$level
             $voiced = if ($null -ne $entry) { (Get-StudentReplayResidual $entry $phone $at $wordFirst $wordTicks 'Voicing') -ge 0.5 } else { $target.Voiced }
