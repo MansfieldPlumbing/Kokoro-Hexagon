@@ -73,7 +73,7 @@ Run from a PowerShell prompt: pwsh -File passes every argument as a string, so a
 #requires -Version 7.7
 [CmdletBinding()]
 param(
-    [ValidateSet('Console', 'Render', 'Corpus', 'Pronunciation', 'Normalize', 'Syllabus', 'Recordings', 'Listen', 'Stems', 'Alignment', 'Percepts', 'Describe', 'Learn', 'Audit', 'Discriminate', 'Reconsider', 'Inventory', 'Speak', 'Ablate', 'PitchGate', 'Trace')][string] $Step = 'Console',
+    [ValidateSet('Console', 'Render', 'Corpus', 'Pronunciation', 'Normalize', 'Syllabus', 'Recordings', 'Listen', 'Stems', 'Alignment', 'Percepts', 'Describe', 'Learn', 'Audit', 'Discriminate', 'Reconsider', 'Inventory', 'Speak', 'Ablate', 'PitchGate', 'Trace', 'Normalization')][string] $Step = 'Console',
     [ValidateRange(2, 64)][int] $Threads = [Math]::Max(2, [Environment]::ProcessorCount),
     [string] $Text = '',
     [string] $Voice = 'af_heart',
@@ -3818,6 +3818,118 @@ function Invoke-StudentSpeakOnDsp($Inventory, [string] $Phonemes, $Stream, [stri
         HostTextEncoderSeconds = [Math]::Round($encoderSeconds, 2); VoiceBase = $basePath; Wave = $wave; Directory = $Out; MachineSHA256 = $script:StudentMachineSHA256 }
 }
 
+function Invoke-StudentRendererNormalization {
+    # The renderer alone, no Student (Run -Case generator-normalization): syllabus x and f0 for stretches of 130 ticks from
+    # the first windows long enough. Each stretch's exact AdaIN moments are exported; the first eight fit, per site, a
+    # channel profile (from the weights' view: the same in every stream) plus one level per stream, and give the voice
+    # base (their mean). Each held-out stretch renders with its own moments, with the voice base, and with the profile
+    # plus its own level per site (one number per site, what a live gain would carry), same x, f0, seed and weights.
+    if ($null -eq $State -or $State.PSObject.TypeNames -notcontains 'Kokoro.SpeechRenderer') { throw 'Normalization needs the speech renderer in -State (Run -Case generator-normalization).' }
+    $renderer = $State; $out = Get-StudentOutputPath 'Normalization'; $ticks = 130; $profileCount = 8; $heldCount = 2
+    $windows = @((Invoke-StudentSyllabus).Windows | Where-Object { $_.Ticks -ge $ticks })
+    if ($windows.Count -lt $profileCount + $heldCount) { throw "The syllabus has $($windows.Count) windows of at least $ticks ticks; $($profileCount + $heldCount) are needed." }
+    $streams = @(for ($k = 0; $k -lt $profileCount + $heldCount; $k++) {
+        $window = $windows[$k]; $first = [int][Math]::Floor(($window.Ticks - $ticks) / 2)
+        $x = [float[]]::new(512 * $ticks); for ($c = 0; $c -lt 512; $c++) { [Array]::Copy($window.Evidence.X, $c * $window.Ticks + $first, $x, $c * $ticks, $ticks) }
+        $f0 = [float[]]::new($ticks); [Array]::Copy($window.Evidence.F0, $first, $f0, 0, $ticks)
+        [pscustomobject]@{ Window = $window.Key; First = $first; X = $renderer.EncodeX($x, $ticks); F0 = $f0; Export = $null; Terms = $null } })
+    # Exports run on the resident listener; renders are one-shot, so every export runs first.
+    foreach ($stream in $streams) { $stream.Export = $renderer.Constants($stream.X, $stream.F0, $ticks); $stream.Terms = @($renderer.Normalization($stream.Export.Tables)) }
+    $fitted = $streams[0..($profileCount - 1)]; $held = $streams[$profileCount..($streams.Count - 1)]
+    $fit = Get-StudentNormalizationProfile @($fitted | ForEach-Object { , $_.Terms })
+    $base = $renderer.VoiceBase(@($fitted | ForEach-Object Export))
+    $renders = @(for ($h = 0; $h -lt $held.Count; $h++) { $stream = $held[$h]
+        $profiled = $renderer.NormalizationTable($stream.Export.Tables, @(Get-StudentProfiledTerms $fit $stream.Terms))
+        $matched = $renderer.Render($stream.X, $stream.F0, $ticks, $stream.Export.Tables)
+        # MatchedRepeat renders the matched input again: the run-to-run control for every comparison.
+        foreach ($condition in @(@('Matched', $stream.Export.Tables), @('MatchedRepeat', $stream.Export.Tables), @('VoiceBase', $base), @('ProfileLevel', $profiled))) {
+            $rendering = if ($condition[0] -ceq 'Matched') { $matched } else { $renderer.Render($stream.X, $stream.F0, $ticks, $condition[1]) }
+            $wave = Join-Path $out "held$h-$($condition[0].ToLowerInvariant()).wav"; [IO.File]::WriteAllBytes($wave, (ConvertTo-StudentWave $rendering.Pcm))
+            $sites = @(Get-StudentNormalizationDeviation @($renderer.Normalization($condition[1])) $stream.Terms)
+            [pscustomobject]@{ PSTypeName = 'Kokoro.StudentNormalizationRender'; Window = $stream.Window; Condition = $condition[0]; Rms = Get-StudentRms $rendering.Pcm
+                SnrAgainstMatchedDb = Get-StudentAblationSnr $matched.Pcm $rendering.Pcm; WorstSiteGainErrorDb = if ($sites.Count) { [Math]::Max([Math]::Abs($sites[0].GainErrorDbMin), [Math]::Abs($sites[0].GainErrorDbMax)) } else { 0 }
+                DspMs = $rendering.DspMs; Wave = $wave; Sites = $sites }
+        } })
+    $result = [pscustomobject]@{ PSTypeName = 'Kokoro.StudentRendererNormalization'; Voice = $Voice; Ticks = $ticks; Seed = $renderer.Seed
+        Fitted = @($fitted | ForEach-Object { "$($_.Window):$($_.First)" }); HeldOut = @($held | ForEach-Object { "$($_.Window):$($_.First)" })
+        Profile = $fit.Sites; Renders = $renders; Directory = $out; MachineSHA256 = $script:StudentMachineSHA256 }
+    Export-Clixml -LiteralPath (Join-Path $out 'normalization.clixml') -InputObject $result -Depth 5
+    $result
+}
+
+function Get-StudentNormalizationProfile([object[]] $Streams) {
+    # Per site, ln(1/std) and the mean in std units of each channel and stream as profile(channel) + level(stream): the
+    # profile is the channel's mean over streams, the level the stream's mean over channels less the profile's. LevelShare
+    # is the part of the across-stream variation the level explains.
+    $count = $Streams.Count; $terms = $Streams[0].Count; $sites = [ordered]@{}
+    for ($i = 0; $i -lt $terms; $i++) { $name = $Streams[0][$i].Site; if (-not $sites.Contains($name)) { $sites[$name] = [Collections.Generic.List[int]]::new() }; $sites[$name].Add($i) }
+    $values = @{ Log = [double[][]]::new($count); Mean = [double[][]]::new($count) }
+    for ($s = 0; $s -lt $count; $s++) {
+        if ($Streams[$s].Count -ne $terms) { throw "Stream $s holds $($Streams[$s].Count) terms; the first holds $terms." }
+        $values.Log[$s] = [double[]]::new($terms); $values.Mean[$s] = [double[]]::new($terms)
+        for ($i = 0; $i -lt $terms; $i++) {
+            $t = $Streams[$s][$i]; if ($t.Site -cne $Streams[0][$i].Site -or $t.Channel -ne $Streams[0][$i].Channel) { throw "Stream $s disagrees at term $i." }
+            $values.Log[$s][$i] = [Math]::Log($t.Inverse); $values.Mean[$s][$i] = $t.Mean * $t.Inverse
+        }
+    }
+    $profiles = @{ Log = [double[]]::new($terms); Mean = [double[]]::new($terms) }
+    $summary = foreach ($name in $sites.Keys) {
+        $indices = $sites[$name]; $shares = foreach ($quantity in 'Log', 'Mean') {
+            $v = $values[$quantity]; $profileOf = $profiles[$quantity]
+            foreach ($i in $indices) { $sum = 0.0; for ($s = 0; $s -lt $count; $s++) { $sum += $v[$s][$i] }; $profileOf[$i] = $sum / $count }
+            $total = 0.0; $levelPart = 0.0
+            for ($s = 0; $s -lt $count; $s++) {
+                $level = 0.0; foreach ($i in $indices) { $level += $v[$s][$i] - $profileOf[$i] }; $level /= $indices.Count
+                foreach ($i in $indices) { $r = $v[$s][$i] - $profileOf[$i]; $total += $r * $r }; $levelPart += $indices.Count * $level * $level
+            }
+            [pscustomobject]@{ Rms = [Math]::Sqrt($total / ($count * $indices.Count)); Share = if ($total -gt 0) { $levelPart / $total } else { 1.0 } }
+        }
+        [pscustomobject]@{ PSTypeName = 'Kokoro.StudentNormalizationProfileSite'; Site = $name; Channels = $indices.Count
+            AcrossStreamStdDb = [Math]::Round(20 / [Math]::Log(10) * $shares[0].Rms, 2); LevelShare = [Math]::Round($shares[0].Share, 3)
+            AcrossStreamMeanStd = [Math]::Round($shares[1].Rms, 3); MeanLevelShare = [Math]::Round($shares[1].Share, 3) }
+    }
+    [pscustomobject]@{ Sites = @($summary); Indices = $sites; Log = $profiles.Log; Mean = $profiles.Mean }
+}
+
+function Get-StudentProfiledTerms($Fit, [object[]] $Terms) {
+    # The fitted profile with this stream's own level per site: one ln(1/std) offset and one mean offset per site.
+    $out = [object[]]::new($Terms.Count)
+    foreach ($name in $Fit.Indices.Keys) {
+        $indices = $Fit.Indices[$name]; $logLevel = 0.0; $meanLevel = 0.0
+        foreach ($i in $indices) { $logLevel += [Math]::Log($Terms[$i].Inverse) - $Fit.Log[$i]; $meanLevel += $Terms[$i].Mean * $Terms[$i].Inverse - $Fit.Mean[$i] }
+        $logLevel /= $indices.Count; $meanLevel /= $indices.Count
+        foreach ($i in $indices) { $inverse = [Math]::Exp($Fit.Log[$i] + $logLevel); $out[$i] = [pscustomobject]@{ Site = $name; Channel = $Terms[$i].Channel; Inverse = $inverse; Mean = ($Fit.Mean[$i] + $meanLevel) / $inverse } }
+    }
+    $out
+}
+
+function Get-StudentRms([float[]] $Pcm) {
+    $sum = 0.0; foreach ($v in $Pcm) { $sum += [double]$v * $v }; [Math]::Round([Math]::Sqrt($sum / [Math]::Max(1, $Pcm.Length)), 5)
+}
+
+function Get-StudentNormalizationDeviation([object[]] $Base, [object[]] $Matched) {
+    # Per AdaIN site, how far the voice base's normalization is from the stream's own: the gain error per channel,
+    # 20 log10 of the base's 1/std over the matched 1/std (K scales with 1/std), and the base mean's offset in matched
+    # standard deviations. Sites are ordered by their largest gain error.
+    if ($Base.Count -ne $Matched.Count) { throw 'The two tables hold different site channels.' }
+    $bySite = [ordered]@{}
+    for ($i = 0; $i -lt $Base.Count; $i++) {
+        $b = $Base[$i]; $m = $Matched[$i]
+        if ($b.Site -cne $m.Site -or $b.Channel -ne $m.Channel) { throw "Site channels differ at term $i." }
+        if (-not $bySite.Contains($b.Site)) { $bySite[$b.Site] = [Collections.Generic.List[double[]]]::new() }
+        $bySite[$b.Site].Add([double[]]@((20 * [Math]::Log10($b.Inverse / $m.Inverse)), (($b.Mean - $m.Mean) * $m.Inverse)))
+    }
+    @(foreach ($site in $bySite.Keys) {
+        $gain = [double[]]@($bySite[$site] | ForEach-Object { $_[0] }); $offset = [double[]]@($bySite[$site] | ForEach-Object { $_[1] })
+        $sorted = [double[]]$gain.Clone(); [Array]::Sort($sorted)
+        $offsetSquares = 0.0; foreach ($o in $offset) { $offsetSquares += $o * $o }
+        [pscustomobject]@{ PSTypeName = 'Kokoro.StudentNormalizationSite'; Site = $site; Channels = $gain.Length
+            GainErrorDbMedian = [Math]::Round($sorted[[int][Math]::Floor($sorted.Length / 2)], 2)
+            GainErrorDbMin = [Math]::Round($sorted[0], 2); GainErrorDbMax = [Math]::Round($sorted[-1], 2)
+            MeanOffsetStdRms = [Math]::Round([Math]::Sqrt($offsetSquares / $offset.Length), 3) }
+    }) | Sort-Object { [Math]::Max([Math]::Abs($_.GainErrorDbMin), [Math]::Abs($_.GainErrorDbMax)) } -Descending
+}
+
 function Get-StudentClauseStatus([string] $Text, [object[]] $Spans) {
     # The compiled interpretation engine over each span (one engine per span; it closes and restarts clauses at sentence
     # stops, with identities running on): the status of its subject-awaiting-predicate closure after each occurrence
@@ -4378,6 +4490,7 @@ $script:StudentSteps = [ordered]@{
     Ablate = { Invoke-StudentAblation }
     PitchGate = { Invoke-StudentPitchGate }
     Trace = { Invoke-StudentTrace }
+    Normalization = { Invoke-StudentRendererNormalization }
 }
 }
 & $studentOwner { & $script:StudentSteps[$Step] }

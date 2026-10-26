@@ -1566,6 +1566,8 @@ function ConvertTo-KokoroGeneratorInt8 {
 #     (2F values each).
 #   Constants(x, f0, ticks): the generator AdaIN constants of a stream from the layer export job (at most about 2 s).
 #   VoiceBase(constants[]): one voice table, the mean of ln(1/std) and mean/std per site channel.
+#   Normalization(table): the table's per-channel normalization terms (site, channel, 1/std, mean), after Constants.
+#   NormalizationTable(template, terms): a copy of a constants table with those terms written in.
 #   Render(x croutons, f0, ticks, constants): PCM.
 # Exports run first: renders are one-shot jobs, after which the resident listener the other jobs use is gone.
 function New-KokoroSpeechRenderer {
@@ -1585,7 +1587,7 @@ function New-KokoroSpeechRenderer {
         DecoderWeights=[IO.File]::ReadAllBytes((Join-Path $DecoderPlan 'weights.bin'));DecoderTables=[IO.File]::ReadAllBytes((Join-Path $DecoderPlan 'tables.bin'))
         NoiseScale=[int][math]::Round([math]::Sqrt($sum)*4096*65536/37837.2)
         Statistics=[IO.File]::ReadAllBytes((Join-Path $GeneratorFixture 'tables.bin'));Weights=[IO.File]::ReadAllBytes((Join-Path $GeneratorFixture 'weights.bin'))
-        Int8=$null;Packing=$null}
+        Int8=$null;Packing=$null;InputsSHA256=$null;ConstantsCache=(Join-Path $Build 'generator-constants')}
     $renderer | Add-Member -MemberType ScriptMethod -Name Run -Value { param($Emission,[byte[]]$Activation,[byte[]]$Tables,[byte[]]$WeightBytes,[bool]$OneShot)
         $this.Runs=$this.Runs+1; $directory=Join-Path $this.Directory ('run-{0:d3}' -f $this.Runs); [void][IO.Directory]::CreateDirectory($directory)
         [IO.File]::WriteAllBytes((Join-Path $directory 'activations.bin'),$Activation); [IO.File]::WriteAllBytes((Join-Path $directory 'tables.bin'),$Tables); [IO.File]::WriteAllBytes((Join-Path $directory 'weights.bin'),$WeightBytes)
@@ -1610,20 +1612,36 @@ function New-KokoroSpeechRenderer {
         $croutons=[byte[]]::new([long][math]::Ceiling($Ticks/32)*32768); $z=[uint16[]]::new($croutons.Length/2); [Array]::Fill($z,[uint16]0x8000); [Buffer]::BlockCopy($z,0,$croutons,0,$croutons.Length)
         (Get-QuantizeCroutons16Kernel).Invoke($X,$Ticks,$this.OutputUnits,$croutons); ,$croutons }
     $renderer | Add-Member -MemberType ScriptMethod -Name Constants -Value { param([byte[]]$XCroutons,[float[]]$Pitch,[int]$Ticks)
-        $emission=$this.GeneratorEmission($Ticks,'Export'); $job=$this.Run($emission,$this.GeneratorInput($emission,$XCroutons,$Pitch,$Ticks),$this.Statistics,$this.Weights,$false)
-        $this.Packing=$emission.Layout.ConstantPacking
-        New-KokoroDecoderConstantsTables -Layout $emission.Layout.ConstantPacking -Tables $this.Statistics -Observation $job.Output -OutputOffset 0 -Contracts @(1) }
+        $emission=$this.GeneratorEmission($Ticks,'Export'); $this.Packing=$emission.Layout.ConstantPacking
+        # An export is cached under the hash of everything it depends on (tables, weights, job, x, f0, seed, noise scale),
+        # so a measurement resumes after a lost phone and replays without it.
+        if(-not $this.InputsSHA256){ $hash=[Security.Cryptography.IncrementalHash]::CreateHash('SHA256'); $hash.AppendData($this.Statistics); $hash.AppendData($this.Weights); $this.InputsSHA256=[Convert]::ToHexString($hash.GetHashAndReset()) }
+        $pitchBytes=[byte[]]::new(4*$Pitch.Length); [Buffer]::BlockCopy($Pitch,0,$pitchBytes,0,$pitchBytes.Length)
+        $hash=[Security.Cryptography.IncrementalHash]::CreateHash('SHA256')
+        foreach($part in @([Text.Encoding]::UTF8.GetBytes("$($this.InputsSHA256)`n$($emission.LibrarySHA256)`n$Ticks`n$($this.Seed)`n$($this.NoiseScale)`n"),$XCroutons,$pitchBytes)){ $hash.AppendData([byte[]]$part) }
+        $cached=Join-Path $this.ConstantsCache ([Convert]::ToHexString($hash.GetHashAndReset())+'.bin')
+        if(Test-Path -LiteralPath $cached){ $tables=[IO.File]::ReadAllBytes($cached); $terms=@($this.Normalization($tables))
+            return [pscustomobject]@{Tables=$tables;Terms=$terms;Channels=$terms.Count;Sites=$this.Packing.MomentSites.Count} }
+        $job=$this.Run($emission,$this.GeneratorInput($emission,$XCroutons,$Pitch,$Ticks),$this.Statistics,$this.Weights,$false)
+        $export=New-KokoroDecoderConstantsTables -Layout $emission.Layout.ConstantPacking -Tables $this.Statistics -Observation $job.Output -OutputOffset 0 -Contracts @(1)
+        [void][IO.Directory]::CreateDirectory($this.ConstantsCache); [IO.File]::WriteAllBytes($cached,$export.Tables)
+        $export }
     $renderer | Add-Member -MemberType ScriptMethod -Name VoiceBase -Value { param([object[]]$Exports)
         if(-not $Exports.Count -or -not $this.Packing){throw 'A voice base needs exported constants.'}
         $count=$Exports.Count; $terms=$Exports[0].Terms.Count; $logInverse=[double[]]::new($terms); $standardMean=[double[]]::new($terms)
         foreach($export in $Exports){ for($i=0;$i -lt $terms;$i++){ $term=$export.Terms[$i]; $logInverse[$i]+=[math]::Log($term.Inverse)/$count; $standardMean[$i]+=$term.Mean*$term.Inverse/$count } }
+        $this.NormalizationTable($Exports[0].Tables,@(for($i=0;$i -lt $terms;$i++){ $term=$Exports[0].Terms[$i]; $inverse=[math]::Exp($logInverse[$i])
+            [pscustomobject]@{Site=$term.Site;Channel=$term.Channel;Inverse=$inverse;Mean=($standardMean[$i]/$inverse)} })) }
+    $renderer | Add-Member -MemberType ScriptMethod -Name NormalizationTable -Value { param([byte[]]$Template,[object[]]$Terms)
         $sites=@{}; foreach($site in $this.Packing.MomentSites){ $sites[$site.Name]=$site }
-        $table=[byte[]]$Exports[0].Tables.Clone()
-        for($i=0;$i -lt $terms;$i++){
-            $term=$Exports[0].Terms[$i]; $site=$sites[$term.Site]; $inverse=[math]::Exp($logInverse[$i])
-            Set-KokoroDecoderConstantRatio -Tables $table -Offset ([int]($this.Packing.ConstantsTableOffset+$site.Offset+16L*$term.Channel)) -Inverse $inverse -Mean ($standardMean[$i]/$inverse) -Ka ([bigint][BitConverter]::ToInt64($this.Statistics,[int]($site.RecordOffset+32L*$term.Channel)))
-        }
+        $table=[byte[]]$Template.Clone()
+        foreach($term in $Terms){ $site=$sites[$term.Site]
+            Set-KokoroDecoderConstantRatio -Tables $table -Offset ([int]($this.Packing.ConstantsTableOffset+$site.Offset+16L*$term.Channel)) -Inverse $term.Inverse -Mean $term.Mean -Ka ([bigint][BitConverter]::ToInt64($this.Statistics,[int]($site.RecordOffset+32L*$term.Channel))) }
         ,$table }
+    $renderer | Add-Member -MemberType ScriptMethod -Name Normalization -Value { param([byte[]]$Table)
+        if(-not $this.Packing){throw 'Reading normalization terms needs the export layout (run Constants first).'}
+        foreach($site in $this.Packing.MomentSites){ for($c=0;$c -lt $site.Width;$c++){ $at=[int]($this.Packing.ConstantsTableOffset+$site.Offset+16L*$c)
+            [pscustomobject]@{Site=$site.Name;Channel=$c;Inverse=[double][BitConverter]::ToUInt32($Table,$at)/[BitConverter]::ToUInt32($Table,$at+4);Mean=[double][BitConverter]::ToInt32($Table,$at+8)/[BitConverter]::ToUInt32($Table,$at+12)} } } }
     $renderer | Add-Member -MemberType ScriptMethod -Name Decode -Value { param([float[]]$Aligned,[float[]]$Pitch,[float[]]$Energy)
         $frames=[int]($Aligned.Length/512)
         if($frames -lt 2 -or $frames -gt $this.Capacity){throw "The decoder plan holds $($this.Capacity) frames; this stream has $frames."}
@@ -1657,6 +1675,15 @@ function Invoke-KokoroStudentSpeech {
     param([Parameter(Mandatory)][string]$OutputDirectory,[string]$Soc='SM8550',[string]$Package='dev.mansfieldplumbing.kokoro',[Parameter(Mandatory)][string]$Text,[hashtable]$Student=@{})
     $renderer=New-KokoroSpeechRenderer -OutputDirectory (Join-Path $OutputDirectory 'renderer') -Soc $Soc -Package $Package
     & (Join-Path $Root 'student/Invoke-Student.ps1') -Step Speak -Text $Text -State $renderer -OutputPath $OutputDirectory @Student
+}
+
+# The generator's AdaIN normalization on the phone without the Student (Student -Step Normalization with the renderer):
+# exported moments of syllabus stretches, their profile-plus-level fit, and held-out renders with matched moments, the
+# voice base, and the profile with each stream's own level per site.
+function Invoke-KokoroGeneratorNormalization {
+    param([Parameter(Mandatory)][string]$OutputDirectory,[string]$Soc='SM8550',[string]$Package='dev.mansfieldplumbing.kokoro')
+    $renderer=New-KokoroSpeechRenderer -OutputDirectory (Join-Path $OutputDirectory 'renderer') -Soc $Soc -Package $Package
+    & (Join-Path $Root 'student/Invoke-Student.ps1') -Step Normalization -State $renderer -OutputPath $OutputDirectory
 }
 
 # Depth-first equivalence for the 128-channel residual section (resblocks 3-5 and their mean): the layer schedule exports
@@ -3188,6 +3215,7 @@ $script:KokoroMeasurementCases = [ordered]@{
     'generator-representation' = 'Test-KokoroGeneratorRepresentation'
     'generator-propagation' = 'Test-KokoroGeneratorPropagation'
     'student-speech' = 'Invoke-KokoroStudentSpeech'
+    'generator-normalization' = 'Invoke-KokoroGeneratorNormalization'
 }
 
 # Dot-sourced (. ./Invoke-KokoroDevelopment.ps1): the functions above are the API; no command runs.
