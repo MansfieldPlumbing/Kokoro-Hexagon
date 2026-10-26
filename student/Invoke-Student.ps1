@@ -3170,6 +3170,7 @@ function Get-StudentPhoneOccurrences($Windows) {
             }
             $syllable[$o] = $roles
         }
+        $phrase = 0
         for ($i = -1; $i -le $n; $i++) {
             $symbol = if ($i -lt 0) { '^' } elseif ($i -eq $n) { '$' } else { [string]$phonemes[$i] }
             $word = $null; $offset = -1; $wordIndex = -1
@@ -3188,6 +3189,7 @@ function Get-StudentPhoneOccurrences($Windows) {
                 }
             }
             # Phrase context: the punctuation that ends this phone's phrase, and its place between phrase boundaries.
+            if ($i -gt 0 -and $script:StudentPhraseMarks.Contains([string]$phonemes[$i - 1])) { $phrase++ }
             $into = 0; for ($j = $i - 1; $j -ge 0 -and -not $script:StudentPhraseMarks.Contains([string]$phonemes[$j]); $j--) { $into++ }
             $toEnd = 0; $boundary = '$'; $wordsAfter = 0; for ($j = $i + 1; $j -lt $n; $j++) { if ($script:StudentPhraseMarks.Contains([string]$phonemes[$j])) { $boundary = [string]$phonemes[$j]; break }; if ($phonemes[$j] -eq ' ') { $wordsAfter++ }; $toEnd++ }
             $wordsBefore = 0; for ($j = $i - 1; $j -ge 0 -and -not $script:StudentPhraseMarks.Contains([string]$phonemes[$j]); $j--) { if ($phonemes[$j] -eq ' ') { $wordsBefore++ } }
@@ -3197,14 +3199,15 @@ function Get-StudentPhoneOccurrences($Windows) {
                 WordFinal = ($null -ne $word -and $offset -eq $word.Phonemes.Length - 1)
                 Previous = $(if ($i -le 0) { '^' } else { [string]$phonemes[$i - 1] }); Next = $(if ($i + 1 -ge $n) { '$' } else { [string]$phonemes[$i + 1] })
                 FirstTick = 2 * $frameStart[$i + 1]; Ticks = 2 * $evidence.Durations[$i + 1]
-                Margin = [Math]::Min($i + 1, $n - $i); HeldOut = $false; Development = $false; Used = $true; Type = -1
+                Margin = [Math]::Min($i + 1, $n - $i); HeldOut = $false; Development = $false; Test = $false; Used = $true; Type = -1; Phrase = $phrase
                 Boundary = $boundary; IntoPhrase = $into; ToBoundary = $toEnd
                 WordsToBoundary = [Math]::Max(0, $wordsAfter - $(if ($boundary -ceq '$') { 0 } else { 1 })); PhraseInitialWord = $wordsBefore -eq 0
                 Given = $(if ($null -ne $word) { $given[$wordIndex] } else { $false })
                 SyllableStress = $(if ($null -ne $word -and $offset -ge 0) { $syllable[$wordIndex][$offset] } else { '-' }) }
             if ($null -ne $word) {
                 $block = [int][Math]::Floor($word.FirstToken / 64) % 8
-                $phone.HeldOut = $block -eq 7; $phone.Development = $block -eq 6
+                # Blocks 7, 6 and 5 of 8: held out (reported), development (choices), test (untouched until a milestone).
+                $phone.HeldOut = $block -eq 7; $phone.Development = $block -eq 6; $phone.Test = $block -eq 5
             }
             $all.Add($phone)
             if ($null -ne $word) {
@@ -3452,19 +3455,19 @@ function Measure-StudentReplay($Rules, $Library, [object[]] $PhoneList) {
         $target = $Rules.Targets($phone); $entry = $replay.Phone[$phone]; $f0 = $phone.Window.Evidence.F0; $energy = $phone.Window.Evidence.N
         $predicted = $Rules.Frames($phone); if ($null -ne $entry) { $predicted = [Math]::Max(0, [int][Math]::Round($predicted * $entry.Ratio)) }
         $wordFirst = 0; $wordTicks = 0; if ($null -ne $entry) { $wordFirst = $entry.Word[0].FirstTick; $wordTicks = $entry.Word[-1].FirstTick + $entry.Word[-1].Ticks - $wordFirst }
-        $agree = 0; $pitchSquares = 0.0; $pitchTicks = 0; $energySquares = 0.0; $predictedSum = 0.0
+        $agree = 0; $pitchSquares = 0.0; $pitchTicks = 0; $energySquares = 0.0; $predictedSum = 0.0; $voicedActual = 0; $voicedPredicted = 0
         for ($t = $phone.FirstTick; $t -lt $phone.FirstTick + $phone.Ticks; $t++) {
             $logHz = $target.LogHz; $e = $target.Energy
             if ($null -ne $entry) { if ($entry.Pitch) { $logHz += $Rules.ReplayPitchWeight * (Get-StudentReplayResidual $entry $phone $t $wordFirst $wordTicks 'Pitch') }; $e += Get-StudentReplayResidual $entry $phone $t $wordFirst $wordTicks 'Energy' }
             $voiced = if ($null -ne $entry) { (Get-StudentReplayResidual $entry $phone $t $wordFirst $wordTicks 'Voicing') -ge 0.5 } else { $target.Voiced }
-            if (($f0[$t] -gt $script:StudentVoicedHz) -eq $voiced) { $agree++ }
+            if (($f0[$t] -gt $script:StudentVoicedHz) -eq $voiced) { $agree++ }; if ($f0[$t] -gt $script:StudentVoicedHz) { $voicedActual++ }; if ($voiced) { $voicedPredicted++ }
             if ($f0[$t] -ge $script:StudentPitchedHz -and $voiced) { $d = 20 * ($logHz - [Math]::Log($f0[$t])) / [Math]::Log(10); $pitchSquares += $d * $d; $pitchTicks++; $predictedSum += $logHz; $spread.Pitch[0].Add([Math]::Log($f0[$t])); $spread.Pitch[1].Add($logHz) }
             $energySquares += ($e - $energy[$t]) * ($e - $energy[$t]); $spread.Energy[0].Add($energy[$t]); $spread.Energy[1].Add($e)
         }
         $spread.Duration[0].Add($phone.Ticks / 2); $spread.Duration[1].Add($predicted)
         $rows.Add([pscustomobject]@{ PSTypeName = 'Kokoro.StudentProsodyScore'; Phone = $phone; Frames = $phone.Ticks / 2; PredictedFrames = $predicted; Ticks = $phone.Ticks
             VoicingAgree = $agree; PitchSquares = $pitchSquares; PitchTicks = $pitchTicks; EnergySquares = $energySquares
-            PredictedLogHz = $(if ($pitchTicks) { $predictedSum / $pitchTicks } else { [double]::NaN }) })
+            PredictedLogHz = $(if ($pitchTicks) { $predictedSum / $pitchTicks } else { [double]::NaN }); VoicedActual = $voicedActual; VoicedPredicted = $voicedPredicted })
     }
     $deviation = { param($Values) $mean = 0.0; foreach ($v in $Values) { $mean += $v }; $mean /= [Math]::Max(1, $Values.Count); $s = 0.0; foreach ($v in $Values) { $s += ($v - $mean) * ($v - $mean) }; [Math]::Sqrt($s / [Math]::Max(1, $Values.Count)) }
     $ratios = [ordered]@{}; foreach ($name in 'Duration', 'Pitch', 'Energy') { $ratios[$name] = [Math]::Round((& $deviation $spread[$name][1]) / [Math]::Max(1e-9, (& $deviation $spread[$name][0])), 2) }
@@ -3484,7 +3487,29 @@ function Measure-StudentReplay($Rules, $Library, [object[]] $PhoneList) {
         if ($pairs.Count -lt 3) { continue }; $mx = 0.0; $my = 0.0; foreach ($pair in $pairs) { $mx += $pair[0]; $my += $pair[1] }; $mx /= $pairs.Count; $my /= $pairs.Count
         foreach ($pair in $pairs) { $sxy += ($pair[0] - $mx) * ($pair[1] - $my); $sxx += ($pair[0] - $mx) * ($pair[0] - $mx); $syy += ($pair[1] - $my) * ($pair[1] - $my) }
     }
-    $gate = [pscustomobject]@{ PhonePitchCorrelation = [Math]::Round($sxy / [Math]::Sqrt([Math]::Max(1e-30, $sxx * $syy)), 3); PhonePitchSpread = [Math]::Round([Math]::Sqrt($syy / [Math]::Max(1e-30, $sxx)), 3) }
+    # Beyond correlation: per phrase the pitch range of its phones' means (predicted against evidence) and whether the
+    # phrase's highest word is the same word (accent placement); over all ticks, predicted against evidence voicing.
+    $phrases = @{}; $voicedPredicted = 0; $voicedActual = 0
+    foreach ($row in $rows) {
+        $phone = $row.Phone; $voicedActual += $row.VoicedActual; $voicedPredicted += $row.VoicedPredicted
+        if ($row.PitchTicks -eq 0 -or $null -eq $phone.Word -or $phone.Offset -lt 0) { continue }
+        $f0 = $phone.Window.Evidence.F0; $s = 0.0; $k = 0; for ($t = $phone.FirstTick; $t -lt $phone.FirstTick + $phone.Ticks; $t++) { if ($f0[$t] -ge $script:StudentPitchedHz) { $s += [Math]::Log($f0[$t]); $k++ } }
+        if (-not $k) { continue }
+        $key = "$($phone.Window.Index):$($phone.Phrase)"; if (-not $phrases.ContainsKey($key)) { $phrases[$key] = [Collections.Generic.List[object]]::new() }
+        $phrases[$key].Add([pscustomobject]@{ Word = "$($phone.Word.Book):$($phone.Word.FirstToken)"; Actual = $s / $k; Predicted = $row.PredictedLogHz })
+    }
+    $rangeRatio = 0.0; $ranged = 0; $placed = 0; $placeable = 0
+    foreach ($members in $phrases.Values) {
+        if (@($members | Select-Object -ExpandProperty Word -Unique).Count -lt 2) { continue }
+        $actualRange = ($members | Measure-Object Actual -Maximum).Maximum - ($members | Measure-Object Actual -Minimum).Minimum
+        $predictedRange = ($members | Measure-Object Predicted -Maximum).Maximum - ($members | Measure-Object Predicted -Minimum).Minimum
+        if ($actualRange -gt 0) { $rangeRatio += $predictedRange / $actualRange; $ranged++ }
+        $words = $members | Group-Object Word | ForEach-Object { [pscustomobject]@{ Word = $_.Name; Actual = ($_.Group | Measure-Object Actual -Average).Average; Predicted = ($_.Group | Measure-Object Predicted -Average).Average } }
+        $placeable++; if (@($words | Sort-Object Actual -Descending)[0].Word -ceq @($words | Sort-Object Predicted -Descending)[0].Word) { $placed++ }
+    }
+    $gate = [pscustomobject]@{ PhonePitchCorrelation = [Math]::Round($sxy / [Math]::Sqrt([Math]::Max(1e-30, $sxx * $syy)), 3); PhonePitchSpread = [Math]::Round([Math]::Sqrt($syy / [Math]::Max(1e-30, $sxx)), 3)
+        PhraseRangeRatio = $(if ($ranged) { [Math]::Round($rangeRatio / $ranged, 3) } else { $null }); AccentPlacement = $(if ($placeable) { [Math]::Round($placed / $placeable, 3) } else { $null }); Phrases = $placeable
+        VoicedCoverage = [Math]::Round($voicedPredicted / [Math]::Max(1, $voicedActual), 3) }
     [pscustomobject]@{ Rows = $rows.ToArray(); SpreadRatio = [pscustomobject]$ratios; Keys = $replay.Keys; Gate = $gate }
 }
 
@@ -3504,7 +3529,7 @@ function Invoke-StudentInventory {
     $windows = @($syllabus.Windows)
     if (@($windows | Where-Object { $null -eq $_.Evidence.PSObject.Properties['N'] -or $null -eq $_.Evidence.N }).Count) { throw 'Syllabus evidence without N: re-render it (Syllabus step).' }
     $phones = Get-StudentPhoneOccurrences $windows
-    $role = { param($Phone) if (-not $Phone.Used -or $null -eq $Phone.Word) { 'Unused' } elseif ($Phone.HeldOut) { 'HeldOut' } elseif ($Phone.Development) { 'Development' } else { 'Training' } }
+    $role = { param($Phone) if (-not $Phone.Used -or $null -eq $Phone.Word) { 'Unused' } elseif ($Phone.HeldOut) { 'HeldOut' } elseif ($Phone.Development) { 'Development' } elseif ($Phone.Test) { 'Test' } else { 'Training' } }
     $byRole = $phones | Group-Object { & $role $_ } -AsHashTable
     $training = @($byRole['Training']); $development = @($byRole['Development']); $heldOut = @($byRole['HeldOut'])
     # The development occurrences choose whether stressed vowels are their own types (by duration error) and whether
@@ -3621,7 +3646,7 @@ function Get-StudentTrainingStretches($Inventory, [int] $Ticks, [int] $Limit) {
     foreach ($window in $Inventory.SyllabusWindows) {
         if ($found.Count -ge $Limit) { break }
         $mask = [bool[]]::new($window.Ticks)
-        foreach ($phone in @($byWindow[$window.Index])) { if ($phone.Used -and $null -ne $phone.Word -and -not $phone.HeldOut -and -not $phone.Development) { for ($t = $phone.FirstTick; $t -lt $phone.FirstTick + $phone.Ticks; $t++) { $mask[$t] = $true } } }
+        foreach ($phone in @($byWindow[$window.Index])) { if ($phone.Used -and $null -ne $phone.Word -and -not $phone.HeldOut -and -not $phone.Development -and -not $phone.Test) { for ($t = $phone.FirstTick; $t -lt $phone.FirstTick + $phone.Ticks; $t++) { $mask[$t] = $true } } }
         $run = 0
         for ($t = 0; $t -lt $window.Ticks; $t++) { if ($mask[$t]) { $run++ } else { $run = 0 }; if ($run -eq $Ticks) { $found.Add([pscustomobject]@{ Window = $window; First = $t - $Ticks + 1 }); break } }
     }
