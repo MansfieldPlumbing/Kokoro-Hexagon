@@ -1429,6 +1429,8 @@ function Invoke-OfflineGeneratorBlock([float[]] $InputValues, [int] $Frames, [fl
         # The residual pair's correction against the stream it is added to; a dropped pair leaves the stream unchanged.
         $pair = "$Name.$stage"
         if ($null -ne $script:OfflineResidualTrace) { $script:OfflineResidualTrace.Add([pscustomobject]@{ Pair = $pair; StreamRms = (Get-OfflineRms $x); CorrectionRms = (Get-OfflineRms $next) }) }
+        # The hook sees the pair, its stream and its correction ([channel][frame]); a returned array replaces the correction.
+        if ($null -ne $script:OfflineResidualHook) { $replacement = & $script:OfflineResidualHook $pair $x $next $channels $Frames; if ($null -ne $replacement) { $next = [float[]]$replacement } }
         if ($null -ne $script:OfflineDroppedResiduals -and $script:OfflineDroppedResiduals.Contains($pair)) { continue }
         $x = $residual.Invoke($next, $x, [float]1)
     }
@@ -1598,12 +1600,13 @@ function Invoke-OfflineSpeech {
     # prosody: ALBERT, bert_encoder and the predictor are skipped, and only the text encoder, decoder and generator run.
     # -SuppliedFeatures (the generator input x, 512 channels per tick, with the supplied prosody) runs the generator
     # alone. -TraceResiduals returns each generator residual pair's stream and correction RMS (Residuals); -DropResiduals
-    # names pairs (generator.resblocks.B.S, generator.noise_res.B.S) whose correction is left out.
+    # names pairs (generator.resblocks.B.S, generator.noise_res.B.S) whose correction is left out. -ResidualHook is called
+    # for every pair with (pair, stream, correction, channels, frames) and may return a replacement correction.
     param([Parameter(Mandatory)][string] $Phonemes, [string] $Voice = 'af_heart', [double] $Speed = 1, [switch] $SkipGenerator,
         [int[]] $SuppliedDurations = $null, [float[]] $SuppliedF0 = $null, [float[]] $SuppliedN = $null, [switch] $SkipDecoder,
-        [float[]] $SuppliedFeatures = $null, [switch] $TraceResiduals, [string[]] $DropResiduals = @())
+        [float[]] $SuppliedFeatures = $null, [switch] $TraceResiduals, [string[]] $DropResiduals = @(), [scriptblock] $ResidualHook = $null)
     # Assigned in the branches, not from an if expression: an empty collection written to the pipeline would be $null.
-    $script:OfflineResidualTrace = $null; $script:OfflineDroppedResiduals = $null
+    $script:OfflineResidualTrace = $null; $script:OfflineDroppedResiduals = $null; $script:OfflineResidualHook = $ResidualHook
     if ($TraceResiduals) { $script:OfflineResidualTrace = [Collections.Generic.List[object]]::new() }
     if ($DropResiduals.Count) { $script:OfflineDroppedResiduals = [Collections.Generic.HashSet[string]]::new([string[]]$DropResiduals, [StringComparer]::Ordinal) }
     $config = Get-Content -LiteralPath (Join-Path $InputRepository "build/inputs/kokoro/f3ff3571791e39611d31c381e3a41a3af07b4987/config.json") -Raw | ConvertFrom-Json -AsHashtable

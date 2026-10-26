@@ -73,7 +73,7 @@ Run from a PowerShell prompt: pwsh -File passes every argument as a string, so a
 #requires -Version 7.7
 [CmdletBinding()]
 param(
-    [ValidateSet('Console', 'Render', 'Corpus', 'Pronunciation', 'Normalize', 'Syllabus', 'Recordings', 'Listen', 'Stems', 'Alignment', 'Percepts', 'Describe', 'Learn', 'Audit', 'Discriminate', 'Reconsider', 'Inventory', 'Speak', 'Ablate', 'PitchGate', 'Trace', 'Normalization', 'Score', 'Residuals')][string] $Step = 'Console',
+    [ValidateSet('Console', 'Render', 'Corpus', 'Pronunciation', 'Normalize', 'Syllabus', 'Recordings', 'Listen', 'Stems', 'Alignment', 'Percepts', 'Describe', 'Learn', 'Audit', 'Discriminate', 'Reconsider', 'Inventory', 'Speak', 'Ablate', 'PitchGate', 'Trace', 'Normalization', 'Score', 'Residuals', 'Retune')][string] $Step = 'Console',
     [ValidateRange(2, 64)][int] $Threads = [Math]::Max(2, [Environment]::ProcessorCount),
     [string] $Text = '',
     [string] $Voice = 'af_heart',
@@ -3981,6 +3981,83 @@ function Invoke-StudentRendererScore([string] $Score = 'SolfegeMajorScale') {
     $result
 }
 
+function Get-StudentSyllabusStretch($Window, [int] $Ticks) {
+    # Ticks of a syllabus window's own x, f0 and N from its middle, with the phonemes and a duration list for the
+    # generator alone (which ignores durations: one token holds every frame so the supplied prosody's shape checks hold).
+    $first = [int][Math]::Floor(($Window.Ticks - $Ticks) / 2)
+    $x = [float[]]::new(512 * $Ticks); for ($c = 0; $c -lt 512; $c++) { [Array]::Copy($Window.Evidence.X, $c * $Window.Ticks + $first, $x, $c * $Ticks, $Ticks) }
+    $f0 = [float[]]::new($Ticks); [Array]::Copy($Window.Evidence.F0, $first, $f0, 0, $Ticks); $n = [float[]]::new($Ticks); [Array]::Copy($Window.Evidence.N, $first, $n, 0, $Ticks)
+    $phonemes = [string]$Window.Evidence.Phonemes; $durations = [int[]]::new($phonemes.Length + 2); $durations[0] = $Ticks / 2
+    [pscustomobject]@{ Key = $Window.Key; First = $first; X = $x; F0 = $f0; N = $n; Phonemes = $phonemes; Durations = $durations }
+}
+
+function Invoke-StudentGeneratorRetune([int] $Stream = 8, [int[]] $FitStreams = @(0, 1, 2, 3), [int] $Ticks = 130) {
+    # Residual pairs replaced by a tuned per-channel gain and offset on the stream (syllabus port, host): for each declared
+    # set, each pair's correction c is stood in for by a x + b per channel, a and b the least-squares fit of c on the
+    # stream x over the fitting stretches (and, as an upper bound, over the held-out stretch itself). The held-out stretch
+    # renders full, with the set left out, with the fitted stand-ins and with the in-sample stand-ins, scored against full.
+    $out = Get-StudentOutputPath 'Retune'
+    $sets = [ordered]@{
+        CheapestSix = @(foreach ($block in 0, 3) { foreach ($stage in 0..2) { "generator.resblocks.$block.$stage" } })
+        HeaviestBlock = @(foreach ($stage in 0..2) { "generator.resblocks.2.$stage" }) }
+    $windows = @((Invoke-StudentSyllabus).Windows | Where-Object { $_.Ticks -ge $Ticks })
+    $held = Get-StudentSyllabusStretch $windows[$Stream] $Ticks
+    $all = [Collections.Generic.HashSet[string]]::new([string[]]@($sets.Values | ForEach-Object { $_ }), [StringComparer]::Ordinal)
+    # Per pair and channel: count, sum x, sum c, sum x^2, sum x c over the frames the hook sees.
+    $newStats = { $s = @{}; foreach ($pair in $all) { $s[$pair] = $null }; $s }
+    $fitHook = { param($Pair, [float[]] $Carried, [float[]] $Added, [int] $Channels, [int] $Frames)
+        if (-not $stats.ContainsKey($Pair)) { return $null }
+        if ($null -eq $stats[$Pair]) { $stats[$Pair] = @(foreach ($k in 0..4) { , [double[]]::new($Channels) }) }
+        $n, $sx, $sc, $sxx, $sxc = $stats[$Pair]
+        for ($c = 0; $c -lt $Channels; $c++) { $at = $c * $Frames
+            for ($t = 0; $t -lt $Frames; $t++) { $v = [double]$Carried[$at + $t]; $w = [double]$Added[$at + $t]; $sx[$c] += $v; $sc[$c] += $w; $sxx[$c] += $v * $v; $sxc[$c] += $v * $w }
+            $n[$c] += $Frames }
+        $null }
+    $coefficientsOf = { param($Statistics) $result = @{}
+        foreach ($pair in @($Statistics.Keys)) { $n, $sx, $sc, $sxx, $sxc = $Statistics[$pair]; $a = [double[]]::new($n.Length); $b = [double[]]::new($n.Length)
+            for ($c = 0; $c -lt $n.Length; $c++) { $mx = $sx[$c] / $n[$c]; $mc = $sc[$c] / $n[$c]; $var = $sxx[$c] / $n[$c] - $mx * $mx
+                $a[$c] = if ($var -gt 1e-12) { ($sxc[$c] / $n[$c] - $mx * $mc) / $var } else { 0.0 }; $b[$c] = $mc - $a[$c] * $mx }
+            $result[$pair] = @($a, $b) }
+        $result }
+    $applyHookFor = { param($Coefficients, [string[]] $Pairs)
+        $chosen = [Collections.Generic.HashSet[string]]::new($Pairs, [StringComparer]::Ordinal)
+        { param($Pair, [float[]] $Carried, [float[]] $Added, [int] $Channels, [int] $Frames)
+            if (-not $chosen.Contains($Pair)) { return $null }
+            $a, $b = $Coefficients[$Pair]; $replaced = [float[]]::new($Carried.Length)
+            for ($c = 0; $c -lt $Channels; $c++) { $at = $c * $Frames; $ac = $a[$c]; $bc = $b[$c]; for ($t = 0; $t -lt $Frames; $t++) { $replaced[$at + $t] = [float]($ac * $Carried[$at + $t] + $bc) } }
+            , $replaced }.GetNewClosure() }
+    $syllabus = Import-StudentSyllabus (Join-Path $out 'syllabus')
+    try {
+        $render = { param($Piece, [string[]] $Drop, [scriptblock] $Hook) Invoke-OfflineSpeech -Phonemes $Piece.Phonemes -Voice $Voice -SuppliedDurations $Piece.Durations -SuppliedF0 $Piece.F0 -SuppliedN $Piece.N -SuppliedFeatures $Piece.X -DropResiduals $Drop -ResidualHook $Hook }
+        $watch = [Diagnostics.Stopwatch]::StartNew()
+        $stats = & $newStats; $hook = $fitHook.GetNewClosure()
+        foreach ($index in $FitStreams) { $null = & $render (Get-StudentSyllabusStretch $windows[$index] $Ticks) @() $hook }
+        $fitted = & $coefficientsOf $stats
+        $stats = & $newStats; $hook = $fitHook.GetNewClosure(); $null = & $render $held @() $hook
+        $inSample = & $coefficientsOf $stats
+        $fitSeconds = $watch.Elapsed.TotalSeconds
+        $full = & $render $held @() $null
+        [IO.File]::WriteAllBytes((Join-Path $out 'full.wav'), (ConvertTo-StudentWave $full.Pcm))
+        $fullHarmonic = Get-StudentHarmonicNoise $full.Pcm $held.F0
+        $renders = @(foreach ($set in $sets.Keys) {
+            $pairs = $sets[$set]; $removed = 0L; $standIns = 0L
+            foreach ($pair in $pairs) { $parts = $pair.Split('.'); $index = [int]$parts[2]; $channels = if ($index -lt 3) { 256 } else { 128 }
+                $removed += 2L * $channels * $channels * @(3, 7, 11)[$index % 3]; $standIns += 2L * $channels }
+            foreach ($condition in @(@('Dropped', $pairs, $null), @('Tuned', @(), (& $applyHookFor $fitted $pairs)), @('TunedInSample', @(), (& $applyHookFor $inSample $pairs)))) {
+                $rendering = & $render $held $condition[1] $condition[2]
+                $wave = Join-Path $out "$($set.ToLowerInvariant())-$($condition[0].ToLowerInvariant()).wav"; [IO.File]::WriteAllBytes($wave, (ConvertTo-StudentWave $rendering.Pcm))
+                [pscustomobject]@{ PSTypeName = 'Kokoro.StudentRetuneRender'; Set = $set; Condition = $condition[0]; RemovedParameters = $removed; StandInParameters = $(if ($condition[0] -ceq 'Dropped') { 0 } else { $standIns })
+                    SnrAgainstFullDb = Get-StudentAblationSnr $full.Pcm $rendering.Pcm; Rms = Get-StudentRms $rendering.Pcm
+                    HarmonicNoiseChangeDb = [Math]::Round((Get-StudentHarmonicNoise $rendering.Pcm $held.F0) - $fullHarmonic, 2); Wave = $wave }
+            } })
+    }
+    finally { Remove-Module -ModuleInfo $syllabus -Force }
+    $result = [pscustomobject]@{ PSTypeName = 'Kokoro.StudentGeneratorRetune'; Voice = $Voice; HeldOut = "$($held.Key):$($held.First)"; FitStreams = $FitStreams; Ticks = $Ticks
+        FullRms = Get-StudentRms $full.Pcm; FullHarmonicNoiseDb = $fullHarmonic; FitSeconds = [Math]::Round($fitSeconds, 1); Renders = $renders; Directory = $out; MachineSHA256 = $script:StudentMachineSHA256 }
+    Export-Clixml -LiteralPath (Join-Path $out 'retune.clixml') -InputObject $result -Depth 4
+    $result
+}
+
 function Invoke-StudentGeneratorResiduals([int] $Stream = 8, [int] $Ticks = 130) {
     # Which of the generator's residual pairs carry the sound, on the syllabus port (the reference, host): one syllabus
     # stretch (by default the normalization study's first held-out one) rendered from its own x and f0 with every pair
@@ -3989,14 +4066,10 @@ function Invoke-StudentGeneratorResiduals([int] $Stream = 8, [int] $Ticks = 130)
     # its two convolutions' parameters.
     $out = Get-StudentOutputPath 'Residuals'
     $window = @((Invoke-StudentSyllabus).Windows | Where-Object { $_.Ticks -ge $Ticks })[$Stream]
-    $first = [int][Math]::Floor(($window.Ticks - $Ticks) / 2)
-    $x = [float[]]::new(512 * $Ticks); for ($c = 0; $c -lt 512; $c++) { [Array]::Copy($window.Evidence.X, $c * $window.Ticks + $first, $x, $c * $Ticks, $Ticks) }
-    $f0 = [float[]]::new($Ticks); [Array]::Copy($window.Evidence.F0, $first, $f0, 0, $Ticks); $n = [float[]]::new($Ticks); [Array]::Copy($window.Evidence.N, $first, $n, 0, $Ticks)
-    # The generator alone ignores durations; one token holds every frame so the supplied prosody's shape checks hold.
-    $phonemes = [string]$window.Evidence.Phonemes; $durations = [int[]]::new($phonemes.Length + 2); $durations[0] = $Ticks / 2
+    $piece = Get-StudentSyllabusStretch $window $Ticks; $first = $piece.First; $f0 = $piece.F0
     $syllabus = Import-StudentSyllabus (Join-Path $out 'syllabus')
     try {
-        $render = { param([string[]] $Drop, [switch] $Trace) Invoke-OfflineSpeech -Phonemes $phonemes -Voice $Voice -SuppliedDurations $durations -SuppliedF0 $f0 -SuppliedN $n -SuppliedFeatures $x -TraceResiduals:$Trace -DropResiduals $Drop }
+        $render = { param([string[]] $Drop, [switch] $Trace) Invoke-OfflineSpeech -Phonemes $piece.Phonemes -Voice $Voice -SuppliedDurations $piece.Durations -SuppliedF0 $piece.F0 -SuppliedN $piece.N -SuppliedFeatures $piece.X -TraceResiduals:$Trace -DropResiduals $Drop }
         $watch = [Diagnostics.Stopwatch]::StartNew(); $full = & $render @() -Trace; $renderSeconds = $watch.Elapsed.TotalSeconds
         [IO.File]::WriteAllBytes((Join-Path $out 'full.wav'), (ConvertTo-StudentWave $full.Pcm))
         $fullHarmonic = Get-StudentHarmonicNoise $full.Pcm $f0
@@ -4697,6 +4770,7 @@ $script:StudentSteps = [ordered]@{
     Normalization = { Invoke-StudentRendererNormalization }
     Score = { foreach ($name in $script:StudentScores.Keys) { if (-not $Text -or $name -like $Text) { Invoke-StudentRendererScore $name } } }
     Residuals = { Invoke-StudentGeneratorResiduals }
+    Retune = { Invoke-StudentGeneratorRetune }
 }
 }
 & $studentOwner { & $script:StudentSteps[$Step] }
