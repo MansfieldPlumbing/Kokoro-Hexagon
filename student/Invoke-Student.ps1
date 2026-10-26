@@ -92,7 +92,8 @@ param(
     [string] $Recordings = '',
     [ValidateRange(0, [int]::MaxValue)][int] $RecordingLimit = 0,
     [string] $OutputPath = '',
-    [string] $CandidatePhonemizer = ''
+    [string] $CandidatePhonemizer = '',
+    [object] $Analysis = $null
 )
 $studentInvocation = @{}
 foreach ($parameterName in $MyInvocation.MyCommand.Parameters.Keys) {
@@ -3599,6 +3600,33 @@ function Get-StudentProsodySummary([object[]] $Scores, [string] $Name) {
         EnergyRmsError = $(if ($ticks) { [Math]::Round([Math]::Sqrt($energy / $ticks), 3) } else { $null }) }
 }
 
+function Get-StudentAnalysisIdentity {
+    # What an inventory is computed from: the Student's source, the pinned phonemizer, the corpus file, the syllabus
+    # port's sources and the configuration the inventory reads. The windows and their evidence keys follow from these.
+    $corpus = Get-StudentCorpusPath
+    $components = [ordered]@{
+        StudentSource = $script:StudentMachineSHA256
+        Phonemizer = $script:StudentInputs.Phonemizer.SHA256
+        Corpus = (Get-FileHash -LiteralPath (Join-Path $corpus 'corpus.clixml')).Hash
+        Syllabus = (@($script:StudentInputs.Syllabus, 'tools/Kokoro.TextEncoder.psm1') | ForEach-Object { (Get-FileHash -LiteralPath (Join-Path $script:StudentRoot $_)).Hash }) -join '+'
+        Configuration = "Voice=$Voice;Speed=$Speed;Corpus=$corpus;WindowLimit=$WindowLimit;ParagraphLimit=$ParagraphLimit" }
+    [pscustomobject]@{ PSTypeName = 'Kokoro.StudentAnalysisIdentity'; Components = [pscustomobject]$components
+        SHA256 = [Convert]::ToHexString([Security.Cryptography.SHA256]::HashData([Text.Encoding]::UTF8.GetBytes((@($components.Keys | ForEach-Object { "$_=$($components[$_])" }) -join "`n")))) }
+}
+
+function Use-StudentInventory {
+    # The live inventory passed as -Analysis when it was built from the same inputs, else a new one. An -Analysis built
+    # from other inputs is refused, naming each input that differs, so a stale state never reaches a measurement.
+    if ($null -eq $script:Analysis) { return Invoke-StudentInventory }
+    if ($script:Analysis.PSObject.TypeNames -notcontains 'Kokoro.StudentInventory' -or $null -eq $script:Analysis.PSObject.Properties['AnalysisIdentity']) { throw '-Analysis is not a Student inventory.' }
+    $current = Get-StudentAnalysisIdentity
+    if ($script:Analysis.AnalysisIdentity.SHA256 -cne $current.SHA256) {
+        $differs = @($current.Components.PSObject.Properties | Where-Object { $script:Analysis.AnalysisIdentity.Components.($_.Name) -cne $_.Value } | ForEach-Object Name)
+        throw "-Analysis was built from different inputs ($($differs -join ', ')); rebuild it with -Step Inventory."
+    }
+    $script:Analysis
+}
+
 function Invoke-StudentInventory {
     $watch = [Diagnostics.Stopwatch]::StartNew()
     $syllabus = Invoke-StudentSyllabus
@@ -3659,7 +3687,7 @@ function Invoke-StudentInventory {
     foreach ($group in ($scores | Group-Object Novelty | Sort-Object Name)) { $strata.Add((Get-StudentProsodySummary @($group.Group) "Novelty.$($group.Name)")) }
     foreach ($group in ($scores | Group-Object Class | Sort-Object Name)) { $strata.Add((Get-StudentProsodySummary @($group.Group) "Class.$($group.Name)")) }
     foreach ($group in ($scores | Group-Object { if (Test-StudentPhraseFinalWord $_.Phone) { "PhraseFinal.$($_.Phone.Boundary)" } else { 'PhraseInternal' } } | Sort-Object Name)) { $strata.Add((Get-StudentProsodySummary @($group.Group) "Position.$($group.Name)")) }
-    [pscustomobject]@{ PSTypeName = 'Kokoro.StudentInventory'; Voice = $Voice; Corpus = $syllabus.Corpus; Windows = $windows.Count
+    [pscustomobject]@{ PSTypeName = 'Kokoro.StudentInventory'; AnalysisIdentity = Get-StudentAnalysisIdentity; Voice = $Voice; Corpus = $syllabus.Corpus; Windows = $windows.Count
         PhoneOccurrences = $phones.Count; Training = $training.Count; Development = $development.Count; HeldOut = $heldOut.Count; Test = $test.Count
         Rules = $chosen; Choices = @($candidates | ForEach-Object { [pscustomobject]@{ SplitStress = $_.Rules.SplitStress; TypePitch = $_.Rules.TypePitch; Phrasing = $_.Rules.Phrasing; DurationErrorFrames = $_.Summary.DurationErrorFrames; PitchErrorDb = $_.Summary.PitchErrorDb } })
         Strata = $strata.ToArray(); Recordings = $library; Replay = $replayScores; Seconds = [Math]::Round($watch.Elapsed.TotalSeconds, 1); SyllabusWindows = $windows; Phones = $phones }
@@ -3966,7 +3994,7 @@ function Invoke-StudentTrace {
     # proposed it and the key it was read under; the replayed recording and whether its pitch applies; the voicing edge
     # key; and the stream's frames and mean pitch against the evidence's. Saved to Trace/trace.json; returns a summary
     # of which behaviours decided the controls.
-    $inventory = Invoke-StudentInventory
+    $inventory = Use-StudentInventory
     $byWindow = $inventory.Phones | Group-Object { $_.Window.Index } -AsHashTable
     $candidates = @($inventory.SyllabusWindows | Where-Object { @($byWindow[$_.Index] | Where-Object { $_.Used -and $_.HeldOut }).Count })
     $withEvent = @($candidates | Where-Object { @($byWindow[$_.Index] | Where-Object { $null -ne $_.PitchEvent -and $_.Used -and $_.HeldOut }).Count })
@@ -4015,7 +4043,7 @@ function Invoke-StudentPitchGate {
     # The held-out pitch gate for Kokoro's own F0 branch run on the Student's durations (and the Student's pitch on the
     # same windows): per held-out phone, mean log f0 against the syllabus evidence's, correlation and spread within each
     # window, pooled. -WindowLimit bounds the windows scored (each runs ALBERT and the predictor on the host).
-    $inventory = Invoke-StudentInventory
+    $inventory = Use-StudentInventory
     $byWindow = $inventory.Phones | Group-Object { $_.Window.Index } -AsHashTable
     $syllabus = Import-StudentSyllabus (Join-Path (Get-StudentOutputPath 'PitchGate') 'syllabus')
     $sums = @{ Kokoro = [double[]]::new(3); Student = [double[]]::new(3) }; $scored = 0
@@ -4052,7 +4080,7 @@ function Invoke-StudentAblation {
     # B: Student f0; C: Student N; D: Student f0 and N; E: all Student.
     if (-not $Text.Trim()) { throw 'Ablate needs -Text.' }
     $out = Get-StudentOutputPath 'Ablate'
-    $inventory = Invoke-StudentInventory
+    $inventory = Use-StudentInventory
     $spoken = New-StudentTextPhones $Text; $phonemes = $spoken.Phonemes; $phones = $spoken.Phones
     $syllabus = Import-StudentSyllabus (Join-Path $out 'syllabus')
     $rows = [Collections.Generic.List[object]]::new()
@@ -4179,7 +4207,7 @@ function Invoke-StudentSpeak {
     # phonemes through the whole stock pipeline for comparison. Both are written as WAVs.
     if (-not $Text.Trim()) { throw 'Speak needs -Text.' }
     $out = Get-StudentOutputPath 'Speak'
-    $inventory = Invoke-StudentInventory
+    $inventory = Use-StudentInventory
     $spoken = New-StudentTextPhones $Text; $phonemes = $spoken.Phonemes; $phones = $spoken.Phones
     $stream = New-StudentProsodyStream $inventory.Rules $phones $inventory.Recordings
     if ($null -ne $State -and $State.PSObject.TypeNames -contains 'Kokoro.SpeechRenderer') { return Invoke-StudentSpeakOnDsp $inventory $phonemes $stream $out }
