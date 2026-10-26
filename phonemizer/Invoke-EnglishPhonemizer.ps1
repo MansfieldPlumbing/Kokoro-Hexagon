@@ -490,7 +490,7 @@ function Get-EnglishMobyFacts {
         if($split -lt 1){continue}
         $word=$line.Substring(0,$split).ToLowerInvariant();$bits=0
         foreach($tag in $line.Substring($split+1).ToCharArray()){
-            switch -CaseSensitive ($tag){'N'{$bits=$bits -bor 1};'p'{$bits=$bits -bor 1};'h'{$bits=$bits -bor 1};'V'{$bits=$bits -bor 10};'t'{$bits=$bits -bor 1026};'i'{$bits=$bits -bor 2};'A'{$bits=$bits -bor 4};'r'{$bits=$bits -bor 17}}
+            switch -CaseSensitive ($tag){'N'{$bits=$bits -bor 1};'p'{$bits=$bits -bor 1};'h'{$bits=$bits -bor 1};'V'{$bits=$bits -bor 10};'t'{$bits=$bits -bor 1026};'i'{$bits=$bits -bor 2};'A'{$bits=$bits -bor 4};'r'{$bits=$bits -bor 17};'P'{$bits=$bits -bor 16384}}
         }
         if($capabilities.ContainsKey($word)){$capabilities[$word]=$capabilities[$word] -bor $bits}else{$capabilities.Add($word,$bits)}
     }
@@ -547,7 +547,7 @@ function Add-EnglishCompiledRange {
 # Authored proof facts, not a corpus or a comprehensive English dictionary.
 # Capabilities: nominal=1, verb=2, property=4, participle=8, pronoun=16,
 # determiner=32, copula=64, by=128, person=256, time=512,
-# transitive=1024, perception complement=2048, perfect auxiliary=4096.
+# transitive=1024, perception complement=2048, perfect auxiliary=4096, relation (any preposition)=16384.
 # Phone slots: nominal, verb, property, participle, function word.
 function Get-EnglishProofFacts {
     @(
@@ -887,10 +887,10 @@ function Import-EnglishReference {
 
 function New-EnglishCandidate {
     param($From=$null)
-    $c=[pscustomobject]@{Subject=$null;Determiner=$null;Modifiers=@();Auxiliary=$null;Predicate=$null;Object=$null;Clause=$null;Relation=$null;Requirement=$null;PredicateRole=1;Tense='Unspecified';Phase='Subject';Voice='Active';Status='Pending';Choices=@{};Bindings=@();Need='Nominal';DependencyIds=@()}
+    $c=[pscustomobject]@{Subject=$null;Determiner=$null;Modifiers=@();Auxiliary=$null;Predicate=$null;Object=$null;Clause=$null;Relation=$null;Requirement=$null;Adjunct=$null;Proposals=@();PredicateRole=1;Tense='Unspecified';Phase='Subject';Voice='Active';Status='Pending';Choices=@{};Bindings=@();Need='Nominal';DependencyIds=@()}
     if($null -ne $From){
         foreach($p in $From.PSObject.Properties){$c.($p.Name)=$p.Value}
-        $c.Choices=@{}+$From.Choices;$c.Bindings=@($From.Bindings);$c.Modifiers=@($From.Modifiers)
+        $c.Choices=@{}+$From.Choices;$c.Bindings=@($From.Bindings);$c.Modifiers=@($From.Modifiers);$c.Proposals=@($From.Proposals)
     }
     $c
 }
@@ -905,6 +905,7 @@ function New-EnglishContext {
         Candidates=@(New-EnglishCandidate);Withdrawn=[Collections.Generic.List[object]]::new()
         Revision=0;Invocations=0;Trace=[Collections.Generic.List[object]]::new();Evidence=@{}
         MaximumCandidates=16;MaximumOccurrences=256;Boundary=$false
+        Clauses=[Collections.Generic.List[object]]::new();ClauseStart=0;ClauseWords=0
         Profile=if($Profile){@{}}else{$null}
         Corrections=$table;CorrectionWords=$words
     }
@@ -964,30 +965,48 @@ function Complete-EnglishClause {
     $Candidate.Choices[$Candidate.Predicate.Identity]=$role
     if($null -ne $Candidate.Auxiliary){$Candidate.Choices[$Candidate.Auxiliary.Identity]=4}
     $Candidate.Clause=$clause;$Candidate.Phase='Extension';$Candidate.Status='Extensible';$Candidate.Need='OptionalRelation'
+    if($null -ne $Candidate.Adjunct){
+        # The fronted adjunct's closure is satisfied by its clause: propose a boundary after it, scoped to the clause.
+        $first=$Candidate.Predicate.Identity;$last=$Candidate.Predicate.Identity
+        if($Candidate.Subject.Head.Identity -ge 0){foreach($id in $Candidate.Subject.Dependencies){if($id -lt $first){$first=$id}}}
+        foreach($id in $clause.Dependencies){if($id -gt $last){$last=$id}}
+        $Candidate.Proposals+=@([pscustomobject]@{Kind='FrontedAdjunctBoundary';Owner=$Candidate.Adjunct.Relation.Identity;Anchor=$Candidate.Adjunct.Complement.Head.Identity;Scope=$first;ScopeEnd=$last;Clause=$Candidate.Predicate.Identity;Dependencies=[int[]](@($Candidate.Adjunct.Dependencies)+@($clause.Dependencies));Support=0;Viable=0})
+        $Candidate.Adjunct=$null
+    }
 }
 
 function Add-EnglishOccurrence {
     [CmdletBinding()]
     param([Parameter(Mandatory)]$Context,[Parameter(Mandatory)][EnglishOccurrence]$Occurrence)
-    if($Context.Occurrences.Count -ge $Context.MaximumOccurrences){throw 'Utterance occurrence bound exceeded.'}
+    # A capitalized word after a sentence stop closes the clause (a lowercase one follows an abbreviation): its span
+    # and candidates are kept, and a fresh clause starts at this occurrence. The occurrence bound holds per clause.
+    if($Occurrence.Kind -cne 'Boundary' -and $Context.Boundary -and $Context.ClauseWords -gt 0 -and [char]::IsUpper($Occurrence.Text[0])){
+        $Context.Clauses.Add([pscustomobject]@{First=$Context.ClauseStart;Last=$Context.Occurrences.Count-1;Candidates=$Context.Candidates})
+        $Context.ClauseStart=$Context.Occurrences.Count;$Context.ClauseWords=0;$Context.Candidates=@(New-EnglishCandidate)
+    }
+    if($Context.Occurrences.Count-$Context.ClauseStart -ge $Context.MaximumOccurrences){throw 'Utterance occurrence bound exceeded.'}
     $Occurrence.Identity=$Context.Occurrences.Count;$Context.Occurrences.Add($Occurrence);$Context.Revision++
     if($Occurrence.Kind -ceq 'Boundary'){$Context.Boundary=$Occurrence.Text -cin @('.','!','?');return}
-    $Context.Boundary=$false
+    $Context.Boundary=$false;$Context.ClauseWords++
     $next=[Collections.Generic.List[object]]::new()
     foreach($prior in $Context.Candidates){
         $c=New-EnglishCandidate $prior
         if($c.Status -cin @('Unsupported','Contradictory')){$next.Add($c);continue}
         $f=$Occurrence.Capabilities
         if($Occurrence.LexicalId -lt 0){$c.Status='Unsupported';$c.Need='UnknownLexicalIdentity';$next.Add($c);continue}
-        if($c.Phase -ceq 'Subject' -and $Occurrence.Identity -eq 0 -and $Occurrence.Text.ToLowerInvariant() -ceq 'please'){
+        if($c.Phase -ceq 'Subject' -and $Occurrence.Identity -eq $Context.ClauseStart -and $Occurrence.Text.ToLowerInvariant() -ceq 'please'){
             $c.Choices[$Occurrence.Identity]=4;$c.Need='ImperativePredicate';$next.Add($c);continue
         }
-        if($c.Phase -ceq 'Subject' -and ($Occurrence.Identity -eq 0 -or ($Occurrence.Identity -eq 1 -and $Context.Occurrences[0].Text.ToLowerInvariant() -ceq 'please')) -and $Occurrence.Text.ToLowerInvariant() -cin @('play','push','press','record') -and ($f -band 2) -ne 0){
+        if($c.Phase -ceq 'Subject' -and ($Occurrence.Identity -eq $Context.ClauseStart -or ($Occurrence.Identity -eq $Context.ClauseStart+1 -and $Context.Occurrences[$Context.ClauseStart].Text.ToLowerInvariant() -ceq 'please')) -and $Occurrence.Text.ToLowerInvariant() -cin @('play','push','press','record') -and ($f -band 2) -ne 0){
             $head=[EnglishOccurrence]::new();$head.Identity=-1;$head.Text='you';$head.Capabilities=1
             $subject=[EnglishNominal]::new();$subject.Head=$head;$subject.Modifiers=@();$subject.Dependencies=@()
             $c.Subject=$subject;$c.Phase='Predicate';$c.Need='Predicate'
         }
-        if($c.Phase -cin @('Subject','Object','RelationComplement')){
+        if($c.Phase -ceq 'Subject' -and $Context.ClauseWords -eq 1 -and ($f -band (128+16384)) -ne 0){
+            # A relation opening the clause starts a fronted adjunct; the clause's own reading continues beside it.
+            $adj=New-EnglishCandidate $c;$adj.Relation=$Occurrence;$adj.Choices[$Occurrence.Identity]=4;$adj.Phase='AdjunctComplement';$adj.Status='Pending';$adj.Need='AdjunctComplement';$next.Add($adj)
+        }
+        if($c.Phase -cin @('Subject','Object','RelationComplement','AdjunctComplement')){
             if(($f -band 32) -ne 0 -and $null -eq $c.Determiner){
                 $det=New-EnglishCandidate $c;$det.Determiner=$Occurrence;$det.Choices[$Occurrence.Identity]=4;$det.Status='Pending';$det.Need='NominalHead';$next.Add($det)
                 $args=@{Determiner=$Occurrence}
@@ -1004,6 +1023,7 @@ function Add-EnglishOccurrence {
                 switch($c.Phase){
                     'Subject' {$c.Subject=$nominal;$c.Phase='Predicate';$c.Status='Extensible';$c.Need='Predicate'}
                     'Object' {$c.Object=$nominal;Complete-EnglishClause $Context $c}
+                    'AdjunctComplement' {$c.Adjunct=[pscustomobject]@{Relation=$c.Relation;Complement=$nominal;Dependencies=[int[]](@($nominal.Dependencies)+@($c.Relation.Identity))};$c.Relation=$null;$c.Phase='Subject';$c.Status='Pending';$c.Need='Nominal'}
                     'RelationComplement' {
                         if(($f -band 512) -ne 0 -or (($f -band 256) -ne 0 -and $c.Voice -ceq 'Passive')){
                             $args=@{Clause=$c.Clause;Relation=$c.Relation;Complement=$nominal}
@@ -1115,14 +1135,29 @@ function Get-EnglishResult {
     $status=if($viable.Count -gt 1){'Ambiguous'}elseif($viable.Count -eq 1){if($Context.Boundary -and $viable[0].Status -ceq 'Extensible' -and $null -ne $viable[0].Clause){'Resolved'}else{$viable[0].Status}}elseif(@($Context.Candidates | Where-Object Status -ceq 'Unsupported').Count){'Unsupported'}else{'Contradictory'}
     if($null -ne $Context.Profile){Stop-EnglishMeasure $Context $filter;$projection=Start-EnglishMeasure 'ProjectionAndResult'}
     $tokens=[Collections.Generic.List[object]]::new();$parts=[Collections.Generic.List[string]]::new();$ids=[Collections.Generic.List[int]]::new();$unresolved=[Collections.Generic.List[object]]::new();$cursor=0
+    # Each occurrence takes its roles from its own clause's viable candidates; the current clause's are $viable.
+    $spans=@($Context.Clauses.ToArray())+@([pscustomobject]@{First=$Context.ClauseStart;Last=$Context.Occurrences.Count-1;Candidates=$Context.Candidates})
+    $proposals=[Collections.Generic.List[object]]::new();$spanIndex=-1;$clauseViable=@()
     foreach($o in $Context.Occurrences){
+        if($spanIndex -lt 0 -or $o.Identity -gt $spans[$spanIndex].Last){
+            $spanIndex++
+            while($spanIndex+1 -lt $spans.Count -and $o.Identity -gt $spans[$spanIndex].Last){$spanIndex++}
+            $clauseViable=@(if($spanIndex -eq $spans.Count-1){$viable}else{$spans[$spanIndex].Candidates | Where-Object Status -cnotin @('Unsupported','Contradictory')})
+            $found=[Collections.Generic.List[object]]::new()
+            foreach($candidate in $clauseViable){foreach($proposal in $candidate.Proposals){
+                $same=$null;foreach($q in $found){if($q.Kind -ceq $proposal.Kind -and $q.Owner -eq $proposal.Owner -and $q.Anchor -eq $proposal.Anchor -and $q.Scope -eq $proposal.Scope){$same=$q}}
+                if($null -eq $same){$same=[pscustomobject]@{Kind=$proposal.Kind;Owner=$proposal.Owner;Anchor=$proposal.Anchor;Scope=$proposal.Scope;ScopeEnd=$proposal.ScopeEnd;Clause=$proposal.Clause;Dependencies=$proposal.Dependencies;Support=0;Viable=$clauseViable.Count};$found.Add($same)}
+                $same.Support++
+            }}
+            foreach($q in $found){$proposals.Add($q)}
+        }
         $phone=$null;$roles=@();$alternatives=@();$reason=$null
         if($o.Kind -ceq 'Boundary'){
             if($Context.Reference.SymbolId.Invoke($o.Text[0]) -ge 0){$phone=$o.Text}else{$reason='UnsupportedSymbol'}
         }elseif($o.LexicalId -lt 0){$reason='UnknownLexicalIdentity'}
-        elseif($viable.Count -eq 0){$reason='NoAdmittedRelationship'}
+        elseif($clauseViable.Count -eq 0){$reason='NoAdmittedRelationship'}
         else{
-            $roles=@($viable | ForEach-Object {if($_.Choices.ContainsKey($o.Identity)){$_.Choices[$o.Identity]}else{-1}} | Sort-Object -Unique)
+            $roles=@($clauseViable | ForEach-Object {if($_.Choices.ContainsKey($o.Identity)){$_.Choices[$o.Identity]}else{-1}} | Sort-Object -Unique)
             if($roles -contains -1){$reason='PendingRole'}
             else{
                 $alternatives=@($roles | ForEach-Object {$Context.Reference.Phones.Invoke($o.LexicalId,$_).Split('|',[StringSplitOptions]::RemoveEmptyEntries)} | Sort-Object -Unique -CaseSensitive)
@@ -1158,7 +1193,7 @@ function Get-EnglishResult {
         KokoroPhones=if($unresolved.Count -eq 0){$parts -join ' '}else{$null}
         SupportedPhones=$parts -join ' ';SymbolIds=$ids.ToArray();Tokens=$tokens.ToArray()
         Complete=$unresolved.Count -eq 0;GrammarStatus=$status;PronunciationStatus=if($unresolved.Count -eq 0){'Resolved'}else{'UnsupportedOrPending'}
-        Candidates=$viable;RetainedCandidates=$Context.Candidates;UnresolvedSpans=$unresolved.ToArray();OovSpans=@($unresolved | Where-Object Status -ceq 'UnknownLexicalIdentity')
+        Candidates=$viable;RetainedCandidates=$Context.Candidates;Clauses=$spans;Proposals=$proposals.ToArray();UnresolvedSpans=$unresolved.ToArray();OovSpans=@($unresolved | Where-Object Status -ceq 'UnknownLexicalIdentity')
         AmbiguousDecisions=@($tokens | Where-Object {$_.Roles.Count -gt 1 -or $_.Alternatives.Count -gt 1})
         Bindings=$Context.Trace.ToArray();Withdrawn=@($Context.Withdrawn.ToArray())+@($contextRejected.ToArray());Revision=$Context.Revision
         Pending=@($viable | Where-Object Status -ceq 'Pending' | ForEach-Object Need)
@@ -1241,6 +1276,26 @@ class CoreClause {
     [CoreClause]$Complement
     [int[]]$Dependencies
 }
+class CoreAdjunct {
+    # A fronted adjunct (relation and its nominal), inherited by the clause that follows it.
+    CoreAdjunct() {}
+    [CoreOccurrence]$Relation
+    [CoreNominal]$Complement
+    [int[]]$Dependencies
+}
+class CoreProposal {
+    # A typed proposal a completed closure makes to the prosody layer: its kind, owner, anchor and scope occurrences.
+    CoreProposal() {}
+    [string]$Kind
+    [int]$Owner
+    [int]$Anchor
+    [int]$Scope
+    [int]$ScopeEnd
+    [int]$Clause
+    [int[]]$Dependencies
+    [int]$Support
+    [int]$Viable
+}
 class CoreCandidate {
     [CoreNominal]$Subject
     [CoreOccurrence]$Determiner
@@ -1250,15 +1305,19 @@ class CoreCandidate {
     [CoreNominal]$Object
     [CoreClause]$Clause
     [CoreOccurrence]$Relation
+    [CoreAdjunct]$Adjunct
+    [CoreProposal[]]$Proposals
     [int]$PredicateRole=1
     [string]$Tense='Unspecified'
     [string]$Phase='Subject'
     [string]$Voice='Active'
     [string]$Status='Pending'
     [string]$Need='Nominal'
+    [int]$Base
     [int[]]$Choices
     CoreCandidate() {
         $this.Modifiers=[CoreOccurrence[]]::new(0)
+        $this.Proposals=[CoreProposal[]]::new(0)
         $this.Choices=[int[]]::new(256)
         for([int]$i=0;$i -lt 256;$i++){$this.Choices[$i]=-1}
     }
@@ -1266,11 +1325,29 @@ class CoreCandidate {
         [CoreCandidate]$c=[CoreCandidate]::new()
         $c.Subject=$this.Subject;$c.Determiner=$this.Determiner;$c.Modifiers=$this.Modifiers
         $c.Auxiliary=$this.Auxiliary;$c.Predicate=$this.Predicate;$c.Object=$this.Object
-        $c.Clause=$this.Clause;$c.Relation=$this.Relation;$c.PredicateRole=$this.PredicateRole
-        $c.Tense=$this.Tense;$c.Phase=$this.Phase;$c.Voice=$this.Voice;$c.Status=$this.Status;$c.Need=$this.Need
+        $c.Clause=$this.Clause;$c.Relation=$this.Relation;$c.Adjunct=$this.Adjunct;$c.Proposals=$this.Proposals;$c.PredicateRole=$this.PredicateRole
+        $c.Tense=$this.Tense;$c.Phase=$this.Phase;$c.Voice=$this.Voice;$c.Status=$this.Status;$c.Need=$this.Need;$c.Base=$this.Base
         [Array]::Copy($this.Choices,$c.Choices,256)
         return $c
     }
+    # Roles are held per clause: an occurrence's slot is its identity less the clause's first identity.
+    [void] Choose([int]$identity,[int]$role) {
+        [int]$local=$identity-$this.Base
+        if($local -lt 0 -or $local -ge 256){throw [ArgumentOutOfRangeException]::new('occurrences')}
+        $this.Choices[$local]=$role
+    }
+    [int] Role([int]$identity) {
+        [int]$local=$identity-$this.Base
+        if($local -lt 0 -or $local -ge 256){return -1}
+        return $this.Choices[$local]
+    }
+}
+class CoreClauseSpan {
+    # A clause's occurrences (first and last identity) and its retained candidates.
+    CoreClauseSpan() {}
+    [int]$First
+    [int]$Last
+    [CoreCandidate[]]$Candidates
 }
 class CoreNormalizationDecision {
     CoreNormalizationDecision() {}
@@ -1325,6 +1402,8 @@ class CoreResult {
     [string]$PronunciationStatus
     [CoreCandidate[]]$Candidates
     [CoreCandidate[]]$RetainedCandidates
+    [CoreClauseSpan[]]$Clauses
+    [CoreProposal[]]$Proposals
     [CoreToken[]]$UnresolvedSpans
     [CoreToken[]]$OovSpans
     [CoreToken[]]$AmbiguousDecisions
@@ -1343,8 +1422,13 @@ class CoreEngine {
     [Collections.Generic.Dictionary[string,string]]$Corrections
     [bool]$Boundary
     [bool]$Polish
+    # Closed clauses keep their spans and candidates; occurrence identities run on across them.
+    [Collections.Generic.List[CoreClauseSpan]]$Clauses
+    [int]$ClauseStart
+    [int]$ClauseWords
     CoreEngine() {
         $this.Occurrences=[Collections.Generic.List[CoreOccurrence]]::new()
+        $this.Clauses=[Collections.Generic.List[CoreClauseSpan]]::new()
         $this.Candidates=[CoreCandidate[]]::new(1);$this.Candidates[0]=[CoreCandidate]::new()
         $this.Trace=[Collections.Generic.List[string]]::new()
         $this.Withdrawn=[Collections.Generic.List[string]]::new()
@@ -1373,12 +1457,12 @@ class CoreEngine {
         [CoreOccurrence]$m=$null
         foreach($m in $c.Modifiers){
             if(($m.Capabilities -band 4) -eq 0){throw [ArgumentException]::new('Modifier capability required.')}
-            $ids.Add($m.Identity);$c.Choices[$m.Identity]=2
+            $ids.Add($m.Identity);$c.Choose($m.Identity,2)
         }
-        $c.Choices[$o.Identity]=0
+        $c.Choose($o.Identity,0)
         if(-not [object]::ReferenceEquals($null,$c.Determiner)){
             if(($c.Determiner.Capabilities -band 32) -eq 0){throw [ArgumentException]::new('Determiner capability required.')}
-            $ids.Add($c.Determiner.Identity);$c.Choices[$c.Determiner.Identity]=4
+            $ids.Add($c.Determiner.Identity);$c.Choose($c.Determiner.Identity,4)
         }
         $n.Dependencies=$ids.ToArray();$c.Determiner=$null;$c.Modifiers=[CoreOccurrence[]]::new(0)
         $this.Trace.Add('CoreEngine.Nominal')
@@ -1402,15 +1486,33 @@ class CoreEngine {
         [int[]]$predicate=[int[]]::new(1);$predicate[0]=$c.Predicate.Identity
         $clause.Dependencies=[CoreEngine]::Join($c.Subject.Dependencies,$predicate)
         if(-not [object]::ReferenceEquals($null,$clause.Object)){$clause.Dependencies=[CoreEngine]::Join($clause.Dependencies,$clause.Object.Dependencies)}
-        if(-not [object]::ReferenceEquals($null,$c.Auxiliary)){$predicate[0]=$c.Auxiliary.Identity;$clause.Dependencies=[CoreEngine]::Join($clause.Dependencies,$predicate);$c.Choices[$c.Auxiliary.Identity]=4}
-        $c.Choices[$c.Predicate.Identity]=$role;$c.Clause=$clause;$c.Phase='Extension';$c.Status='Extensible';$c.Need='OptionalRelation'
+        if(-not [object]::ReferenceEquals($null,$c.Auxiliary)){$predicate[0]=$c.Auxiliary.Identity;$clause.Dependencies=[CoreEngine]::Join($clause.Dependencies,$predicate);$c.Choose($c.Auxiliary.Identity,4)}
+        $c.Choose($c.Predicate.Identity,$role);$c.Clause=$clause;$c.Phase='Extension';$c.Status='Extensible';$c.Need='OptionalRelation'
+        if(-not [object]::ReferenceEquals($null,$c.Adjunct)){
+            # The fronted adjunct's closure is satisfied by its clause: propose a boundary after it, scoped to the clause.
+            [CoreProposal]$p=[CoreProposal]::new();$p.Kind='FrontedAdjunctBoundary';$p.Owner=$c.Adjunct.Relation.Identity;$p.Anchor=$c.Adjunct.Complement.Head.Identity;$p.Clause=$c.Predicate.Identity
+            [int]$first=$c.Predicate.Identity;[int]$last=$c.Predicate.Identity;[int]$id=0
+            if($c.Subject.Head.Identity -ge 0){foreach($id in $c.Subject.Dependencies){if($id -lt $first){$first=$id}}}
+            foreach($id in $clause.Dependencies){if($id -gt $last){$last=$id}}
+            $p.Scope=$first;$p.ScopeEnd=$last;$p.Dependencies=[CoreEngine]::Join($c.Adjunct.Dependencies,$clause.Dependencies)
+            [CoreProposal[]]$ps=[CoreProposal[]]::new($c.Proposals.Length+1);[Array]::Copy($c.Proposals,$ps,$c.Proposals.Length);$ps[$ps.Length-1]=$p
+            $c.Proposals=$ps;$c.Adjunct=$null;$this.Trace.Add('CoreEngine.AdjunctProposal')
+        }
         $this.Trace.Add('CoreEngine.CompleteClause')
     }
     [void] Add([CoreOccurrence]$o) {
-        if($this.Occurrences.Count -ge 256){throw [ArgumentOutOfRangeException]::new('occurrences')}
+        # A capitalized word after a sentence stop closes the clause (a lowercase one follows an abbreviation): its span
+        # and candidates are kept, and a fresh clause starts at this occurrence. The occurrence bound holds per clause.
+        if($o.Kind -cne 'Boundary' -and $this.Boundary -and $this.ClauseWords -gt 0 -and [char]::IsUpper($o.Text.get_Chars(0))){
+            [CoreClauseSpan]$span=[CoreClauseSpan]::new();$span.First=$this.ClauseStart;$span.Last=$this.Occurrences.Count-1;$span.Candidates=$this.Candidates;$this.Clauses.Add($span)
+            $this.ClauseStart=$this.Occurrences.Count;$this.ClauseWords=0
+            $this.Candidates=[CoreCandidate[]]::new(1);$this.Candidates[0]=[CoreCandidate]::new();$this.Candidates[0].Base=$this.ClauseStart
+            $this.Trace.Add('CoreEngine.ClauseClosed')
+        }
+        if($this.Occurrences.Count-$this.ClauseStart -ge 256){throw [ArgumentOutOfRangeException]::new('occurrences')}
         $o.Identity=$this.Occurrences.Count;$this.Occurrences.Add($o)
         if($o.Kind -ceq 'Boundary'){$this.Boundary=$o.Text -ceq '.' -or $o.Text -ceq '!' -or $o.Text -ceq '?';return}
-        $this.Boundary=$false
+        $this.Boundary=$false;$this.ClauseWords++
         [Collections.Generic.List[CoreCandidate]]$next=[Collections.Generic.List[CoreCandidate]]::new()
         [CoreCandidate]$prior=$null
         foreach($prior in $this.Candidates){
@@ -1418,28 +1520,38 @@ class CoreEngine {
             if($c.Status -ceq 'Unsupported' -or $c.Status -ceq 'Contradictory'){$next.Add($c);continue}
             [int]$f=$o.Capabilities
             if($o.LexicalId -lt 0){$c.Status='Unsupported';$c.Need='UnknownLexicalIdentity';$next.Add($c);continue}
-            if($c.Phase -ceq 'Subject' -and $o.Identity -eq 0 -and $o.Text.ToLowerInvariant() -ceq 'please'){
-                $c.Choices[$o.Identity]=4;$c.Need='ImperativePredicate';$next.Add($c);continue
+            if($c.Phase -ceq 'Subject' -and $o.Identity -eq $this.ClauseStart -and $o.Text.ToLowerInvariant() -ceq 'please'){
+                $c.Choose($o.Identity,4);$c.Need='ImperativePredicate';$next.Add($c);continue
             }
-            if($c.Phase -ceq 'Subject' -and ($o.Identity -eq 0 -or ($o.Identity -eq 1 -and $this.Occurrences.get_Item(0).Text.ToLowerInvariant() -ceq 'please')) -and ($o.Text.ToLowerInvariant() -ceq 'play' -or $o.Text.ToLowerInvariant() -ceq 'push' -or $o.Text.ToLowerInvariant() -ceq 'press' -or $o.Text.ToLowerInvariant() -ceq 'record') -and ($f -band 2) -ne 0){
+            if($c.Phase -ceq 'Subject' -and ($o.Identity -eq $this.ClauseStart -or ($o.Identity -eq $this.ClauseStart+1 -and $this.Occurrences.get_Item($this.ClauseStart).Text.ToLowerInvariant() -ceq 'please')) -and ($o.Text.ToLowerInvariant() -ceq 'play' -or $o.Text.ToLowerInvariant() -ceq 'push' -or $o.Text.ToLowerInvariant() -ceq 'press' -or $o.Text.ToLowerInvariant() -ceq 'record') -and ($f -band 2) -ne 0){
                 [CoreOccurrence]$head=[CoreOccurrence]::new();$head.Identity=-1;$head.Text='you';$head.Capabilities=1
                 [CoreNominal]$subject=[CoreNominal]::new();$subject.Head=$head;$subject.Modifiers=[CoreOccurrence[]]::new(0);$subject.Dependencies=[int[]]::new(0)
                 $c.Subject=$subject;$c.Phase='Predicate';$c.Need='Predicate'
             }
-            if($c.Phase -ceq 'Subject' -or $c.Phase -ceq 'Object' -or $c.Phase -ceq 'RelationComplement'){
+            if($c.Phase -ceq 'Subject' -and $this.ClauseWords -eq 1 -and ($f -band 16512) -ne 0){
+                # A relation opening the clause starts a fronted adjunct; the clause's own reading continues beside it.
+                [CoreCandidate]$adj=$c.Copy();$adj.Relation=$o;$adj.Choose($o.Identity,4);$adj.Phase='AdjunctComplement';$adj.Status='Pending';$adj.Need='AdjunctComplement';$next.Add($adj)
+                $this.Trace.Add('CoreEngine.FrontedAdjunct')
+            }
+            if($c.Phase -ceq 'Subject' -or $c.Phase -ceq 'Object' -or $c.Phase -ceq 'RelationComplement' -or $c.Phase -ceq 'AdjunctComplement'){
                 if(($f -band 32) -ne 0 -and [object]::ReferenceEquals($null,$c.Determiner)){
-                    [CoreCandidate]$det=$c.Copy();$det.Determiner=$o;$det.Choices[$o.Identity]=4;$det.Status='Pending';$det.Need='NominalHead';$next.Add($det)
+                    [CoreCandidate]$det=$c.Copy();$det.Determiner=$o;$det.Choose($o.Identity,4);$det.Status='Pending';$det.Need='NominalHead';$next.Add($det)
                     $this.Trace.Add('CoreEngine.DeterminerRequirement')
                 }
                 if(($f -band 4) -ne 0 -and -not [object]::ReferenceEquals($null,$c.Determiner)){
                     [CoreCandidate]$mod=$c.Copy();[CoreOccurrence[]]$mods=[CoreOccurrence[]]::new($c.Modifiers.Length+1)
                     [Array]::Copy($c.Modifiers,$mods,$c.Modifiers.Length);$mods[$mods.Length-1]=$o
-                    $mod.Modifiers=$mods;$mod.Choices[$o.Identity]=2;$mod.Need='NominalHead';$next.Add($mod)
+                    $mod.Modifiers=$mods;$mod.Choose($o.Identity,2);$mod.Need='NominalHead';$next.Add($mod)
                 }
                 if(($f -band 1) -ne 0){
                     [CoreNominal]$nominal=$this.Nominal($c,$o)
                     if($c.Phase -ceq 'Subject'){$c.Subject=$nominal;$c.Phase='Predicate';$c.Status='Extensible';$c.Need='Predicate'}
                     elseif($c.Phase -ceq 'Object'){$c.Object=$nominal;$this.CompleteClause($c)}
+                    elseif($c.Phase -ceq 'AdjunctComplement'){
+                        [CoreAdjunct]$adjunct=[CoreAdjunct]::new();$adjunct.Relation=$c.Relation;$adjunct.Complement=$nominal
+                        [int[]]$aid=[int[]]::new(1);$aid[0]=$c.Relation.Identity;$adjunct.Dependencies=[CoreEngine]::Join($nominal.Dependencies,$aid)
+                        $c.Adjunct=$adjunct;$c.Relation=$null;$c.Phase='Subject';$c.Status='Pending';$c.Need='Nominal';$this.Trace.Add('CoreEngine.AdjunctComplement')
+                    }
                     else{
                         if(($f -band 512) -ne 0 -or (($f -band 256) -ne 0 -and $c.Voice -ceq 'Passive')){
                             [CoreClause]$relation=[CoreEngine]::CopyClause($c.Clause)
@@ -1453,27 +1565,27 @@ class CoreEngine {
                 }
                 if(($f -band 37) -eq 0){$c.Status='Contradictory';$c.Need='NominalHead';$next.Add($c)}
             }elseif($c.Phase -ceq 'Predicate'){
-                if(($f -band 4160) -ne 0){$c.Auxiliary=$o;$c.Choices[$o.Identity]=4;$c.Phase='AfterAuxiliary';$c.Status='Pending';$c.Need='Predicate';$next.Add($c);$this.Trace.Add('CoreEngine.AuxiliaryRequirement')}
+                if(($f -band 4160) -ne 0){$c.Auxiliary=$o;$c.Choose($o.Identity,4);$c.Phase='AfterAuxiliary';$c.Status='Pending';$c.Need='Predicate';$next.Add($c);$this.Trace.Add('CoreEngine.AuxiliaryRequirement')}
                 elseif(($f -band 2) -ne 0){
-                    $c.Predicate=$o;$c.Choices[$o.Identity]=1;$this.Trace.Add('CoreEngine.OperationRequirement')
+                    $c.Predicate=$o;$c.Choose($o.Identity,1);$this.Trace.Add('CoreEngine.OperationRequirement')
                     if(($f -band 1024) -ne 0){$c.Phase='Object';$c.Status='Pending';$c.Need='Object'}else{$this.CompleteClause($c)}
                     $next.Add($c)
-                    if(($f -band 8192) -ne 0){[CoreCandidate]$past=$c.Copy();$past.PredicateRole=3;$past.Tense='Past';$past.Choices[$o.Identity]=3;$c.Tense='Present';if($past.Phase -ceq 'Extension'){$this.CompleteClause($past)};$next.Add($past)}
+                    if(($f -band 8192) -ne 0){[CoreCandidate]$past=$c.Copy();$past.PredicateRole=3;$past.Tense='Past';$past.Choose($o.Identity,3);$c.Tense='Present';if($past.Phase -ceq 'Extension'){$this.CompleteClause($past)};$next.Add($past)}
                 }else{$c.Status='Contradictory';$c.Need='CallablePredicate';$next.Add($c)}
             }elseif($c.Phase -ceq 'AfterAuxiliary'){
-                if(($c.Auxiliary.Capabilities -band 4096) -ne 0 -and ($f -band 8) -ne 0){$c.Predicate=$o;$c.Choices[$o.Identity]=3;if(($f -band 1024) -ne 0){$c.Phase='Object';$c.Need='Object'}else{$this.CompleteClause($c)};$next.Add($c)}
+                if(($c.Auxiliary.Capabilities -band 4096) -ne 0 -and ($f -band 8) -ne 0){$c.Predicate=$o;$c.Choose($o.Identity,3);if(($f -band 1024) -ne 0){$c.Phase='Object';$c.Need='Object'}else{$this.CompleteClause($c)};$next.Add($c)}
                 elseif(($c.Auxiliary.Capabilities -band 64) -ne 0){
                     if(($f -band 8) -ne 0){[CoreCandidate]$passive=$c.Copy();$passive.Predicate=$o;$passive.Voice='Passive';$this.CompleteClause($passive);$next.Add($passive)}
                     if(($f -band 4) -ne 0){[CoreCandidate]$stative=$c.Copy();$stative.Predicate=$o;$stative.Voice='Stative';$this.CompleteClause($stative);$next.Add($stative)}
                     if(($f -band 12) -eq 0){$c.Status='Unsupported';$c.Need='CopularComplement';$next.Add($c)}
                 }else{$c.Status='Contradictory';$c.Need='Participle';$next.Add($c)}
             }elseif($c.Phase -ceq 'Extension'){
-                if(($f -band 128) -ne 0){$c.Relation=$o;$c.Choices[$o.Identity]=4;$c.Phase='RelationComplement';$c.Status='Pending';$c.Need='RelationComplement';$next.Add($c)}
+                if(($f -band 128) -ne 0){$c.Relation=$o;$c.Choose($o.Identity,4);$c.Phase='RelationComplement';$c.Status='Pending';$c.Need='RelationComplement';$next.Add($c)}
                 elseif(($c.Predicate.Capabilities -band 2048) -ne 0 -and ($f -band 2) -ne 0 -and ($f -band 1024) -eq 0){
                     [CoreCandidate]$embedded=[CoreCandidate]::new();$embedded.Subject=$c.Object;$embedded.Predicate=$o;$this.CompleteClause($embedded)
                     [CoreClause]$parent=[CoreEngine]::CopyClause($c.Clause);$parent.Complement=$embedded.Clause
                     $parent.Dependencies=[CoreEngine]::Join($parent.Dependencies,$embedded.Clause.Dependencies)
-                    $c.Clause=$parent;$c.Choices[$o.Identity]=1;$next.Add($c)
+                    $c.Clause=$parent;$c.Choose($o.Identity,1);$next.Add($c)
                 }else{$c.Status='Unsupported';$c.Need='AdditionalConstruction';$next.Add($c)}
             }
         }
@@ -1535,6 +1647,23 @@ class CoreEngine {
         }
         if($answer -lt 0){return 2};return $answer
     }
+    static [void] CollectProposals([Collections.Generic.List[CoreProposal]]$into,[Collections.Generic.List[CoreCandidate]]$viable) {
+        # Distinct proposals of a clause's viable candidates, each with how many of them carry it.
+        [CoreCandidate]$c=$null;[CoreProposal]$p=$null;[CoreProposal]$q=$null
+        [Collections.Generic.List[CoreProposal]]$found=[Collections.Generic.List[CoreProposal]]::new()
+        foreach($c in $viable.ToArray()){
+            foreach($p in $c.Proposals){
+                [CoreProposal]$same=$null
+                foreach($q in $found.ToArray()){if($q.Kind -ceq $p.Kind -and $q.Owner -eq $p.Owner -and $q.Anchor -eq $p.Anchor -and $q.Scope -eq $p.Scope){$same=$q}}
+                if([object]::ReferenceEquals($null,$same)){
+                    $same=[CoreProposal]::new();$same.Kind=$p.Kind;$same.Owner=$p.Owner;$same.Anchor=$p.Anchor;$same.Scope=$p.Scope;$same.ScopeEnd=$p.ScopeEnd;$same.Clause=$p.Clause;$same.Dependencies=$p.Dependencies;$same.Viable=$viable.Count
+                    $found.Add($same)
+                }
+                $same.Support++
+            }
+        }
+        foreach($q in $found.ToArray()){$into.Add($q)}
+    }
     [CoreResult] Result([string]$text) {
         [CoreResult]$r=[CoreResult]::new();$r.OriginalText=$text;$r.Revision=$this.Occurrences.Count
         [Collections.Generic.List[CoreCandidate]]$viable=[Collections.Generic.List[CoreCandidate]]::new()
@@ -1552,17 +1681,33 @@ class CoreEngine {
         [Collections.Generic.List[CoreToken]]$oov=[Collections.Generic.List[CoreToken]]::new()
         [Collections.Generic.List[CoreToken]]$ambiguous=[Collections.Generic.List[CoreToken]]::new()
         [Collections.Generic.List[int]]$ids=[Collections.Generic.List[int]]::new();[Text.StringBuilder]$phones=[Text.StringBuilder]::new()
+        # Each occurrence takes its roles from its own clause's viable candidates; the current clause's are $viable.
+        [Collections.Generic.List[CoreClauseSpan]]$spans=[Collections.Generic.List[CoreClauseSpan]]::new()
+        [CoreClauseSpan]$s=$null
+        foreach($s in $this.Clauses.ToArray()){$spans.Add($s)}
+        [CoreClauseSpan]$open=[CoreClauseSpan]::new();$open.First=$this.ClauseStart;$open.Last=$this.Occurrences.Count-1;$open.Candidates=$this.Candidates;$spans.Add($open)
+        [Collections.Generic.List[CoreProposal]]$proposals=[Collections.Generic.List[CoreProposal]]::new()
+        [Collections.Generic.List[CoreCandidate]]$clauseViable=$null;[int]$spanIndex=-1
         [CoreOccurrence]$o=$null
         foreach($o in $this.Occurrences.ToArray()){
+            if($spanIndex -lt 0 -or $o.Identity -gt $spans.get_Item($spanIndex).Last){
+                $spanIndex++
+                while($spanIndex+1 -lt $spans.Count -and $o.Identity -gt $spans.get_Item($spanIndex).Last){$spanIndex++}
+                if($spanIndex -eq $spans.Count-1){$clauseViable=$viable}else{
+                    $clauseViable=[Collections.Generic.List[CoreCandidate]]::new()
+                    foreach($c in $spans.get_Item($spanIndex).Candidates){if($c.Status -cne 'Unsupported' -and $c.Status -cne 'Contradictory'){$clauseViable.Add($c)}}
+                }
+                [CoreEngine]::CollectProposals($proposals,$clauseViable)
+            }
             [CoreToken]$t=[CoreToken]::new();$t.Identity=$o.Identity;$t.LexicalId=$o.LexicalId;$t.Word=$o.Text;$t.SourceStart=$o.Start;$t.SourceEnd=$o.End
             [Collections.Generic.List[int]]$roles=[Collections.Generic.List[int]]::new()
             [Collections.Generic.List[string]]$alternatives=[Collections.Generic.List[string]]::new()
             [string]$phone=$null;[string]$reason=$null
             if($o.Kind -ceq 'Boundary'){if([Phonology]::SymbolId($o.Text.get_Chars(0)) -ge 0){$phone=$o.Text}else{$reason='UnsupportedSymbol'}}
             elseif($o.LexicalId -lt 0){$reason='UnknownLexicalIdentity'}
-            elseif($viable.Count -eq 0){$reason='NoAdmittedRelationship'}
+            elseif($clauseViable.Count -eq 0){$reason='NoAdmittedRelationship'}
             else{
-                foreach($c in $viable.ToArray()){[int]$role=$c.Choices[$o.Identity];if(-not $roles.Contains($role)){$roles.Add($role)}}
+                foreach($c in $clauseViable.ToArray()){[int]$role=$c.Role($o.Identity);if(-not $roles.Contains($role)){$roles.Add($role)}}
                 $roles.Sort()
                 if($roles.Contains(-1)){$reason='PendingRole'}else{
                     [int]$role=0
@@ -1605,6 +1750,7 @@ class CoreEngine {
             }else{$unresolved.Add($e);if($e.Status -ceq 'UnknownLexicalIdentity'){$oov.Add($e)}}
             $e.SymbolIds=$tokenIds.ToArray()
         }
+        $r.Clauses=$spans.ToArray();$r.Proposals=$proposals.ToArray()
         $r.Tokens=$emitted;$r.UnresolvedSpans=$unresolved.ToArray();$r.OovSpans=$oov.ToArray();$r.AmbiguousDecisions=$ambiguous.ToArray()
         $r.SymbolIds=$ids.ToArray();$r.SupportedPhones=$phones.ToString();$r.Complete=$unresolved.Count -eq 0
         $r.PronunciationStatus='UnsupportedOrPending';if($r.Complete){$r.KokoroPhones=$r.SupportedPhones;$r.PronunciationStatus='Resolved'}
@@ -2914,7 +3060,7 @@ function Test-EnglishCoreDriver {
     [CmdletBinding()]
     param()
     $driver=Import-EnglishCoreDriver
-    $fixtures=@('Play the record.','Please record it.','Push record.','The record records the record.','They present the present.','They permit the record.','They live.','The music is live.','They close the door.','They wind the clock.','They lead the cat.','They had read the record.','They read the record.','The door was closed by Alice.','The door was closed by noon.','I saw her duck.','I saw her shit.','The duck.','They duck.','the door was','The quuxblarg records the record.','The actor records the record.','The hour records the record.','The university records the record.','The one records the record.','')
+    $fixtures=@('Play the record.','Please record it.','Push record.','The record records the record.','They present the present.','They permit the record.','They live.','The music is live.','They close the door.','They wind the clock.','They lead the cat.','They had read the record.','They read the record.','The door was closed by Alice.','The door was closed by noon.','I saw her duck.','I saw her shit.','The duck.','They duck.','the door was','The quuxblarg records the record.','The actor records the record.','The hour records the record.','The university records the record.','The one records the record.','After the meeting, they read the record.','They read the record. They had read the record.','')
     foreach($sentence in $fixtures){
         $legacy=Invoke-EnglishPhonemizer -Text $sentence -Context (New-EnglishContext)
         $native=Invoke-EnglishPhonemizer -Text $sentence -Lexical
@@ -3009,6 +3155,26 @@ function Test-EnglishCoreDriver {
         }
         Assert-EnglishContract 'retained teacher corrections reached standalone execution' ($teacherChecks -gt 0)
     }
+    # Clause lifetime: sentences interpreted together keep the pronunciation each has alone; identities run on across
+    # clauses, and the occurrence bound holds per clause, not per text.
+    $sentences=@('They read the record.','They had read the record.','After the meeting, they read the record.','The record records the record.')
+    $joined=$sentences -join ' ';$whole=$driver.Run.Invoke($joined)
+    $alone=@($sentences | ForEach-Object {$driver.Run.Invoke($_).KokoroPhones}) -join ' '
+    Assert-EnglishContract 'clauses keep their pronunciation across sentences' ($whole.Complete -and $whole.KokoroPhones -ceq $alone)
+    Assert-EnglishContract 'one clause span per sentence with running identities' ($whole.Clauses.Length -eq $sentences.Count -and $whole.Clauses[1].First -eq $whole.Clauses[0].Last+1)
+    $engine=$engineType::new();$engine.Polish=$true;$offset=0
+    while($offset -lt $joined.Length){$offset=$engine.ScanNext($joined,$offset)}
+    Assert-EnglishContract 'incremental scanning matches the whole text across clauses' ($engine.Result($joined).KokoroPhones -ceq $whole.KokoroPhones)
+    Assert-EnglishContract 'occurrence bound is per clause' ($driver.Run.Invoke((@(1..60 | ForEach-Object {'They read the record.'}) -join ' ')).Complete)
+    $clauseBound=$false
+    try{$null=$driver.Run.Invoke((@(1..300 | ForEach-Object {'the'}) -join ' '))}catch{$clauseBound=$_.Exception.ToString().Contains('ArgumentOutOfRangeException')}
+    Assert-EnglishContract 'one clause beyond the occurrence bound is rejected' $clauseBound
+    # Fronted adjunct: a relation opening the clause opens an adjunct, the clause after it inherits it, and the
+    # satisfied closure proposes a boundary after the adjunct, scoped to the clause.
+    $adjunct=$driver.Run.Invoke('After the meeting, they read the record.')
+    $proposal=@($adjunct.Proposals | Where-Object Kind -ceq 'FrontedAdjunctBoundary')
+    Assert-EnglishContract 'fronted adjunct proposes a boundary' ($proposal.Count -ge 1 -and $proposal[0].Owner -eq 0 -and $proposal[0].Anchor -eq 2 -and $proposal[0].Scope -eq 4 -and $proposal[0].Support -ge 1)
+    Assert-EnglishContract 'a clause without an adjunct proposes nothing' ($driver.Run.Invoke('They read the record.').Proposals.Length -eq 0)
     $null=$driver.Batch.Invoke('The record records the record.',100)
     $runs=2000;$watch=[Diagnostics.Stopwatch]::StartNew()
     $count=$driver.Batch.Invoke('The record records the record.',$runs)

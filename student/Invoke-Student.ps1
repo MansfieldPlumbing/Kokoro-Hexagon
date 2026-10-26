@@ -91,7 +91,8 @@ param(
     [ValidateRange(0, [int]::MaxValue)][int] $WindowLimit = 0,
     [string] $Recordings = '',
     [ValidateRange(0, [int]::MaxValue)][int] $RecordingLimit = 0,
-    [string] $OutputPath = ''
+    [string] $OutputPath = '',
+    [string] $CandidatePhonemizer = ''
 )
 $studentInvocation = @{}
 foreach ($parameterName in $MyInvocation.MyCommand.Parameters.Keys) {
@@ -123,8 +124,8 @@ $script:StudentContext = [ordered]@{
 # phonemizer/Invoke-EnglishPhonemizer.ps1; the syllabus is tools/Invoke-KokoroPrecomputedDecoder.ps1.
 $script:StudentInputs = [ordered]@{
     Phonemizer = [ordered]@{
-        Directory = 'build/phonemizer/english/driver/E8BB6AD454496486459F93AB4BF42D8F9AD1D5798CE75A474AC00BF79EA3390C-library-dll'
-        SHA256 = 'B5486F5CDDCA2E12D795003473F16F400E05A95BE2F8C2D972561993D1E07E87'
+        Directory = 'build/phonemizer/english/driver/C9070333748D4E8F319858304103E4F8E30A732E358142A9E7357216185F672B-library-dll'
+        SHA256 = 'CDA84D09B239715E80483944C46D819C5BC0864EC40C9F2332E47208345E88E6'
     }
     Syllabus = 'tools/Invoke-KokoroPrecomputedDecoder.ps1'
     Manifest = 'lib/manifest.json'
@@ -182,15 +183,19 @@ function New-StudentOutputDirectory([string] $Name) {
     $directory
 }
 
-function Import-StudentPhonemizer {
-    $pin = $script:StudentInputs.Phonemizer
+function Import-StudentPhonemizer($Candidate = $null) {
+    # The pinned compiled phonemizer's driver; with Candidate (Directory and SHA256), another build's driver, leaving the
+    # Student's normalization and interpretation types on the pinned one.
+    $pin = if ($null -ne $Candidate) { $Candidate } else { $script:StudentInputs.Phonemizer }
     $directory = Join-Path $script:StudentRoot $pin.Directory
     $receipt = Import-PowerShellDataFile (Join-Path $directory 'driver-receipt.psd1')
     $path = Join-Path $directory ([IO.Path]::GetFileName($receipt.Output))
     if ($receipt.AssemblySha256 -cne $pin.SHA256 -or (Get-FileHash -LiteralPath $path).Hash -cne $pin.SHA256) { throw 'Compiled English phonemizer integrity mismatch.' }
     $assembly = [Reflection.Assembly]::LoadFrom($path)
-    $script:StudentContext.NormalizationType = $assembly.GetType('CoreNormalizationDecision', $true)
-    $script:StudentContext.InterpretationType = $assembly.GetType('CoreEngine', $true)
+    if ($null -eq $Candidate) {
+        $script:StudentContext.NormalizationType = $assembly.GetType('CoreNormalizationDecision', $true)
+        $script:StudentContext.InterpretationType = $assembly.GetType('CoreEngine', $true)
+    }
     $assembly.GetType('CoreDriver', $true).GetMethod('Run').CreateDelegate([Func[string,object]])
 }
 
@@ -1580,7 +1585,38 @@ function Get-StudentCorpusPath {
     $latest[-1].FullName
 }
 
+function Measure-StudentPhonemizerParity {
+    # Every corpus sentence as the corpus pronounces it (Add-StudentPhonemizerPronunciations), through the pinned
+    # phonemizer and through the candidate build in -CandidatePhonemizer: tokens whose pronunciation changes, is gained or
+    # is lost, and sentences whose completeness changes, with examples of each.
+    $receiptPath = Join-Path (Join-Path $script:StudentRoot $CandidatePhonemizer) 'driver-receipt.psd1'
+    if (-not (Test-Path -LiteralPath $receiptPath)) { throw "No driver receipt in -CandidatePhonemizer: $CandidatePhonemizer" }
+    $pinned = Import-StudentPhonemizer
+    $candidate = Import-StudentPhonemizer ([pscustomobject]@{ Directory = $CandidatePhonemizer; SHA256 = (Import-PowerShellDataFile -LiteralPath $receiptPath).AssemblySha256 })
+    $counts = [ordered]@{ Books = 0; Sentences = 0; Tokens = 0; Same = 0; Changed = 0; Gained = 0; Lost = 0; SentencesCompleted = 0; SentencesUncompleted = 0 }
+    $examples = [Collections.Generic.List[object]]::new()
+    foreach ($book in @(Get-StudentBooks)) {
+        Add-StudentPhonemizerPronunciations $book $pinned; $before = $book.Phonemizer; $completeBefore = $book.CompleteSentences
+        Add-StudentPhonemizerPronunciations $book $candidate; $after = $book.Phonemizer; $completeAfter = $book.CompleteSentences
+        $counts.Books++; $counts.Sentences += $completeBefore.Length
+        for ($k = 0; $k -lt $before.Phones.Length; $k++) {
+            $old = $before.Phones[$k]; $new = $after.Phones[$k]
+            if ($null -eq $old -and $null -eq $new) { continue }
+            $counts.Tokens++
+            $change = if ($old -ceq $new -and $before.Last[$k] -eq $after.Last[$k]) { 'Same' } elseif ($null -eq $old) { 'Gained' } elseif ($null -eq $new) { 'Lost' } else { 'Changed' }
+            $counts[$change]++
+            if ($change -ceq 'Changed' -or ($change -cne 'Same' -and $examples.Count -lt 20)) { $examples.Add([pscustomobject]@{ Book = $book.Name; Token = $k; Word = $book.Text.Substring($book.Tokens[4 * $k + 1], $book.Tokens[4 * $k + 2]); Context = $book.Text.Substring([Math]::Max(0, $book.Tokens[4 * $k + 1] - 80), [Math]::Min(160, $book.Text.Length - [Math]::Max(0, $book.Tokens[4 * $k + 1] - 80))).Replace("`n", ' '); Change = $change; Pinned = $old; Candidate = $new }) }
+        }
+        for ($s = 0; $s -lt $completeBefore.Length; $s++) {
+            if ($null -eq $completeBefore[$s] -and $null -ne $completeAfter[$s]) { $counts.SentencesCompleted++ } elseif ($null -ne $completeBefore[$s] -and $null -eq $completeAfter[$s]) { $counts.SentencesUncompleted++ }
+        }
+    }
+    [pscustomobject]@{ PSTypeName = 'Kokoro.StudentPhonemizerParity'; Pinned = $script:StudentInputs.Phonemizer.Directory; Candidate = $CandidatePhonemizer
+        Counts = [pscustomobject]$counts; Examples = $examples.ToArray() }
+}
+
 function Invoke-StudentPronunciation {
+    if ($CandidatePhonemizer) { return Measure-StudentPhonemizerParity }
     if ($Text) {
         $ziraModule = Import-StudentZira
         try {
@@ -3200,7 +3236,7 @@ function Get-StudentPhoneOccurrences($Windows) {
                 Boundary = $boundary; IntoPhrase = $into; ToBoundary = $toEnd
                 WordsToBoundary = [Math]::Max(0, $wordsAfter - $(if ($boundary -ceq '$') { 0 } else { 1 })); PhraseInitialWord = $wordsBefore -eq 0
                 Given = $(if ($null -ne $word) { $given[$wordIndex] } else { $false })
-                SyllableStress = $(if ($null -ne $word -and $offset -ge 0) { $syllable[$wordIndex][$offset] } else { '-' }); Closure = 'Unscanned'; PitchEvent = $null }
+                SyllableStress = $(if ($null -ne $word -and $offset -ge 0) { $syllable[$wordIndex][$offset] } else { '-' }); Closure = 'Unscanned'; ProposalKind = ''; ProposalScope = ''; PitchEvent = $null }
             if ($null -ne $word) {
                 $block = [int][Math]::Floor($word.FirstToken / 64) % 8
                 # Blocks 7, 6 and 5 of 8: held out (reported), development (choices), test (untouched until a milestone).
@@ -3743,61 +3779,68 @@ function Invoke-StudentSpeakOnDsp($Inventory, [string] $Phonemes, $Stream, [stri
 }
 
 function Get-StudentClauseStatus([string] $Text, [object[]] $Spans) {
-    # The compiled interpretation engine's clause state after each occurrence, keyed by source offset: one engine per
-    # sentence span (the engine holds one clause), with the status of its subject-awaiting-predicate closure (Inactive,
-    # Open, Ambiguous, Satisfied, Unresolved) from its prosody transitions. A sentence it cannot hold is counted and
-    # left out.
+    # The compiled interpretation engine over each span (one engine per span; it closes and restarts clauses at sentence
+    # stops, with identities running on): the status of its subject-awaiting-predicate closure after each occurrence
+    # (Inactive, Open, Ambiguous, Satisfied, Unresolved), keyed by source offset, and the typed proposals its completed
+    # closures make (kind, and owner, anchor and scope by source offset). A span it cannot hold is counted and left out.
     if ($null -eq $script:StudentContext.InterpretationType) { $null = Import-StudentPhonemizer }
-    $status = [Collections.Generic.Dictionary[int,string]]::new(); $failed = 0
+    $status = [Collections.Generic.Dictionary[int,string]]::new(); $proposals = [Collections.Generic.List[object]]::new(); $failed = 0
     foreach ($span in $Spans) {
         $state = New-StudentInterpretationState "clause:$($span[0])"
         try { $null = Add-StudentInterpretationText $state $Text.Substring($span[0], $span[1] - $span[0]) $true } catch { $failed++; continue }
         $byToken = @{}; foreach ($transition in $state.Transitions) { $byToken[[int]$transition.Token] = [string]$transition.Status }
         $current = 'Inactive'
         foreach ($occurrence in $state.Engine.Occurrences) { if ($byToken.ContainsKey([int]$occurrence.Identity)) { $current = $byToken[[int]$occurrence.Identity] }; $status[$span[0] + $occurrence.Start] = $current }
+        $at = { param([int] $Identity) $span[0] + $state.Engine.Occurrences[$Identity].Start }
+        foreach ($proposal in @($state.Result.Proposals)) { $proposals.Add([pscustomobject]@{ PSTypeName = 'Kokoro.StudentGrammarProposal'; Kind = [string]$proposal.Kind; Owner = & $at $proposal.Owner; Anchor = & $at $proposal.Anchor; Scope = & $at $proposal.Scope; Support = [int]$proposal.Support; Viable = [int]$proposal.Viable }) }
     }
-    [pscustomobject]@{ PSTypeName = 'Kokoro.StudentClauseStatus'; Status = $status; Sentences = $Spans.Count; Failed = $failed }
+    [pscustomobject]@{ PSTypeName = 'Kokoro.StudentClauseStatus'; Status = $status; Proposals = $proposals.ToArray(); Spans = $Spans.Count; Failed = $failed }
+}
+
+function Set-StudentClauseBinding([object[]] $PhoneList, $Clause, [scriptblock] $SourceStart) {
+    # Each word phone takes its word's closure status by source offset ('Unscanned' where none was recorded), and the
+    # anchor word of each proposal carries its kind and the word key of its scope. SourceStart maps a word occurrence
+    # to its source offset.
+    $wordAt = @{}
+    foreach ($phone in $PhoneList) { if ($null -ne $phone.Word) { $wordAt[(& $SourceStart $phone.Word)] = "$($phone.Word.Book):$($phone.Word.FirstToken)" } }
+    $anchors = @{}; foreach ($proposal in $Clause.Proposals) { if ($wordAt.ContainsKey($proposal.Anchor) -and $wordAt.ContainsKey($proposal.Scope)) { $anchors[$wordAt[$proposal.Anchor]] = $proposal } }
+    foreach ($phone in $PhoneList) {
+        if ($null -eq $phone.Word) { continue }
+        $found = $null; $phone.Closure = if ($Clause.Status.TryGetValue((& $SourceStart $phone.Word), [ref]$found)) { $found } else { 'Unscanned' }
+        $proposal = $anchors["$($phone.Word.Book):$($phone.Word.FirstToken)"]
+        if ($null -ne $proposal) { $phone.ProposalKind = $proposal.Kind; $phone.ProposalScope = $wordAt[$proposal.Scope] }
+    }
 }
 
 function Set-StudentClauseStatus([object[]] $PhoneList) {
-    # Syllabus occurrences: every source sentence holding a window's words goes through Get-StudentClauseStatus, and each
-    # word phone takes its word's closure status by the token's source offset ('Unscanned' where none was recorded).
-    $tokens = @{}
-    foreach ($phone in $PhoneList) { if ($null -ne $phone.Word) { if (-not $tokens.ContainsKey($phone.Word.Book)) { $tokens[$phone.Word.Book] = [Collections.Generic.HashSet[int]]::new() }; $null = $tokens[$phone.Word.Book].Add($phone.Word.FirstToken) } }
-    $books = @{}; $statusByBook = @{}; $sentences = 0; $failed = 0
-    foreach ($name in $tokens.Keys) {
-        $book = @(Get-StudentBooks -Name $name)[0]; $books[$name] = $book; $spans = [Collections.Generic.List[object]]::new()
-        for ($s = 0; $s -lt ($book.Sentences.Length -shr 1); $s++) {
-            $first = $book.Sentences[2 * $s]; $last = $book.Sentences[2 * $s + 1]; $hit = $false
-            for ($k = $first; $k -le $last -and -not $hit; $k++) { $hit = $tokens[$name].Contains($k) }
-            if ($hit) { $spans.Add([int[]]@($book.Tokens[4 * $first + 1], ($book.Tokens[4 * $last + 1] + $book.Tokens[4 * $last + 2]))) }
-        }
-        $clause = Get-StudentClauseStatus $book.Text $spans.ToArray(); $statusByBook[$name] = $clause.Status; $sentences += $clause.Sentences; $failed += $clause.Failed
-    }
-    $words = @{}
-    foreach ($phone in $PhoneList) {
-        if ($null -eq $phone.Word) { continue }
-        $found = $null; $start = $books[$phone.Word.Book].Tokens[4 * $phone.Word.FirstToken + 1]
-        $phone.Closure = if ($statusByBook[$phone.Word.Book].TryGetValue($start, [ref]$found)) { $found } else { 'Unscanned' }
-        $words["$($phone.Word.Book):$($phone.Word.FirstToken)"] = $phone.Closure
+    # Syllabus occurrences: each window's source text (its first word to its last) through Get-StudentClauseStatus, and
+    # the window's word phones bound to the result.
+    $books = @{}; $words = @{}; $spans = 0; $failed = 0; $proposals = 0
+    foreach ($group in ($PhoneList | Where-Object { $null -ne $_.Word } | Group-Object { $_.Window.Index })) {
+        $name = $group.Group[0].Word.Book
+        if (-not $books.ContainsKey($name)) { $books[$name] = @(Get-StudentBooks -Name $name)[0] }
+        $book = $books[$name]; $first = [int]::MaxValue; $last = -1
+        foreach ($phone in $group.Group) { $first = [Math]::Min($first, $phone.Word.FirstToken); $last = [Math]::Max($last, $phone.Word.LastToken) }
+        $span = [int[]]@($book.Tokens[4 * $first + 1], ($book.Tokens[4 * $last + 1] + $book.Tokens[4 * $last + 2]))
+        $clause = Get-StudentClauseStatus $book.Text @(, $span); $spans += $clause.Spans; $failed += $clause.Failed; $proposals += $clause.Proposals.Count
+        Set-StudentClauseBinding @($group.Group) $clause { param($Word) $book.Tokens[4 * $Word.FirstToken + 1] }
+        foreach ($phone in $group.Group) { if ($phone.Used) { $words["$($phone.Word.Book):$($phone.Word.FirstToken)"] = $phone.Closure } }
     }
     $counts = [ordered]@{}; foreach ($group in ($words.Values | Group-Object | Sort-Object Name)) { $counts[$group.Name] = $group.Count }
-    [pscustomobject]@{ Sentences = $sentences; Failed = $failed; Words = $words.Count; Status = [pscustomobject]$counts }
+    [pscustomobject]@{ Spans = $spans; Failed = $failed; Proposals = $proposals; Words = $words.Count; Status = [pscustomobject]$counts }
 }
-
 function New-StudentTextPhones([string] $Text) {
     # Live text as typed occurrences: one interpretation of the text gives its pronunciation and tokens; each token with
     # phonemes is a word occurrence carrying its identity, source offset and span in the phoneme string, and each
-    # sentence's clause state binds to its words by source offset.
+    # clause state and proposals of the text's interpretation bind to its words by source offset.
     $phonemize = Import-StudentPhonemizer
     $state = New-StudentInterpretationState 'text'
     $normalization = Add-StudentInterpretationText $state $Text $true
     if (-not $normalization.Complete -or -not $normalization.Phones) { throw 'The phonemizer could not resolve -Text.' }
     $phonemes = [string]$normalization.Phones
     if ($phonemes -cne [string]$phonemize.Invoke($Text).KokoroPhones) { throw 'The interpretation and the phonemizer disagree on -Text.' }
-    $words = [Collections.Generic.List[object]]::new(); $spans = [Collections.Generic.List[object]]::new(); $sentenceStart = -1; $end = 0
+    $words = [Collections.Generic.List[object]]::new(); $end = 0
     foreach ($token in $state.Result.Tokens) {
-        if ($sentenceStart -lt 0) { $sentenceStart = [int]$token.SourceStart }
         if ($token.EmissionEnd -gt $token.EmissionStart) {
             if ($token.EmissionStart -lt $end) { throw 'Interpretation tokens overlap in the phoneme string.' }
             $end = [int]$token.EmissionEnd
@@ -3805,38 +3848,43 @@ function New-StudentTextPhones([string] $Text) {
                 Kind = $(if ([char]::IsLetterOrDigit([string]$token.Word, 0)) { 'Word' } else { 'Punctuation' }); SourceStart = [int]$token.SourceStart
                 Phonemes = $phonemes.Substring($token.EmissionStart, $token.EmissionEnd - $token.EmissionStart); Start = [int]$token.EmissionStart; FirstTick = 0; Ticks = 0 })
         }
-        if ([string]$token.Word -cin '.', '!', '?') { $spans.Add([int[]]@($sentenceStart, [int]$token.SourceEnd)); $sentenceStart = -1 }
     }
-    if ($sentenceStart -ge 0) { $spans.Add([int[]]@($sentenceStart, $Text.Length)) }
     $window = [pscustomobject]@{ Index = -1; Ticks = 0; Occurrences = $words.ToArray(); Evidence = [pscustomobject]@{ Phonemes = $phonemes; Durations = [int[]]::new($phonemes.Length + 2) } }
     $phones = @(Get-StudentPhoneOccurrences @($window))
-    $clause = Get-StudentClauseStatus $Text $spans.ToArray()
-    foreach ($phone in $phones) { if ($null -ne $phone.Word) { $found = $null; $phone.Closure = if ($clause.Status.TryGetValue($phone.Word.SourceStart, [ref]$found)) { $found } else { 'Unscanned' } } }
+    $clause = Get-StudentClauseStatus $Text @(, [int[]]@(0, $Text.Length))
+    Set-StudentClauseBinding $phones $clause { param($Word) $Word.SourceStart }
     [pscustomobject]@{ PSTypeName = 'Kokoro.StudentTextPhones'; Phonemes = $phonemes; Phones = $phones; Clause = $clause; Interpretation = $state }
 }
 
 function Get-StudentBoundaries([object[]] $PhoneList) {
-    # Each phrase mark between two spoken words of one window: the mark's phone and the phones of the word before it
-    # and of the word after it (the first mark where several stand together).
+    # Each phrase mark between two spoken words of one window, and each grammar proposal's boundary between its anchor
+    # word and its scope word with no mark between them: the boundary's phone (the mark, or the scope word's first
+    # phone), its mark ('' for none), and the phones of the word before it and of the word after it.
     foreach ($group in ($PhoneList | Group-Object { $_.Window.Index })) {
         $runs = [Collections.Generic.List[object]]::new(); $marks = [Collections.Generic.List[object]]::new(); $key = $null
         foreach ($phone in @($group.Group | Sort-Object Index)) {
             if ($null -ne $phone.Word -and $phone.Offset -ge 0 -and $phone.Word.Kind -cnotin 'Punctuation', 'Quote') {
                 $wordKey = "$($phone.Word.Book):$($phone.Word.FirstToken)"
-                if ($wordKey -cne $key) { $runs.Add([Collections.Generic.List[object]]::new()); $key = $wordKey }
+                if ($wordKey -cne $key) {
+                    if ($runs.Count -and $runs[$runs.Count - 1][-1].ProposalScope -ceq $wordKey -and ($marks.Count -eq 0 -or $marks[$marks.Count - 1].Run -ne $runs.Count)) { $marks.Add([pscustomobject]@{ Phone = $phone; Mark = ''; Run = $runs.Count }) }
+                    $runs.Add([Collections.Generic.List[object]]::new()); $key = $wordKey
+                }
                 $runs[$runs.Count - 1].Add($phone)
             }
-            elseif ($script:StudentPhraseMarks.Contains([string]$phone.Symbol) -and ($marks.Count -eq 0 -or $marks[$marks.Count - 1].Run -ne $runs.Count)) { $marks.Add([pscustomobject]@{ Phone = $phone; Run = $runs.Count }); $key = $null }
+            elseif ($script:StudentPhraseMarks.Contains([string]$phone.Symbol) -and ($marks.Count -eq 0 -or $marks[$marks.Count - 1].Run -ne $runs.Count)) { $marks.Add([pscustomobject]@{ Phone = $phone; Mark = [string]$phone.Symbol; Run = $runs.Count }); $key = $null }
         }
-        foreach ($mark in $marks) { if ($mark.Run -ge 1 -and $mark.Run -lt $runs.Count) { [pscustomobject]@{ Phone = $mark.Phone; Previous = $runs[$mark.Run - 1].ToArray(); Next = $runs[$mark.Run].ToArray() } } }
+        foreach ($mark in $marks) { if ($mark.Run -ge 1 -and $mark.Run -lt $runs.Count) { [pscustomobject]@{ Phone = $mark.Phone; Mark = $mark.Mark; Previous = $runs[$mark.Run - 1].ToArray(); Next = $runs[$mark.Run].ToArray() } } }
     }
 }
 
 function Get-StudentBoundaryContext($Boundary) {
-    # The mark and whether the clause's subject still awaits its predicate after the word before it.
-    $status = $Boundary.Previous[-1].Closure
+    # The mark and the grammar's decision there: a proposal of the word before it scoped to the word after it, else
+    # whether the clause's subject still awaits its predicate after the word before it.
+    $previous = $Boundary.Previous[-1]
+    if ($previous.ProposalKind -and $previous.ProposalScope -ceq "$($Boundary.Next[0].Word.Book):$($Boundary.Next[0].Word.FirstToken)") { return "$($Boundary.Mark)|$($previous.ProposalKind)" }
+    $status = $previous.Closure
     $closure = if ($status -cin 'Open', 'Ambiguous') { 'Open' } elseif ($status -ceq 'Unscanned') { 'Unscanned' } else { 'Closed' }
-    "$($Boundary.Phone.Symbol)|$closure"
+    "$($Boundary.Mark)|$closure"
 }
 
 function Get-StudentWordLogHz($Rules, [object[]] $Word) {
@@ -3922,7 +3970,8 @@ function Invoke-StudentTrace {
     $byWindow = $inventory.Phones | Group-Object { $_.Window.Index } -AsHashTable
     $candidates = @($inventory.SyllabusWindows | Where-Object { @($byWindow[$_.Index] | Where-Object { $_.Used -and $_.HeldOut }).Count })
     $withEvent = @($candidates | Where-Object { @($byWindow[$_.Index] | Where-Object { $null -ne $_.PitchEvent -and $_.Used -and $_.HeldOut }).Count })
-    $window = if ($withEvent.Count) { $withEvent[0] } else { $candidates[0] }
+    $withProposal = @($candidates | Where-Object { @($byWindow[$_.Index] | Where-Object { $_.ProposalKind -and $_.Used -and $_.HeldOut }).Count })
+    $window = if ($withProposal.Count) { $withProposal[0] } elseif ($withEvent.Count) { $withEvent[0] } else { $candidates[0] }
     $phones = @($byWindow[$window.Index] | Sort-Object { $_.Index })
     # Equivalence: with the boundary events off the durations and N are identical, and f0 differs only inside an event's
     # scope or its response tail (to the next unvoiced tick). With no admitted program, every program runs for this
