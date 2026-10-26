@@ -41,7 +41,8 @@ pair left out RMS stays between 0.03 and 0.05 and the harmonic-to-noise ratio mo
 
 ## Not yet done
 
-- Several pairs left out together, and whether retuning each site's K and M against the full render recovers the loss.
+- Several pairs left out together and retuned per channel: measured in `generator-residual-retune-20261026.md`
+  (retuning recovers at most 0.39 dB).
 - The correction-to-stream ratio per pair (the trace returned nothing in this run; fixed in `e1ef4ae`).
 - The same study on the phone's depth-first generator.
 
