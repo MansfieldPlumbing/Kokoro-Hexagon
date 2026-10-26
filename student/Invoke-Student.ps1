@@ -3879,15 +3879,22 @@ function Invoke-StudentRendererNormalization {
     $result
 }
 
-# Hand-authored scores for the renderer, played without the Student: each note is a consonant and a stressed vowel in
-# Kokoro symbols, a semitone offset from the score's lowest note, and frames for the consonant and the vowel.
+# Hand-authored scores for the renderer, played without the Student. Each note is an optional consonant and a stressed
+# vowel in Kokoro symbols and a semitone offset from the lowest note (seven semitones below the voice's median voiced
+# f0); a score gives the frames of every consonant and vowel and may carry vibrato: a sine on the vowel's f0 of RateHz,
+# DepthCents peak, starting OnsetSeconds into the vowel and reaching full depth over RiseSeconds.
 $script:StudentScores = [ordered]@{
-    SolfegeMajorScale = @(
-        @('d', 'O', 0), @('ɹ', 'A', 2), @('m', 'i', 4), @('f', 'ɑ', 5), @('s', 'O', 7), @('l', 'ɑ', 9), @('t', 'i', 11), @('d', 'O', 12))
+    SolfegeMajorScale = @{ ConsonantFrames = 2; VowelFrames = 5; Notes = @(
+        @{ Consonant = 'd'; Vowel = 'O'; Semitone = 0 }, @{ Consonant = 'ɹ'; Vowel = 'A'; Semitone = 2 }, @{ Consonant = 'm'; Vowel = 'i'; Semitone = 4 }
+        @{ Consonant = 'f'; Vowel = 'ɑ'; Semitone = 5 }, @{ Consonant = 's'; Vowel = 'O'; Semitone = 7 }, @{ Consonant = 'l'; Vowel = 'ɑ'; Semitone = 9 }
+        @{ Consonant = 't'; Vowel = 'i'; Semitone = 11 }, @{ Consonant = 'd'; Vowel = 'O'; Semitone = 12 }) }
+    SustainedAh = @{ VowelFrames = 70; Notes = @(@{ Vowel = 'ɑ'; Semitone = 7 }) }
+    SustainedAhVibrato = @{ VowelFrames = 70; Notes = @(@{ Vowel = 'ɑ'; Semitone = 7 }); Vibrato = @{ RateHz = 5.5; DepthCents = 50; OnsetSeconds = 0; RiseSeconds = 0 } }
+    SustainedAhDelayedVibrato = @{ VowelFrames = 70; Notes = @(@{ Vowel = 'ɑ'; Semitone = 7 }); Vibrato = @{ RateHz = 5.5; DepthCents = 50; OnsetSeconds = 0.6; RiseSeconds = 0.3 } }
 }
 $script:StudentVoicelessConsonants = 'f', 's', 't', 'k', 'p', 'h', 'θ', 'ʃ', 'ʧ'
 
-function Invoke-StudentRendererScore([string] $Score = 'SolfegeMajorScale', [int] $ConsonantFrames = 2, [int] $VowelFrames = 5) {
+function Invoke-StudentRendererScore([string] $Score = 'SolfegeMajorScale') {
     # A declared score on the phone (Run -Case generator-score), no Student: its phones through the host text encoder,
     # the DSP decoder and the generator, legato with no gaps. The lowest note sits seven semitones below the voice's
     # median voiced f0 in the syllabus, so the octave spans its range; N is the syllabus median (voiced ticks for voiced
@@ -3896,13 +3903,14 @@ function Invoke-StudentRendererScore([string] $Score = 'SolfegeMajorScale', [int
     # score's own moments.
     if ($null -eq $State -or $State.PSObject.TypeNames -notcontains 'Kokoro.SpeechRenderer') { throw 'Score needs the speech renderer in -State (Run -Case generator-score).' }
     if (-not $script:StudentScores.Contains($Score)) { throw "No score $Score; declared: $($script:StudentScores.Keys -join ', ')." }
-    $renderer = $State; $out = Get-StudentOutputPath 'Score'; $notes = $script:StudentScores[$Score]
+    $renderer = $State; $out = Get-StudentOutputPath 'Score'; $record = $script:StudentScores[$Score]; $notes = $record.Notes
+    $consonantFrames = if ($record.ContainsKey('ConsonantFrames')) { $record.ConsonantFrames } else { 0 }; $vowelFrames = $record.VowelFrames
     $windows = @((Invoke-StudentSyllabus).Windows)
     $voicedF0 = [Collections.Generic.List[double]]::new(); $voicedN = [Collections.Generic.List[double]]::new(); $unvoicedN = [Collections.Generic.List[double]]::new()
     foreach ($window in $windows) { for ($t = 0; $t -lt $window.Evidence.F0.Length; $t++) { if ($window.Evidence.F0[$t] -gt 10) { $voicedF0.Add($window.Evidence.F0[$t]); $voicedN.Add($window.Evidence.N[$t]) } else { $unvoicedN.Add($window.Evidence.N[$t]) } } }
     $median = { param($list) $a = $list.ToArray(); [Array]::Sort($a); $a[[int][Math]::Floor($a.Length / 2)] }
     $medianF0 = & $median $voicedF0; $lowest = $medianF0 * [Math]::Pow(2, -7 / 12.0); $nVoiced = & $median $voicedN; $nUnvoiced = & $median $unvoicedN
-    $phonemes = (@($notes | ForEach-Object { "$($_[0])ˈ$($_[1])" }) -join ' ')
+    $phonemes = (@($notes | ForEach-Object { "$($_['Consonant'])ˈ$($_.Vowel)" }) -join ' ')
     # One duration per token, each at least one frame: the pads, then per note its consonant, the stress mark and its
     # vowel (at the note's f0), and one frame for each space (holding the note before it).
     $durations = [Collections.Generic.List[int]]::new(); $durations.Add(1)
@@ -3910,17 +3918,27 @@ function Invoke-StudentRendererScore([string] $Score = 'SolfegeMajorScale', [int
     $addTicks = { param([int]$frames, [double]$f0, [double]$n) for ($i = 0; $i -lt 2 * $frames; $i++) { $tickF0.Add($f0); $tickN.Add($n) } }
     & $addTicks 1 0 $nUnvoiced
     for ($k = 0; $k -lt $notes.Count; $k++) {
-        $consonant, $vowel, $semitone = $notes[$k]; $f0 = $lowest * [Math]::Pow(2, $semitone / 12.0)
-        $voiceless = $script:StudentVoicelessConsonants -ccontains $consonant
+        $note = $notes[$k]; $f0 = $lowest * [Math]::Pow(2, $note.Semitone / 12.0)
         $first = $tickF0.Count
-        $durations.Add($ConsonantFrames); & $addTicks $ConsonantFrames $(if ($voiceless) { 0 } else { $f0 }) $(if ($voiceless) { $nUnvoiced } else { $nVoiced })
-        $durations.Add(1); & $addTicks 1 $f0 $nVoiced; $durations.Add($VowelFrames); & $addTicks $VowelFrames $f0 $nVoiced
+        if ($note['Consonant']) {
+            $voiceless = $script:StudentVoicelessConsonants -ccontains $note.Consonant
+            $durations.Add($consonantFrames); & $addTicks $consonantFrames $(if ($voiceless) { 0 } else { $f0 }) $(if ($voiceless) { $nUnvoiced } else { $nVoiced })
+        }
+        $durations.Add(1); & $addTicks 1 $f0 $nVoiced; $vowelStart = $tickF0.Count; $durations.Add($vowelFrames); & $addTicks $vowelFrames $f0 $nVoiced
+        if ($record.ContainsKey('Vibrato')) {
+            $v = $record.Vibrato
+            for ($t = $vowelStart; $t -lt $tickF0.Count; $t++) {
+                $since = ($t - $vowelStart) / 80.0 - $v.OnsetSeconds; if ($since -lt 0) { continue }
+                $depth = if ($v.RiseSeconds -gt 0) { [Math]::Min(1.0, $since / $v.RiseSeconds) } else { 1.0 }
+                $tickF0[$t] = $f0 * [Math]::Pow(2, $depth * $v.DepthCents / 1200.0 * [Math]::Sin(2 * [Math]::PI * $v.RateHz * $since))
+            }
+        }
         if ($k -lt $notes.Count - 1) { $durations.Add(1); & $addTicks 1 $f0 $nVoiced }
         $noteTicks.Add([int[]]@($first, $tickF0.Count, [Math]::Round($f0, 1)))
     }
     $durations.Add(1); & $addTicks 1 0 $nUnvoiced
     $f0Curve = $tickF0.ToArray(); $nCurve = $tickN.ToArray(); $ticks = $f0Curve.Length
-    $syllabus = Import-StudentSyllabus (Join-Path $out 'syllabus')
+    $syllabus = Import-StudentSyllabus (Join-Path $out "syllabus-$Score")
     try { $encoded = Invoke-OfflineSpeech -Phonemes $phonemes -Voice $Voice -SuppliedDurations $durations.ToArray() -SuppliedF0 $f0Curve -SuppliedN $nCurve -SkipDecoder }
     finally { Remove-Module -ModuleInfo $syllabus -Force }
     $decoded = $renderer.Decode([float[]]$encoded.Aligned, $f0Curve, $nCurve)
@@ -3948,7 +3966,7 @@ function Invoke-StudentRendererScore([string] $Score = 'SolfegeMajorScale', [int
     $result = [pscustomobject]@{ PSTypeName = 'Kokoro.StudentRendererScore'; Score = $Score; Voice = $Voice; Phonemes = $phonemes; MedianVoicedF0 = [Math]::Round($medianF0, 1)
         LowestF0 = [Math]::Round($lowest, 1); Ticks = $ticks; Seconds = $ticks / 80.0; DecoderDspMs = $decoded.DspMs; ExportFailure = $exportFailure
         Controls = [pscustomobject]@{ Durations = $durations.ToArray(); F0 = $f0Curve; N = $nCurve }; Renders = $renders; Directory = $out; MachineSHA256 = $script:StudentMachineSHA256 }
-    Export-Clixml -LiteralPath (Join-Path $out 'score.clixml') -InputObject $result -Depth 5
+    Export-Clixml -LiteralPath (Join-Path $out "$Score.clixml") -InputObject $result -Depth 5
     $result
 }
 
@@ -4618,7 +4636,7 @@ $script:StudentSteps = [ordered]@{
     PitchGate = { Invoke-StudentPitchGate }
     Trace = { Invoke-StudentTrace }
     Normalization = { Invoke-StudentRendererNormalization }
-    Score = { Invoke-StudentRendererScore }
+    Score = { foreach ($name in $script:StudentScores.Keys) { Invoke-StudentRendererScore $name } }
 }
 }
 & $studentOwner { & $script:StudentSteps[$Step] }
