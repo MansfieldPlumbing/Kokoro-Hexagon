@@ -13,6 +13,12 @@ CompareConvolution checks every returned teacher boundary against the previous c
 Kernels checks short spans, phase tails, output padding and dilation against the previous kernel.
 FrontEnd runs ALBERT, bert_encoder, the predictor and the text encoder on the phonemes of every stored stock capture
 and compares token ids, ALBERT and bert_encoder output, F0, N and the aligned text encoding with stock.
+.PARAMETER AlbertQuantization
+FrontEnd: run ALBERT's and bert_encoder's linears in a DSP integer format, simulated in float, and also compare the
+stream after each of ALBERT's 12 repeats. Keys: Rotation (block Hadamard width, 0 none), ActivationBits (0 exact, per
+token), WeightBits (0 exact), WeightGroup (input columns per weight step, 0 the whole row), PowerOfTwo (activation steps),
+SignSets (random +-1 diagonals ahead of the rotation, cycled over the repeats, 0 none), AlternateRounding (the complement
+weight rounding on odd repeats, so the shared layer's rounding errors alternate in sign).
 Library compiles and loads the reference, then returns without rendering; dot-source
 it (. ./Invoke-KokoroPrecomputedDecoder.ps1 -Mode Library) to call Invoke-OfflineDecoder,
 Invoke-OfflineGenerator and the compiled delegates from the caller's scope.
@@ -80,6 +86,7 @@ param(
     [ValidateSet('Vector','Scalar')][string] $Dense = 'Vector',
     [ValidateRange(8,1024)][int] $ConvolutionTileFrames = 1024,
     [Collections.IDictionary] $SelectedUnits = $null,
+    [Collections.IDictionary] $AlbertQuantization = $null,
     [object[]] $DonorRecords = @(),
     [switch] $h
 )
@@ -901,6 +908,60 @@ class OfflineUpstreamMath {
         }
         return $y
     }
+    static [float[]] Hadamard([float[]] $x, [int] $rows, [int] $columns, [int] $block) {
+        # Orthonormal block Hadamard over each row's columns, block a power of two dividing columns: W x = (W H)(H x).
+        if ($x.Length -ne $rows * $columns -or $block -lt 2 -or ($block -band ($block - 1)) -ne 0 -or $columns % $block -ne 0) { throw [ArgumentException]::new('Hadamard shape mismatch.') }
+        $y = [double[]]::new($x.Length); $out = [float[]]::new($x.Length); $scale = [double]1 / [Math]::Sqrt([double]$block)
+        for ($i = 0; $i -lt $x.Length; $i++) { $y[$i] = [double]$x[$i] }
+        for ($base = 0; $base -lt $x.Length; $base += $block) {
+            for ($h = 1; $h -lt $block; $h = $h * 2) {
+                for ($i = $base; $i -lt $base + $block; $i += 2 * $h) {
+                    for ($j = $i; $j -lt $i + $h; $j++) { $a = $y[$j]; $b = $y[$j + $h]; $y[$j] = $a + $b; $y[$j + $h] = $a - $b }
+                }
+            }
+        }
+        for ($i = 0; $i -lt $x.Length; $i++) { $out[$i] = [float]($y[$i] * $scale) }
+        return $out
+    }
+    static [float[]] ScaleColumns([float[]] $x, [int] $rows, [int] $columns, [float[]] $factors) {
+        # Each column times its factor (a diagonal on the right).
+        if ($x.Length -ne $rows * $columns -or $factors.Length -ne $columns) { throw [ArgumentException]::new('ScaleColumns shape mismatch.') }
+        $y = [float[]]::new($x.Length)
+        for ($i = 0; $i -lt $x.Length; $i++) { $y[$i] = [float]([double]$x[$i] * [double]$factors[$i % $columns]) }
+        return $y
+    }
+    static [float[]] QuantizeRowsComplement([float[]] $x, [int] $rows, [int] $columns, [int] $group, [int] $bits) {
+        # The complement of nearest rounding on the same grid: q2 = round(2 v / step - q1), so q1 and q2 average to within
+        # a quarter step of v and their errors point opposite ways.
+        if ($x.Length -ne $rows * $columns -or $group -lt 1 -or $columns % $group -ne 0) { throw [ArgumentException]::new('QuantizeRowsComplement shape mismatch.') }
+        $y = [float[]]::new($x.Length); $top = [Math]::Pow([double]2, [double]($bits - 1)) - [double]1
+        for ($start = 0; $start -lt $x.Length; $start += $group) {
+            $peak = [double]0
+            for ($i = $start; $i -lt $start + $group; $i++) { $peak = [Math]::Max($peak, [Math]::Abs([double]$x[$i])) }
+            if ($peak -eq [double]0) { continue }
+            $step = $peak / $top
+            for ($i = $start; $i -lt $start + $group; $i++) {
+                $v = [double]$x[$i] / $step; $q1 = [Math]::Max(-$top, [Math]::Min($top, [Math]::Round($v)))
+                $y[$i] = [float]([Math]::Max(-$top, [Math]::Min($top, [Math]::Round([double]2 * $v - $q1))) * $step)
+            }
+        }
+        return $y
+    }
+    static [float[]] QuantizeRows([float[]] $x, [int] $rows, [int] $columns, [int] $group, [int] $bits, [bool] $powerOfTwo) {
+        # Symmetric integer rounding with one step per row and group of columns (largest magnitude over 2^(bits-1) - 1,
+        # or the next power of two at or above it); returns the dequantized values.
+        if ($x.Length -ne $rows * $columns -or $group -lt 1 -or $columns % $group -ne 0) { throw [ArgumentException]::new('QuantizeRows shape mismatch.') }
+        $y = [float[]]::new($x.Length); $top = [Math]::Pow([double]2, [double]($bits - 1)) - [double]1
+        for ($start = 0; $start -lt $x.Length; $start += $group) {
+            $peak = [double]0
+            for ($i = $start; $i -lt $start + $group; $i++) { $peak = [Math]::Max($peak, [Math]::Abs([double]$x[$i])) }
+            if ($peak -eq [double]0) { continue }
+            $step = $peak / $top
+            if ($powerOfTwo) { $step = [Math]::Pow([double]2, [Math]::Ceiling([Math]::Log2($step))) }
+            for ($i = $start; $i -lt $start + $group; $i++) { $y[$i] = [float]([Math]::Max(-$top, [Math]::Min($top, [Math]::Round([double]$x[$i] / $step))) * $step) }
+        }
+        return $y
+    }
     static [float[]] Add([float[]] $a, [float[]] $b) {
         if ($a.Length -ne $b.Length) { throw [ArgumentException]::new('Add shape mismatch.') }
         $y = [float[]]::new($a.Length)
@@ -1184,6 +1245,17 @@ $checkpoint = & $reader.Read $modelPath
 $weightCache = [Collections.Generic.Dictionary[string,float[]]]::new([StringComparer]::Ordinal)
 $convolutionCache = [Collections.Generic.Dictionary[string,object]]::new([StringComparer]::Ordinal)
 $denseCache = [Collections.Generic.Dictionary[string,object]]::new([StringComparer]::Ordinal)
+$script:OfflineAlbertFormat = $null; $script:OfflineAlbertTrace = $null
+$script:OfflineFormatWeights = [Collections.Generic.Dictionary[string,float[]]]::new([StringComparer]::Ordinal)
+if ($null -ne $AlbertQuantization) {
+    foreach ($key in $AlbertQuantization.Keys) { if ($key -notin 'Rotation','ActivationBits','WeightBits','WeightGroup','PowerOfTwo','SignSets','AlternateRounding') { throw "AlbertQuantization has no setting '$key'." } }
+    # Indexers, not properties: a missing key reads as null (0, $false) under strict mode.
+    $script:OfflineAlbertFormat = [pscustomobject]@{ Rotation = [int]$AlbertQuantization['Rotation']; ActivationBits = [int]$AlbertQuantization['ActivationBits']
+        WeightBits = [int]$AlbertQuantization['WeightBits']; WeightGroup = [int]$AlbertQuantization['WeightGroup']; PowerOfTwo = [bool]$AlbertQuantization['PowerOfTwo']
+        SignSets = [int]$AlbertQuantization['SignSets']; AlternateRounding = [bool]$AlbertQuantization['AlternateRounding'] }
+}
+# ALBERT's current repeat (0..11) for repeat-dependent formats; -1 outside the repeats.
+$script:OfflineAlbertRepeat = -1
 $lstmCache = [Collections.Generic.Dictionary[string,object]]::new([StringComparer]::Ordinal)
 $profile = [Collections.Generic.List[object]]::new()
 $levelContext = $null
@@ -1532,15 +1604,48 @@ function Invoke-OfflineLstm([float[]] $Rows, [int] $rowCount, [string] $Prefix) 
 function Invoke-OfflineLinear([float[]] $Rows, [int] $rowCount, [string] $Prefix) {
     $stageWatch = [Diagnostics.Stopwatch]::StartNew()
     $weight = Read-OfflineWeight ($Prefix + '.weight'); $bias = Read-OfflineWeight ($Prefix + '.bias')
-    $inputs = [int]($weight.Length / $bias.Length)
+    $inputs = [int]($weight.Length / $bias.Length); $cacheKey = $Prefix
+    # -AlbertQuantization: ALBERT's and bert_encoder's linears in a DSP integer format (rotation, activation bits per token,
+    # weight bits per output row and column group), simulated in float; the rotated quantized weights are cached per prefix.
+    if ($null -ne $script:OfflineAlbertFormat -and ($Prefix.StartsWith('bert.module.') -or $Prefix.StartsWith('bert_encoder.'))) {
+        $format = $script:OfflineAlbertFormat; $block = [Math]::Min([int]$format.Rotation, $inputs)
+        # Within ALBERT's repeats: SignSets cycles that many random +-1 diagonals ahead of the rotation (W D H against H D x,
+        # set 0 none), and AlternateRounding uses the complement rounding on odd repeats.
+        $repeat = $script:OfflineAlbertRepeat; $set = 0; $complement = $false
+        if ($repeat -ge 0 -and [int]$format.SignSets -gt 0) { $set = $repeat % [int]$format.SignSets }
+        if ($repeat -ge 0 -and [bool]$format.AlternateRounding) { $complement = ($repeat % 2) -eq 1 }
+        $cacheKey = '{0}|{1}|{2}|{3}|{4}|{5}|{6}' -f $Prefix, $block, $format.WeightBits, $format.WeightGroup, $format.PowerOfTwo, $set, $complement
+        $signs = $null
+        if ($set -gt 0) {
+            $signKey = "signs|$inputs|$set"
+            if (-not $script:OfflineFormatWeights.ContainsKey($signKey)) {
+                $random = [Random]::new(7919 * $set + $inputs); $draw = [float[]]::new($inputs)
+                for ($c = 0; $c -lt $inputs; $c++) { $draw[$c] = if ($random.Next(2) -eq 0) { [float]-1 } else { [float]1 } }
+                $script:OfflineFormatWeights[$signKey] = $draw
+            }
+            $signs = $script:OfflineFormatWeights[$signKey]
+            $Rows = $upstreamMath::ScaleColumns($Rows, $rowCount, $inputs, $signs)
+        }
+        if ($block -ge 2) { $Rows = $upstreamMath::Hadamard($Rows, $rowCount, $inputs, $block) }
+        if ([int]$format.ActivationBits -gt 0) { $Rows = $upstreamMath::QuantizeRows($Rows, $rowCount, $inputs, $inputs, [int]$format.ActivationBits, [bool]$format.PowerOfTwo) }
+        if (-not $script:OfflineFormatWeights.ContainsKey($cacheKey)) {
+            $signed = if ($null -ne $signs) { $upstreamMath::ScaleColumns($weight, $bias.Length, $inputs, $signs) } else { $weight }
+            $rotated = if ($block -ge 2) { $upstreamMath::Hadamard($signed, $bias.Length, $inputs, $block) } else { $signed }
+            $group = if ([int]$format.WeightGroup -gt 0) { [Math]::Min([int]$format.WeightGroup, $inputs) } else { $inputs }
+            $script:OfflineFormatWeights[$cacheKey] = if ([int]$format.WeightBits -le 0) { $rotated }
+                elseif ($complement) { $upstreamMath::QuantizeRowsComplement($rotated, $bias.Length, $inputs, $group, [int]$format.WeightBits) }
+                else { $upstreamMath::QuantizeRows($rotated, $bias.Length, $inputs, $group, [int]$format.WeightBits, $false) }
+        }
+        $weight = $script:OfflineFormatWeights[$cacheKey]
+    }
     if ($Dense -eq 'Scalar') {
         $values = $upstreamMath::Linear($Rows, $rowCount, $inputs, $weight, $bias, $bias.Length)
     } else {
         if ($Rows.Length -ne $rowCount * $inputs -or $rowCount -lt 1) { throw 'Dense input shape mismatch.' }
-        if (-not $denseCache.ContainsKey($Prefix)) {
-            $denseCache.Add($Prefix, [pscustomobject]@{ Weights = $denseWorker::Pack($weight, $bias.Length, $inputs); Bias = $denseWorker::Pack($bias, $bias.Length, 1) })
+        if (-not $denseCache.ContainsKey($cacheKey)) {
+            $denseCache.Add($cacheKey, [pscustomobject]@{ Weights = $denseWorker::Pack($weight, $bias.Length, $inputs); Bias = $denseWorker::Pack($bias, $bias.Length, 1) })
         }
-        $packed = $denseCache[$Prefix]
+        $packed = $denseCache[$cacheKey]
         $roundedRows = [int][Math]::Ceiling($rowCount / 4.0) * 4
         $paddedRows = [float[]]::new($roundedRows * $inputs)
         [Array]::Copy($Rows, $paddedRows, $Rows.Length)
@@ -1568,6 +1673,7 @@ function Invoke-OfflineAlbert([int[]] $Ids) {
     $x = $upstreamMath::LayerNorm($x, $t, 128, (Read-OfflineWeight ($p + 'embeddings.LayerNorm.weight')), (Read-OfflineWeight ($p + 'embeddings.LayerNorm.bias')), [double]1e-12)
     $h = Invoke-OfflineLinear $x $t ($p + 'encoder.embedding_hidden_mapping_in')
     for ($repeat = 0; $repeat -lt 12; $repeat++) {
+        $script:OfflineAlbertRepeat = $repeat
         $query = Invoke-OfflineLinear $h $t ($layer + 'attention.query')
         $key = Invoke-OfflineLinear $h $t ($layer + 'attention.key')
         $value = Invoke-OfflineLinear $h $t ($layer + 'attention.value')
@@ -1579,7 +1685,9 @@ function Invoke-OfflineAlbert([int[]] $Ids) {
         $feedForward = Invoke-OfflineLinear $feedForward $t ($layer + 'ffn_output')
         $h = $upstreamMath::LayerNorm($upstreamMath::Add($feedForward, $attention), $t, 768,
             (Read-OfflineWeight ($layer + 'full_layer_layer_norm.weight')), (Read-OfflineWeight ($layer + 'full_layer_layer_norm.bias')), [double]1e-12)
+        if ($null -ne $script:OfflineAlbertTrace) { $script:OfflineAlbertTrace.Add($h) }
     }
+    $script:OfflineAlbertRepeat = -1
     return , $h
 }
 function Read-OfflineVoiceRow([string] $Voice, [int] $PhonemeCount) {
@@ -2105,6 +2213,7 @@ if ($Mode -eq 'FrontEnd') {
         @(Get-ChildItem -LiteralPath (Join-Path $InputRepository 'build') -Directory | Where-Object Name -in 'speak-stock-control-20261010', 'speak-typed-capture-check') +
         @(Get-ChildItem -LiteralPath (Join-Path $InputRepository 'build/capture-timing-passages') -Directory -Filter '*-decoder')
     $frontResults = [Collections.Generic.List[object]]::new(); $frontProfile = [Collections.Generic.List[object]]::new()
+    if ($null -ne $script:OfflineAlbertFormat) { $script:OfflineAlbertFormat | Export-Clixml -LiteralPath (Join-Path $output 'albert-format.clixml') }
     foreach ($directory in $captureDirectories) {
         $capture = Get-Content -LiteralPath (Join-Path $directory.FullName 'capture.json') -Raw | ConvertFrom-Json -AsHashtable
         # A capture rendered from a supplied decoder input did not run stock's predictor: it is no front-end reference.
@@ -2112,6 +2221,7 @@ if ($Mode -eq 'FrontEnd') {
         if ([IO.File]::Exists($spec) -and (Get-Content -LiteralPath $spec -Raw | ConvertFrom-Json -AsHashtable).ContainsKey('decoderInput')) { Write-Host "$($directory.Name): supplied decoder input, skipped"; continue }
         if ($capture.styleEntry -ne $capture.phonemes.Length - 1) { throw "$($directory.Name): style row $($capture.styleEntry) is not the phoneme count less one." }
         $watch = [Diagnostics.Stopwatch]::StartNew(); $profile.Clear()
+        if ($null -ne $script:OfflineAlbertFormat) { $script:OfflineAlbertTrace = [Collections.Generic.List[float[]]]::new() }
         $speech = Invoke-OfflineSpeech -Phonemes $capture.phonemes -Voice $capture.voice -Speed $capture.speed -SkipDecoder
         $hostMs = $watch.Elapsed.TotalMilliseconds
         $frontProfile.AddRange([object[]]@($profile | ForEach-Object { [pscustomobject]@{ Capture = $directory.Name; Phonemes = $capture.phonemes.Length; Stage = $_.Stage; Kind = $_.Kind; Milliseconds = [Math]::Round($_.Milliseconds, 2); Frames = $_.Frames } }))
@@ -2137,6 +2247,19 @@ if ($Mode -eq 'FrontEnd') {
             $frontResults.Add([pscustomobject]@{ PSTypeName = 'Kokoro.OfflineFrontEndBoundary'; Capture = $directory.Name; Phonemes = $capture.phonemes.Length
                 Boundary = $boundary.Name; Values = $expected.Length; HostValues = $actual.Length; SnrDb = [Math]::Round($metrics[0], 2); MaxAbsError = $metrics[1]
                 BeyondFloatNoise = ($actual.Length -ne $expected.Length -or $metrics[0] -lt 80); HostMs = [Math]::Round($hostMs); SourceSHA256 = $sourceHash })
+        }
+        # With a quantization format: the stream after each repeat against the capture's (token-major, as the port).
+        if ($null -ne $script:OfflineAlbertTrace) {
+            for ($repeat = 0; $repeat -lt $script:OfflineAlbertTrace.Count; $repeat++) {
+                $tensor = $capture.tensors["bert.layer.$repeat.output"]; if ($null -eq $tensor) { continue }
+                $path = Join-Path $directory.FullName $tensor.file
+                if ((Get-FileHash -LiteralPath $path).Hash -cne $tensor.sha256) { throw "$($directory.Name): layer $repeat integrity mismatch." }
+                $raw = [IO.File]::ReadAllBytes($path); $expected = [float[]]::new($raw.Length / 4); [Buffer]::BlockCopy($raw, 0, $expected, 0, $raw.Length)
+                $metrics = $compare.Invoke($script:OfflineAlbertTrace[$repeat], $expected)
+                $frontResults.Add([pscustomobject]@{ PSTypeName = 'Kokoro.OfflineFrontEndBoundary'; Capture = $directory.Name; Phonemes = $capture.phonemes.Length
+                    Boundary = "Repeat.$repeat"; Values = $expected.Length; HostValues = $script:OfflineAlbertTrace[$repeat].Length; SnrDb = [Math]::Round($metrics[0], 2); MaxAbsError = $metrics[1]
+                    BeyondFloatNoise = ($metrics[0] -lt 80); HostMs = [Math]::Round($hostMs); SourceSHA256 = $sourceHash })
+            }
         }
         $frontResults.ToArray() | Export-Clixml -LiteralPath (Join-Path $output 'frontend.clixml')
         Write-Host ('{0}: {1} phonemes, {2:F0} ms' -f $directory.Name, $capture.phonemes.Length, $hostMs)
