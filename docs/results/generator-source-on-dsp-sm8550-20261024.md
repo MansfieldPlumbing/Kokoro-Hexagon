@@ -217,9 +217,28 @@ PCM and the compared tensor are identical in all four runs and equal the layer j
 Receipt: `build/resident-source-256-vs-128-ab.clixml`, `build/resident-source-256-ab.clixml` (against both chunked)
 and their `build/resident-source-256-*` directories.
 
+### DMA ledger emitted by the job (2026-10-27)
+
+The job now records every transfer it emits in `Layout.DmaLedger` (section, span, class, transfers and bytes per run,
+loop bodies counted by their trip counts; the tail's own transfers are not included). Classes follow the base register:
+weights, parameters, the section's state slot (save, restore), and tensors. Library bytes are unchanged. For the job
+with both sources resident (`91A0B066...`):
+
+| Section | Weights | State save | State restore | Tensors | Parameters |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| 256-channel main (with `ups.0`) | 114.43 MB | 8.91 MB | 8.91 MB | 6.37 MB | 1.14 MB |
+| 128-channel main (with `ups.1`) | 5.60 MB | 14.35 MB | 14.35 MB | 8.73 MB | 0.52 MB |
+| `noise_res.0` (with `noise_convs.0`) | 3.54 MB | 6.29 MB | 6.29 MB | 4.02 MB | 0.54 MB |
+| `noise_res.1` (with `noise_convs.1`) | 1.23 MB | 5.96 MB | 5.96 MB | 8.98 MB | 0.30 MB |
+| Total | 124.80 MB | 35.52 MB | 35.52 MB | 28.09 MB | 2.50 MB |
+
+226.43 MB per run. The 256-channel weights (90.8 MB of chunked streaming and 23.6 MB of `ups.0`, loaded once per span)
+are the largest class; state saves and restores, 71.0 MB, the second.
+
 ## Not yet done
 
-- **State:** sections save and restore their read-only regions (weights, records, K/M/S) with their live state.
+- **State:** sections save and restore their read-only regions (weights, records, K/M/S) and whole rings with their
+  live state.
 - **Overlap:** weight DMA overlapped with computation.
 - **Length:** the harmonic source and the `har` layouts are whole-length in VTCM, which limits length to about 2 s.
   Spanning them removes that limit.

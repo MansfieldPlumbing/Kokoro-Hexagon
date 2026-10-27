@@ -653,9 +653,21 @@ function New-KokoroGenerator60x16RunSteps {
         }
     }
 
+    # DMA ledger (Layout.DmaLedger): bytes each run moves, by section, span and class, every transfer counted as often as
+    # it runs ($dmaRepeat: loops multiply it while their body is emitted). The tail's own transfers are not included.
+    $dmaLedger=[Collections.Generic.List[object]]::new(); $dmaRepeat=1L; $ledgerSpan='-'
+    $ledgerAdd={param([string]$class,[long]$length) $dmaLedger.Add([pscustomobject]@{Section="$Channels$sfx";Span=$ledgerSpan;Class=$class;Count=$dmaRepeat;Bytes=$dmaRepeat*$length}) }
+    # Class by base register: r21 weights, r22 parameters, the bound section's state slot in r25, else tensors (VTCM r18).
+    $dmaClass={param([int]$destBase,[long]$destOff,[int]$srcBase,[long]$srcOff)
+        $slot=if(Test-Path variable:stateSlot){$stateSlot}else{-1L}
+        if($srcBase -eq 21){'Weights'} elseif($srcBase -eq 22){'Parameters'}
+        elseif($destBase -eq 18 -and $srcBase -eq 25 -and $srcOff -eq $slot){'StateRestore'}
+        elseif($destBase -eq 25 -and $srcBase -eq 18 -and $destOff -eq $slot){'StateSave'}
+        elseif($destBase -eq 18){'TensorIn'} else {'TensorOut'} }
     # DMA dest <- src, length bytes; r24 holds two 64-byte aligned descriptor slots in DDR.
     $dma={param([int]$destBase,[long]$destOff,[int]$srcBase,[long]$srcOff,[long]$length)
         if($length -lt 2 -or $length -ge 2*16777215){throw 'DMA length out of range'}
+        & $ledgerAdd (& $dmaClass $destBase $destOff $srcBase $srcOff) $length
         & $ptr 1 $srcBase $srcOff; & $ptr 2 $destBase $destOff; & $imm 3 $length; $s.Add(@{Op='addi';d=0;s=24;i=0})
         foreach($step in @(New-KokoroDmaCopySteps -NoReturn)){$s.Add($step)}
         & $mark 'Dma'
@@ -905,7 +917,7 @@ function New-KokoroGenerator60x16RunSteps {
         $s.Add(@{Op='addi';d=$r;s=17;i=$delta}); $s.Add(@{Op='asl-i';d=$r;s=$r;i=($batchShift+2)})
         & $imm 15 ($tileRegions.Controller+4L*$within); $s.Add(@{Op='add';d=$r;s=$r;t=15}); $s.Add(@{Op='add';d=$r;s=$r;t=18})
     }
-    $dmaRegisters={param([long]$length) & $imm 3 $length; $s.Add(@{Op='addi';d=0;s=24;i=0}); foreach($step in @(New-KokoroDmaCopySteps -NoReturn)){$s.Add($step)} }
+    $dmaRegisters={param([long]$length) & $ledgerAdd 'Tensor' $length; & $imm 3 $length; $s.Add(@{Op='addi';d=0;s=24;i=0}); foreach($step in @(New-KokoroDmaCopySteps -NoReturn)){$s.Add($step)} }
     # Backward schedule. Register r <- tile (BatchTiles block + delta) of a ring of ringTiles tiles (a power of two) at
     # base: a constant block, or at run time the step in r17. Tiles are virtual; the mask is the wrap.
     $tileAt={param([int]$r,[long]$base,[int]$ringTiles,$block,[int]$delta)
@@ -1097,7 +1109,9 @@ function New-KokoroGenerator60x16RunSteps {
                 & $imm 17 $j
                 $steps=& $label; $stepsDone=& $label
                 $s.Add(@{Op='label';Name=$steps})
+                $outerRepeat=$dmaRepeat; $dmaRepeat=$outerRepeat*[long](($loopEnd-$j)/$period)
                 for($i=0;$i -lt $period;$i++){ & $step $null (($j+$i) % 2); $s.Add(@{Op='addi';d=17;s=17;i=1}) }
+                $dmaRepeat=$outerRepeat
                 & $imm 15 $loopEnd; $s.Add(@{Op='eq';d=0;s=17;t=15}); $s.Add(@{Op='jump-p';u=0;Label=$stepsDone}); & $jump $steps
                 $s.Add(@{Op='label';Name=$stepsDone})
             }
@@ -1116,6 +1130,7 @@ function New-KokoroGenerator60x16RunSteps {
             $s.Add(@{Op='addi';d=17;s=3;i=0}); $s.Add(@{Op='add';d=16;s=3;t=4})
             $steps=& $label; $stepsDone=& $label
             $s.Add(@{Op='label';Name=$steps})
+            $dmaRepeat=$dmaRepeat*[long][math]::Floor(($j1-$j0)/2)
             foreach($stepInPair in 0,1){ & $lockstepTile $null (($j0+$stepInPair) % 2) $thread; $s.Add(@{Op='addi';d=17;s=17;i=1}) }
             $s.Add(@{Op='eq';d=0;s=17;t=16}); $s.Add(@{Op='jump-p';u=0;Label=$stepsDone}); & $jump $steps
             $s.Add(@{Op='label';Name=$stepsDone})
@@ -1371,6 +1386,7 @@ function New-KokoroGenerator60x16RunSteps {
     # One span. Generic: the uniform span's code for the span loop (its lockstep runs take their steps at run time).
     $emitSpan={param($span,[switch]$Generic)
         $runName=if($Generic){'_su'}else{"_s$($span.Index)"}
+        $ledgerSpan=if($Generic){"$u0-$($u1-1)"}else{"$($span.Index)"}
         if($StopAfterSpanStage -eq 'Start'){ $spanStopped=$true }
         if($spanStopped){ return }
         if($Source){
@@ -1479,11 +1495,14 @@ function New-KokoroGenerator60x16RunSteps {
         for($spanAt=0;$spanAt -lt $u0;$spanAt++){ . $emitSpan $spans[$spanAt] }
         if($u0 -lt $spans.Count){
             $jobSteps=$s; $callsAt=$calls.Count; $bodiesAt=$lockstepBodies.Count; $spanCode=@()
+            # The ledger keeps the first uniform span's transfers, counted once per looped span.
+            $dmaRepeat=[long]($u1-$u0); $ledgerAt=$dmaLedger.Count
             foreach($spanAt in $u0,($u0+1),($u0+2)){
                 $s=[Collections.Generic.List[hashtable]]::new(); . $emitSpan $spans[$spanAt] -Generic; $spanCode+=,$s
-                if($spanAt -eq $u0){ $callsAt=$calls.Count; $bodiesAt=$lockstepBodies.Count }
+                if($spanAt -eq $u0){ $callsAt=$calls.Count; $bodiesAt=$lockstepBodies.Count; $ledgerAt=$dmaLedger.Count }
             }
             $calls.RemoveRange($callsAt,$calls.Count-$callsAt); $lockstepBodies.RemoveRange($bodiesAt,$lockstepBodies.Count-$bodiesAt)
+            $dmaLedger.RemoveRange($ledgerAt,$dmaLedger.Count-$ledgerAt); $dmaRepeat=1L
             $body=[Collections.Generic.List[hashtable]]::new(); $body.Add(@{Op='allocframe';Bytes=16})
             foreach($step in (& $spanRelative $spanCode[0] $spanCode[1] $spanCode[2] $u0)){ $body.Add($step) }
             $body.Add(@{Op='dealloc-return'}); $spanBodies.Add(@('body_span_uniform',$body.ToArray()))
@@ -1758,6 +1777,7 @@ function New-KokoroGenerator60x16RunSteps {
     $resultLayout.SourceStreams=@($sourceStreams | Where-Object { $null -ne $_ })
     $resultLayout.Spans=$spans
     $resultLayout.SpanLoop=$spanLoop; $resultLayout.SpanRejections=$spanRejections.ToArray()
+$resultLayout.DmaLedger=@($dmaLedger | Group-Object Section,Span,Class | ForEach-Object { $first=$_.Group[0]; [pscustomobject]@{Section=$first.Section;Span=$first.Span;Class=$first.Class;Transfers=[long]($_.Group | Measure-Object Count -Sum).Sum;Bytes=[long]($_.Group | Measure-Object Bytes -Sum).Sum} })
     # Each section's tensors in the workspace: its input after the front (fronted sections) and its output.
     $resultLayout.Sections=@(for($i=0;$i -lt $sections.Count;$i++){ . $bind $i
         [pscustomobject]@{Section=$i;Channels=$Channels;Tiles=$tiles;Bytes=$tensorBytes;InputWorkspaceOffset=$(if($Front){$r0Slot}else{-1L});FinalWorkspaceOffset=$finalOffset;SourceOf=$(if($sec.Source){[int]$sec.Of}else{-1});Schedule=$sectionSchedule;StateBytes=$(if($spanMode -and $sectionSchedule -ne 'Layer'){[long]$stateBytes}else{0L})} })
