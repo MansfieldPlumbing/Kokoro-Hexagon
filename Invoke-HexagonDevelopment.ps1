@@ -1655,8 +1655,8 @@ Write-NewOrIdenticalFile $adapter ([Text.Encoding]::UTF8.GetBytes($text)) -Allow
 # The compiler is a pinned, self-contained PowerShell source file. A verified
 # sibling checkout can supply an unpublished local revision; otherwise fetch
 # the immutable revision. Neither path executes an unverified working copy.
-$loweringCommit = '8880e5e51c65babbf83d8d059c2316c2e4c11858'
-$loweringHash = '6CF1537E3FDAC9F6073655F042FABCFB20A95468F929F59C5BBC5901DF62A00F'
+$loweringCommit = 'bb0f67a2bf16e54086c35ff96c0d8a5e523f0519'
+$loweringHash = '6900FC735D5F463ECFDB0241B326D959CF7A8B8A252B56B1A7734F20D3BD9BD6'
 $loweringCache = Join-Path $script:HexagonToolsRoot "../build/lowered-hexagon/compiler/$loweringHash/Export-LoweredAssembly.ps1"
 if ([IO.File]::Exists($loweringCache)) { $loweringBytes = [IO.File]::ReadAllBytes($loweringCache) }
 else {

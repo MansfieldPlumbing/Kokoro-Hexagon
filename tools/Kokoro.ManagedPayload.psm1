@@ -66,7 +66,7 @@ function New-KokoroWeightAssembly {
     finally { $validationMap.Dispose() }
     $assemblyHash = (Get-FileHash -LiteralPath $stagedPath).Hash
     [IO.File]::Move($stagedPath, $assemblyPath)
-    $compilerHash = '6CF1537E3FDAC9F6073655F042FABCFB20A95468F929F59C5BBC5901DF62A00F'
+    $compilerHash = '6900FC735D5F463ECFDB0241B326D959CF7A8B8A252B56B1A7734F20D3BD9BD6'
     $compiler = [IO.Path]::Combine($root, 'build', 'lowered-hexagon', 'compiler', $compilerHash, 'Export-LoweredAssembly.ps1')
     if (-not [IO.File]::Exists($compiler) -or (Get-FileHash -LiteralPath $compiler).Hash -cne $compilerHash) { throw 'Existing pinned PSLowering compiler is unavailable or differs.' }
     $loader = [IO.Path]::Combine($out, 'Kokoro.MappedPayload.dll')
