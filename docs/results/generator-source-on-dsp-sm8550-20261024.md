@@ -199,9 +199,27 @@ The job drops by 3.3 ms, from 33.0 to 31.0 ms per audio second (30.3 to 32.3 tim
 
 Receipt: `build/resident-source-ab.clixml` and the four `build/resident-source-ab-*` directories.
 
+**`noise_res.0` resident as well** (`-ResidentSourceChannels 128,256`): its section state per switch is 6,291,456 B
+(1,703,936 B chunked), of which 2,752,512 B are its weights; VTCM 7,602,176 B, unchanged; library 1,343,732 B,
+`91A0B066...`. Same protocol, against `noise_res.1` resident alone:
+
+| Round | Resident sources | Depth-first, resident | One-shot proof | Layer |
+| --- | --- | ---: | ---: | ---: |
+| 1 | 128 and 256 | 49.22 ms | 48.95 ms | 66.74 ms |
+| 1 | 128 | 50.16 ms | 50.19 ms | 66.83 ms |
+| 2 | 128 and 256 | 49.08 ms | 49.15 ms | 67.04 ms |
+| 2 | 128 | 50.31 ms | 50.03 ms | 66.75 ms |
+
+PCM and the compared tensor are identical in all four runs and equal the layer job's. Both resident is 1.1 ms faster:
+30.2 ms per audio second, 33.1 times real time. Against both chunked (an earlier pairing, same protocol) it measured
+49.0 against 53.5 and 53.9 ms. Its larger saved state is moved at every switch, read-only weights included.
+
+Receipt: `build/resident-source-256-vs-128-ab.clixml`, `build/resident-source-256-ab.clixml` (against both chunked)
+and their `build/resident-source-256-*` directories.
+
 ## Not yet done
 
-- **Profile:** a per-stage profile of the source sections. `noise_res.0` (256 channels) also fits resident.
+- **State:** sections save and restore their read-only regions (weights, records, K/M/S) with their live state.
 - **Overlap:** weight DMA overlapped with computation.
 - **Length:** the harmonic source and the `har` layouts are whole-length in VTCM, which limits length to about 2 s.
   Spanning them removes that limit.
