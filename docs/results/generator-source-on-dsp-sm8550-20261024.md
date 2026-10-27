@@ -56,6 +56,25 @@ In jobs with a chunked section, workers take r5 from pool slot 56 after the coun
 (the `har` phase-major layout's) therefore ran its workers with a stale count, and the job faulted. Such calls now store
 their count in slot 56 as well.
 
+## Reproduced as a baseline (2026-10-27)
+
+Kokoro-Hexagon `80a57cd`, `Test-KokoroGeneratorTileEquivalence -Joint WholeSource -Runs 5`, same fixture, schedule
+Backward, blocks of 4 tiles, int8 weights in one plane (q = round(w / 256)), supplied (constants) AdaIN values.
+
+| Job | DSP median, 5 one-shot runs | Per audio second | VTCM | Library |
+| --- | ---: | ---: | ---: | --- |
+| Layer, source on the DSP | 66.17 ms | 40.7 ms (24.6 times real time) | 7,208,960 B | 983,284 B, `246983CA...` |
+| Depth-first, source on the DSP | 62.58 ms | 38.5 ms (26.0 times real time) | 7,602,176 B | 1,253,620 B, `1062E99B...` |
+
+- PCM SHA-256 `AF52480D...` for both jobs, as above; every section's input and output, both computed sources and the
+  `har` layouts are byte-identical between the jobs.
+- PCM against stock Kokoro for the same captured inputs: 29.43 dB (int8 weights).
+- Timing covers the job on the DSP from its start tick to its end tick: weight DMA, harmonic source and STFT, source
+  branches, sections, tail and PCM. It excludes what is supplied or prepared on the host: the decoder output `x`,
+  the AdaIN constants (exported by a separate layer-job run on the same input, so whole-input moments), `f0` and the
+  noise draws, int8 weight conversion, constants packing, FastRPC dispatch and app launch.
+- Receipt: `build/generator-baseline-wholesource-20261027T113146/baseline.clixml` and `equivalence.clixml`.
+
 ## Not yet done
 
 - **Profile:** a per-stage profile of the source sections. The one-branch chunked `noise_res.1` runs 62 steps with
