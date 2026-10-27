@@ -15,28 +15,27 @@ function Initialize-KokoroTextEncoder {
     $checkpointHash = '496DBA118D1A58F5F3DB2EFC88DBDC216E0483FC89FE6E47EE1F2C53F18AD1E4'
     if ((Get-FileHash -LiteralPath $CheckpointPath).Hash -cne $checkpointHash) { throw 'Checkpoint integrity mismatch.' }
     $root = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..'))
-    $pin = '1afabe056235a570da29e268824784557d4f6cdd'
-    $compiler = Join-Path $root "build/phonemizer/inputs/pslowering-$pin"
-    if (-not (Test-Path -LiteralPath $compiler)) { $null = & (Join-Path $root 'tools/Get-PhonemizerInput.ps1') }
-    $sourcePins = @(Import-Csv -LiteralPath (Join-Path $compiler 'verified-source.tsv') -Delimiter "`t")
-    if ($sourcePins.Count -ne 9) { throw 'Incomplete pinned compiler source.' }
-    foreach ($item in $sourcePins) {
-        $path = [IO.Path]::GetFullPath((Join-Path $compiler $item.Path))
-        if (-not $path.StartsWith($compiler + [IO.Path]::DirectorySeparatorChar, [StringComparison]::OrdinalIgnoreCase) -or $item.Commit -cne $pin -or
-            (Get-FileHash -LiteralPath $path).Hash -cne $item.Sha256) { throw 'Compiler integrity mismatch.' }
+    # The pinned single-file PSLowering compiler (as Invoke-HexagonDevelopment.ps1 pins it), cached under build/ by hash.
+    $loweringCommit = 'bb0f67a2bf16e54086c35ff96c0d8a5e523f0519'
+    $loweringHash = '6900FC735D5F463ECFDB0241B326D959CF7A8B8A252B56B1A7734F20D3BD9BD6'
+    $compiler = Join-Path $root "build/lowered-hexagon/compiler/$loweringHash/Export-LoweredAssembly.ps1"
+    if (-not [IO.File]::Exists($compiler)) {
+        $loweringBytes = (Invoke-WebRequest -Uri "https://raw.githubusercontent.com/MansfieldPlumbing/PSLowering/$loweringCommit/Export-LoweredAssembly.ps1" -UseBasicParsing).RawContentStream.ToArray()
+        if ([Convert]::ToHexString([Security.Cryptography.SHA256]::HashData($loweringBytes)) -cne $loweringHash) { throw 'Pinned PSLowering compiler hash mismatch.' }
+        [void][IO.Directory]::CreateDirectory([IO.Path]::GetDirectoryName($compiler)); [IO.File]::WriteAllBytes($compiler, $loweringBytes)
     }
-    Import-Module (Join-Path $compiler 'src/Dev.MansfieldPlumbing.PowerShell.Lowering.psd1')
+    if ((Get-FileHash -LiteralPath $compiler).Hash -cne $loweringHash) { throw 'Compiler integrity mismatch.' }
     $source = Join-Path $root 'src/frontend/Kokoro.TextEncoder.ps1'
     $sourceHash = (Get-FileHash -LiteralPath $source).Hash
-    $directory = Join-Path $root "build/frontend/encoder/$sourceHash"
+    $directory = Join-Path $root "build/frontend/encoder/$sourceHash/$loweringCommit"
     [void][IO.Directory]::CreateDirectory($directory)
     $dll = Join-Path $directory 'Kokoro.TextEncoder.dll'; $digestPath = $dll + '.sha256'
     if (-not (Test-Path -LiteralPath $dll)) {
-        $null = Export-LoweredAssembly -SourcePath $source -ClassName KokoroTextEncoder -OutputPath $dll -Deterministic
+        $null = & $compiler -SourcePath $source -ClassName KokoroTextEncoder -OutputPath $dll -Deterministic
         [IO.File]::WriteAllText($digestPath, (Get-FileHash -LiteralPath $dll).Hash)
     }
     if (-not (Test-Path -LiteralPath $digestPath) -or (Get-FileHash -LiteralPath $dll).Hash -cne [IO.File]::ReadAllText($digestPath)) { throw 'Compiled encoder integrity mismatch.' }
-    $admission = Test-LoweredAssembly -AssemblyPath $dll
+    $admission = & $compiler -Mode Inspect -AssemblyPath $dll
     if (-not $admission.ClrOnlyAdmitted -or $admission.AssemblyReferences.Count -ne 1 -or $admission.AssemblyReferences[0] -cne 'System.Private.CoreLib') { throw 'Encoder is not CoreLib-only.' }
     $assembly = [Reflection.Assembly]::LoadFrom($dll); $type = $assembly.GetType('KokoroTextEncoder', $true)
     $engine = [Activator]::CreateInstance($type)
