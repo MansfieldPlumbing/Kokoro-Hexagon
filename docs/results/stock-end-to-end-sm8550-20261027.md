@@ -73,10 +73,9 @@ base (seed 1). Hann window 1,024, hop 256, 149 frames; each column against the m
 | Frame energy envelope correlation | 1.000 | 0.958 |
 
 A second seed (a different noise and harmonic start draw, the same by construction) is the yardstick: the voice base
-keeps the loudness contour but changes spectral detail and phase well beyond seed-to-seed variation. In a listening
-comparison of the two renders no difference was heard. Waveform SNR against the matched render does not describe that
-result; with supplied coefficients the comparison is spectral distance against the seed-to-seed yardstick, plus
-listening on more varied material.
+keeps the loudness contour but changes spectral detail and phase well beyond seed-to-seed variation. With supplied
+coefficients the waveform is not expected to match the matched render; the comparison is spectral distance against
+the seed-to-seed yardstick, on more varied material than this one sentence.
 
 Receipt: `build/voice-base-vs-matched-20261027T183928` (matched.wav, matched-seed2.wav, voice-base.wav).
 
