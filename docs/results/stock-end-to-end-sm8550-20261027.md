@@ -58,3 +58,24 @@ Chunk-local, composed and voice-base moments are each far from the exact normali
 need a pass that walks each layer over the whole utterance (the layer schedule), with activations outside VTCM.
 
 Receipts: `build/decoder-chunk-moments-*`, `build/decoder-composed-moments-*`, `build/voice-base-vs-matched-*`.
+
+## Voice base against matched, by spectrum
+
+Same sentence and 130 ticks, rendered on the DSP with the stream's own constants (seed 1 and seed 2) and with the voice
+base (seed 1). Hann window 1,024, hop 256, 149 frames; each column against the matched render with seed 1:
+
+| Measure | Matched, seed 2 | Voice base |
+| --- | ---: | ---: |
+| Waveform SNR | 16.93 dB | -2.43 dB |
+| STFT magnitude SNR | 23.78 dB | 5.82 dB |
+| Log-spectral distance | 3.33 dB | 8.81 dB |
+| Phase agreement (energy-weighted mean cosine) | 0.965 | 0.39 |
+| Frame energy envelope correlation | 1.000 | 0.958 |
+
+A second seed (a different noise and harmonic start draw, the same by construction) is the yardstick: the voice base
+keeps the loudness contour but changes spectral detail and phase well beyond seed-to-seed variation. In a listening
+comparison of the two renders no difference was heard. Waveform SNR against the matched render does not describe that
+result; with supplied coefficients the comparison is spectral distance against the seed-to-seed yardstick, plus
+listening on more varied material.
+
+Receipt: `build/voice-base-vs-matched-20261027T183928` (matched.wav, matched-seed2.wav, voice-base.wav).
