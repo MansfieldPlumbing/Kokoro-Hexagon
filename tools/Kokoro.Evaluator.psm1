@@ -199,14 +199,73 @@ function Invoke-KokoroEmission {
     $phoneStage = $Kernel -ceq 'KokoroGenerator60x16Run' -and ($Parameters.ContainsKey('GeneratorSchedule') -or $Parameters.ContainsKey('GeneratorMoments'))
     if ($phoneStage -or $Kernel -cin 'KokoroGeneratorTemplate1Run','KokoroHarmonicSource16Run','KokoroDecoder16Run','KokoroGeneratorWholeSource16Run','KokoroDecoderGenerator16Run') {
         if (-not $script:TypedEmissions.ContainsKey($key)) {
-            # The source worker's layout and link state remain live objects. No generated
-            # metadata file or child PowerShell process is its execution contract.
-            $emission = & (Join-Path $script:Root 'tools/Emit-HexagonProbe.ps1') -Kernel $Kernel -OutputDirectory $dir -Force @Parameters
+            $artifactPath = Join-Path $dir 'emission-cache.clixml'
+            if (Test-Path -LiteralPath $artifactPath -PathType Leaf) {
+                $saved = Import-Clixml -LiteralPath $artifactPath
+                if ($saved.Schema -ne 2 -or $saved.Kernel -cne $Kernel -or $saved.SourceKey -cne $SourceKey -or
+                    $saved.Parameters -cne ($pairs -join "`n") -or $saved.StepsSHA256 -cnotmatch '^[0-9A-F]{64}$') {
+                    throw "Cached $Kernel artifact identity mismatch."
+                }
+                $emission = $saved.Artifact
+                # Binary buffers are already persisted by the emitter. Restore their original
+                # byte[] types without serializing a second copy of the library into CLIXML.
+                $libraryPath = Join-Path $dir ([IO.Path]::GetFileName([string]$emission.Path))
+                if (-not (Test-Path -LiteralPath $libraryPath -PathType Leaf) -or
+                    (Get-Item -LiteralPath $libraryPath).Length -ne $emission.Bytes -or
+                    (Get-FileHash -LiteralPath $libraryPath).Hash -cne $emission.LibrarySHA256) {
+                    throw "Cached $Kernel library integrity mismatch."
+                }
+                $libraryBytes = [IO.File]::ReadAllBytes($libraryPath)
+                $codeBytes = [byte[]]::new([int]$emission.CodeBytes)
+                [Array]::Copy($libraryBytes, [int]$emission.Link.Entry, $codeBytes, 0, $codeBytes.Length)
+                $emission.Path = $libraryPath; $emission.Directory = $dir
+                $emission | Add-Member -NotePropertyName Buffers -NotePropertyValue ([pscustomobject]@{Library=$libraryBytes;Code=$codeBytes}) -Force
+                # Most consumers need only Layout and the library. Preserve the instruction
+                # array on first access, rather than deserializing hundreds of thousands of
+                # authoring records for every unchanged invocation.
+                $stepsHash = [string]$saved.StepsSHA256
+                $stepsPath = Join-Path $dir "emission-steps-$stepsHash.clixml"
+                if (-not [IO.File]::Exists($stepsPath) -or (Get-FileHash -LiteralPath $stepsPath).Hash -cne $stepsHash) {
+                    throw "Cached $Kernel steps integrity mismatch."
+                }
+                $getSteps = {
+                    if (-not [IO.File]::Exists($stepsPath) -or (Get-FileHash -LiteralPath $stepsPath).Hash -cne $stepsHash) {
+                        throw 'Cached emission steps integrity mismatch.'
+                    }
+                    $restoredSteps = Import-Clixml -LiteralPath $stepsPath
+                    $this | Add-Member -NotePropertyName Steps -NotePropertyValue $restoredSteps -Force
+                    , $restoredSteps
+                }.GetNewClosure()
+                $emission | Add-Member -MemberType ScriptProperty -Name Steps -Value $getSteps -Force
+                $emission.PSObject.TypeNames.Insert(0, 'Kokoro.Hexagon.Emission')
+            } else {
+                $emission = & (Join-Path $script:Root 'tools/Emit-HexagonProbe.ps1') -Kernel $Kernel -OutputDirectory $dir -Force @Parameters
+            }
             if ($emission -isnot [pscustomobject] -or $null -eq $emission.Layout -or
-                $null -eq $emission.Steps -or $null -eq $emission.Buffers) {
+                $null -eq $emission.PSObject.Properties['Steps'] -or $null -eq $emission.Buffers -or $null -eq $emission.Link) {
                 throw "$Kernel emitter did not return its typed artifact and layout."
             }
-            $emission | Add-Member -NotePropertyName Key -NotePropertyValue $key
+            $emission | Add-Member -NotePropertyName Key -NotePropertyValue $key -Force
+            if (-not (Test-Path -LiteralPath $artifactPath -PathType Leaf)) {
+                $properties = [ordered]@{}
+                foreach ($property in $emission.PSObject.Properties) {
+                    if ($property.Name -cnotin 'Buffers','Steps') { $properties[$property.Name] = $property.Value }
+                }
+                $temporary = $artifactPath + '.' + [Guid]::NewGuid().ToString('N') + '.tmp'
+                $temporarySteps = $temporary + '.steps'
+                try {
+                    Export-Clixml -InputObject $emission.Steps -LiteralPath $temporarySteps -Depth 40
+                    $stepsHash = (Get-FileHash -LiteralPath $temporarySteps).Hash
+                    $stepsPath = Join-Path $dir "emission-steps-$stepsHash.clixml"
+                    [pscustomobject]@{Schema=2;Kernel=$Kernel;SourceKey=$SourceKey;Parameters=($pairs -join "`n");StepsSHA256=$stepsHash;Artifact=[pscustomobject]$properties} |
+                        Export-Clixml -LiteralPath $temporary -Depth 40
+                    [IO.File]::Move($temporarySteps, $stepsPath, $true)
+                    [IO.File]::Move($temporary, $artifactPath, $true)
+                } finally {
+                    if ([IO.File]::Exists($temporary)) { [IO.File]::Delete($temporary) }
+                    if ([IO.File]::Exists($temporarySteps)) { [IO.File]::Delete($temporarySteps) }
+                }
+            }
             $script:TypedEmissions.Add($key, $emission)
         }
         $cachedEmission = $script:TypedEmissions[$key]
