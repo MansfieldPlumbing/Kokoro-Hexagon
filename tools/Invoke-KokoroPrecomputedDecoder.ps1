@@ -1629,17 +1629,24 @@ function Invoke-OfflineSpeech {
         $bert = $null; $durationInput = $null; $durationFeatures = $null; $durations = [int[]]$SuppliedDurations; $curves = @{ F0 = $SuppliedF0; N = $SuppliedN }
     }
     else {
+    # Each front-end stage's total time, beside the per-operator entries, as Kind FrontEndStage.
+    $frontStageWatch = [Diagnostics.Stopwatch]::StartNew()
+    $endStage = { param([string] $StageName, [int] $StageFrames) $profile.Add([pscustomobject]@{ Stage = $StageName; Kind = 'FrontEndStage'; Milliseconds = $frontStageWatch.Elapsed.TotalMilliseconds; Frames = $StageFrames }); $frontStageWatch.Restart() }
     $bert = Invoke-OfflineAlbert $tokenIds
+    & $endStage 'albert' $t
     $durationInput = Invoke-OfflineLinear $bert $t 'bert_encoder.module'
+    & $endStage 'bert_encoder' $t
     $x = $upstreamMath::AppendStyle($durationInput, $t, 512, $style.Prosody)
     for ($layer = 0; $layer -lt 3; $layer++) {
         $x = Invoke-OfflineLstm $x $t "predictor.module.text_encoder.lstms.$(2 * $layer)"
         $affine = Invoke-OfflineLinear $style.Prosody 1 "predictor.module.text_encoder.lstms.$(2 * $layer + 1).fc"
         $x = $upstreamMath::AppendStyle($upstreamMath::AdaLayerNorm($x, $t, 512, $affine, [double]1e-5), $t, 512, $style.Prosody)
+        & $endStage "predictor.text_encoder.$layer" $t
     }
     $durationFeatures = $x
     $logits = Invoke-OfflineLinear (Invoke-OfflineLstm $durationFeatures $t 'predictor.module.lstm') $t 'predictor.module.duration_proj.linear_layer'
     $durations = $upstreamMath::Durations($logits, $t, 50, $Speed)
+    & $endStage 'predictor.duration' $t
     if ($null -ne $SuppliedDurations) {
         if ($SuppliedDurations.Length -ne $t) { throw "SuppliedDurations has $($SuppliedDurations.Length) values for $t token ids." }
         $durations = [int[]]$SuppliedDurations
@@ -1648,6 +1655,7 @@ function Invoke-OfflineSpeech {
     $aligned = $upstreamMath::ExpandChannels($durationFeatures, $t, 640, $durations)
     $shared = Invoke-OfflineLstm ($upstreamMath::ChannelsToRows($aligned, 640, $frames)) $frames 'predictor.module.shared'
     $shared = $upstreamMath::RowsToChannels($shared, $frames, 512)
+    & $endStage 'predictor.shared' $frames
     $curves = @{}
     foreach ($curve in 'F0', 'N') {
         $values = $shared; $curveFrames = $frames
@@ -1656,6 +1664,7 @@ function Invoke-OfflineSpeech {
             if ($block -eq 1) { $curveFrames *= 2 }
         }
         $curves[$curve] = Invoke-OfflineConv $values $curveFrames "$($curve)_proj" -Module 'predictor.module.'
+        & $endStage "predictor.$curve" $curveFrames
     }
     if ($null -ne $SuppliedN) {
         if ($SuppliedN.Length -ne 2 * $frames) { throw 'SuppliedN needs two values per duration frame.' }
@@ -2095,16 +2104,18 @@ if ($Mode -eq 'FrontEnd') {
     $captureDirectories = @(Get-ChildItem -LiteralPath (Join-Path $InputRepository 'build') -Directory -Filter 'stock-albert-capture-*') +
         @(Get-ChildItem -LiteralPath (Join-Path $InputRepository 'build') -Directory | Where-Object Name -in 'speak-stock-control-20261010', 'speak-typed-capture-check') +
         @(Get-ChildItem -LiteralPath (Join-Path $InputRepository 'build/capture-timing-passages') -Directory -Filter '*-decoder')
-    $frontResults = [Collections.Generic.List[object]]::new()
+    $frontResults = [Collections.Generic.List[object]]::new(); $frontProfile = [Collections.Generic.List[object]]::new()
     foreach ($directory in $captureDirectories) {
         $capture = Get-Content -LiteralPath (Join-Path $directory.FullName 'capture.json') -Raw | ConvertFrom-Json -AsHashtable
         # A capture rendered from a supplied decoder input did not run stock's predictor: it is no front-end reference.
         $spec = Join-Path $directory.FullName 'capture-spec.json'
         if ([IO.File]::Exists($spec) -and (Get-Content -LiteralPath $spec -Raw | ConvertFrom-Json -AsHashtable).ContainsKey('decoderInput')) { Write-Host "$($directory.Name): supplied decoder input, skipped"; continue }
         if ($capture.styleEntry -ne $capture.phonemes.Length - 1) { throw "$($directory.Name): style row $($capture.styleEntry) is not the phoneme count less one." }
-        $watch = [Diagnostics.Stopwatch]::StartNew()
+        $watch = [Diagnostics.Stopwatch]::StartNew(); $profile.Clear()
         $speech = Invoke-OfflineSpeech -Phonemes $capture.phonemes -Voice $capture.voice -Speed $capture.speed -SkipDecoder
         $hostMs = $watch.Elapsed.TotalMilliseconds
+        $frontProfile.AddRange([object[]]@($profile | ForEach-Object { [pscustomobject]@{ Capture = $directory.Name; Phonemes = $capture.phonemes.Length; Stage = $_.Stage; Kind = $_.Kind; Milliseconds = [Math]::Round($_.Milliseconds, 2); Frames = $_.Frames } }))
+        $frontProfile.ToArray() | Export-Clixml -LiteralPath (Join-Path $output 'frontend-profile.clixml')
         foreach ($boundary in $boundaries) {
             $tensor = $capture.tensors[$boundary.Tensor]
             if ($null -eq $tensor) { continue }
