@@ -1711,6 +1711,14 @@ function Get-StudentWindowOccurrences([object] $Book, [object] $Window) {
     $occurrences.ToArray()
 }
 
+# A source file's SHA-256 with each CR before an LF removed, so cache keys follow the content, not the checkout's line
+# endings (a file stored with LF hashes as its stored bytes).
+function Get-StudentSourceHash([string] $Path) {
+    $bytes = [IO.File]::ReadAllBytes($Path); $kept = [Collections.Generic.List[byte]]::new($bytes.Length)
+    for ($i = 0; $i -lt $bytes.Length; $i++) { if ($bytes[$i] -eq 13 -and $i + 1 -lt $bytes.Length -and $bytes[$i + 1] -eq 10) { continue }; $kept.Add($bytes[$i]) }
+    [Convert]::ToHexString([Security.Cryptography.SHA256]::HashData($kept.ToArray()))
+}
+
 function Invoke-StudentSyllabus {
     # Host syllabus evidence up to the generator boundary. The window is only the syllabus's evidence
     # scope; what the Student receives is typed occurrences with their ticks of x and f0.
@@ -1719,7 +1727,7 @@ function Invoke-StudentSyllabus {
     $voices = @(Get-StudentVoices)
     if ($voices -cnotcontains $Voice) { throw "Voice $Voice is not pinned and present; available: $($voices -join ', ')." }
     $cache = Join-Path $script:StudentBuild "student/syllabus/$Voice"; [void][IO.Directory]::CreateDirectory($cache)
-    $syllabusHash = (@($script:StudentInputs.Syllabus, 'tools/Kokoro.TextEncoder.psm1') | ForEach-Object { (Get-FileHash -LiteralPath (Join-Path $script:StudentRoot $_)).Hash }) -join '+'
+    $syllabusHash = (@($script:StudentInputs.Syllabus, 'tools/Kokoro.TextEncoder.psm1') | ForEach-Object { Get-StudentSourceHash (Join-Path $script:StudentRoot $_) }) -join '+'
     $books = @{}; foreach ($book in $data.Books) { $books[$book.Index] = $book }
     $windows = @($data.Windows); if ($WindowLimit -gt 0 -and $windows.Count -gt $WindowLimit) { $windows = $windows[0..($WindowLimit - 1)] }
     $syllabus = $null; $watch = [Diagnostics.Stopwatch]::StartNew(); $renderSeconds = 0.0
