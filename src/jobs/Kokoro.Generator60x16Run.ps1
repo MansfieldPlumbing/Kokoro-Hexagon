@@ -148,7 +148,10 @@ function New-KokoroGenerator60x16RunSteps {
         [switch]$HostCoefficients,
         # Computed sources under a depth-first schedule: the noise_res sections of these channel counts run Backward (one
         # branch, its six stages' weights resident) instead of Chunked.
-        [ValidateSet(128,256)][int[]]$ResidentSourceChannels=@())
+        [ValidateSet(128,256)][int[]]$ResidentSourceChannels=@(),
+        # Chunked sections queue each branch's weights of the next stage (no wait) as soon as that branch's convolution
+        # returns, and wait for them before the next stage's convolutions.
+        [switch]$AsyncWeights)
 
     if($WeightPlanes -eq 1 -and $Schedule -eq 'Layer'){ throw 'One weight plane is a backward schedule option.' }
     $packets={ param([object[]]$Steps) $grouped=if($VectorPackets){ Group-HexagonPackets $Steps } else { $Steps }; $grouped }
@@ -553,7 +556,7 @@ function New-KokoroGenerator60x16RunSteps {
         if($pmuSites.Count -eq 0 -or $pmuSites[0].Index -ne 0 -or (@($pmuSites.Index | Sort-Object -Unique).Count -ne $pmuSites.Count)){throw 'Unmarked PMU site indices must be unique and start at zero.'}
         # Keep indices stable when an optional source branch has no mark site.
         $pmuSiteRecordCount=1+$pmuSites[-1].Index
-        if(256+64*$pmuCategories.Count -gt 4096 -or $pmuSiteOffset+64*$pmuSiteRecordCount -gt 61440){throw 'PMU records overlap the pool or stacks.'}
+        if(256+64*$pmuCategories.Count -gt 4096 -or $pmuSiteOffset+64*$pmuSiteRecordCount -gt 61184){throw 'PMU records overlap the pool, the queued DMA descriptors or the stacks.'}
     }
     $mark={param([string]$category,[string]$nextStage='',[int]$site=-1)
         if(-not $PmuEvents -or $marksOff){return}
@@ -569,6 +572,9 @@ function New-KokoroGenerator60x16RunSteps {
     # + 65536 - 4096 + 16384*k. Futex, HVX lock and unlock are the libqurt.a trap stubs (SDK 6.4.0.2
     # computev73 pic/libqurt.a 8e0ba5fd...); thread create/join/exit are imports.
     $poolOffset=$scratchOffset+4096; $stackOffset=$scratchOffset+65536
+    # Queued DMA (-AsyncWeights): up to four transfers' descriptor pairs (64 bytes each) below the stacks, untouched while
+    # in flight because the synchronous transfers use r24's slots.
+    $queueOffset=$scratchOffset+61184
     # Spin waits poll the pool between pause(#16) instructions.
     $poolPause=16
     $futexWait={param([int]$addrReg,[int]$valueReg) $s.Add(@{Op='addi';d=1;s=$valueReg;i=0}); $s.Add(@{Op='addi';d=0;s=$addrReg;i=0}); $s.Add(@{Op='imm';d=3;i=0}); $s.Add(@{Op='imm';d=4;i=-1}); $s.Add(@{Op='imm';d=5;i=-1}); $s.Add(@{Op='trap0';i=0x20}) }
@@ -665,13 +671,27 @@ function New-KokoroGenerator60x16RunSteps {
         elseif($destBase -eq 25 -and $srcBase -eq 18 -and $destOff -eq $slot){'StateSave'}
         elseif($destBase -eq 18){'TensorIn'} else {'TensorOut'} }
     # DMA dest <- src, length bytes; r24 holds two 64-byte aligned descriptor slots in DDR.
+    # $dmaQueue: transfers queued and not yet waited for (emission order is program order, loop bodies included). A
+    # synchronous transfer never starts while any are in flight.
+    $dmaQueue=@{InFlight=0}
     $dma={param([int]$destBase,[long]$destOff,[int]$srcBase,[long]$srcOff,[long]$length)
         if($length -lt 2 -or $length -ge 2*16777215){throw 'DMA length out of range'}
+        if($dmaQueue.InFlight){throw 'A synchronous DMA would start while queued transfers are in flight.'}
         & $ledgerAdd (& $dmaClass $destBase $destOff $srcBase $srcOff) $length
         & $ptr 1 $srcBase $srcOff; & $ptr 2 $destBase $destOff; & $imm 3 $length; $s.Add(@{Op='addi';d=0;s=24;i=0})
         foreach($step in @(New-KokoroDmaCopySteps -NoReturn)){$s.Add($step)}
         & $mark 'Dma'
     }
+    # Queued DMA: start a transfer behind those in flight (slot pair k of the queue area), and wait for all of them.
+    $dmaQueued={param([int]$destBase,[long]$destOff,[int]$srcBase,[long]$srcOff,[long]$length)
+        if($length -lt 2 -or $length -ge 2*16777215){throw 'DMA length out of range'}
+        if($dmaQueue.InFlight -ge 4){throw 'At most four queued DMA transfers.'}
+        & $ledgerAdd (& $dmaClass $destBase $destOff $srcBase $srcOff) $length
+        & $ptr 1 $srcBase $srcOff; & $ptr 2 $destBase $destOff; & $imm 3 $length; & $ptr 0 25 ($queueOffset+64L*$dmaQueue.InFlight)
+        foreach($step in @(New-KokoroDmaCopySteps -NoReturn -NoWait -Linked:($dmaQueue.InFlight -gt 0))){$s.Add($step)}
+        $dmaQueue.InFlight++
+    }
+    $dmaWait={ if($dmaQueue.InFlight){ $s.Add(@{Op='dmwait';d=0}); $dmaQueue.InFlight=0; & $mark 'Dma' } }
     $sync={ & $mark 'Unmarked' -site 0; $s.Add(@{Op='syncht'}); & $mark 'Sync' }
     # VTCM tiles <- one 32-bit pattern (0x80008000: x = 0 or the high-window zero; 0: the low-window zero).
     $fill={param([long]$off,[int]$count,[long]$pattern)
@@ -917,7 +937,7 @@ function New-KokoroGenerator60x16RunSteps {
         $s.Add(@{Op='addi';d=$r;s=17;i=$delta}); $s.Add(@{Op='asl-i';d=$r;s=$r;i=($batchShift+2)})
         & $imm 15 ($tileRegions.Controller+4L*$within); $s.Add(@{Op='add';d=$r;s=$r;t=15}); $s.Add(@{Op='add';d=$r;s=$r;t=18})
     }
-    $dmaRegisters={param([long]$length) & $ledgerAdd 'Tensor' $length; & $imm 3 $length; $s.Add(@{Op='addi';d=0;s=24;i=0}); foreach($step in @(New-KokoroDmaCopySteps -NoReturn)){$s.Add($step)} }
+    $dmaRegisters={param([long]$length) if($dmaQueue.InFlight){throw 'A synchronous DMA would start while queued transfers are in flight.'}; & $ledgerAdd 'Tensor' $length; & $imm 3 $length; $s.Add(@{Op='addi';d=0;s=24;i=0}); foreach($step in @(New-KokoroDmaCopySteps -NoReturn)){$s.Add($step)} }
     # Backward schedule. Register r <- tile (BatchTiles block + delta) of a ring of ringTiles tiles (a power of two) at
     # base: a constant block, or at run time the step in r17. Tiles are virtual; the mask is the wrap.
     $tileAt={param([int]$r,[long]$base,[int]$ringTiles,$block,[int]$delta)
@@ -1179,8 +1199,12 @@ function New-KokoroGenerator60x16RunSteps {
     $historyAt={param([int]$st,[int]$plane,[int]$branch) $tileRegions.History+(2L*$st+$plane)*$historyBytes+$branch*$guardBytes}
     $workAt={param([int]$plane,[int]$branch,[int]$i) $fillAt[@('High','Low')[$plane]]+$branch*$fillBytes+$i*[long]$tileBytes}
     # Step: block j (a constant, or $null for the runtime step in r17) through every stage, stage by stage.
+    # -AsyncWeights: a run queues its first stage's weights; each stage waits for its own just before its convolutions,
+    # and as each branch's convolution returns queues that branch's weights of the next stage (stage 5 the next step's
+    # stage 0) into the slot it freed; a step's input and output transfers start with nothing in flight.
     $chunkedStep={param($block)
         $inputTiles=if($null -eq $block){$batch}else{[math]::Max(0,[math]::Min($batch,$tiles-$batch*$block))}
+        & $dmaWait
         if($inputTiles -gt 0){
             if($null -ne $block){ & $dma 18 ($tileRegions.Input+(($batch*$block) % $ringTiles)*[long]$tileBytes) $r0Base ($r0Offset+$batch*$block*[long]$tileBytes) ($inputTiles*[long]$tileBytes) }
             else {
@@ -1191,7 +1215,7 @@ function New-KokoroGenerator60x16RunSteps {
         }
         for($st=0;$st -lt 6;$st++){
             $p=[int][math]::Floor($st/2); $half=$st % 2; $src=& $fillSource $st
-            for($branch=0;$branch -lt $branches;$branch++){ & $dma 18 ($tileRegions.Weights+$streamAt[$branch]) 21 $tileStages[6*$branch+$st].WeightOffset $tileStages[6*$branch+$st].WeightBytes }
+            if(-not $AsyncWeights){ for($branch=0;$branch -lt $branches;$branch++){ & $dma 18 ($tileRegions.Weights+$streamAt[$branch]) 21 $tileStages[6*$branch+$st].WeightOffset $tileStages[6*$branch+$st].WeightBytes } }
             for($plane=0;$plane -lt 2;$plane++){ for($branch=0;$branch -lt $branches;$branch++){ & $copyTiles (& $workAt $plane $branch 0) (& $historyAt $st $plane $branch) $guardBytes } }
             $segments=[Collections.Generic.List[object]]::new()
             for($w=0;$w -lt $batch;$w++){
@@ -1208,11 +1232,14 @@ function New-KokoroGenerator60x16RunSteps {
                 } }
             }
             & $sync
+            & $dmaWait
             for($branch=0;$branch -lt $branches;$branch++){
                 $at=6*$branch+$st
                 & $ptr 0 18 (& $workAt 0 $branch 2); & $ptr 1 18 (& $workAt 1 $branch 2)
                 & $ptr 2 18 ($tileRegions.Weights+$streamAt[$branch]); & $ptr 3 18 ($tileRegions.Records+$at*$recordBytes+$tablesAt); & $imm 4 $batch; & $ptr 5 18 ($tileRegions.Planes+$branch*$planesStride)
                 & $call "body_convB_b${branch}_s$st$sfx"
+                # Its slot is free once its convolution returns: queue the next stage's weights of this branch.
+                if($AsyncWeights){ & $streamQueued (($st+1) % 6) $branch }
             }
             & $mark 'HmxConv'; & $sync
             for($plane=0;$plane -lt 2;$plane++){ for($branch=0;$branch -lt $branches;$branch++){ & $copyTiles (& $historyAt $st $plane $branch) (& $workAt $plane $branch $batch) $guardBytes } }
@@ -1234,6 +1261,7 @@ function New-KokoroGenerator60x16RunSteps {
             }
         }
         # The output: the three branches' mean, or one branch's last level (a block's ring tiles are contiguous).
+        & $dmaWait
         if($branches -eq 3){
             $segments=@(for($w=0;$w -lt $batch;$w++){ @{Count=1;Body="body_mean$sfx";Arguments=@((& $tileArg ($tileRegions.Levels+6L*$ringBytes) $block $w),(& $tileArg ($tileRegions.Levels+7L*$ringBytes) $block $w),(& $tileArg ($tileRegions.Levels+8L*$ringBytes) $block $w),($tileRegions.Mean+$w*[long]$tileBytes))} })
             & $dispatch "body_mean$sfx" $segments; & $mark 'Mean'; & $sync
@@ -1257,7 +1285,12 @@ function New-KokoroGenerator60x16RunSteps {
         & $fill $tileRegions.Input $ringTiles 0x80008000L; & $fill $tileRegions.Levels (3*$branches*$ringTiles) 0x80008000L; & $fill $tileRegions.Stage (3*$branches*$ringTiles) 0x80008000L
         & $mark 'Boundary' "Res${Channels}_0"
     }
-    $chunkedRun={param([int]$j0,[int]$j1) & $stepRange $j0 $j1 { param($block,$parity) & $chunkedStep $block } 1 }
+    # Stage st's weights of one branch, queued into the branch's slot of the stage buffer.
+    $streamQueued={param([int]$st,[int]$branch) $g=$tileStages[6*$branch+$st]; & $dmaQueued 18 ($tileRegions.Weights+$streamAt[$branch]) 21 $g.WeightOffset $g.WeightBytes }
+    $chunkedRun={param([int]$j0,[int]$j1)
+        if($AsyncWeights){ for($branch=0;$branch -lt $branches;$branch++){ & $streamQueued 0 $branch } }
+        & $stepRange $j0 $j1 { param($block,$parity) & $chunkedStep $block } 1
+        if($dmaQueue.InFlight){throw 'A chunked run ends with queued transfers in flight.'} }
     # The bound section's schedule: its initial state, and its steps j0 .. j1 - 1.
     $sectionInit={ if($sectionSchedule -eq 'Backward'){ . $backwardInit } else { . $chunkedInit } }
     $sectionRun={param([int]$j0,[int]$j1,[string]$runName) if($sectionSchedule -eq 'Backward'){ . $backwardRun $j0 $j1 $runName } else { . $chunkedRun $j0 $j1 } }

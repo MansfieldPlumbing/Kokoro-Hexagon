@@ -264,6 +264,30 @@ switches per audio second fall by a factor of three. 60-tile spans leave 262,144
 
 Receipt: `build/span-tiles-ab.clixml` and the six `build/span-tiles-ab-*` directories.
 
+### Queued weight transfers (2026-10-27)
+
+With `-AsyncWeights` a chunked section no longer waits for each stage's weights before the stage starts. As each
+branch's convolution returns, the next stage's weights for that branch are queued (`dmstart`, or `dmlink` behind the
+transfer before it, no `dmwait`) into the slot it freed; the next stage waits once, just before its convolutions. Queued
+transfers use their own descriptor pairs in the scratch region below the worker stacks, and emission fails if a
+synchronous transfer would start while any are in flight. VTCM is unchanged (one stage buffer); the ledger shows
+107.59 MB of weights against 106.22 MB (one extra stage-0 transfer at the end of each run). `Kokoro.DmaCopy.ps1` gains
+`-NoWait` and `-Linked`; without them its steps are unchanged.
+
+Both sources resident, host coefficients, 60-tile spans, alternated over two rounds:
+
+| Round | 256-channel weights | Depth-first, resident | One-shot proof | Layer | Library |
+| --- | --- | ---: | ---: | ---: | --- |
+| 1 | queued | 44.77 ms | 44.56 ms | 66.84 ms | `EC472BCE...` |
+| 1 | synchronous | 46.38 ms | 46.39 ms | 66.83 ms | `CCB30E2B...` |
+| 2 | queued | 45.40 ms | 44.70 ms | 66.93 ms | `EC472BCE...` |
+| 2 | synchronous | 46.78 ms | 46.26 ms | 66.72 ms | `CCB30E2B...` |
+
+PCM and the compared tensor are identical in all four runs and equal the layer job's. Queued transfers take 45.09 ms,
+1.5 ms less (27.7 ms per audio second, 36.0 times real time).
+
+Receipt: `build/async-weights-ab.clixml` and the four `build/async-weights-ab-*` directories.
+
 ## Not yet done
 
 - **State:** sections save and restore their read-only regions (weights, records, K/M/S) and whole rings with their

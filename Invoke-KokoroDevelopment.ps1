@@ -1817,7 +1817,9 @@ function Test-KokoroGeneratorTileEquivalence {
         [switch]$HostCoefficients,
         # Computed sources: the depth-first job runs the noise_res sections of these channel counts resident (Backward,
         # one branch) instead of chunked.
-        [int[]]$ResidentSourceChannels=@())
+        [int[]]$ResidentSourceChannels=@(),
+        # The depth-first job's chunked sections queue the next stage's weights behind the current stage's convolutions.
+        [switch]$AsyncWeights)
     $out=[IO.Path]::GetFullPath($OutputDirectory)
     if(-not $out.StartsWith($Build+[IO.Path]::DirectorySeparatorChar,[StringComparison]::OrdinalIgnoreCase) -or (Test-Path -LiteralPath $out)){throw 'Choose a fresh equivalence directory under build/.'}
     [void][IO.Directory]::CreateDirectory($out)
@@ -1845,6 +1847,7 @@ function Test-KokoroGeneratorTileEquivalence {
     $tileParameters=$common+@{ResidentBatchTiles=$TileBlock;GeneratorMoments='Constants';GeneratorSchedule=$depthFirst;GeneratorWeightPlanes=$WeightPlanes;GeneratorControllerContact=$ControllerContact.IsPresent;GeneratorVectorPackets=$VectorPackets.IsPresent}
     if($HostCoefficients){ $tileParameters.GeneratorHostCoefficients=$true }
     if($ResidentSourceChannels){ $tileParameters.GeneratorResidentSourceChannels=$ResidentSourceChannels }
+    if($AsyncWeights){ $tileParameters.GeneratorAsyncWeights=$true }
     if($Joint -notin 'Section','WholeSource','SpansSource'){ $tileParameters.GeneratorSuppliedSource=$true }
     if($Joint -ne 'Section'){ $tileParameters.GeneratorSpanTiles=$SpanTiles }
     if($Joint -in 'WholeSource','SpansSource' -and $SourceChunkTiles -ne 128){ $tileParameters.GeneratorSourceChunkTiles=$SourceChunkTiles }

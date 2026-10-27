@@ -7,8 +7,11 @@
 # dst_bypass = 1, src_bypass = 1, order = 0, done}, src, dst.
 # r0 = two 32-byte descriptor slots (64-byte aligned); r1 source; r2 destination;
 # r3 byte count, 2..2*(2^24-1). Returns r0 = dmwait status. Clobbers r0..r7.
+# -NoWait leaves the transfer in flight (a later dmwait completes it; its slots must stay untouched until then).
+# -Linked appends it to a queue already started: its first descriptor is linked after the previous transfer's last,
+# the 32 bytes before r0 (transfers in consecutive 64-byte slot pairs).
 function New-KokoroDmaCopySteps {
-    param([string]$LabelPrefix='dmacopy',[switch]$NoReturn)
+    param([string]$LabelPrefix='dmacopy',[switch]$NoReturn,[switch]$NoWait,[switch]$Linked)
     $s=[Collections.Generic.List[hashtable]]::new()
     $s.Add(@{Op='lsr-i';d=4;s=3;i=1})                 # first half
     $s.Add(@{Op='sub';d=5;s=3;t=4})                   # second half
@@ -21,10 +24,11 @@ function New-KokoroDmaCopySteps {
     $s.Add(@{Op='or';d=6;s=5;t=7});$s.Add(@{Op='store';s=0;t=6;Offset=36})
     $s.Add(@{Op='add';d=6;s=1;t=4});$s.Add(@{Op='store';s=0;t=6;Offset=40})
     $s.Add(@{Op='add';d=6;s=2;t=4});$s.Add(@{Op='store';s=0;t=6;Offset=44})
-    $s.Add(@{Op='release-at';s=0});$s.Add(@{Op='dmstart';s=0})
+    if($Linked){ $s.Add(@{Op='addi';d=6;s=0;i=-32}); $s.Add(@{Op='release-at';s=0});$s.Add(@{Op='dmlink';s=6;t=0}) }
+    else { $s.Add(@{Op='release-at';s=0});$s.Add(@{Op='dmstart';s=0}) }
     $s.Add(@{Op='addi';d=6;s=0;i=32})
     $s.Add(@{Op='release-at';s=6});$s.Add(@{Op='dmlink';s=0;t=6})
-    $s.Add(@{Op='dmwait';d=0})
+    if(-not $NoWait){ $s.Add(@{Op='dmwait';d=0}) }
     if(-not $NoReturn){$s.Add(@{Op='return'})}
     $s.ToArray()
 }
