@@ -330,6 +330,26 @@ no options emits `2DAAED9A...` and ran 42.17 ms (one-shot proof 42.45 ms), outpu
 
 Receipt: `build/generator-defaults-*` (defaults.clixml).
 
+### Packed combines (2026-10-27)
+
+Profile of the defaults (`build/generator-profile-defaults-*`, set A, 43.32 ms instrumented): per lockstep thread the
+fill takes 10.0 to 10.4 ms and the combine 4.4 to 4.7 ms; the chunked section's combine is 3.04 ms. Of the combine
+bodies' instructions, 91 to 93 % have packet-class records (all but the loop's compare, branch and return). `VectorPackets`
+now also groups the five plane-combine bodies. Defaults otherwise, alternated against no packing:
+
+| Round | Fill and combines | Depth-first, resident | One-shot proof | Layer | Library |
+| --- | --- | ---: | ---: | ---: | --- |
+| 1 | packed | 39.71 ms | 39.73 ms | 66.81 ms | `C419743C...` |
+| 1 | unpacked | 44.97 ms | 44.74 ms | 66.91 ms | `EC472BCE...` |
+| 2 | packed | 39.58 ms | 39.37 ms | 66.75 ms | `C419743C...` |
+| 2 | unpacked | 44.83 ms | 44.72 ms | 66.79 ms | `EC472BCE...` |
+
+PCM and the compared tensor are identical in all four runs and equal the layer job's. Packed, the job takes 39.65 ms:
+24.4 ms per audio second, 41.0 times real time. Packing saves 5.25 ms against no packing; the fill alone saved 2.56 ms
+in the pairing above, so the combines about 2.7 ms.
+
+Receipt: `build/combine-packets-ab.clixml` and its four `build/combine-packets-ab-*` directories.
+
 ## Not yet done
 
 - **State:** sections save and restore their read-only regions (weights, records, K/M/S) and whole rings with their

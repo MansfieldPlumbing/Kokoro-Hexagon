@@ -139,8 +139,8 @@ function New-KokoroGenerator60x16RunSteps {
         # multiply, as K * x), with K_base, M_base and S from the stage's supplied AdaIN values as before and P_K, P_M per
         # stage from the parameters input after the constants table. v = 0 is exactly the constants arithmetic.
         [switch]$ControllerContact,
-        # Group the fill's straight-line vector instructions into packets (Group-HexagonPackets) instead of one
-        # instruction per packet.
+        # Group the fill's and the plane combines' straight-line vector instructions into packets (Group-HexagonPackets)
+        # instead of one instruction per packet.
         [switch]$VectorPackets,
         # Constants mode, depth-first schedules: each site's K/M/S arrive finished in the parameters after the constants
         # table (ConvertTo-KokoroGeneratorStageCoefficients, ConstantPacking.HostCoefficientsOffset) and are copied in
@@ -1700,15 +1700,15 @@ function New-KokoroGenerator60x16RunSteps {
     }
     $combineGroups=if($WeightPlanes -eq 2){@{Groups=3;Group3Shifts=$true}}else{@{Groups=2}}
     $convPlanes=if($WeightPlanes -eq 2){@{WeightPlanes=2}}else{@{WeightPlanes=1;TableGroups=3}}
-    $bodies.Add(@("body_combine_conv$sfx",@(New-KokoroPlaneCombineSteps -Mode Conv -Channels $Channels @combineGroups -PlaneStride $planeStride -LabelPrefix "combineconv$sfx")))
+    $bodies.Add(@("body_combine_conv$sfx",@(& $packets @(New-KokoroPlaneCombineSteps -Mode Conv -Channels $Channels @combineGroups -PlaneStride $planeStride -LabelPrefix "combineconv$sfx"))))
     # ups.0 convolves both weight planes: with one resblock weight plane its combine is the three-group form.
-    if($front10 -and $WeightPlanes -eq 1){ $bodies.Add(@("body_combine_front$sfx",@(New-KokoroPlaneCombineSteps -Mode Conv -Channels $Channels -Groups 3 -Group3Shifts -PlaneStride $planeStride -LabelPrefix "combinefront$sfx"))) }
-    $bodies.Add(@("body_combine_residual$sfx",@(New-KokoroPlaneCombineSteps -Mode Residual -Channels $Channels @combineGroups -PlaneStride $planeStride -LabelPrefix "combineresidual$sfx")))
+    if($front10 -and $WeightPlanes -eq 1){ $bodies.Add(@("body_combine_front$sfx",@(& $packets @(New-KokoroPlaneCombineSteps -Mode Conv -Channels $Channels -Groups 3 -Group3Shifts -PlaneStride $planeStride -LabelPrefix "combinefront$sfx")))) }
+    $bodies.Add(@("body_combine_residual$sfx",@(& $packets @(New-KokoroPlaneCombineSteps -Mode Residual -Channels $Channels @combineGroups -PlaneStride $planeStride -LabelPrefix "combineresidual$sfx"))))
     if($sectionSchedule -ne 'Layer'){
         # This section's thread programs (body_lockstep_t<k><suffix>_s<run>).
         if($sectionSchedule -eq 'Backward'){ foreach($pair in $lockstepBodies){ if($pair[0] -cmatch "^body_lockstep_t\d+$([regex]::Escape($sfx))_s"){ $bodies.Add($pair) } } }
         # A computed source's noise_convs convolves both weight planes: its sum is the three-group combine.
-        if($sec.Source){ $bodies.Add(@("body_combine_noise$sfx",@(New-KokoroPlaneCombineSteps -Mode Residual -Channels $Channels -Groups 3 -Group3Shifts -PlaneStride $planeStride -LabelPrefix "combinenoise$sfx"))) }
+        if($sec.Source){ $bodies.Add(@("body_combine_noise$sfx",@(& $packets @(New-KokoroPlaneCombineSteps -Mode Residual -Channels $Channels -Groups 3 -Group3Shifts -PlaneStride $planeStride -LabelPrefix "combinenoise$sfx")))) }
         # A body over three branches: the inner body for branch 0 with the caller's r0 to r5, then for branches 1 and 2
         # with each argument advanced by its branch stride (bytes; 0 keeps it). Arguments live in the frame between calls.
         $branchBodies={param([string]$name,[string]$inner,[long[]]$strides)
@@ -1730,7 +1730,7 @@ function New-KokoroGenerator60x16RunSteps {
         # Fill: source ring tile, conv-input tiles (high, low), K/M/S, count, mirror delta; the input ring is shared by the
         # branches (stride 0). Combines: planes, target ring tile, record, count, residual source.
         if($sectionSchedule -eq 'Backward'){ $bodies.Add(@("body_turns_mirror$sfx",@(& $packets @(New-KokoroAdaInSnakeTurnsSteps -TurnsBits 22 -Channels $Channels -LabelPrefix "adainsnaketurnsmirror$sfx" -ControllerContact:$ControllerContact -MirrorDelta (-$ringBytes))))) }
-        $bodies.Add(@("body_combine_residual_separate$sfx",@(New-KokoroPlaneCombineSteps -Mode Residual -Channels $Channels @combineGroups -PlaneStride $planeStride -LabelPrefix "combineresidualseparate$sfx" -SeparateResidual)))
+        $bodies.Add(@("body_combine_residual_separate$sfx",@(& $packets @(New-KokoroPlaneCombineSteps -Mode Residual -Channels $Channels @combineGroups -PlaneStride $planeStride -LabelPrefix "combineresidualseparate$sfx" -SeparateResidual))))
         foreach($sharing in @(@('shared',0L),@('branch',$ringBytes))){
             $bodies.Add((& $branchBodies "body_turnsB_$($sharing[0])$sfx" "body_turns$sfx" @($sharing[1],$fillBytes,$fillBytes,(6L*$kmsBytes),0L,0L)))
             if($sectionSchedule -eq 'Backward'){ $bodies.Add((& $branchBodies "body_turnsB_$($sharing[0])_mirror$sfx" "body_turns_mirror$sfx" @($sharing[1],$fillBytes,$fillBytes,(6L*$kmsBytes),0L,0L))) }
