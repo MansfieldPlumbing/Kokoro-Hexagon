@@ -176,10 +176,32 @@ against 1.70 MB), about 11 MB more over the run's saves and restores if, as esti
 twice. The net is about 75 MB, about 2 ms at the profile's DMA rate (7.30 ms for about 276 MB). The step count also drops:
 `noise_res.1` runs 62 chunked steps with per-stage dispatch.
 
+### `noise_res.1` resident (2026-10-27)
+
+The Backward layout and lockstep now take the section's branch count. A one-branch section keeps its six stages'
+weights resident and writes its last level (position m - 3) as its output in place of the three-branch mean. With
+`-ResidentSourceChannels 128` (`Test-KokoroGeneratorTileEquivalence`, `GeneratorResidentSourceChannels`) the depth-first
+job runs `noise_res.1` this way; its section state per switch is 2,981,888 B (VTCM 7,602,176 B, unchanged; library
+1,302,772 B, `5DC60DBB...`). Without the parameter the libraries are unchanged (`35B57166...`, layer `246983CA...`). A
+resident source section's steps are emitted as constants, so such a job does not use the span loop.
+
+Host coefficients, alternated over two rounds, 5 resident runs each after a one-shot proof:
+
+| Round | `noise_res.1` | Depth-first, resident | One-shot proof | Layer |
+| --- | --- | ---: | ---: | ---: |
+| 1 | resident | 50.14 ms | 49.91 ms | 66.81 ms |
+| 1 | chunked | 53.69 ms | 53.27 ms | 66.85 ms |
+| 2 | resident | 50.53 ms | 50.49 ms | 66.95 ms |
+| 2 | chunked | 53.63 ms | 53.10 ms | 66.72 ms |
+
+PCM (`AF52480D...`) and the compared tensor (`607A350B...`) are identical in all four runs and equal the layer job's.
+The job drops by 3.3 ms, from 33.0 to 31.0 ms per audio second (30.3 to 32.3 times real time).
+
+Receipt: `build/resident-source-ab.clixml` and the four `build/resident-source-ab-*` directories.
+
 ## Not yet done
 
-- **Profile:** a per-stage profile of the source sections. The one-branch chunked `noise_res.1` runs 62 steps with
-  per-stage dispatch for little work each. The 128-channel source could run on the resident lockstep schedule instead.
+- **Profile:** a per-stage profile of the source sections. `noise_res.0` (256 channels) also fits resident.
 - **Overlap:** weight DMA overlapped with computation.
 - **Length:** the harmonic source and the `har` layouts are whole-length in VTCM, which limits length to about 2 s.
   Spanning them removes that limit.

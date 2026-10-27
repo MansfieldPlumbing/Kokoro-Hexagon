@@ -1814,7 +1814,10 @@ function Test-KokoroGeneratorTileEquivalence {
         [switch]$OneShotTiming,
         # The depth-first job reads each site's K/M/S finished from the host (ConvertTo-KokoroGeneratorStageCoefficients)
         # instead of computing them from the ratios on the DSP; the layer job is unchanged.
-        [switch]$HostCoefficients)
+        [switch]$HostCoefficients,
+        # Computed sources: the depth-first job runs the noise_res sections of these channel counts resident (Backward,
+        # one branch) instead of chunked.
+        [int[]]$ResidentSourceChannels=@())
     $out=[IO.Path]::GetFullPath($OutputDirectory)
     if(-not $out.StartsWith($Build+[IO.Path]::DirectorySeparatorChar,[StringComparison]::OrdinalIgnoreCase) -or (Test-Path -LiteralPath $out)){throw 'Choose a fresh equivalence directory under build/.'}
     [void][IO.Directory]::CreateDirectory($out)
@@ -1841,6 +1844,7 @@ function Test-KokoroGeneratorTileEquivalence {
     $layer=Invoke-KokoroEmission -Kernel KokoroGenerator60x16Run -Parameters $layerParameters
     $tileParameters=$common+@{ResidentBatchTiles=$TileBlock;GeneratorMoments='Constants';GeneratorSchedule=$depthFirst;GeneratorWeightPlanes=$WeightPlanes;GeneratorControllerContact=$ControllerContact.IsPresent;GeneratorVectorPackets=$VectorPackets.IsPresent}
     if($HostCoefficients){ $tileParameters.GeneratorHostCoefficients=$true }
+    if($ResidentSourceChannels){ $tileParameters.GeneratorResidentSourceChannels=$ResidentSourceChannels }
     if($Joint -notin 'Section','WholeSource','SpansSource'){ $tileParameters.GeneratorSuppliedSource=$true }
     if($Joint -ne 'Section'){ $tileParameters.GeneratorSpanTiles=$SpanTiles }
     if($Joint -in 'WholeSource','SpansSource' -and $SourceChunkTiles -ne 128){ $tileParameters.GeneratorSourceChunkTiles=$SourceChunkTiles }
