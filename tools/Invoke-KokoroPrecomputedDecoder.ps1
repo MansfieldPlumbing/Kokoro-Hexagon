@@ -1170,15 +1170,18 @@ $finishedOutputs = switch ($Mode) {
 foreach ($finishedOutput in $finishedOutputs) {
     if ([IO.File]::Exists((Join-Path $output $finishedOutput))) { throw 'Existing completed result is immutable; choose a fresh output directory.' }
 }
-$compiler = Join-Path $root 'build/phonemizer/inputs/pslowering-1afabe056235a570da29e268824784557d4f6cdd'
-$pins = @(Import-Csv -LiteralPath (Join-Path $compiler 'verified-source.tsv') -Delimiter "`t")
-if ($pins.Count -ne 9) { throw 'Incomplete pinned frontend compiler.' }
-foreach ($pin in $pins) {
-    $path = [IO.Path]::GetFullPath((Join-Path $compiler $pin.Path))
-    if (-not $path.StartsWith($compiler + [IO.Path]::DirectorySeparatorChar, [StringComparison]::OrdinalIgnoreCase) -or $pin.Commit -cne '1afabe056235a570da29e268824784557d4f6cdd' -or
-        (Get-FileHash -LiteralPath $path).Hash -cne $pin.Sha256) { throw 'Pinned compiler integrity mismatch.' }
+# The pinned single-file PSLowering compiler (as Invoke-HexagonDevelopment.ps1 pins it), cached under build/ by hash.
+$loweringCommit = 'bb0f67a2bf16e54086c35ff96c0d8a5e523f0519'
+$loweringHash = '6900FC735D5F463ECFDB0241B326D959CF7A8B8A252B56B1A7734F20D3BD9BD6'
+$compiler = Join-Path $root "build/lowered-hexagon/compiler/$loweringHash/Export-LoweredAssembly.ps1"
+if (-not [IO.File]::Exists($compiler)) {
+    $loweringBytes = (Invoke-WebRequest -Uri "https://raw.githubusercontent.com/MansfieldPlumbing/PSLowering/$loweringCommit/Export-LoweredAssembly.ps1" -UseBasicParsing).RawContentStream.ToArray()
+    if ([Convert]::ToHexString([Security.Cryptography.SHA256]::HashData($loweringBytes)) -cne $loweringHash) { throw 'Pinned PSLowering compiler hash mismatch.' }
+    [void][IO.Directory]::CreateDirectory([IO.Path]::GetDirectoryName($compiler)); [IO.File]::WriteAllBytes($compiler, $loweringBytes)
 }
-Import-Module (Join-Path $compiler 'src/Dev.MansfieldPlumbing.PowerShell.Lowering.psd1')
+if ((Get-FileHash -LiteralPath $compiler).Hash -cne $loweringHash) { throw 'Pinned compiler integrity mismatch.' }
+function Export-LoweredAssembly { & $compiler @args }
+function Test-LoweredAssembly { param([string] $AssemblyPath) & $compiler -Mode Inspect -AssemblyPath $AssemblyPath }
 $sourceHash = (Get-FileHash -LiteralPath $PSCommandPath).Hash
 $dllDirectory = Join-Path $output $sourceHash
 [void][IO.Directory]::CreateDirectory($dllDirectory)
