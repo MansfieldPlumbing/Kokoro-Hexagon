@@ -1218,7 +1218,7 @@ $script:Kernels=@(
 } }
     @{ Names=@('KokoroAlbert16Run'); Build={
     . (Join-Path $script:HexagonToolsRoot '..\src\jobs\Kokoro.Albert16Run.ps1')
-    $run=New-KokoroAlbert16RunSteps -Tokens $AlbertTokens -StopAfter $AlbertStopAfter
+    $run=New-KokoroAlbert16RunSteps -Tokens $AlbertTokens -StopAfter $AlbertStopAfter -SharedWindows:$AlbertSharedWindows
     $steps=@($run.Steps)
     $symbol='kokoro_generator_tail_skel_handle_invoke'; $soname='libkokoro_generator_tail_skel.so'
     Write-NewOrIdenticalFile (Join-Path $OutputDirectory 'runner-layout.json') ([Text.Encoding]::UTF8.GetBytes(($run.Layout | ConvertTo-Json -Depth 6))) -AllowOverwrite:$Force
@@ -1395,6 +1395,8 @@ param(
     [ValidateRange(1, 512)][int] $AlbertTokens = 16,
     # KokoroAlbert16Run diagnosis: end after this operator (src/jobs/Kokoro.Albert16Run.ps1 -StopAfter).
     [string] $AlbertStopAfter = '',
+    # KokoroAlbert16Run: key and value read the conv-input windows query wrote from the same stream (one conversion per repeat).
+    [switch] $AlbertSharedWindows,
     [ValidateRange(2, 1048576)][int] $ResBlockFrames = 7801,
     [ValidateSet(3,7,11)][int] $ResBlockKernel = 3,
     [ValidateSet(128,256)][int] $IntegerChannels = 128,

@@ -250,8 +250,10 @@ function Get-KokoroAlbert16Layout {
 
 # -StopAfter <table record> (embed.ln, mapping, q.0 .. ln_full.11, bert_encoder): the job ends after that operator and
 # dumps the tensor it wrote into dump slot 1 (diagnosis, as the decoder's -StopAfterBlock).
+# -SharedWindows: query, key and value read the same stream H with identical identity tables (New-KokoroAlbertJobInput
+# checks the bytes), so key and value read the conv-input windows query wrote instead of converting H again.
 function New-KokoroAlbert16RunSteps {
-    param([ValidateRange(1,32)][int]$Tokens=16,[ValidateRange(1,65536)][int]$Vocab=178,[string]$StopAfter)
+    param([ValidateRange(1,32)][int]$Tokens=16,[ValidateRange(1,65536)][int]$Vocab=178,[string]$StopAfter,[switch]$SharedWindows)
     foreach($file in '../kernels/Kokoro.HmxConvPlanes.ps1','../kernels/Kokoro.PlaneCombine.ps1','../kernels/Kokoro.AdaInLeaky16.ps1','../kernels/Kokoro.LayerNorm16.ps1',
         '../kernels/Kokoro.Gelu16.ps1','../kernels/Kokoro.Attention16.ps1','../kernels/Kokoro.Decoder16.ps1','../kernels/Kokoro.Embed16.ps1') { . (Join-Path $PSScriptRoot $file) }
     $L=Get-KokoroAlbert16Layout -Tokens $Tokens -Vocab $Vocab
@@ -263,11 +265,12 @@ function New-KokoroAlbert16RunSteps {
         $stopped=$false
         $stop={param([string]$name,[string]$region) if($StopAfter -eq $name){ & $dma 23 ($L.DumpOffset+$L.HBytes) 18 $reg[$region].Offset ([math]::Min($reg[$region].Bytes,$L.HBytes)); $true } else { $false } }
         $stageTables={param([string]$name) $rec=$L.Tables[$name]; & $dma 18 $reg.Stage.Offset 22 $rec.Offset $rec.Bytes }
-        $linear={param([string]$name,[string]$weight,[string]$x,[string]$y)
+        $linear={param([string]$name,[string]$weight,[string]$x,[string]$y,[bool]$windowsReady=$false)
             $rec=$L.Tables[$name]; $cin=$rec.Cin; $cout=$rec.Cout; $identity=256L*$cin/32; $conv=1024L*$cout/32
             & $stageTables $name
-            & $ptr 0 18 $reg[$x].Offset; & $ptr 1 18 $reg.WinHi.Offset; & $ptr 2 18 $reg.WinLo.Offset; & $ptr 3 18 $reg.Stage.Offset; & $imm 4 $tiles
-            & $call "albert_identity_$cin"; & $sync
+            if(-not $windowsReady){
+                & $ptr 0 18 $reg[$x].Offset; & $ptr 1 18 $reg.WinHi.Offset; & $ptr 2 18 $reg.WinLo.Offset; & $ptr 3 18 $reg.Stage.Offset; & $imm 4 $tiles
+                & $call "albert_identity_$cin"; & $sync }
             & $ptr 0 18 $reg.WinHi.Offset; & $ptr 1 18 $reg.WinLo.Offset; & $ptr 2 18 ($W+$L.Weights[$weight].Offset); & $ptr 3 18 ($reg.Stage.Offset+$identity); & $imm 4 $tiles; & $ptr 5 18 $reg.Planes.Offset
             & $call "albert_conv_${cin}_$cout"; & $sync
             & $ptr 0 18 $reg.Planes.Offset; & $ptr 1 18 $reg[$y].Offset; & $ptr 2 18 ($reg.Stage.Offset+$identity+$conv); & $imm 3 $tiles
@@ -292,8 +295,8 @@ function New-KokoroAlbert16RunSteps {
         $ops.Add(@('mapping','H',{ & $linear 'mapping' 'mapping' 'E' 'H'; & $dump 0 }))
         for($r=0;$r -lt 12;$r++){
             $ops.Add(@("q.$r",'Q',[scriptblock]::Create("& `$linear 'q.$r' 'q' 'H' 'Q'")))
-            $ops.Add(@("k.$r",'K',[scriptblock]::Create("& `$linear 'k.$r' 'k' 'H' 'K'")))
-            $ops.Add(@("v.$r",'V',[scriptblock]::Create("& `$linear 'v.$r' 'v' 'H' 'V'")))
+            $ops.Add(@("k.$r",'K',[scriptblock]::Create("& `$linear 'k.$r' 'k' 'H' 'K' `$$SharedWindows")))
+            $ops.Add(@("v.$r",'V',[scriptblock]::Create("& `$linear 'v.$r' 'v' 'H' 'V' `$$SharedWindows")))
             $ops.Add(@("attention.$r",'Context',[scriptblock]::Create(@"
 & `$stageTables 'attention.$r'
 & `$ptr 0 18 `$reg.Q.Offset; & `$ptr 1 18 `$reg.Stage.Offset; & `$imm 2 `$tiles; & `$call 'albert_qconvert'; & `$sync

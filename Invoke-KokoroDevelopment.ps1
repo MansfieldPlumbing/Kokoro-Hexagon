@@ -2788,6 +2788,11 @@ function New-KokoroAlbertJobInput {
         $sH[$r + 1] = $needH; $opUnits["ln_full.$r"] = (& $uniform 768 $sH[$r + 1])
         & $put "ln_full.$r" (ConvertTo-KokoroLayerNormTable -Gamma (& $parameter "$layer.full_layer_layer_norm.weight") -Beta (& $parameter "$layer.full_layer_layer_norm.bias") -OutScales (& $uniform 768 $sH[$r + 1]) -InputLsb $plan.A1[$r] -Epsilon $eps)
     }
+    # Shared windows (New-KokoroAlbert16RunSteps -SharedWindows) are exact only if key and value convert H exactly as query does.
+    $identityBytes = 256 * 768 / 32
+    for ($r = 0; $r -lt 12; $r++) { foreach ($n in 'k', 'v') {
+        $a = $L.Tables["q.$r"].Offset; $b = $L.Tables["$n.$r"].Offset
+        for ($i = 0; $i -lt $identityBytes; $i++) { if ($tables[$a + $i] -ne $tables[$b + $i]) { throw "Repeat ${r}: $n's identity table differs from query's; shared windows would not be exact." } } } }
    $dPeak = [double[]]::new(512); foreach ($cap in $cals) { $st = Get-KokoroChannelStats -Values (& $read $cap 'd_en') -Channels 512; for ($i = 0; $i -lt 512; $i++) { $dPeak[$i] = [math]::Max($dPeak[$i], $st.AbsMax[$i]) } }
     $uD = & $linear 'bert_encoder' 'bert_encoder' 'bert_encoder' (& $uniform 768 $sH[12]) $dPeak 0 (& $peakTensor 'bert.layer.11.output' 768)
     $plan.Stream = $sH
@@ -2839,11 +2844,11 @@ function Get-KokoroAlbertOperatorReference {
 function Test-KokoroAlbertJob {
     param([string] $TestCapture = (Join-Path $Build 'stock-albert-capture-hello'),
         [string[]] $CalibrationCaptures = @('bench1', 'bench2', 'bench3', 'howareyou' | ForEach-Object { Join-Path $Build "stock-albert-capture-$_" }),
-        [string] $Soc = 'SM8550', [int] $Runs = 3, [string] $StopAfter)
+        [string] $Soc = 'SM8550', [int] $Runs = 3, [string] $StopAfter, [switch] $SharedWindows)
     $dir = New-KokoroInputDirectory 'albert/job'
     $fx = New-KokoroAlbertJobInput -TestCapture $TestCapture -CalibrationCaptures $CalibrationCaptures -OutputDirectory $dir
     Import-Evaluator
-    $parameters = @{ AlbertTokens = $fx.Tokens }; if ($StopAfter) { $parameters.AlbertStopAfter = $StopAfter }
+    $parameters = @{ AlbertTokens = $fx.Tokens }; if ($StopAfter) { $parameters.AlbertStopAfter = $StopAfter }; if ($SharedWindows) { $parameters.AlbertSharedWindows = $true }
     $e = Invoke-KokoroEmission -Kernel KokoroAlbert16Run -Parameters $parameters
     $run = Invoke-KokoroDeviceJob -EmissionDirectory $e.Directory -InputDirectory $dir -Soc $Soc -Runs $Runs
     $layout = Get-Content (Join-Path $e.Directory 'runner-layout.json') -Raw | ConvertFrom-Json
@@ -2862,8 +2867,10 @@ function Test-KokoroAlbertJob {
         $got = ConvertFrom-KokoroCroutons16 -Bytes (& $slice ($layout.DumpOffset + $layout.HBytes) $layout.HBytes) -Frames $T -Units $units
         $stopDb = Get-KokoroSnr $got (ConvertTo-KokoroChannelMajor (Get-KokoroAlbertOperatorReference -Capture (Read-KokoroCapture -Directory $TestCapture) -Operator $StopAfter) 768)
     }
+    # The output tensors (d_en and the stream dumps) without the header's tick counts, for byte comparisons between emissions.
+    $tensorSha = [Convert]::ToHexString([Security.Cryptography.SHA256]::HashData((& $slice $layout.OutputOffset ($run.Output.Length - $layout.OutputOffset))))
     [pscustomobject]@{ Tokens = $T; Soc = $Soc; DEnDb = Get-KokoroSnr $d (& $expected 'expected-d_en-f32.bin' (512 * $T)); StreamDb = $stream; MedianMs = $run.MedianMs
-        Skel = $e.LibrarySHA256.Substring(0, 16); Emission = $e.Key; Input = $dir; StopAfter = $StopAfter; Runs = $run.Lines; StopDb = $stopDb }
+        Skel = $e.LibrarySHA256.Substring(0, 16); Emission = $e.Key; Input = $dir; StopAfter = $StopAfter; Runs = $run.Lines; StopDb = $stopDb; TensorSHA256 = $tensorSha; SharedWindows = $SharedWindows.IsPresent }
 }
 # Every ALBERT LayerNorm after the embeddings, by short name: attention.<r> (input layer.r.input + attention.dense output)
 # and full.<r> (input attention.LayerNorm output + ffn_output output), r = 0..11. Inputs are the stock sums.
