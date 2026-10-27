@@ -87,6 +87,9 @@ param(
     [Collections.IDictionary] $SelectedUnits = $null,
     [Collections.IDictionary] $AlbertQuantization = $null,
     [object[]] $DonorRecords = @(),
+    # A Kokoro.OfflineRender.dll compiled from this file elsewhere (the phone runs no compiler); it must reference
+    # System.Private.CoreLib only. Without it the classes below are compiled here.
+    [string] $CompiledAssembly = '',
     [switch] $h
 )
 
@@ -1163,27 +1166,34 @@ $finishedOutputs = switch ($Mode) {
 foreach ($finishedOutput in $finishedOutputs) {
     if ([IO.File]::Exists((Join-Path $output $finishedOutput))) { throw 'Existing completed result is immutable; choose a fresh output directory.' }
 }
-# The pinned single-file PSLowering compiler (as Invoke-HexagonDevelopment.ps1 pins it), cached under build/ by hash.
-$loweringCommit = 'bb0f67a2bf16e54086c35ff96c0d8a5e523f0519'
-$loweringHash = '6900FC735D5F463ECFDB0241B326D959CF7A8B8A252B56B1A7734F20D3BD9BD6'
-$compiler = Join-Path $root "build/lowered-hexagon/compiler/$loweringHash/Export-LoweredAssembly.ps1"
-if (-not [IO.File]::Exists($compiler)) {
-    $loweringBytes = (Invoke-WebRequest -Uri "https://raw.githubusercontent.com/MansfieldPlumbing/PSLowering/$loweringCommit/Export-LoweredAssembly.ps1" -UseBasicParsing).RawContentStream.ToArray()
-    if ([Convert]::ToHexString([Security.Cryptography.SHA256]::HashData($loweringBytes)) -cne $loweringHash) { throw 'Pinned PSLowering compiler hash mismatch.' }
-    [void][IO.Directory]::CreateDirectory([IO.Path]::GetDirectoryName($compiler)); [IO.File]::WriteAllBytes($compiler, $loweringBytes)
-}
-if ((Get-FileHash -LiteralPath $compiler).Hash -cne $loweringHash) { throw 'Pinned compiler integrity mismatch.' }
-function Export-LoweredAssembly { & $compiler @args }
-function Test-LoweredAssembly { param([string] $AssemblyPath) & $compiler -Mode Inspect -AssemblyPath $AssemblyPath }
 $sourceHash = (Get-FileHash -LiteralPath $PSCommandPath).Hash
-$dllDirectory = Join-Path $output $sourceHash
-[void][IO.Directory]::CreateDirectory($dllDirectory)
-$dll = Join-Path $dllDirectory 'Kokoro.OfflineRender.dll'
-if ([IO.File]::Exists($dll)) { throw 'Existing compiled artifact is immutable; choose a fresh output directory.' }
-$compiled = Export-LoweredAssembly -SourcePath $PSCommandPath -ClassName OfflineConvolutionWorker -OutputPath $dll -Deterministic
-$admission = Test-LoweredAssembly -AssemblyPath $dll
-if (-not $admission.ClrOnlyAdmitted) { throw 'Offline numeric kernels reference SMA.' }
-$assembly = [Reflection.Assembly]::LoadFrom($dll)
+if ($CompiledAssembly) {
+    $dll = [IO.Path]::GetFullPath($CompiledAssembly)
+    $assembly = [Reflection.Assembly]::LoadFrom($dll)
+    $references = @($assembly.GetReferencedAssemblies() | ForEach-Object Name)
+    if ($references.Count -ne 1 -or $references[0] -cne 'System.Private.CoreLib') { throw 'The supplied numeric kernels must reference System.Private.CoreLib only.' }
+    $admission = [pscustomobject]@{ SHA256 = (Get-FileHash -LiteralPath $dll).Hash; ClrOnlyAdmitted = $true }
+}
+else {
+    # The pinned single-file PSLowering compiler (as Invoke-HexagonDevelopment.ps1 pins it), cached under build/ by hash.
+    $loweringCommit = 'bb0f67a2bf16e54086c35ff96c0d8a5e523f0519'
+    $loweringHash = '6900FC735D5F463ECFDB0241B326D959CF7A8B8A252B56B1A7734F20D3BD9BD6'
+    $compiler = Join-Path $root "build/lowered-hexagon/compiler/$loweringHash/Export-LoweredAssembly.ps1"
+    if (-not [IO.File]::Exists($compiler)) {
+        $loweringBytes = (Invoke-WebRequest -Uri "https://raw.githubusercontent.com/MansfieldPlumbing/PSLowering/$loweringCommit/Export-LoweredAssembly.ps1" -UseBasicParsing).RawContentStream.ToArray()
+        if ([Convert]::ToHexString([Security.Cryptography.SHA256]::HashData($loweringBytes)) -cne $loweringHash) { throw 'Pinned PSLowering compiler hash mismatch.' }
+        [void][IO.Directory]::CreateDirectory([IO.Path]::GetDirectoryName($compiler)); [IO.File]::WriteAllBytes($compiler, $loweringBytes)
+    }
+    if ((Get-FileHash -LiteralPath $compiler).Hash -cne $loweringHash) { throw 'Pinned compiler integrity mismatch.' }
+    $dllDirectory = Join-Path $output $sourceHash
+    [void][IO.Directory]::CreateDirectory($dllDirectory)
+    $dll = Join-Path $dllDirectory 'Kokoro.OfflineRender.dll'
+    if ([IO.File]::Exists($dll)) { throw 'Existing compiled artifact is immutable; choose a fresh output directory.' }
+    $null = & $compiler -SourcePath $PSCommandPath -ClassName OfflineConvolutionWorker -OutputPath $dll -Deterministic
+    $admission = & $compiler -Mode Inspect -AssemblyPath $dll
+    if (-not $admission.ClrOnlyAdmitted) { throw 'Offline numeric kernels reference SMA.' }
+    $assembly = [Reflection.Assembly]::LoadFrom($dll)
+}
 $workerType = $assembly.GetType('OfflineConvolutionWorker', $true)
 $mathType = $assembly.GetType('OfflineRenderMath', $true)
 $upstreamMath = $assembly.GetType('OfflineUpstreamMath', $true)
