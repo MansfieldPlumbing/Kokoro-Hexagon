@@ -288,6 +288,48 @@ PCM and the compared tensor are identical in all four runs and equal the layer j
 
 Receipt: `build/async-weights-ab.clixml` and the four `build/async-weights-ab-*` directories.
 
+### Inside the lockstep, and the packed fill (2026-10-27)
+
+Profile of the job above (`-PmuSplit`, set A, 45.89 ms instrumented): the three lockstep regions (the 128-channel
+section and both resident sources) take 20.15 ms, 44 % of the job; DMA is 1.17 ms. With PMU events the lockstep threads
+now also sum their own ticks per activity (`PmuProfile.LockstepTelemetryOffset`; the unprofiled library is unchanged).
+Per thread, over all three lockstep regions (set A; set B agrees within 0.2 ms):
+
+| Thread | Fill | Combine | Matrix lock held | Waiting for the lock | Waiting for the neighbor | Input | Mean and output |
+| ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| 0 | 12.12 ms | 4.52 ms | 2.12 ms | 0.48 ms | 0.06 ms | 0.10 ms | 0.24 ms |
+| 1 | 12.14 ms | 4.43 ms | 1.93 ms | 0.37 ms | 0.52 ms | 0.10 ms | 0.22 ms |
+| 2 | 12.43 ms | 4.62 ms | 1.94 ms | 0.15 ms | 0.31 ms | 0.10 ms | 0.25 ms |
+| 3 | 12.51 ms | 4.41 ms | 1.92 ms | 0.41 ms | 0.32 ms | 0.09 ms | 0.21 ms |
+
+The lockstep is bound by its HVX work, the AdaIN and Snake fill above all; the matrix unit is held about 8 ms of the
+threads' combined time, and contention for it is small.
+
+The fill packed into instruction packets (`VectorPackets`, `window-fill-packets-sm8550-20261021.md`), same protocol:
+
+| Round | Fill | Depth-first, resident | One-shot proof | Layer | Library |
+| --- | --- | ---: | ---: | ---: | --- |
+| 1 | packed | 42.00 ms | 42.03 ms | 66.90 ms | `2DAAED9A...` |
+| 1 | unpacked | 44.75 ms | 44.80 ms | 66.74 ms | `EC472BCE...` |
+| 2 | packed | 42.38 ms | 41.86 ms | 66.68 ms | `2DAAED9A...` |
+| 2 | unpacked | 44.75 ms | 44.53 ms | 66.56 ms | `EC472BCE...` |
+
+PCM and the compared tensor are identical in all four runs and equal the layer job's. Packed, the job takes 42.19 ms,
+2.56 ms less (26.0 ms per audio second, 38.5 times real time).
+
+Receipts: `build/generator-profile-best-*` (profile.clixml), `build/vector-packets-ab.clixml` and its directories.
+
+### Kept settings are the defaults (2026-10-27)
+
+`Invoke-KokoroGeneratorDepthFirstEmission` applies every kept setting unless the caller overrides it: host coefficients,
+queued weights, the packed fill, resident sources and 60-tile spans. A whole-generator layout that does not fit VTCM
+falls back to 40- then 20-tile spans, then to fewer resident sources, and the emission reports what it chose
+(`DepthFirstSettings`). `Add-KokoroGeneratorHostCoefficients` appends K/M/S wherever the layout expects them; the tile
+equivalence case and the speech renderer both use the two. `Test-KokoroGeneratorTileEquivalence -Joint WholeSource` with
+no options emits `2DAAED9A...` and ran 42.17 ms (one-shot proof 42.45 ms), output equal to the layer job's.
+
+Receipt: `build/generator-defaults-*` (defaults.clixml).
+
 ## Not yet done
 
 - **State:** sections save and restore their read-only regions (weights, records, K/M/S) and whole rings with their

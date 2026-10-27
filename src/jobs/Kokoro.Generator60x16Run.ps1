@@ -556,7 +556,7 @@ function New-KokoroGenerator60x16RunSteps {
         if($pmuSites.Count -eq 0 -or $pmuSites[0].Index -ne 0 -or (@($pmuSites.Index | Sort-Object -Unique).Count -ne $pmuSites.Count)){throw 'Unmarked PMU site indices must be unique and start at zero.'}
         # Keep indices stable when an optional source branch has no mark site.
         $pmuSiteRecordCount=1+$pmuSites[-1].Index
-        if(256+64*$pmuCategories.Count -gt 4096 -or $pmuSiteOffset+64*$pmuSiteRecordCount -gt 61184){throw 'PMU records overlap the pool, the queued DMA descriptors or the stacks.'}
+        if(256+64*$pmuCategories.Count -gt 4096 -or $pmuSiteOffset+64*$pmuSiteRecordCount -gt 60928){throw 'PMU records overlap the pool, the lockstep telemetry, the queued DMA descriptors or the stacks.'}
     }
     $mark={param([string]$category,[string]$nextStage='',[int]$site=-1)
         if(-not $PmuEvents -or $marksOff){return}
@@ -575,6 +575,11 @@ function New-KokoroGenerator60x16RunSteps {
     # Queued DMA (-AsyncWeights): up to four transfers' descriptor pairs (64 bytes each) below the stacks, untouched while
     # in flight because the synchronous transfers use r24's slots.
     $queueOffset=$scratchOffset+61184
+    # Lockstep telemetry (with PMU events): per lockstep thread k, 32 bytes at + 32 k of ticks summed over every stage of
+    # every lockstep run: +0 waiting for the matrix lock, +4 holding it (the stage's convolutions), +8 waiting for the
+    # neighbor's progress, +12 the fill, +16 the combine, +20 the mean and output transfer, +24 the input transfer;
+    # +28 the interval's start tick (low word).
+    $lockstepTelemetryOffset=$scratchOffset+60928
     # Spin waits poll the pool between pause(#16) instructions.
     $poolPause=16
     $futexWait={param([int]$addrReg,[int]$valueReg) $s.Add(@{Op='addi';d=1;s=$valueReg;i=0}); $s.Add(@{Op='addi';d=0;s=$addrReg;i=0}); $s.Add(@{Op='imm';d=3;i=0}); $s.Add(@{Op='imm';d=4;i=-1}); $s.Add(@{Op='imm';d=5;i=-1}); $s.Add(@{Op='trap0';i=0x20}) }
@@ -762,6 +767,7 @@ function New-KokoroGenerator60x16RunSteps {
         for($i=0;$i -lt 8;$i++){ $pmucfg=$pmucfg -bor ((([long]$PmuEvents[$i] -shr 8) -band 3) -shl (2*$i)) }
         & $ptr 4 25 $pmuOffset; $s.Add(@{Op='vxor';d=0;s=0;t=0}); for($k=0;$k -lt [math]::Ceiling((256+64*$pmuCategories.Count)/128);$k++){$s.Add(@{Op='vstore';s=4;t=0;Offset=(128*($k%8))}); if($k%8 -eq 7){$s.Add(@{Op='addi';d=4;s=4;i=1024})}}
         & $ptr 4 25 ($pmuOffset+$pmuSiteOffset); for($k=0;$k -lt [math]::Ceiling(64*$pmuSiteRecordCount/128);$k++){$s.Add(@{Op='vstore';s=4;t=0;Offset=(128*($k%8))}); if($k%8 -eq 7){$s.Add(@{Op='addi';d=4;s=4;i=1024})}}
+        & $ptr 4 25 $lockstepTelemetryOffset; $s.Add(@{Op='vstore';s=4;t=0;Offset=0}); $s.Add(@{Op='vstore';s=4;t=0;Offset=128})
         & $ptr 4 25 ($pmuOffset+64); $s.Add(@{Op='store-d';s=4;t=26;Offset=32}); $s.Add(@{Op='upcycle';d=6}); $s.Add(@{Op='store-d';s=4;t=6;Offset=40})
         $s.Add(@{Op='imm';d=5;i=2}); $s.Add(@{Op='trap0';i=0x55}); & $ptr 2 25 $pmuOffset; $s.Add(@{Op='store';s=2;t=0;Offset=4})
         foreach($w in @(@(4,$pmucfg),@(5,$evtcfg),@(10,$evtcfg1))){ $s.Add(@{Op='imm';d=0;i=$w[0]}); & $imm 1 $w[1]; $s.Add(@{Op='imm';d=2;i=1}); $s.Add(@{Op='trap0';i=0x4a}) }
@@ -1045,11 +1051,18 @@ function New-KokoroGenerator60x16RunSteps {
         $s.Add(@{Op='label';Name=$again}); $s.Add(@{Op='load';d=3;s=2;Offset=0}); $s.Add(@{Op='gt';d=0;s=3;t=1}); $s.Add(@{Op='jump-p';u=0;Label=$ready})
         $s.Add(@{Op='pause';i=$poolPause}); & $jump $again
         $s.Add(@{Op='label';Name=$ready}) }
+    # Lockstep telemetry: start an interval, and add the ticks since its start to one of the thread's sums (r6..r9).
+    $tickStart={param([int]$thread) if(-not $PmuEvents){ return }
+        $s.Add(@{Op='hwticks';d=6}); & $ptr 8 25 ($lockstepTelemetryOffset+32*$thread); $s.Add(@{Op='store';s=8;t=6;Offset=28}) }
+    $tickAdd={param([int]$thread,[int]$slot) if(-not $PmuEvents){ return }
+        $s.Add(@{Op='hwticks';d=6}); & $ptr 8 25 ($lockstepTelemetryOffset+32*$thread); $s.Add(@{Op='load';d=9;s=8;Offset=28}); $s.Add(@{Op='sub';d=6;s=6;t=9})
+        $s.Add(@{Op='load';d=9;s=8;Offset=$slot}); $s.Add(@{Op='add';d=9;s=9;t=6}); $s.Add(@{Op='store';s=8;t=9;Offset=$slot}) }
     $publish={param($block,[int]$thread,[int]$st)
         $s.Add(@{Op='syncht'}); & $progressValue 1 $block ($st+1); & $ptr 2 18 ($tileRegions.Progress+4*$thread); $s.Add(@{Op='store';s=2;t=1;Offset=0}) }
     # Thread k's tile of block j through every stage, the mean and its output.
     $lockstepTile={param($block,[int]$parity,[int]$thread)
         $w=$thread; $tile=if($null -eq $block){$null}else{$batch*$block+$w}
+        & $tickStart $thread
         if($null -eq $block -or $tile -lt $tiles){
             if($null -ne $block){ & $dma 18 ($tileRegions.Input+($tile % $ringTiles)*[long]$tileBytes) $r0Base ($r0Offset+$tile*[long]$tileBytes) $tileBytes }
             else {
@@ -1058,13 +1071,16 @@ function New-KokoroGenerator60x16RunSteps {
                 & $dmaRegisters $tileBytes
             }
         }
+        & $tickAdd $thread 24
         for($st=0;$st -lt 6;$st++){
             $p=[int][math]::Floor($st/2); $half=$st % 2; $src=& $fillSource $st
             $highBase=$fillAt["High.$st"]+$guardBytes; $lowBase=$fillAt["Low.$st"]+$guardBytes
             & $tileAt 0 $src[0] $ringTiles $block $w; & $tileAt 1 $highBase $ringTiles $block $w; & $tileAt 2 $lowBase $ringTiles $block $w
             & $ptr 3 18 ($tileRegions.Kms+$st*$kmsBytes); $s.Add(@{Op='imm';d=4;i=1})
             if($ControllerContact){ & $controllerPointer 5 $block 0 ($w-$p) }
+            & $tickStart $thread
             & $call $(if($parity -and $w -ge $batch-2){"body_turnsB_$($src[1])_mirror$sfx"}else{"body_turnsB_$($src[1])$sfx"})
+            & $tickAdd $thread 12
             if($null -ne $block){
                 $phys=$tile % $ringTiles
                 for($branch=0;$branch -lt $branches;$branch++){
@@ -1076,15 +1092,16 @@ function New-KokoroGenerator60x16RunSteps {
                     }
                 }
             }
-            & $waitNeighbor $block $thread $st
-            $s.Add(@{Op='syncht'}); & $matrixLock
+            & $tickStart $thread; & $waitNeighbor $block $thread $st; & $tickAdd $thread 8
+            $s.Add(@{Op='syncht'}); & $tickStart $thread; & $matrixLock; & $tickAdd $thread 0; & $tickStart $thread
             for($branch=0;$branch -lt $branches;$branch++){
                 $at=6*$branch+$st
                 & $tileAt 0 ($highBase+$branch*$fillBytes) $ringTiles $block $w; & $tileAt 1 ($lowBase+$branch*$fillBytes) $ringTiles $block $w
                 & $ptr 2 18 $tileWeightAt[$at]; & $ptr 3 18 ($tileRegions.Records+$at*$recordBytes+$tablesAt); $s.Add(@{Op='imm';d=4;i=1}); & $ptr 5 18 ($tileRegions.Planes+$branch*$planesStride+$w*[long]$tileBytes)
                 & $call "body_convB_b${branch}_s$st$sfx"
             }
-            & $matrixUnlock; $s.Add(@{Op='syncht'})
+            & $matrixUnlock; & $tickAdd $thread 4; $s.Add(@{Op='syncht'})
+            & $tickStart $thread
             $rAt=$tileRegions.Records+$st*$recordBytes
             & $ptr 0 18 ($tileRegions.Planes+$w*[long]$tileBytes); & $ptr 2 18 ($rAt+$ratiosAt); $s.Add(@{Op='imm';d=3;i=1})
             if($half -eq 0){ & $tileAt 1 ($tileRegions.Stage+[long]$branches*$p*$ringBytes) $ringTiles $block $w; & $call "body_combine_convB$sfx" }
@@ -1097,9 +1114,11 @@ function New-KokoroGenerator60x16RunSteps {
                     if($lo -lt $Frames -and $lo+31 -ge $Frames){ for($branch=0;$branch -lt $branches;$branch++){ & $padRows ($tileRegions.Levels+([long]$branches*$p+$branch)*$ringBytes+($tile % $ringTiles)*[long]$tileBytes) 0x8000 ($Frames-$lo) 32 } }
                 }
             }
+            & $tickAdd $thread 16
             & $publish $block $thread $st
         }
         # The output tile (position m - 3): the three branches' mean, or one branch's last level.
+        & $tickStart $thread
         if($branches -eq 3){
             for($branch=0;$branch -lt 3;$branch++){ & $tileAt $branch ($tileRegions.Levels+(6L+$branch)*$ringBytes) $ringTiles $block $w }
             & $ptr 3 18 ($tileRegions.Mean+$w*[long]$tileBytes); $s.Add(@{Op='imm';d=4;i=1}); & $call "body_mean$sfx"; $s.Add(@{Op='syncht'})
@@ -1113,6 +1132,7 @@ function New-KokoroGenerator60x16RunSteps {
             $s.Add(@{Op='asl-i';d=2;s=17;i=$blockShift}); & $imm 15 ($finalOffset+($w-3L)*$tileBytes); $s.Add(@{Op='add';d=2;s=2;t=15}); $s.Add(@{Op='add';d=2;s=2;t=25})
             & $dmaRegisters $tileBytes
         }
+        & $tickAdd $thread 20
     }
     # Thread k's program: r0 VTCM base, r1 the DDR workspace, r2 the input buffer; r16 to r27 saved; r24 its own DMA
     # descriptor slots in its frame. It runs the section's steps j0 .. j1 - 1.
@@ -1818,7 +1838,7 @@ $resultLayout.DmaLedger=@($dmaLedger | Group-Object Section,Span,Class | ForEach
     if($Source){ $resultLayout.Har=[pscustomobject]@{SixtyOffset=$har60At;SixtyBytes=2L*$tiles60*4096;PhaseMajorOffset=$harPmAt;PhaseMajorBytes=2L*$tiles10*16384} }
     if($Source){ $resultLayout.SourceNoise=[pscustomobject]@{InputOffset=$sourceIn+$sourceLayout.F0Bytes;Bytes=$sourceLayout.HalfwordBytes;Seeded=$SeededNoise.IsPresent} }
     if($ControllerContact){ $resultLayout.ControllerContact=[pscustomobject]@{Offset=$contactOffset;SensitivityBytesPerStage=8L*$Channels;ControllerOffset=$contactOffset+18L*8*$Channels;ControllerBytes=$controllerBytes;Tiles=$tiles} }
-    if($PmuEvents){$resultLayout.PmuProfile=[pscustomobject]@{Categories=$pmuCategories;SiteRecordOffset=$pmuSiteOffset;SiteRecordCount=$pmuSiteRecordCount;Sites=$pmuSites}}
+    if($PmuEvents){$resultLayout.PmuProfile=[pscustomobject]@{Categories=$pmuCategories;SiteRecordOffset=$pmuSiteOffset;SiteRecordCount=$pmuSiteRecordCount;Sites=$pmuSites;LockstepTelemetryOffset=$lockstepTelemetryOffset;LockstepThreads=$BatchTiles}}
     $resultLayout.ConstantPacking=[pscustomobject]@{Frames=$Frames;ParameterBytes=$constantsTableOffset;ConstantsTableOffset=$constantsTableOffset;
         ConstantsBytes=$momentAt;ConstantsParameterBytes=$constantsTableOffset+$momentAt;OutputBytes=$exportOffset;
         MomentSites=$momentSites.ToArray();MomentsBytes=$momentAt;KmBytes=$kmsAt;HostCoefficientsOffset=$(if($HostCoefficients){$hostCoefficientsOffset}else{-1L})}

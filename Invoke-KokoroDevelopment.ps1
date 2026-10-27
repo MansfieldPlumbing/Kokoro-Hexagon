@@ -1555,6 +1555,50 @@ function ConvertTo-KokoroGeneratorStageCoefficients {
     , $out
 }
 
+# The job's parameters with the finished K/M/S appended where a depth-first layout with host coefficients expects them
+# (ConstantPacking.HostCoefficientsOffset); returned unchanged when the layout computes them on the DSP.
+function Add-KokoroGeneratorHostCoefficients {
+    param([Parameter(Mandatory)][byte[]] $Tables, [Parameter(Mandatory)] $Layout)
+    $at = [long]$Layout.ConstantPacking.HostCoefficientsOffset
+    if ($at -lt 0) { return , $Tables }
+    if ($Tables.Length -gt $at) { throw "Parameters ($($Tables.Length) B) reach past the host coefficients at $at." }
+    $kms = ConvertTo-KokoroGeneratorStageCoefficients -Tables $Tables -Layout $Layout
+    $out = [byte[]]::new($at + $kms.Length); [Array]::Copy($Tables, $out, $Tables.Length); [Array]::Copy($kms, 0, $out, $at, $kms.Length)
+    , $out
+}
+
+# The depth-first generator job with the settings its paired phone runs kept (docs/results/
+# generator-source-on-dsp-sm8550-20261024.md): K/M/S from the host, queued 256-channel weights, the packed fill, resident
+# source sections and 60-tile spans. -Overrides replace any of them (opt-out). A whole-generator layout that does not
+# fit VTCM falls back to 40- then 20-tile spans, then to fewer resident sources; the result's DepthFirstSettings and
+# DepthFirstParameters say what was emitted. Callers append K/M/S with Add-KokoroGeneratorHostCoefficients.
+function Invoke-KokoroGeneratorDepthFirstEmission {
+    param([Parameter(Mandatory)][hashtable] $Parameters, [hashtable] $Overrides = @{})
+    $kept = @{ GeneratorHostCoefficients = $true; GeneratorAsyncWeights = $true; GeneratorVectorPackets = $true }
+    $spanSizes = @(0); $residentSets = @(, [int[]]@())
+    if ($Parameters.GeneratorWhole) { $spanSizes = @(60, 40, 20) }
+    if ($Parameters.GeneratorSource) { $residentSets = @([int[]]@(128, 256), [int[]]@(128), [int[]]@()) }
+    if ($Overrides.ContainsKey('GeneratorSpanTiles')) { $spanSizes = @([int]$Overrides.GeneratorSpanTiles) }
+    if ($Overrides.ContainsKey('GeneratorResidentSourceChannels')) { $residentSets = @(, [int[]]@($Overrides.GeneratorResidentSourceChannels)) }
+    $rejected = [Collections.Generic.List[string]]::new()
+    foreach ($residentSet in $residentSets) {
+        foreach ($size in $spanSizes) {
+            $p = $Parameters.Clone(); foreach ($key in $kept.Keys) { $p[$key] = $kept[$key] }
+            foreach ($key in $Overrides.Keys) { $p[$key] = $Overrides[$key] }
+            if ($size) { $p.GeneratorSpanTiles = $size }
+            if ($residentSet.Count) { $p.GeneratorResidentSourceChannels = $residentSet } else { $p.Remove('GeneratorResidentSourceChannels') }
+            try { $emission = Invoke-KokoroEmission -Kernel KokoroGenerator60x16Run -Parameters $p }
+            catch { if ($_.Exception.Message -notmatch 'VTCM') { throw }; $rejected.Add("span $size, resident $($residentSet -join ','): $($_.Exception.Message)"); continue }
+            $settings = [pscustomobject]@{ SpanTiles = $size; ResidentSourceChannels = $residentSet; HostCoefficients = [bool]$p.GeneratorHostCoefficients
+                AsyncWeights = [bool]$p.GeneratorAsyncWeights; VectorPackets = [bool]$p.GeneratorVectorPackets; Rejected = $rejected.ToArray() }
+            $emission | Add-Member -NotePropertyName DepthFirstSettings -NotePropertyValue $settings -Force
+            $emission | Add-Member -NotePropertyName DepthFirstParameters -NotePropertyValue $p -Force
+            return $emission
+        }
+    }
+    throw "No depth-first layout fits VTCM: $($rejected -join '; ')"
+}
+
 # int8 weights in the high plane: q = round(w / 256), clamped to +-127, stored as 256 q (low plane zero). Zero-point
 # biases follow the planes (as Test-KokoroGeneratorWeightPrecision): group 0 by -128 (sum q - sum Wh), group 1 by
 # 128 sum Wl. HMX weight byte order: ((g K + k) CB + blk) 2048 + 1024 hh + 128 (i >> 2) + 4 c + (i & 3). -Layout is a
@@ -1653,9 +1697,8 @@ function New-KokoroSpeechRenderer {
         finally { [IO.File]::Delete((Join-Path $directory 'weights.bin')) } }
     $renderer | Add-Member -MemberType ScriptMethod -Name GeneratorEmission -Value { param([int]$Ticks,[string]$Kind)
         $parameters=@{ResBlockFrames=60*$Ticks+1;ResidentHvxThreads=4;GeneratorWhole=$true;GeneratorSource=$true;SourceSeededNoise=$true}
-        if($Kind -ceq 'Export'){ $parameters+=@{ResidentBatchTiles=22;GeneratorMoments='Export';GeneratorSchedule='Layer'} }
-        else { $parameters+=@{ResidentBatchTiles=4;GeneratorMoments='Constants';GeneratorSchedule='Backward';GeneratorWeightPlanes=1;GeneratorSpanTiles=20} }
-        Invoke-KokoroEmission -Kernel KokoroGenerator60x16Run -Parameters $parameters }
+        if($Kind -ceq 'Export'){ $parameters+=@{ResidentBatchTiles=22;GeneratorMoments='Export';GeneratorSchedule='Layer'}; return Invoke-KokoroEmission -Kernel KokoroGenerator60x16Run -Parameters $parameters }
+        Invoke-KokoroGeneratorDepthFirstEmission -Parameters ($parameters+@{ResidentBatchTiles=4;GeneratorMoments='Constants';GeneratorSchedule='Backward';GeneratorWeightPlanes=1}) }
     $renderer | Add-Member -MemberType ScriptMethod -Name GeneratorInput -Value { param($Emission,[byte[]]$XCroutons,[float[]]$Pitch,[int]$Ticks)
         # x croutons (ceil(ticks / 32) tiles of 512 channels), f0 as int32 Q16 Hz per tick, the noise seed and scale.
         $xBytes=[long][math]::Ceiling($Ticks/32)*32768; $f0Bytes=[long][math]::Ceiling(4*$Ticks/128)*128
@@ -1722,6 +1765,7 @@ function New-KokoroSpeechRenderer {
         if($null -eq $this.Int8){ $this.Int8=ConvertTo-KokoroGeneratorInt8 -Tables $Constants -WeightBytes $this.Weights -Layout $emission.Layout -IncludeSource -CacheDirectory (Join-Path $Build 'generator-int8') }
         $tables=[byte[]]$Constants.Clone(); $corrections=$this.Int8.Corrections
         for($i=0;$i -lt $corrections.Length;$i+=2){ $at=[int]$corrections[$i]; [Array]::Copy([BitConverter]::GetBytes([int]([long][BitConverter]::ToInt32($tables,$at)+$corrections[$i+1])),0,$tables,$at,4) }
+        $tables=Add-KokoroGeneratorHostCoefficients -Tables $tables -Layout $emission.Layout
         $job=$this.Run($emission,$this.GeneratorInput($emission,$XCroutons,$Pitch,$Ticks),$tables,$this.Int8.Weights,-not $onResident)
         $samples=300*$Ticks; $pcm=[float[]]::new($samples); for($i=0;$i -lt $samples;$i++){ $pcm[$i]=[BitConverter]::ToInt16($job.Output,$emission.Layout.PcmOffset+2*$i)/32768.0 }
         [pscustomobject]@{PSTypeName='Kokoro.GeneratorRendering';Ticks=$Ticks;Pcm=$pcm;DspMs=$job.MedianMs;LibrarySHA256=$emission.LibrarySHA256} }
@@ -1844,18 +1888,19 @@ function Test-KokoroGeneratorTileEquivalence {
     $export=Invoke-KokoroEmission -Kernel KokoroGenerator60x16Run -Parameters ($common+@{ResidentBatchTiles=22;GeneratorMoments='Export';GeneratorSchedule='Layer'})
     $layerParameters=$common+@{ResidentBatchTiles=$LayerBatchTiles;GeneratorMoments='Constants';GeneratorSchedule='Layer'}; if($LayerPoolWait){ $layerParameters.GeneratorPoolWait=$LayerPoolWait }; if($SourceStreams -eq 'Model'){ $layerParameters.GeneratorExportFrontTensors=$true }
     $layer=Invoke-KokoroEmission -Kernel KokoroGenerator60x16Run -Parameters $layerParameters
-    $tileParameters=$common+@{ResidentBatchTiles=$TileBlock;GeneratorMoments='Constants';GeneratorSchedule=$depthFirst;GeneratorWeightPlanes=$WeightPlanes;GeneratorControllerContact=$ControllerContact.IsPresent;GeneratorVectorPackets=$VectorPackets.IsPresent}
-    if($HostCoefficients){ $tileParameters.GeneratorHostCoefficients=$true }
-    if($ResidentSourceChannels){ $tileParameters.GeneratorResidentSourceChannels=$ResidentSourceChannels }
-    if($AsyncWeights){ $tileParameters.GeneratorAsyncWeights=$true }
+    $tileParameters=$common+@{ResidentBatchTiles=$TileBlock;GeneratorMoments='Constants';GeneratorSchedule=$depthFirst;GeneratorWeightPlanes=$WeightPlanes;GeneratorControllerContact=$ControllerContact.IsPresent}
+    # The kept depth-first settings apply unless a parameter here is given (opt-out with -Name:$false).
+    $overrides=@{}
+    foreach($name in 'HostCoefficients','AsyncWeights','VectorPackets'){ if($PSBoundParameters.ContainsKey($name)){ $overrides["Generator$name"]=[bool]$PSBoundParameters[$name] } }
+    if($PSBoundParameters.ContainsKey('ResidentSourceChannels')){ $overrides.GeneratorResidentSourceChannels=$ResidentSourceChannels }
     if($Joint -notin 'Section','WholeSource','SpansSource'){ $tileParameters.GeneratorSuppliedSource=$true }
-    if($Joint -ne 'Section'){ $tileParameters.GeneratorSpanTiles=$SpanTiles }
+    if($Joint -ne 'Section' -and $PSBoundParameters.ContainsKey('SpanTiles')){ $overrides.GeneratorSpanTiles=$SpanTiles }
     if($Joint -in 'WholeSource','SpansSource' -and $SourceChunkTiles -ne 128){ $tileParameters.GeneratorSourceChunkTiles=$SourceChunkTiles }
     if($StopAfterSpanStage){ $tileParameters.GeneratorStopAfterSpanStage=$StopAfterSpanStage }
     if($PoolWait){ $tileParameters.GeneratorPoolWait=$PoolWait }
     if($SourceStreams -eq 'Model'){ $tileParameters.GeneratorExportFrontTensors=$true; if($ModelInjection -eq 'Output'){ $tileParameters.GeneratorSuppliedSectionInputs=$ModelSections } }
     if($SourceStreams -eq 'LayerOutput'){ $tileParameters.GeneratorSuppliedSectionInputs=$ModelSections }
-    $tile=Invoke-KokoroEmission -Kernel KokoroGenerator60x16Run -Parameters $tileParameters
+    $tile=Invoke-KokoroGeneratorDepthFirstEmission -Parameters $tileParameters -Overrides $overrides; $tileParameters=$tile.DepthFirstParameters
     $statistics=[IO.File]::ReadAllBytes((Join-Path $FixtureDirectory 'tables.bin'))
     $weights=[IO.File]::ReadAllBytes((Join-Path $FixtureDirectory 'weights.bin'))
     $stage={param([string]$Name,[byte[]]$Tables,[byte[]]$WeightBytes,[byte[]]$Activations)
@@ -1881,12 +1926,9 @@ function Test-KokoroGeneratorTileEquivalence {
     # The DDR workspace starts at the first 128-byte boundary at least 64 bytes into the output buffer.
     $tensorBytes=[long]$fixture.Tiles*$tileBytes
     $tileInput=$constantsInput
-    if($HostCoefficients){
+    if([long]$tile.Layout.ConstantPacking.HostCoefficientsOffset -ge 0){
         # The same parameters, then the finished K/M/S at the offset the depth-first layout gives them.
-        $packing=$tile.Layout.ConstantPacking; $at=[long]$packing.HostCoefficientsOffset; $kms=ConvertTo-KokoroGeneratorStageCoefficients -Tables $runTables -Layout $tile.Layout
-        if($runTables.Length -gt $at){throw "Parameters ($($runTables.Length) B) reach past the host coefficients at $at."}
-        $hostTables=[byte[]]::new($at+$kms.Length); [Array]::Copy($runTables,$hostTables,$runTables.Length); [Array]::Copy($kms,0,$hostTables,$at,$kms.Length)
-        $tileInput=& $stage 'host-coefficients' $hostTables $runWeights
+        $tileInput=& $stage 'host-coefficients' (Add-KokoroGeneratorHostCoefficients -Tables $runTables -Layout $tile.Layout) $runWeights
     }
     if($Joint -notin 'Section','WholeSource','SpansSource'){
         # Each source stream the layer job parked in its workspace becomes the depth-first job's supplied input there.
@@ -2049,7 +2091,14 @@ function Test-KokoroGeneratorTileEquivalence {
             $profiledTensor=& $read $run $emission
             if([Convert]::ToHexString([Security.Cryptography.SHA256]::HashData($profiledTensor)) -cne [Convert]::ToHexString([Security.Cryptography.SHA256]::HashData($tileTensor))){throw "Profiled tile output (set $eventSet) differs from the unprofiled run."}
             $records=Read-KokoroPmuRecords -Output $run.Output -PmuProfile $emission.Layout.PmuProfile -EventSet $eventSet
-            [pscustomobject]@{EventSet=$eventSet;DspMs=$run.MedianMs;LibrarySHA256=$emission.LibrarySHA256;Measurements=$records.Measurements;UnmarkedSites=$records.UnmarkedSites}
+            # Per lockstep thread, ticks summed over every lockstep stage (workspace at output + 128).
+            $pmuLayout=$emission.Layout.PmuProfile
+            $lockstep=@(if($pmuLayout.PSObject.Properties.Name -contains 'LockstepTelemetryOffset'){ for($k=0;$k -lt $pmuLayout.LockstepThreads;$k++){
+                $at=128+[long]$pmuLayout.LockstepTelemetryOffset+32*$k
+                [pscustomobject]@{Thread=$k;LockWaitMs=[BitConverter]::ToUInt32($run.Output,$at)/19200.0;LockHeldMs=[BitConverter]::ToUInt32($run.Output,$at+4)/19200.0;NeighborWaitMs=[BitConverter]::ToUInt32($run.Output,$at+8)/19200.0;
+                    FillMs=[BitConverter]::ToUInt32($run.Output,$at+12)/19200.0;CombineMs=[BitConverter]::ToUInt32($run.Output,$at+16)/19200.0;
+                    OutputMs=[BitConverter]::ToUInt32($run.Output,$at+20)/19200.0;InputMs=[BitConverter]::ToUInt32($run.Output,$at+24)/19200.0} } })
+            [pscustomobject]@{EventSet=$eventSet;DspMs=$run.MedianMs;LibrarySHA256=$emission.LibrarySHA256;Measurements=$records.Measurements;UnmarkedSites=$records.UnmarkedSites;Lockstep=$lockstep}
         })
     }
     $different=0; $first=-1; $differingTiles=[Collections.Generic.List[int]]::new()
