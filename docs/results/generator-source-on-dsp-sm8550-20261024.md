@@ -235,6 +235,35 @@ with both sources resident (`91A0B066...`):
 226.43 MB per run. The 256-channel weights (90.8 MB of chunked streaming and 23.6 MB of `ups.0`, loaded once per span)
 are the largest class; state saves and restores, 71.0 MB, the second.
 
+### Span size (2026-10-27)
+
+Both sources resident, host coefficients. Span sizes are multiples of 20 tiles (whole decoder tiles and blocks). VTCM is
+sized by the largest span, not by the input's length. The emitted ledger before the phone runs:
+
+| SpanTiles | Spans | DMA per run | State save and restore | VTCM | Library |
+| ---: | ---: | ---: | ---: | ---: | --- |
+| 20 | 3 | 226.43 MB | 71.04 MB | 7,602,176 B | `91A0B066...` |
+| 40 | 2 | 174.58 MB | 29.22 MB | 7,602,176 B | `994F4B8E...` |
+| 60 | 1 | 135.86 MB | 0 | 8,126,464 B | `CCB30E2B...` |
+
+Alternated over two rounds, 5 resident runs each after a one-shot proof:
+
+| Round | SpanTiles | Depth-first, resident | One-shot proof | Layer |
+| --- | ---: | ---: | ---: | ---: |
+| 1 | 60 | 46.73 ms | 46.27 ms | 66.53 ms |
+| 1 | 40 | 47.63 ms | 47.79 ms | 66.74 ms |
+| 1 | 20 | 49.61 ms | 48.88 ms | 66.55 ms |
+| 2 | 60 | 46.66 ms | 46.29 ms | 66.76 ms |
+| 2 | 40 | 47.75 ms | 48.10 ms | 66.89 ms |
+| 2 | 20 | 49.20 ms | 49.51 ms | 66.88 ms |
+
+PCM and the compared tensor are identical in all six runs and equal the layer job's. 60-tile spans take 46.70 ms,
+2.7 ms less than 20-tile spans (28.7 ms per audio second, 34.8 times real time); at the profile's DMA rate the ledger
+predicted 2.4 ms. At this fixture's length one span covers the input, so no section state moves; on longer inputs the
+switches per audio second fall by a factor of three. 60-tile spans leave 262,144 B of VTCM free.
+
+Receipt: `build/span-tiles-ab.clixml` and the six `build/span-tiles-ab-*` directories.
+
 ## Not yet done
 
 - **State:** sections save and restore their read-only regions (weights, records, K/M/S) and whole rings with their
