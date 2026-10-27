@@ -35,6 +35,11 @@ twice, or written as a scratch script, is a missing command: add it here.
   Capture  -Path [-Pattern]   List a stock capture's tensors: name, shape, bytes, hash prefix, and its capture spec.
   MeasureAudio -Path         Read a WAV or folder of WAVs; return typed BS.1770-4 loudness, true peak and RMS measurements.
                               PCM16/float32, mono/stereo, native sample rate. No phone access or audio writes.
+  CompareAudio -Reference -Path [-OutputDirectory] [-Parameters @{Yardstick=<wav>}]
+                              Compare two mono WAVs: waveform SNR, multi-resolution magnitude SNR and log-spectral
+                              distance, mel-cepstral distortion, loudness envelope, YIN f0 and voicing, HNR; with
+                              -OutputDirectory also spectrogram, difference, pitch and envelope PNGs; with a yardstick
+                              (a render the same by construction, e.g. another seed) the same measures for scale.
   StockCapture [-Block albert|decoder|generator] [-Phonemes] [-Voice] [-Seed] [-PhonemesFrom capture] [-DecoderInput json] [-OutputDirectory]
                               Run pinned stock PyTorch Kokoro on Windows (reference only) and record one block's tensors
                               under build/ with source, checkpoint and voice integrity checks. -PhonemesFrom reuses the phonemes,
@@ -106,7 +111,7 @@ pwsh -NoProfile -File ./Invoke-KokoroDevelopment.ps1 Run -Case timing-passage-0-
 [CmdletBinding()]
 param(
     [Parameter(Position = 0)]
-    [ValidateSet('Status', 'Verify', 'LineEndings', 'BuildHost','Ratchet', 'Run', 'Emit', 'Check', 'Compare', 'JobInput', 'Capture', 'MeasureAudio', 'StockCapture', 'Speak', 'FrontEnd', 'PrecomputedDecoder', 'Student', 'Zira', 'Albert', 'AlbertError', 'AlbertLinear', 'AlbertLayerNorm', 'AlbertGelu', 'AlbertAttention', 'AlbertEmbed', 'AlbertJob', 'Api', 'Find', 'Tools', 'StageResidency', 'CopySynthesis', 'WeightAssembly')]
+    [ValidateSet('Status', 'Verify', 'LineEndings', 'BuildHost','Ratchet', 'Run', 'Emit', 'Check', 'Compare', 'JobInput', 'Capture', 'MeasureAudio', 'CompareAudio', 'StockCapture', 'Speak', 'FrontEnd', 'PrecomputedDecoder', 'Student', 'Zira', 'Albert', 'AlbertError', 'AlbertLinear', 'AlbertLayerNorm', 'AlbertGelu', 'AlbertAttention', 'AlbertEmbed', 'AlbertJob', 'Api', 'Find', 'Tools', 'StageResidency', 'CopySynthesis', 'WeightAssembly')]
     [string] $Command = 'Status',
     [string] $Case,
     [string] $Kernel,
@@ -3460,6 +3465,12 @@ switch ($Command) {
         $studentArguments=@{}
         if($Parameters){foreach($key in $Parameters.Keys){$studentArguments[$key]=$Parameters[$key]}}
         & (Join-Path $Root 'student/Invoke-Student.ps1') @studentArguments
+    }
+    'CompareAudio' {
+        if (-not $Reference -or -not $Path) { throw 'CompareAudio needs -Reference and -Path (mono WAVs at one rate).' }
+        Import-Module (Join-Path $Root 'tools/Kokoro.AudioMeasurement.psm1')
+        $yardstick=if ($Parameters -and $Parameters.Yardstick) { [string]$Parameters.Yardstick } else { $null }
+        Compare-KokoroAudio -Reference $Reference -Candidate $Path -Yardstick $yardstick -ImageDirectory $OutputDirectory
     }
     'MeasureAudio' {
         if (-not $Path) { throw 'MeasureAudio needs -Path (a WAV file or folder).' }

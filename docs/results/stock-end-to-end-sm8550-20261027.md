@@ -79,6 +79,27 @@ the seed-to-seed yardstick, on more varied material than this one sentence.
 
 Receipt: `build/voice-base-vs-matched-20261027T183928` (matched.wav, matched-seed2.wav, voice-base.wav).
 
+**The same pair through `CompareAudio`** (`tools/Kokoro.AudioMeasurement.psm1`: spectra at 512, 1,024 and 2,048 points;
+log-spectral distance above a floor 80 dB under the loudest bin; mel-cepstral distortion from 80 mel bands and 24
+orthonormal DCT coefficients, comparable only within this tool; YIN f0 with voicing at aperiodicity below 0.2):
+
+| Against the matched render, seed 1 | Matched, seed 2 | Voice base |
+| --- | ---: | ---: |
+| Log-spectral distance (mean of three resolutions) | 1.80 dB | 5.49 dB |
+| Magnitude SNR (mean of three resolutions) | 23.87 dB | 5.82 dB |
+| Mel-cepstral distortion | 5.80 dB | 38.28 dB |
+| f0 difference on frames voiced in both (RMS) | 3.93 cents | 24.34 cents |
+| Voicing agreement | 96.5 % | 82.5 % |
+| Loudness envelope correlation | 0.9998 | 0.9732 |
+| Integrated loudness difference | -0.03 LU | +1.70 LU |
+| HNR (matched render 12.53 dB) | 12.37 dB | 11.75 dB |
+
+Against the seed-to-seed yardstick, the voice base changes the spectral envelope most (mel-cepstral distortion 6.6
+times, log-spectral distance 3.1 times the yardstick), pitch and voicing less, and the loudness contour least.
+
+Images: `compare-voice-base/` and `compare-seed2/` in the receipt directory (spectrograms, their difference, f0 tracks,
+loudness envelopes).
+
 ## Any length: decoder by overlap-save, both on voice bases
 
 The speech renderer's `Decode` now takes a decoder constants table: the stream decodes in chunks whose interiors are a
