@@ -29,3 +29,32 @@ The DSP stages take 88.0 ms for 2.85 s of audio (32.4 times real time). The phon
 - The depth-first generator itself rendered the 2.85 s utterance (library `3DD74F61...`).
 
 Receipt: `build/stock-end-to-end-20261027T180338` (stock-end-to-end.clixml, speech.wav).
+
+## Utterance moments and length
+
+The generator's export and the decoder both normalize with moments over the whole utterance. Measured sources for those
+moments when an utterance is longer than one job:
+
+**Decoder chunks, host port** (11.775 s sentence, 471 frames; each chunk with 16 frames of halo per side, scored over
+its interior against one whole decode; `Invoke-OfflineDecoder`, live and supplied level modes):
+
+| Chunk | Chunks | Own moments | Worst chunk | Two passes, composed moments | Exact moments supplied |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| 32 frames | 15 | 8.02 dB | 3.92 dB | -0.96 dB | |
+| 64 frames | 8 | 9.27 dB | 3.92 dB | -0.72 dB | |
+| 128 frames | 4 | 12.56 dB | 9.05 dB | 6.60 dB | bit-exact |
+
+"Composed" sums each site's interior statistics from a first pass of chunks with their own moments and supplies the
+result to a second pass; the composed moments are 21 to 25 dB from the exact ones. With exact moments supplied, chunks
+reproduce the whole decode bit for bit (the harness control).
+
+**Generator, DSP** ("The dog naps in the sun.", first 130 ticks, 1.625 s; same x, f0 and seed): the voice base against
+this stream's own exported constants gives -2.43 dB PCM SNR, with 1.29 dB more level (generator 41.7 against 41.1 ms).
+
+**Export length.** The export (layer job, whole length in VTCM) runs at 130 ticks; at 166 and 180 ticks it emits but
+fails on the device (`Stage=2 Done=0`), and at 228 ticks its layout does not fit.
+
+Chunk-local, composed and voice-base moments are each far from the exact normalization. Exact moments at any length
+need a pass that walks each layer over the whole utterance (the layer schedule), with activations outside VTCM.
+
+Receipts: `build/decoder-chunk-moments-*`, `build/decoder-composed-moments-*`, `build/voice-base-vs-matched-*`.
