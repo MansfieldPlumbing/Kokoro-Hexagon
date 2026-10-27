@@ -11,6 +11,8 @@ Seeded renders the capture inputs with deterministic noise; Join runs the bank e
 Speech runs our compiled phonemizer and the lowered teacher from Text in process.
 CompareConvolution checks every returned teacher boundary against the previous convolution.
 Kernels checks short spans, phase tails, output padding and dilation against the previous kernel.
+FrontEnd runs ALBERT, bert_encoder, the predictor and the text encoder on the phonemes of every stored stock capture
+and compares token ids, ALBERT and bert_encoder output, F0, N and the aligned text encoding with stock.
 Library compiles and loads the reference, then returns without rendering; dot-source
 it (. ./Invoke-KokoroPrecomputedDecoder.ps1 -Mode Library) to call Invoke-OfflineDecoder,
 Invoke-OfflineGenerator and the compiled delegates from the caller's scope.
@@ -62,7 +64,7 @@ using namespace System.Runtime.Intrinsics
 using namespace System.Runtime.Intrinsics.X86
 [CmdletBinding()]
 param(
-    [ValidateSet('Admit','Nodes','Levels','Gate','Seeded','Join','Library','Speech','Kernels')][string] $Mode = 'Gate',
+    [ValidateSet('Admit','Nodes','Levels','Gate','Seeded','Join','Library','Speech','Kernels','FrontEnd')][string] $Mode = 'Gate',
     [ValidateRange(2,64)][int] $Threads = 4,
     [ValidateRange(1,10)][int] $Runs = 10,
     [ValidateSet('','dog','peach')][string] $CaseName = '',
@@ -1102,6 +1104,7 @@ $finishedOutputs = switch ($Mode) {
     'Seeded' { 'dog-seeded-pcm.f32'; 'peach-seeded-pcm.f32' }
     'Join' { 'store-size.clixml' }
     'Speech' { 'speech.clixml'; 'speech.wav' }
+    'FrontEnd' { 'frontend.clixml' }
 }
 foreach ($finishedOutput in $finishedOutputs) {
     if ([IO.File]::Exists((Join-Path $output $finishedOutput))) { throw 'Existing completed result is immutable; choose a fresh output directory.' }
@@ -1623,7 +1626,7 @@ function Invoke-OfflineSpeech {
         if ($SuppliedDurations.Length -ne $t) { throw "SuppliedDurations has $($SuppliedDurations.Length) values for $t token ids." }
         $frames = 0; foreach ($duration in $SuppliedDurations) { $frames += $duration }
         if ($SuppliedF0.Length -ne 2 * $frames -or $SuppliedN.Length -ne 2 * $frames) { throw 'SuppliedF0 and SuppliedN need two values per duration frame.' }
-        $bert = $null; $durationFeatures = $null; $durations = [int[]]$SuppliedDurations; $curves = @{ F0 = $SuppliedF0; N = $SuppliedN }
+        $bert = $null; $durationInput = $null; $durationFeatures = $null; $durations = [int[]]$SuppliedDurations; $curves = @{ F0 = $SuppliedF0; N = $SuppliedN }
     }
     else {
     $bert = Invoke-OfflineAlbert $tokenIds
@@ -1691,7 +1694,7 @@ function Invoke-OfflineSpeech {
     # Aligned: the decoder's asr input, [channel][frame] at the duration frames. -SkipDecoder stops here.
     $aligned = $align.Invoke($textEncoding, $durations)
     if ($SkipDecoder) {
-        return [pscustomobject]@{ Phonemes = $Phonemes; Voice = $Voice; TokenIds = $tokenIds; Durations = $durations; F0 = $curves.F0; N = $curves.N; TextEncoding = $textEncoding; Aligned = $aligned }
+        return [pscustomobject]@{ Phonemes = $Phonemes; Voice = $Voice; TokenIds = $tokenIds; Bert = $bert; BertEncoder = $durationInput; Durations = $durations; F0 = $curves.F0; N = $curves.N; TextEncoding = $textEncoding; Aligned = $aligned }
     }
     $decoded = Invoke-OfflineDecoder $aligned $curves.F0 $curves.N $style.Acoustic -TokenDurations $durations
     $pcm = $null
@@ -2077,6 +2080,57 @@ if ($Mode -eq 'Speech') {
     $output = $speechOutput
     $speechResults.ToArray() | Export-Clixml -LiteralPath (Join-Path $output 'speech-runs.clixml')
     return $speechResults.ToArray()
+}
+if ($Mode -eq 'FrontEnd') {
+    # Stock captures (capture.json with phonemes, voice, style row and hashed tensors): ALBERT captures hold the token ids,
+    # ALBERT output (bert_dur, token-major) and bert_encoder output (d_en, channel-major); decoder captures hold the
+    # predictor's F0 and N (the F0_conv and N_conv inputs) and the aligned text encoding (the asr_res input).
+    $boundaries = @(
+        @{ Name = 'TokenIds'; Tensor = 'bert.input_ids'; Property = 'TokenIds'; ChannelMajor = 0 }
+        @{ Name = 'Albert'; Tensor = 'bert_dur'; Property = 'Bert'; ChannelMajor = 0 }
+        @{ Name = 'BertEncoder'; Tensor = 'd_en'; Property = 'BertEncoder'; ChannelMajor = 512 }
+        @{ Name = 'F0'; Tensor = 'decoder.F0_conv.input.0'; Property = 'F0'; ChannelMajor = 0 }
+        @{ Name = 'N'; Tensor = 'decoder.N_conv.input.0'; Property = 'N'; ChannelMajor = 0 }
+        @{ Name = 'AlignedTextEncoding'; Tensor = 'decoder.asr_res.input.0'; Property = 'Aligned'; ChannelMajor = 0 })
+    $captureDirectories = @(Get-ChildItem -LiteralPath (Join-Path $InputRepository 'build') -Directory -Filter 'stock-albert-capture-*') +
+        @(Get-ChildItem -LiteralPath (Join-Path $InputRepository 'build') -Directory | Where-Object Name -in 'speak-stock-control-20261010', 'speak-typed-capture-check') +
+        @(Get-ChildItem -LiteralPath (Join-Path $InputRepository 'build/capture-timing-passages') -Directory -Filter '*-decoder')
+    $frontResults = [Collections.Generic.List[object]]::new()
+    foreach ($directory in $captureDirectories) {
+        $capture = Get-Content -LiteralPath (Join-Path $directory.FullName 'capture.json') -Raw | ConvertFrom-Json -AsHashtable
+        # A capture rendered from a supplied decoder input did not run stock's predictor: it is no front-end reference.
+        $spec = Join-Path $directory.FullName 'capture-spec.json'
+        if ([IO.File]::Exists($spec) -and (Get-Content -LiteralPath $spec -Raw | ConvertFrom-Json -AsHashtable).ContainsKey('decoderInput')) { Write-Host "$($directory.Name): supplied decoder input, skipped"; continue }
+        if ($capture.styleEntry -ne $capture.phonemes.Length - 1) { throw "$($directory.Name): style row $($capture.styleEntry) is not the phoneme count less one." }
+        $watch = [Diagnostics.Stopwatch]::StartNew()
+        $speech = Invoke-OfflineSpeech -Phonemes $capture.phonemes -Voice $capture.voice -Speed $capture.speed -SkipDecoder
+        $hostMs = $watch.Elapsed.TotalMilliseconds
+        foreach ($boundary in $boundaries) {
+            $tensor = $capture.tensors[$boundary.Tensor]
+            if ($null -eq $tensor) { continue }
+            if ($tensor.file -cnotmatch '^[A-Za-z0-9_.-]+\.(f32|i32)$') { throw 'Invalid capture tensor file.' }
+            $path = Join-Path $directory.FullName $tensor.file
+            if ((Get-FileHash -LiteralPath $path).Hash -cne $tensor.sha256) { throw "$($directory.Name): $($boundary.Tensor) integrity mismatch." }
+            $raw = [IO.File]::ReadAllBytes($path)
+            $expected = [float[]]::new($raw.Length / 4)
+            if ($tensor.file.EndsWith('.i32')) { $ints = [int[]]::new($raw.Length / 4); [Buffer]::BlockCopy($raw, 0, $ints, 0, $raw.Length); for ($i = 0; $i -lt $ints.Length; $i++) { $expected[$i] = $ints[$i] } }
+            else { [Buffer]::BlockCopy($raw, 0, $expected, 0, $raw.Length) }
+            $actual = [float[]]@($speech.($boundary.Property))
+            if ($boundary.ChannelMajor) {
+                # Token-major rows to the capture's [channel][token] layout.
+                $tokens = $actual.Length / $boundary.ChannelMajor; $transposed = [float[]]::new($actual.Length)
+                for ($token = 0; $token -lt $tokens; $token++) { for ($channel = 0; $channel -lt $boundary.ChannelMajor; $channel++) { $transposed[$channel * $tokens + $token] = $actual[$token * $boundary.ChannelMajor + $channel] } }
+                $actual = $transposed
+            }
+            $metrics = if ($actual.Length -eq $expected.Length) { $compare.Invoke($actual, $expected) } else { [double[]]@([double]::NegativeInfinity, [double]::PositiveInfinity) }
+            $frontResults.Add([pscustomobject]@{ PSTypeName = 'Kokoro.OfflineFrontEndBoundary'; Capture = $directory.Name; Phonemes = $capture.phonemes.Length
+                Boundary = $boundary.Name; Values = $expected.Length; HostValues = $actual.Length; SnrDb = [Math]::Round($metrics[0], 2); MaxAbsError = $metrics[1]
+                BeyondFloatNoise = ($actual.Length -ne $expected.Length -or $metrics[0] -lt 80); HostMs = [Math]::Round($hostMs); SourceSHA256 = $sourceHash })
+        }
+        $frontResults.ToArray() | Export-Clixml -LiteralPath (Join-Path $output 'frontend.clixml')
+        Write-Host ('{0}: {1} phonemes, {2:F0} ms' -f $directory.Name, $capture.phonemes.Length, $hostMs)
+    }
+    return $frontResults.ToArray()
 }
 $captures =Import-PowerShellDataFile (Join-Path $InputRepository 'build/score-capture-20261014/capture.psd1')
 $gateResults = [Collections.Generic.List[object]]::new()
