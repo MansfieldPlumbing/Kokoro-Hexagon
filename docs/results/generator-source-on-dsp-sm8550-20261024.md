@@ -125,6 +125,57 @@ that time is not in the DSP figure and has not been measured on the phone's CPU.
 
 Receipt: `build/host-coefficients-ab.clixml` and the four `build/host-coefficients-ab-*` directories.
 
+### DMA ledger of the depth-first job (2026-10-27, arithmetic from the emitted layout)
+
+Depth-first job with host coefficients (library `35B57166...`), 244 tiles, 3 spans. Section state is the VTCM range each
+section saves to the DDR workspace before another section runs and restores after (`Sections[].StateBytes`; for the
+Backward section from its first conv-input ring to the end of stage 17's weights, for the Chunked sections from the
+history region to the stage-weight region):
+
+| Section | Channels | Schedule | State per switch |
+| --- | ---: | --- | ---: |
+| 0, main | 256 | Chunked | 4,456,448 B |
+| 1, main | 128 | Backward | 7,176,192 B |
+| 2, source of 0 | 256 | Chunked | 1,703,936 B |
+| 3, source of 1 | 128 | Chunked | 983,040 B |
+
+The 128-channel section's state holds, besides its rings, its 18 stages' resident int8 weights (about 2.1 MB), the
+supplied moments, K/M/S, records and progress. Its conv-input rings hold ten tiles each, of which the next step reads two.
+
+DMA per run, with the weight streaming of the 2026-10-24 accounting above:
+
+| Traffic | MB per run |
+| --- | ---: |
+| `noise_res.1` weights, 62 steps of the same 1.08 MB | 67.0 |
+| 256-channel section weights, 11 steps of 8.26 MB | 90.8 |
+| `noise_res.0` weights, 11 steps of the same 2.75 MB | 30.3 |
+| `ups.0` weights, 7.86 MB per span | 23.6 |
+| Section state, saved and restored around the span switches | about 57 |
+| `ups.1`, `noise_convs`, tail, tables | about 6.6 |
+| Total | about 276 |
+
+At the measured 37 to 55 GB/s DDR-to-VTCM rate that is 5 to 7.5 ms, against the profile's 7.30 ms of synchronous DMA.
+About 96 MB repeats the same source-branch weights at every step, and about 57 MB moves state of which much is
+read-only (weights, coefficients, records) or not read after the switch. State traffic grows with the number of spans:
+at 24.4 s (31 spans) it would be about 890 MB per run.
+
+**Resident source sections.** Each section's layout starts at VTCM offset 0, and the `har` layouts are read from the DDR
+workspace, so a source section has the whole 8 MiB while it runs. The Backward layout (`Kokoro.Generator60x16Run.ps1`,
+`$sectionLayout`) is written for three branches (three plane sets, three fills per stage and plane, nine level and stage
+rings, 18 stages); the `noise_res` sections have one. The same layout arithmetic with one branch, batch 4 and one weight
+plane (the three-branch case reproduces section 1's 7,176,192 B of state exactly):
+
+| Section | Planes | Fills | Rings, mean, K/M/S, records | Weights | Total VTCM | Margin to 8 MiB |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| `noise_res.1` (128, kernel 11) | 131,072 | 1,048,576 | 851,968 | 1,081,344 | 3,112,960 B | 5,275,648 B |
+| `noise_res.0` (256, kernel 7) | 262,144 | 2,162,688 | 1,376,256 | 2,752,512 | 6,553,600 B | 1,835,008 B |
+
+Both fit. Resident, each loads its weights once per span (3 times) instead of once per step: 3.2 MB instead of 67.0 MB
+and 8.3 MB instead of 30.3 MB, about 86 MB less. Their live state per switch grows (1.90 MB against 0.98 MB, 3.54 MB
+against 1.70 MB), about 11 MB more over the run's saves and restores if, as estimated here, each is saved and restored
+twice. The net is about 75 MB, about 2 ms at the profile's DMA rate (7.30 ms for about 276 MB). The step count also drops:
+`noise_res.1` runs 62 chunked steps with per-stage dispatch.
+
 ## Not yet done
 
 - **Profile:** a per-stage profile of the source sections. The one-branch chunked `noise_res.1` runs 62 steps with
