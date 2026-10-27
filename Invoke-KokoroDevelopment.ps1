@@ -1778,7 +1778,9 @@ function Test-KokoroGeneratorTileEquivalence {
         [switch]$VectorPackets,
         # Also run the backward job with PMU event sets A and B (output must equal the unprofiled run) and record its
         # time per category: fill, convolution, combine, mean, DMA, synchronization, tile fixes.
-        [switch]$PmuSplit)
+        [switch]$PmuSplit,
+        # Jobs with a tail: time every run one-shot (about 30 s each) instead of one one-shot proof run plus resident timing.
+        [switch]$OneShotTiming)
     $out=[IO.Path]::GetFullPath($OutputDirectory)
     if(-not $out.StartsWith($Build+[IO.Path]::DirectorySeparatorChar,[StringComparison]::OrdinalIgnoreCase) -or (Test-Path -LiteralPath $out)){throw 'Choose a fresh equivalence directory under build/.'}
     [void][IO.Directory]::CreateDirectory($out)
@@ -1830,7 +1832,10 @@ function Test-KokoroGeneratorTileEquivalence {
         $runTables=$converted.Tables; $runWeights=$converted.Weights
     }
     $constantsInput=& $stage 'constants' $runTables $runWeights
-    $layerRun=Invoke-KokoroDeviceJob -EmissionDirectory $layer.Directory -EmissionArtifact $layer -InputDirectory $constantsInput -Soc $Soc -Runs $Runs -Package $Package -OneShot:$oneShot
+    # A job with a tail needs one one-shot run for its workspace; its timing runs go through the resident listener (header
+    # and PCM, about 30 s less per run), checked below to give the one-shot run's PCM. -OneShotTiming times one-shot as before.
+    $proofRuns=if($oneShot -and -not $OneShotTiming){1}else{$Runs}
+    $layerRun=Invoke-KokoroDeviceJob -EmissionDirectory $layer.Directory -EmissionArtifact $layer -InputDirectory $constantsInput -Soc $Soc -Runs $proofRuns -Package $Package -OneShot:$oneShot
     # The DDR workspace starts at the first 128-byte boundary at least 64 bytes into the output buffer.
     $tensorBytes=[long]$fixture.Tiles*$tileBytes
     $tileInput=$constantsInput
@@ -1969,7 +1974,7 @@ function Test-KokoroGeneratorTileEquivalence {
             HighDspMs=$highRun.MedianMs;StepDspMs=$stepRun.MedianMs;SingleBlockDspMs=$singleRun.MedianMs
             StepTensorSHA256=[Convert]::ToHexString([Security.Cryptography.SHA256]::HashData($stepTensor))}
     }
-    else { $tileRun=Invoke-KokoroDeviceJob -EmissionDirectory $tile.Directory -EmissionArtifact $tile -InputDirectory $tileInput -Soc $Soc -Runs $Runs -Package $Package -OneShot:$oneShot }
+    else { $tileRun=Invoke-KokoroDeviceJob -EmissionDirectory $tile.Directory -EmissionArtifact $tile -InputDirectory $tileInput -Soc $Soc -Runs $proofRuns -Package $Package -OneShot:$oneShot }
     if($SourceStreams -eq 'Model' -and $ModelInjection -eq 'Output' -and 0 -in $ModelSections -and 1 -in $ModelSections){
         # Section 1's Y^ from the U the fitted section 0 gives it, then the second pass.
         $uFitted=& $readTensor $tileRun $tileStreams[1].UpsWorkspaceOffset $tileStreams[1]; $modelY[1]=& $predictY $tileStreams[1] $uFitted
@@ -2043,8 +2048,20 @@ function Test-KokoroGeneratorTileEquivalence {
             }
         }
     }
+    # Resident timing runs: their PCM must equal the one-shot proof run's before their times stand.
+    $layerTiming=$layerRun; $tileTiming=$tileRun; $timingMode=if($proofRuns -lt $Runs){'Resident'}else{$(if($oneShot){'OneShot'}else{'Resident'})}
+    if($proofRuns -lt $Runs){
+        $layerTiming=Invoke-KokoroDeviceJob -EmissionDirectory $layer.Directory -EmissionArtifact $layer -InputDirectory $constantsInput -Soc $Soc -Runs $Runs -Package $Package
+        $tileTiming=Invoke-KokoroDeviceJob -EmissionDirectory $tile.Directory -EmissionArtifact $tile -InputDirectory $tileInput -Soc $Soc -Runs $Runs -Package $Package
+        if([int]$tile.Layout.Samples -gt 1){
+            $samePcm={param($A,$B,$Emission) $at=[long]$Emission.Layout.PcmOffset; $n=2L*[int]$Emission.Layout.Samples
+                [Convert]::ToHexString([Security.Cryptography.SHA256]::HashData([byte[]]$A.Output[$at..($at+$n-1)])) -ceq [Convert]::ToHexString([Security.Cryptography.SHA256]::HashData([byte[]]$B.Output[$at..($at+$n-1)]))}
+            if(-not (& $samePcm $layerRun $layerTiming $layer)){throw 'Resident layer-job PCM differs from its one-shot run.'}
+            if(-not (& $samePcm $tileRun $tileTiming $tile)){throw 'Resident depth-first PCM differs from its one-shot run.'}
+        }
+    }
     $report=[pscustomobject]@{Soc=$Soc;Fixture=$FixtureDirectory;Joint=$Joint;SourceStreams=$SourceStreams;Model=$modelReport;Pcm=$pcm;Sections=$sectionReport;Channels=$Channels;Schedule=$tileParameters.GeneratorSchedule;Tiles=[int]$fixture.Tiles;TileBlock=$TileBlock;WeightPlanes=$WeightPlanes;TensorBytes=$tensorBytes;ByteIdentical=($different -eq 0);DifferentBytes=$different;FirstDifference=$first;DifferingTiles=$differingTiles.ToArray()
-        LayerDspMs=$layerRun.MedianMs;TileDspMs=$tileRun.MedianMs;LayerVtcmBytes=$layer.Layout.VtcmBytes;TileVtcmBytes=$tile.Layout.VtcmBytes;LayerLibraryBytes=$layer.Bytes;TileLibraryBytes=$tile.Bytes
+        LayerDspMs=$layerTiming.MedianMs;TileDspMs=$tileTiming.MedianMs;TimingMode=$timingMode;TimingRuns=$Runs;LayerTimingLines=$layerTiming.Lines;TileTimingLines=$tileTiming.Lines;OneShotLayerDspMs=$layerRun.MedianMs;OneShotTileDspMs=$tileRun.MedianMs;LayerVtcmBytes=$layer.Layout.VtcmBytes;TileVtcmBytes=$tile.Layout.VtcmBytes;LayerLibraryBytes=$layer.Bytes;TileLibraryBytes=$tile.Bytes
         LayerLibrarySHA256=$layer.LibrarySHA256;TileLibrarySHA256=$tile.LibrarySHA256;LayerTensorSHA256=[Convert]::ToHexString([Security.Cryptography.SHA256]::HashData($layerTensor))
         TileTensorSHA256=[Convert]::ToHexString([Security.Cryptography.SHA256]::HashData($tileTensor));ControllerContact=$contactProof;PmuSplit=$split}
     $report | Export-Clixml -LiteralPath (Join-Path $out 'equivalence.clixml') -Depth 8

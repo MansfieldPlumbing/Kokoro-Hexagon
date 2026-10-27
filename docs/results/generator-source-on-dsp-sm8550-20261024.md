@@ -75,6 +75,35 @@ Backward, blocks of 4 tiles, int8 weights in one plane (q = round(w / 256)), sup
   noise draws, int8 weight conversion, constants packing, FastRPC dispatch and app launch.
 - Receipt: `build/generator-baseline-wholesource-20261027T113146/baseline.clixml` and `equivalence.clixml`.
 
+### Profile of the baseline (2026-10-27)
+
+`-PmuSplit`, two event sets, one-shot runs whose output equals the unprofiled run's. Timing runs are now resident with a
+one-shot proof run whose PCM they must reproduce (`-OneShotTiming` restores one-shot timing): depth-first 62.61 ms
+resident, 63.50 ms one-shot, layer 66.82 ms resident.
+
+The instrumented run took 65.79 ms (event set A); the categories sum to 65.73 ms, 4.94 ms of it between marks.
+
+| Category | ms | Calls |
+| --- | ---: | ---: |
+| Lockstep (the 128-channel section's steps, one region) | 13.44 | 3 |
+| Coefficients (AdaIN coefficients expanded from the supplied constants) | 8.92 | 48 |
+| DMA (synchronous) | 7.30 | 1,177 |
+| HMX convolution | 7.28 | 669 |
+| AdaIN and Snake | 6.99 | 504 |
+| Combine | 4.80 | 699 |
+| Between marks | 4.94 | 52 sites |
+| Source (harmonic source and STFT) | 4.21 | 1 |
+| Tile fixes | 3.83 | 2,908 |
+| Boundary | 3.39 | 22 |
+| Synchronization | 0.56 | 1,340 |
+| Mean, setup | 0.07 | 12 |
+
+By stage: front of the 128-channel section 13.35 ms, front of the 256-channel section 12.17, 128-channel section 9.46,
+128-channel source 7.89, 256-channel section 7.15, harmonic layouts 4.38, harmonic source 4.21, 256-channel source 3.72,
+tail 3.36 ms. The source branch (harmonic source, its layouts and both source stages) is 20.2 ms.
+
+Receipt: `build/generator-profile-wholesource-20261027T114800/profile.clixml`.
+
 ## Not yet done
 
 - **Profile:** a per-stage profile of the source sections. The one-branch chunked `noise_res.1` runs 62 steps with
