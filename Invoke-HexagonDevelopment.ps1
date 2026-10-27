@@ -1240,6 +1240,7 @@ $script:Kernels=@(
             if($GeneratorWeightPlanes -ne 2){ $harness.WeightPlanes=$GeneratorWeightPlanes }
             if($GeneratorControllerContact){ $harness.ControllerContact=$true }
             if($GeneratorVectorPackets){ $harness.VectorPackets=$true }
+            if($GeneratorHostCoefficients){ $harness.HostCoefficients=$true }
             if($Stage16Channels -ne 128){ $harness.Channels=$Stage16Channels }
             if($GeneratorFront){ $harness.Front=$true }
             if($GeneratorWhole){ $harness.Whole=$true }
@@ -1454,6 +1455,8 @@ param(
     [switch] $GeneratorControllerContact,
     # KokoroGenerator60x16Run: group the fill's vector instructions into packets.
     [switch] $GeneratorVectorPackets,
+    # KokoroGenerator60x16Run Constants mode: K/M/S supplied finished (src/jobs/Kokoro.Generator60x16Run.ps1 -HostCoefficients).
+    [switch] $GeneratorHostCoefficients,
     # KokoroHarmonicSource16Run: generate the source noise on the DSP from a seed (input holds seed and scale) instead of
     # reading captured draws.
     [switch] $SourceSeededNoise,

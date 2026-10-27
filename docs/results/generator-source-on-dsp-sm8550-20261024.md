@@ -104,6 +104,27 @@ tail 3.36 ms. The source branch (harmonic source, its layouts and both source st
 
 Receipt: `build/generator-profile-wholesource-20261027T114800/profile.clixml`.
 
+### Site coefficients computed on the host (2026-10-27)
+
+With `-HostCoefficients` the depth-first job reads each site's K, M and S finished from the parameters (one DMA per
+site) instead of computing them from the supplied ratios with the scalar coefficient kernel (two bit-serial divisions
+per channel, 48 sites). `ConvertTo-KokoroGeneratorStageCoefficients` reproduces the kernel's integer arithmetic on the
+host from the same int8-converted parameters. Alternated over two rounds, 5 resident runs each after a one-shot proof:
+
+| Round | Coefficients | Depth-first, resident | One-shot proof | Layer | Library |
+| --- | --- | ---: | ---: | ---: | --- |
+| 1 | DSP | 63.46 ms | 62.24 ms | 66.97 ms | `1062E99B...` |
+| 1 | host | 53.84 ms | 53.48 ms | 66.79 ms | `35B57166...` |
+| 2 | DSP | 62.88 ms | 63.56 ms | 66.72 ms | `1062E99B...` |
+| 2 | host | 53.91 ms | 53.02 ms | 66.76 ms | `35B57166...` |
+
+PCM (`AF52480D...`) and the compared tensor (`607A350B...`) are identical in all four, and both equal the layer job's:
+the host arithmetic gives the kernel's K/M/S exactly at every site. The depth-first job drops by 9.3 ms, from 38.9 to
+33.2 ms per audio second (25.7 to 30.2 times real time). The coefficients are now computed on the host before the job;
+that time is not in the DSP figure and has not been measured on the phone's CPU.
+
+Receipt: `build/host-coefficients-ab.clixml` and the four `build/host-coefficients-ab-*` directories.
+
 ## Not yet done
 
 - **Profile:** a per-stage profile of the source sections. The one-branch chunked `noise_res.1` runs 62 steps with

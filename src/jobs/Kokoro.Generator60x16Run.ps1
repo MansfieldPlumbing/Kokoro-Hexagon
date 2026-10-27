@@ -141,7 +141,11 @@ function New-KokoroGenerator60x16RunSteps {
         [switch]$ControllerContact,
         # Group the fill's straight-line vector instructions into packets (Group-HexagonPackets) instead of one
         # instruction per packet.
-        [switch]$VectorPackets)
+        [switch]$VectorPackets,
+        # Constants mode, depth-first schedules: each site's K/M/S arrive finished in the parameters after the constants
+        # table (ConvertTo-KokoroGeneratorStageCoefficients, ConstantPacking.HostCoefficientsOffset) and are copied in
+        # instead of computed from the ratios on the DSP.
+        [switch]$HostCoefficients)
 
     if($WeightPlanes -eq 1 -and $Schedule -eq 'Layer'){ throw 'One weight plane is a backward schedule option.' }
     $packets={ param([object[]]$Steps) $grouped=if($VectorPackets){ Group-HexagonPackets $Steps } else { $Steps }; $grouped }
@@ -481,6 +485,9 @@ function New-KokoroGenerator60x16RunSteps {
     $exportOffset=[long]([math]::Ceiling($totalOutput/128)*128)
     if($AdaInMode -eq 'Export'){$totalOutput=$exportOffset+$momentAt+$kmsAt}
     if($AdaInMode -eq 'Constants'){$totalParameters+=$momentAt}
+    if($HostCoefficients -and $AdaInMode -ne 'Constants'){throw 'HostCoefficients needs the Constants AdaIN mode.'}
+    $hostCoefficientsOffset=$totalParameters
+    if($HostCoefficients){$totalParameters+=$kmsAt}
     # Controller contact inputs: per stage P_K[C] then P_M[C] (int32), then one controller word per tile.
     $contactOffset=$totalParameters
     if($ControllerContact){$totalParameters+=18L*8*$Channels+$controllerBytes}
@@ -942,8 +949,11 @@ function New-KokoroGenerator60x16RunSteps {
             & $dma 18 $rAt 22 $g.RecordOffset $recordBytes
             if($sectionSchedule -eq 'Backward'){ & $dma 18 $tileWeightAt[$index] 21 $g.WeightOffset $g.WeightBytes }
             $site=$siteByRecord[[long]$g.RecordOffset]
-            & $dma 18 $tileRegions.Moments 22 ($constantsTableOffset+$site.Offset) $site.Bytes
-            & $ptr 0 18 $tileRegions.Moments; & $ptr 1 18 $rAt; & $ptr 2 18 ($tileRegions.Kms+$index*$kmsBytes); & $call "body_constant$sfx"; & $mark 'Coefficients'
+            if($HostCoefficients){ & $dma 18 ($tileRegions.Kms+$index*$kmsBytes) 22 ($hostCoefficientsOffset+$site.KmOffset) $site.KmBytes; & $mark 'Coefficients' }
+            else {
+                & $dma 18 $tileRegions.Moments 22 ($constantsTableOffset+$site.Offset) $site.Bytes
+                & $ptr 0 18 $tileRegions.Moments; & $ptr 1 18 $rAt; & $ptr 2 18 ($tileRegions.Kms+$index*$kmsBytes); & $call "body_constant$sfx"; & $mark 'Coefficients'
+            }
             if($ControllerContact){ & $dma 18 ($tileRegions.Kms+$index*$kmsBytes+12L*$Channels) 22 ($contactOffset+$index*8L*$Channels) (8L*$Channels) }
         }
         if($ControllerContact){ & $dma 18 $tileRegions.Controller 22 ($contactOffset+18L*8*$Channels) $controllerBytes }
@@ -1746,6 +1756,6 @@ function New-KokoroGenerator60x16RunSteps {
     if($PmuEvents){$resultLayout.PmuProfile=[pscustomobject]@{Categories=$pmuCategories;SiteRecordOffset=$pmuSiteOffset;SiteRecordCount=$pmuSiteRecordCount;Sites=$pmuSites}}
     $resultLayout.ConstantPacking=[pscustomobject]@{Frames=$Frames;ParameterBytes=$constantsTableOffset;ConstantsTableOffset=$constantsTableOffset;
         ConstantsBytes=$momentAt;ConstantsParameterBytes=$constantsTableOffset+$momentAt;OutputBytes=$exportOffset;
-        MomentSites=$momentSites.ToArray();MomentsBytes=$momentAt;KmBytes=$kmsAt}
+        MomentSites=$momentSites.ToArray();MomentsBytes=$momentAt;KmBytes=$kmsAt;HostCoefficientsOffset=$(if($HostCoefficients){$hostCoefficientsOffset}else{-1L})}
     [pscustomobject]@{Steps=$s.ToArray();Layout=$resultLayout}
 }

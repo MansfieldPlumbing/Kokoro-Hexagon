@@ -1524,6 +1524,37 @@ function Test-KokoroGeneratorWeightPrecision {
     $report
 }
 
+# Each moment site's K, M and S (Turns layout: K[C], M[C], S[C] int32) from its supplied ratios and its Ka/Mb record, with
+# the integer arithmetic of src/kernels/Kokoro.AdaInTurnsCoefficients.ps1 New-KokoroAdaInConstantCoefficientsLoopSteps:
+#   K = sign(Ka) q(|Ka| a + b/2, b)      a/b: the site's N/root ratio (u32), |Ka| 64-bit, products modulo 2^64
+#   M = Mb - sign(K c) q(|K c| + e/2, e)  c: S1/N numerator (signed), e = (d << 15) modulo 2^32
+#   S = the record's S;  q(v, b) = the largest q < 2^31 with q b <= v (the kernel's bit loop).
+# -Tables are the job's parameters (records and, at ConstantPacking.ConstantsTableOffset, the ratios); returns the sites'
+# K/M/S at their KmOffset, ConstantPacking.KmBytes in all.
+function ConvertTo-KokoroGeneratorStageCoefficients {
+    param([Parameter(Mandatory)][byte[]] $Tables, [Parameter(Mandatory)] $Layout)
+    $packing = $Layout.ConstantPacking; $out = [byte[]]::new([long]$packing.KmBytes)
+    $two64 = [bigint]::Pow(2, 64); $top = [bigint]2147483647
+    $quotient = { param([bigint] $v, [bigint] $b) if ($b.IsZero) { return $top }; [bigint]::Min([bigint]::Divide($v, $b), $top) }
+    foreach ($site in @($packing.MomentSites)) {
+        $c = [int]$site.Width; $ratios = [long]$packing.ConstantsTableOffset + [long]$site.Offset; $record = [long]$site.RecordOffset; $at = [long]$site.KmOffset
+        for ($ch = 0; $ch -lt $c; $ch++) {
+            $a = [bigint][BitConverter]::ToUInt32($Tables, $ratios + 16 * $ch); $b = [bigint][BitConverter]::ToUInt32($Tables, $ratios + 16 * $ch + 4)
+            $cn = [bigint][BitConverter]::ToInt32($Tables, $ratios + 16 * $ch + 8); $d = [bigint][BitConverter]::ToUInt32($Tables, $ratios + 16 * $ch + 12)
+            $ka = [bigint][BitConverter]::ToInt64($Tables, $record + 32 * $ch); $mb = [BitConverter]::ToInt32($Tables, $record + 32 * $ch + 8); $sv = [BitConverter]::ToInt32($Tables, $record + 32 * $ch + 12)
+            $q = & $quotient ((([bigint]::Abs($ka) * $a) % $two64 + [bigint]::Divide($b, 2)) % $two64) $b
+            $k = [int]$(if ($ka.Sign -lt 0) { -$q } else { $q })
+            $e = ($d * 32768) % [bigint]4294967296
+            $product = [bigint]$k * $cn
+            $r = & $quotient (([bigint]::Abs($product) + [bigint]::Divide($e, 2)) % $two64) $e
+            # M wraps modulo 2^32 like the kernel's 32-bit subtraction.
+            $wide = ([long]$mb - [long]$(if ($product.Sign -lt 0) { -$r } else { $r })) -band 0xFFFFFFFFL; if ($wide -gt 2147483647L) { $wide -= 4294967296L }
+            [BitConverter]::GetBytes([int]$k).CopyTo($out, $at + 4 * $ch); [BitConverter]::GetBytes([int]$wide).CopyTo($out, $at + 4 * ($c + $ch)); [BitConverter]::GetBytes([int]$sv).CopyTo($out, $at + 4 * (2 * $c + $ch))
+        }
+    }
+    , $out
+}
+
 # int8 weights in the high plane: q = round(w / 256), clamped to +-127, stored as 256 q (low plane zero). Zero-point
 # biases follow the planes (as Test-KokoroGeneratorWeightPrecision): group 0 by -128 (sum q - sum Wh), group 1 by
 # 128 sum Wl. HMX weight byte order: ((g K + k) CB + blk) 2048 + 1024 hh + 128 (i >> 2) + 4 c + (i & 3). -Layout is a
@@ -1780,7 +1811,10 @@ function Test-KokoroGeneratorTileEquivalence {
         # time per category: fill, convolution, combine, mean, DMA, synchronization, tile fixes.
         [switch]$PmuSplit,
         # Jobs with a tail: time every run one-shot (about 30 s each) instead of one one-shot proof run plus resident timing.
-        [switch]$OneShotTiming)
+        [switch]$OneShotTiming,
+        # The depth-first job reads each site's K/M/S finished from the host (ConvertTo-KokoroGeneratorStageCoefficients)
+        # instead of computing them from the ratios on the DSP; the layer job is unchanged.
+        [switch]$HostCoefficients)
     $out=[IO.Path]::GetFullPath($OutputDirectory)
     if(-not $out.StartsWith($Build+[IO.Path]::DirectorySeparatorChar,[StringComparison]::OrdinalIgnoreCase) -or (Test-Path -LiteralPath $out)){throw 'Choose a fresh equivalence directory under build/.'}
     [void][IO.Directory]::CreateDirectory($out)
@@ -1806,6 +1840,7 @@ function Test-KokoroGeneratorTileEquivalence {
     $layerParameters=$common+@{ResidentBatchTiles=$LayerBatchTiles;GeneratorMoments='Constants';GeneratorSchedule='Layer'}; if($LayerPoolWait){ $layerParameters.GeneratorPoolWait=$LayerPoolWait }; if($SourceStreams -eq 'Model'){ $layerParameters.GeneratorExportFrontTensors=$true }
     $layer=Invoke-KokoroEmission -Kernel KokoroGenerator60x16Run -Parameters $layerParameters
     $tileParameters=$common+@{ResidentBatchTiles=$TileBlock;GeneratorMoments='Constants';GeneratorSchedule=$depthFirst;GeneratorWeightPlanes=$WeightPlanes;GeneratorControllerContact=$ControllerContact.IsPresent;GeneratorVectorPackets=$VectorPackets.IsPresent}
+    if($HostCoefficients){ $tileParameters.GeneratorHostCoefficients=$true }
     if($Joint -notin 'Section','WholeSource','SpansSource'){ $tileParameters.GeneratorSuppliedSource=$true }
     if($Joint -ne 'Section'){ $tileParameters.GeneratorSpanTiles=$SpanTiles }
     if($Joint -in 'WholeSource','SpansSource' -and $SourceChunkTiles -ne 128){ $tileParameters.GeneratorSourceChunkTiles=$SourceChunkTiles }
@@ -1828,7 +1863,7 @@ function Test-KokoroGeneratorTileEquivalence {
     if($WeightPlanes -eq 1){
         # The main path's resblocks only, unless the source runs on the DSP: otherwise noise_res runs only in the layer job,
         # which computes the supplied streams from its own weights.
-        $converted=ConvertTo-KokoroGeneratorInt8 -Tables $exact.Tables -WeightBytes $weights -Layout $layer.Layout -IncludeSource:($Joint -in 'WholeSource','SpansSource')
+        $converted=ConvertTo-KokoroGeneratorInt8 -Tables $exact.Tables -WeightBytes $weights -Layout $layer.Layout -IncludeSource:($Joint -in 'WholeSource','SpansSource') -CacheDirectory (Join-Path $Build 'generator-int8')
         $runTables=$converted.Tables; $runWeights=$converted.Weights
     }
     $constantsInput=& $stage 'constants' $runTables $runWeights
@@ -1839,6 +1874,13 @@ function Test-KokoroGeneratorTileEquivalence {
     # The DDR workspace starts at the first 128-byte boundary at least 64 bytes into the output buffer.
     $tensorBytes=[long]$fixture.Tiles*$tileBytes
     $tileInput=$constantsInput
+    if($HostCoefficients){
+        # The same parameters, then the finished K/M/S at the offset the depth-first layout gives them.
+        $packing=$tile.Layout.ConstantPacking; $at=[long]$packing.HostCoefficientsOffset; $kms=ConvertTo-KokoroGeneratorStageCoefficients -Tables $runTables -Layout $tile.Layout
+        if($runTables.Length -gt $at){throw "Parameters ($($runTables.Length) B) reach past the host coefficients at $at."}
+        $hostTables=[byte[]]::new($at+$kms.Length); [Array]::Copy($runTables,$hostTables,$runTables.Length); [Array]::Copy($kms,0,$hostTables,$at,$kms.Length)
+        $tileInput=& $stage 'host-coefficients' $hostTables $runWeights
+    }
     if($Joint -notin 'Section','WholeSource','SpansSource'){
         # Each source stream the layer job parked in its workspace becomes the depth-first job's supplied input there.
         if($SourceStreams -eq 'Model'){
@@ -1996,7 +2038,7 @@ function Test-KokoroGeneratorTileEquivalence {
             $profiled=$tileParameters.Clone(); $profiled.ResidentPmuEvents=$events[$eventSet]
             $emission=Invoke-KokoroEmission -Kernel KokoroGenerator60x16Run -Parameters $profiled
             # The resident listener returns only the header and PCM ranges; the PMU records need the whole output.
-            $run=Invoke-KokoroDeviceJob -EmissionDirectory $emission.Directory -EmissionArtifact $emission -InputDirectory $constantsInput -Soc $Soc -Runs $Runs -Package $Package -OneShot
+            $run=Invoke-KokoroDeviceJob -EmissionDirectory $emission.Directory -EmissionArtifact $emission -InputDirectory $tileInput -Soc $Soc -Runs $Runs -Package $Package -OneShot
             $profiledTensor=& $read $run $emission
             if([Convert]::ToHexString([Security.Cryptography.SHA256]::HashData($profiledTensor)) -cne [Convert]::ToHexString([Security.Cryptography.SHA256]::HashData($tileTensor))){throw "Profiled tile output (set $eventSet) differs from the unprofiled run."}
             $records=Read-KokoroPmuRecords -Output $run.Output -PmuProfile $emission.Layout.PmuProfile -EventSet $eventSet
