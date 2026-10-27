@@ -1534,22 +1534,47 @@ function Test-KokoroGeneratorWeightPrecision {
 function ConvertTo-KokoroGeneratorStageCoefficients {
     param([Parameter(Mandatory)][byte[]] $Tables, [Parameter(Mandatory)] $Layout)
     $packing = $Layout.ConstantPacking; $out = [byte[]]::new([long]$packing.KmBytes)
-    $two64 = [bigint]::Pow(2, 64); $top = [bigint]2147483647
-    $quotient = { param([bigint] $v, [bigint] $b) if ($b.IsZero) { return $top }; [bigint]::Min([bigint]::Divide($v, $b), $top) }
     foreach ($site in @($packing.MomentSites)) {
         $c = [int]$site.Width; $ratios = [long]$packing.ConstantsTableOffset + [long]$site.Offset; $record = [long]$site.RecordOffset; $at = [long]$site.KmOffset
         for ($ch = 0; $ch -lt $c; $ch++) {
-            $a = [bigint][BitConverter]::ToUInt32($Tables, $ratios + 16 * $ch); $b = [bigint][BitConverter]::ToUInt32($Tables, $ratios + 16 * $ch + 4)
-            $cn = [bigint][BitConverter]::ToInt32($Tables, $ratios + 16 * $ch + 8); $d = [bigint][BitConverter]::ToUInt32($Tables, $ratios + 16 * $ch + 12)
-            $ka = [bigint][BitConverter]::ToInt64($Tables, $record + 32 * $ch); $mb = [BitConverter]::ToInt32($Tables, $record + 32 * $ch + 8); $sv = [BitConverter]::ToInt32($Tables, $record + 32 * $ch + 12)
-            $q = & $quotient ((([bigint]::Abs($ka) * $a) % $two64 + [bigint]::Divide($b, 2)) % $two64) $b
-            $k = [int]$(if ($ka.Sign -lt 0) { -$q } else { $q })
-            $e = ($d * 32768) % [bigint]4294967296
-            $product = [bigint]$k * $cn
-            $r = & $quotient (([bigint]::Abs($product) + [bigint]::Divide($e, 2)) % $two64) $e
-            # M wraps modulo 2^32 like the kernel's 32-bit subtraction.
-            $wide = ([long]$mb - [long]$(if ($product.Sign -lt 0) { -$r } else { $r })) -band 0xFFFFFFFFL; if ($wide -gt 2147483647L) { $wide -= 4294967296L }
-            [BitConverter]::GetBytes([int]$k).CopyTo($out, $at + 4 * $ch); [BitConverter]::GetBytes([int]$wide).CopyTo($out, $at + 4 * ($c + $ch)); [BitConverter]::GetBytes([int]$sv).CopyTo($out, $at + 4 * (2 * $c + $ch))
+            $km = Get-KokoroConstantCoefficient -Tables $Tables -Ratio ($ratios + 16 * $ch) -Record ($record + 32 * $ch); $sv = [BitConverter]::ToInt32($Tables, $record + 32 * $ch + 12)
+            [BitConverter]::GetBytes($km[0]).CopyTo($out, $at + 4 * $ch); [BitConverter]::GetBytes($km[1]).CopyTo($out, $at + 4 * ($c + $ch)); [BitConverter]::GetBytes([int]$sv).CopyTo($out, $at + 4 * (2 * $c + $ch))
+        }
+    }
+    , $out
+}
+
+# One channel's K and M as New-KokoroAdaInConstantCoefficientsLoopSteps computes them, from its ratio (16 bytes at
+# -Ratio: N/root numerator and denominator, S1/N numerator and denominator) and its record (Ka int64, Mb int32 at
+# -Record). Shared by the generator's and the decoder's host coefficients.
+function Get-KokoroConstantCoefficient {
+    param([Parameter(Mandatory)][byte[]] $Tables, [long] $Ratio, [long] $Record)
+    $two64 = [bigint]::Pow(2, 64); $top = [bigint]2147483647
+    $quotient = { param([bigint] $v, [bigint] $b) if ($b.IsZero) { return $top }; [bigint]::Min([bigint]::Divide($v, $b), $top) }
+    $a = [bigint][BitConverter]::ToUInt32($Tables, $Ratio); $b = [bigint][BitConverter]::ToUInt32($Tables, $Ratio + 4)
+    $cn = [bigint][BitConverter]::ToInt32($Tables, $Ratio + 8); $d = [bigint][BitConverter]::ToUInt32($Tables, $Ratio + 12)
+    $ka = [bigint][BitConverter]::ToInt64($Tables, $Record); $mb = [BitConverter]::ToInt32($Tables, $Record + 8)
+    $q = & $quotient ((([bigint]::Abs($ka) * $a) % $two64 + [bigint]::Divide($b, 2)) % $two64) $b
+    $k = [int]$(if ($ka.Sign -lt 0) { -$q } else { $q })
+    $e = ($d * 32768) % [bigint]4294967296
+    $product = [bigint]$k * $cn
+    $r = & $quotient (([bigint]::Abs($product) + [bigint]::Divide($e, 2)) % $two64) $e
+    # M wraps modulo 2^32 like the kernel's 32-bit subtraction.
+    $wide = ([long]$mb - [long]$(if ($product.Sign -lt 0) { -$r } else { $r })) -band 0xFFFFFFFFL; if ($wide -gt 2147483647L) { $wide -= 4294967296L }
+    , [int[]]@($k, [int]$wide)
+}
+
+# The decoder's K/M for every site from a constants table, in the Direct mode's input layout (each site at its KmOffset,
+# blocked per 32 channels: K at 0 and M at 128 of each 256-byte block).
+function ConvertTo-KokoroDecoderCoefficients {
+    param([Parameter(Mandatory)][byte[]] $Tables, [Parameter(Mandatory)] $Layout)
+    $out = [byte[]]::new([long]$Layout.KmBytes)
+    foreach ($site in @($Layout.MomentSites)) {
+        $blockIndex = [int][math]::Floor($site.Index / 2); $record = if ($site.Index % 2) { $Layout.BlockParams[$blockIndex].Records2 } else { $Layout.BlockParams[$blockIndex].Records1 }
+        for ($ch = 0; $ch -lt [int]$site.Width; $ch++) {
+            $km = Get-KokoroConstantCoefficient -Tables $Tables -Ratio ([long]$Layout.ConstantsTableOffset + $site.Offset + 16L * $ch) -Record ([long]$record + 32L * $ch)
+            $at = [long]$site.KmOffset + 256L * [math]::Floor($ch / 32) + 4L * ($ch % 32)
+            [BitConverter]::GetBytes($km[0]).CopyTo($out, $at); [BitConverter]::GetBytes($km[1]).CopyTo($out, $at + 128)
         }
     }
     , $out
@@ -1745,7 +1770,7 @@ function New-KokoroSpeechRenderer {
             [pscustomobject]@{Site=$site.Name;Channel=$c;Inverse=[double][BitConverter]::ToUInt32($Table,$at)/[BitConverter]::ToUInt32($Table,$at+4);Mean=[double][BitConverter]::ToInt32($Table,$at+8)/[BitConverter]::ToUInt32($Table,$at+12)} } } }
     # One decoder job over at most Capacity frames: Accumulate (moments measured in the job), Export (also returns them and
     # the coefficients) or Constants (normalization supplied in -Tables).
-    $renderer | Add-Member -MemberType ScriptMethod -Name DecoderRun -Value { param([float[]]$Aligned,[float[]]$Pitch,[float[]]$Energy,[string]$Moments='Accumulate',[byte[]]$Tables=$null)
+    $renderer | Add-Member -MemberType ScriptMethod -Name DecoderRun -Value { param([float[]]$Aligned,[float[]]$Pitch,[float[]]$Energy,[string]$Moments='Accumulate',[byte[]]$Tables=$null,[byte[]]$Coefficients=$null)
         $frames=[int]($Aligned.Length/512)
         if($frames -lt 2 -or $frames -gt $this.Capacity){throw "The decoder plan holds $($this.Capacity) frames; this stream has $frames."}
         if($Pitch.Length -ne 2*$frames -or $Energy.Length -ne 2*$frames){throw 'Decode needs the f0 and N curves at two values per frame.'}
@@ -1758,12 +1783,16 @@ function New-KokoroSpeechRenderer {
         foreach($pair in @(@($Pitch,($tiles*32768L),$this.F0CurveScale),@($Energy,($tiles*32768L+$curveBytes),$this.NCurveScale))){
             for($i=0;$i -lt 2*$frames;$i++){ [Array]::Copy([BitConverter]::GetBytes([int][math]::Round([double]$pair[0][$i]/$pair[2],[MidpointRounding]::ToEven)),0,$activation,$pair[1]+4*$i,4) } }
         [Array]::Copy([BitConverter]::GetBytes([int]$frames),0,$activation,[long]$layout.FramesOffset,4)
+        # Direct: every site's K/M (ConvertTo-KokoroDecoderCoefficients) in the input's KmDeltas region.
+        if($Moments -eq 'Direct'){ [Array]::Copy($Coefficients,0,$activation,[long]$this.DecoderLayout.Input.KmDeltas,$Coefficients.Length) }
         $job=$this.Run($emission,$activation,$(if($null -ne $Tables){$Tables}else{$this.DecoderTables}),$this.DecoderWeights,$false)
         [pscustomobject]@{Job=$job;Layout=$layout;Frames=$frames} }
     # The decoder's x for a stream. Without -Constants one job measures the stream's own moments (at most Capacity
     # frames). With -Constants (a decoder constants table: an export's or a voice base) any length decodes in chunks of
     # -Interior frames (a multiple of 16, so chunks join on whole 32-tick tiles) with 16 frames of halo each side.
-    $renderer | Add-Member -MemberType ScriptMethod -Name Decode -Value { param([float[]]$Aligned,[float[]]$Pitch,[float[]]$Energy,[byte[]]$Constants=$null,[int]$Interior=0)
+    # With -Constants the chunks run in Direct mode on K/M computed once on the host from the table (-Mode Constants
+    # derives them on the DSP in every chunk instead; both give the same x).
+    $renderer | Add-Member -MemberType ScriptMethod -Name Decode -Value { param([float[]]$Aligned,[float[]]$Pitch,[float[]]$Energy,[byte[]]$Constants=$null,[int]$Interior=0,[ValidateSet('Direct','Constants')][string]$Mode='Direct')
         $frames=[int]($Aligned.Length/512)
         if($null -eq $Constants){
             $run=$this.DecoderRun($Aligned,$Pitch,$Energy,'Accumulate',$null)
@@ -1773,10 +1802,12 @@ function New-KokoroSpeechRenderer {
         $halo=16; if($Interior -le 0){ $Interior=$this.Capacity-2*$halo }
         if($Interior % 16 -or $Interior+2*$halo -gt $this.Capacity){throw "Decoder chunks need an interior that is a multiple of 16 frames and fits $($this.Capacity) frames with its halo."}
         $x=[byte[]]::new([long][math]::Ceiling(2*$frames/32)*32768); $dspMs=0.0; $chunks=0
+        if($null -eq $this.DecoderLayout){ . (Join-Path $Root 'src/jobs/Kokoro.DecoderRun16.ps1'); $this.DecoderLayout=Get-KokoroDecoder16Layout -Frames $this.Capacity }
+        $coefficients=if($Mode -eq 'Direct'){ ConvertTo-KokoroDecoderCoefficients -Tables $Constants -Layout $this.DecoderLayout }else{ $null }
         $slice={param([float[]]$Values,[int]$Channels,[int]$T,[int]$A,[int]$B) $n=$B-$A; $r=[float[]]::new($Channels*$n); for($c=0;$c -lt $Channels;$c++){ [Array]::Copy($Values,$c*$T+$A,$r,$c*$n,$n) }; ,$r}
         for($a=0;$a -lt $frames;$a+=$Interior){
             $b=[math]::Min($frames,$a+$Interior); $lo=[math]::Max(0,$a-$halo); $hi=[math]::Min($frames,$b+$halo)
-            $run=$this.DecoderRun((& $slice $Aligned 512 $frames $lo $hi),(& $slice $Pitch 1 (2*$frames) (2*$lo) (2*$hi)),(& $slice $Energy 1 (2*$frames) (2*$lo) (2*$hi)),'Constants',$Constants)
+            $run=$this.DecoderRun((& $slice $Aligned 512 $frames $lo $hi),(& $slice $Pitch 1 (2*$frames) (2*$lo) (2*$hi)),(& $slice $Energy 1 (2*$frames) (2*$lo) (2*$hi)),$Mode,$Constants,$coefficients)
             # Interior ticks [2a, 2b) start on a tile boundary in both the chunk's output and the stream's.
             $bytes=[long][math]::Ceiling(2*($b-$a)/32)*32768
             [Array]::Copy($run.Job.Output,[long]$run.Layout.OutputOffset+(2L*($a-$lo)/32)*32768,$x,(2L*$a/32)*32768,[math]::Min($bytes,$x.Length-(2L*$a/32)*32768))

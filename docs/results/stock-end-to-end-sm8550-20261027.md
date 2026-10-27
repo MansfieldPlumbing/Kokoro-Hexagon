@@ -105,3 +105,19 @@ A decoder chunk takes about 12 ms, most of it deriving coefficients from the tab
 `decoder-direct-coefficients-sm8550-20261010.md`, where direct coefficients took a chunk from 13.4 to 2.9 ms).
 
 Receipt: `build/streaming-decoder-20261027T185820` (streaming-decoder.clixml, decoder-base.bin, passage.wav).
+
+**K/M from the host.** The decoder's Constants mode and the generator's run the same coefficient kernel
+(`New-KokoroAdaInConstantCoefficientsLoopSteps`, flat K/M/S for the generator, K/M blocked per 32 channels for the
+decoder). `Get-KokoroConstantCoefficient` reproduces its per-channel arithmetic for both
+(`ConvertTo-KokoroGeneratorStageCoefficients`, `ConvertTo-KokoroDecoderCoefficients`), and `Decode` now computes the
+decoder's K/M once per table and runs its chunks in Direct mode. Same voice base, same chunks:
+
+| Input | Constants mode | Direct mode | x |
+| --- | ---: | ---: | --- |
+| 114 frames, 2 chunks | 22.26 ms | 7.89 ms | identical (`EC352C59...`) |
+| 471 frames (11.775 s), 5 chunks | 60.79 ms | 24.96 ms | identical |
+
+The decoder takes 2.1 ms per audio second; with the generator's 289.6 ms the 11.775 s sentence needs about 314.6 ms on
+the DSP (26.7 ms per audio second, 37.4 times real time).
+
+Receipt: `build/decoder-direct-*` (decoder-direct.clixml).
