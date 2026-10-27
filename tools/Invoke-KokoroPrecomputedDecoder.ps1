@@ -40,7 +40,7 @@ Seeded and Join reset this seed for each render, using uniform phase and Gaussia
 .PARAMETER Text
 Speech mode input for the pinned compiled English phonemizer. One group of at most 510 phonemes.
 .PARAMETER Convolution
-Direct uses packed AVX2 with the reference FP32 rounding schedule; Reference uses the previous SSE worker.
+Direct uses packed 256-bit vectors with the reference FP32 rounding schedule; Reference uses the previous 128-bit worker.
 .PARAMETER CompareConvolution
 Render the same phonemes and seeded draws through both methods; require bit equality at every returned boundary.
 .PARAMETER ReferenceSpeechDirectory
@@ -67,7 +67,6 @@ Show help without compiling, loading weights or rendering.
 
 #requires -Version 7.7
 using namespace System.Runtime.Intrinsics
-using namespace System.Runtime.Intrinsics.X86
 [CmdletBinding()]
 param(
     [ValidateSet('Admit','Nodes','Levels','Gate','Seeded','Join','Library','Speech','Kernels','FrontEnd')][string] $Mode = 'Gate',
@@ -309,15 +308,15 @@ class OfflineConvolutionWorker {
                         if (-not $this.ActiveTaps[$timeGroup * $this.Kernel + $tap]) { continue }
                         $values = $this.VectorInput[$packedBase + $ic * $this.Kernel + $tap]
                         $weight = [System.Runtime.Intrinsics.Vector128]::Create($this.Weights[$at])
-                        $sum = [System.Runtime.Intrinsics.X86.Sse]::Add($sum, [System.Runtime.Intrinsics.X86.Sse]::Multiply($values, $weight))
+                        $sum = [System.Runtime.Intrinsics.Vector128]::Add($sum, [System.Runtime.Intrinsics.Vector128]::Multiply($values, $weight))
                     }
                 }
-                $sum = [System.Runtime.Intrinsics.X86.Sse]::Add($sum, [System.Runtime.Intrinsics.Vector128]::Create($this.Bias[$oc]))
+                $sum = [System.Runtime.Intrinsics.Vector128]::Add($sum, [System.Runtime.Intrinsics.Vector128]::Create($this.Bias[$oc]))
                 $base = $oc * $this.OutputFrames + $t
-                $this.Output[$base] = [System.Runtime.Intrinsics.X86.Sse41]::Extract($sum, [byte]0)
-                if ($t + 1 -lt $this.OutputFrames) { $this.Output[$base + 1] = [System.Runtime.Intrinsics.X86.Sse41]::Extract($sum, [byte]1) }
-                if ($t + 2 -lt $this.OutputFrames) { $this.Output[$base + 2] = [System.Runtime.Intrinsics.X86.Sse41]::Extract($sum, [byte]2) }
-                if ($t + 3 -lt $this.OutputFrames) { $this.Output[$base + 3] = [System.Runtime.Intrinsics.X86.Sse41]::Extract($sum, [byte]3) }
+                $this.Output[$base] = [System.Runtime.Intrinsics.Vector128]::GetElement($sum, 0)
+                if ($t + 1 -lt $this.OutputFrames) { $this.Output[$base + 1] = [System.Runtime.Intrinsics.Vector128]::GetElement($sum, 1) }
+                if ($t + 2 -lt $this.OutputFrames) { $this.Output[$base + 2] = [System.Runtime.Intrinsics.Vector128]::GetElement($sum, 2) }
+                if ($t + 3 -lt $this.OutputFrames) { $this.Output[$base + 3] = [System.Runtime.Intrinsics.Vector128]::GetElement($sum, 3) }
             }
         }
     }
@@ -325,7 +324,7 @@ class OfflineConvolutionWorker {
 
 class OfflineDirectConvolutionWorker {
     # Stride-1, ungrouped Conv1d: out[oc, t] = bias[oc] + sum over ic, tap of w[oc, ic, tap] * x[ic, t + tap * dilation - padding].
-    # Weights are packed once as 8-output-channel AVX2 vectors; the input is a zero-padded copy, so
+    # Weights are packed once as 8-output-channel 256-bit vectors; the input is a zero-padded copy, so
     # every read is in bounds. Each step loads one weight vector and updates eight time positions.
     [float[]] $Padded
     [System.Runtime.Intrinsics.Vector256[float][]] $Packed
@@ -348,14 +347,10 @@ class OfflineDirectConvolutionWorker {
     [void] Store([System.Runtime.Intrinsics.Vector256[float]] $sum, [int] $block, [int] $frame) {
         if ($frame -ge $this.WorkFrames) { return }
         $destinationFrame = $this.OutputOffset + $frame * $this.OutputStep
-        $low = [System.Runtime.Intrinsics.X86.Avx]::ExtractVector128($sum, [byte]0)
-        $high = [System.Runtime.Intrinsics.X86.Avx]::ExtractVector128($sum, [byte]1)
         for ($lane = 0; $lane -lt 8; $lane++) {
             $oc = $block * 8 + $lane
             if ($oc -ge $this.OutputChannels) { return }
-            $value = [float]0
-            if ($lane -lt 4) { $value = [System.Runtime.Intrinsics.X86.Sse41]::Extract($low, [byte]$lane) }
-            else { $value = [System.Runtime.Intrinsics.X86.Sse41]::Extract($high, [byte]($lane - 4)) }
+            $value = [System.Runtime.Intrinsics.Vector256]::GetElement($sum, $lane)
             $this.Output[$oc * $this.OutputFrames + $destinationFrame] = [float]($value + $this.Bias[$oc])
         }
     }
@@ -381,21 +376,21 @@ class OfflineDirectConvolutionWorker {
                         $wa = $weights[$firstAt + $tap]; $wb = $weights[$secondAt + $tap]
                         $at = $row + $tap * $tapStride
                         $x = [System.Runtime.Intrinsics.Vector256]::Create($source[$at])
-                        $a0 = [System.Runtime.Intrinsics.X86.Avx]::Add($a0, [System.Runtime.Intrinsics.X86.Avx]::Multiply($wa, $x)); $b0 = [System.Runtime.Intrinsics.X86.Avx]::Add($b0, [System.Runtime.Intrinsics.X86.Avx]::Multiply($wb, $x))
+                        $a0 = [System.Runtime.Intrinsics.Vector256]::Add($a0, [System.Runtime.Intrinsics.Vector256]::Multiply($wa, $x)); $b0 = [System.Runtime.Intrinsics.Vector256]::Add($b0, [System.Runtime.Intrinsics.Vector256]::Multiply($wb, $x))
                         $x = [System.Runtime.Intrinsics.Vector256]::Create($source[$at + 1])
-                        $a1 = [System.Runtime.Intrinsics.X86.Avx]::Add($a1, [System.Runtime.Intrinsics.X86.Avx]::Multiply($wa, $x)); $b1 = [System.Runtime.Intrinsics.X86.Avx]::Add($b1, [System.Runtime.Intrinsics.X86.Avx]::Multiply($wb, $x))
+                        $a1 = [System.Runtime.Intrinsics.Vector256]::Add($a1, [System.Runtime.Intrinsics.Vector256]::Multiply($wa, $x)); $b1 = [System.Runtime.Intrinsics.Vector256]::Add($b1, [System.Runtime.Intrinsics.Vector256]::Multiply($wb, $x))
                         $x = [System.Runtime.Intrinsics.Vector256]::Create($source[$at + 2])
-                        $a2 = [System.Runtime.Intrinsics.X86.Avx]::Add($a2, [System.Runtime.Intrinsics.X86.Avx]::Multiply($wa, $x)); $b2 = [System.Runtime.Intrinsics.X86.Avx]::Add($b2, [System.Runtime.Intrinsics.X86.Avx]::Multiply($wb, $x))
+                        $a2 = [System.Runtime.Intrinsics.Vector256]::Add($a2, [System.Runtime.Intrinsics.Vector256]::Multiply($wa, $x)); $b2 = [System.Runtime.Intrinsics.Vector256]::Add($b2, [System.Runtime.Intrinsics.Vector256]::Multiply($wb, $x))
                         $x = [System.Runtime.Intrinsics.Vector256]::Create($source[$at + 3])
-                        $a3 = [System.Runtime.Intrinsics.X86.Avx]::Add($a3, [System.Runtime.Intrinsics.X86.Avx]::Multiply($wa, $x)); $b3 = [System.Runtime.Intrinsics.X86.Avx]::Add($b3, [System.Runtime.Intrinsics.X86.Avx]::Multiply($wb, $x))
+                        $a3 = [System.Runtime.Intrinsics.Vector256]::Add($a3, [System.Runtime.Intrinsics.Vector256]::Multiply($wa, $x)); $b3 = [System.Runtime.Intrinsics.Vector256]::Add($b3, [System.Runtime.Intrinsics.Vector256]::Multiply($wb, $x))
                         $x = [System.Runtime.Intrinsics.Vector256]::Create($source[$at + 4])
-                        $a4 = [System.Runtime.Intrinsics.X86.Avx]::Add($a4, [System.Runtime.Intrinsics.X86.Avx]::Multiply($wa, $x)); $b4 = [System.Runtime.Intrinsics.X86.Avx]::Add($b4, [System.Runtime.Intrinsics.X86.Avx]::Multiply($wb, $x))
+                        $a4 = [System.Runtime.Intrinsics.Vector256]::Add($a4, [System.Runtime.Intrinsics.Vector256]::Multiply($wa, $x)); $b4 = [System.Runtime.Intrinsics.Vector256]::Add($b4, [System.Runtime.Intrinsics.Vector256]::Multiply($wb, $x))
                         $x = [System.Runtime.Intrinsics.Vector256]::Create($source[$at + 5])
-                        $a5 = [System.Runtime.Intrinsics.X86.Avx]::Add($a5, [System.Runtime.Intrinsics.X86.Avx]::Multiply($wa, $x)); $b5 = [System.Runtime.Intrinsics.X86.Avx]::Add($b5, [System.Runtime.Intrinsics.X86.Avx]::Multiply($wb, $x))
+                        $a5 = [System.Runtime.Intrinsics.Vector256]::Add($a5, [System.Runtime.Intrinsics.Vector256]::Multiply($wa, $x)); $b5 = [System.Runtime.Intrinsics.Vector256]::Add($b5, [System.Runtime.Intrinsics.Vector256]::Multiply($wb, $x))
                         $x = [System.Runtime.Intrinsics.Vector256]::Create($source[$at + 6])
-                        $a6 = [System.Runtime.Intrinsics.X86.Avx]::Add($a6, [System.Runtime.Intrinsics.X86.Avx]::Multiply($wa, $x)); $b6 = [System.Runtime.Intrinsics.X86.Avx]::Add($b6, [System.Runtime.Intrinsics.X86.Avx]::Multiply($wb, $x))
+                        $a6 = [System.Runtime.Intrinsics.Vector256]::Add($a6, [System.Runtime.Intrinsics.Vector256]::Multiply($wa, $x)); $b6 = [System.Runtime.Intrinsics.Vector256]::Add($b6, [System.Runtime.Intrinsics.Vector256]::Multiply($wb, $x))
                         $x = [System.Runtime.Intrinsics.Vector256]::Create($source[$at + 7])
-                        $a7 = [System.Runtime.Intrinsics.X86.Avx]::Add($a7, [System.Runtime.Intrinsics.X86.Avx]::Multiply($wa, $x)); $b7 = [System.Runtime.Intrinsics.X86.Avx]::Add($b7, [System.Runtime.Intrinsics.X86.Avx]::Multiply($wb, $x))
+                        $a7 = [System.Runtime.Intrinsics.Vector256]::Add($a7, [System.Runtime.Intrinsics.Vector256]::Multiply($wa, $x)); $b7 = [System.Runtime.Intrinsics.Vector256]::Add($b7, [System.Runtime.Intrinsics.Vector256]::Multiply($wb, $x))
                     }
                 }
                 $this.Store($a0, $block, $t); $this.Store($a1, $block, $t + 1); $this.Store($a2, $block, $t + 2); $this.Store($a3, $block, $t + 3)
@@ -414,14 +409,14 @@ class OfflineDirectConvolutionWorker {
                     for ($tap = 0; $tap -lt $this.Kernel; $tap++) {
                         $w = $this.Packed[$packedAt + $tap]
                         $at = $row + $tap * $this.Dilation
-                        $s0 = [System.Runtime.Intrinsics.X86.Avx]::Add($s0, [System.Runtime.Intrinsics.X86.Avx]::Multiply($w, [System.Runtime.Intrinsics.Vector256]::Create($this.Padded[$at])))
-                        $s1 = [System.Runtime.Intrinsics.X86.Avx]::Add($s1, [System.Runtime.Intrinsics.X86.Avx]::Multiply($w, [System.Runtime.Intrinsics.Vector256]::Create($this.Padded[$at + 1])))
-                        $s2 = [System.Runtime.Intrinsics.X86.Avx]::Add($s2, [System.Runtime.Intrinsics.X86.Avx]::Multiply($w, [System.Runtime.Intrinsics.Vector256]::Create($this.Padded[$at + 2])))
-                        $s3 = [System.Runtime.Intrinsics.X86.Avx]::Add($s3, [System.Runtime.Intrinsics.X86.Avx]::Multiply($w, [System.Runtime.Intrinsics.Vector256]::Create($this.Padded[$at + 3])))
-                        $s4 = [System.Runtime.Intrinsics.X86.Avx]::Add($s4, [System.Runtime.Intrinsics.X86.Avx]::Multiply($w, [System.Runtime.Intrinsics.Vector256]::Create($this.Padded[$at + 4])))
-                        $s5 = [System.Runtime.Intrinsics.X86.Avx]::Add($s5, [System.Runtime.Intrinsics.X86.Avx]::Multiply($w, [System.Runtime.Intrinsics.Vector256]::Create($this.Padded[$at + 5])))
-                        $s6 = [System.Runtime.Intrinsics.X86.Avx]::Add($s6, [System.Runtime.Intrinsics.X86.Avx]::Multiply($w, [System.Runtime.Intrinsics.Vector256]::Create($this.Padded[$at + 6])))
-                        $s7 = [System.Runtime.Intrinsics.X86.Avx]::Add($s7, [System.Runtime.Intrinsics.X86.Avx]::Multiply($w, [System.Runtime.Intrinsics.Vector256]::Create($this.Padded[$at + 7])))
+                        $s0 = [System.Runtime.Intrinsics.Vector256]::Add($s0, [System.Runtime.Intrinsics.Vector256]::Multiply($w, [System.Runtime.Intrinsics.Vector256]::Create($this.Padded[$at])))
+                        $s1 = [System.Runtime.Intrinsics.Vector256]::Add($s1, [System.Runtime.Intrinsics.Vector256]::Multiply($w, [System.Runtime.Intrinsics.Vector256]::Create($this.Padded[$at + 1])))
+                        $s2 = [System.Runtime.Intrinsics.Vector256]::Add($s2, [System.Runtime.Intrinsics.Vector256]::Multiply($w, [System.Runtime.Intrinsics.Vector256]::Create($this.Padded[$at + 2])))
+                        $s3 = [System.Runtime.Intrinsics.Vector256]::Add($s3, [System.Runtime.Intrinsics.Vector256]::Multiply($w, [System.Runtime.Intrinsics.Vector256]::Create($this.Padded[$at + 3])))
+                        $s4 = [System.Runtime.Intrinsics.Vector256]::Add($s4, [System.Runtime.Intrinsics.Vector256]::Multiply($w, [System.Runtime.Intrinsics.Vector256]::Create($this.Padded[$at + 4])))
+                        $s5 = [System.Runtime.Intrinsics.Vector256]::Add($s5, [System.Runtime.Intrinsics.Vector256]::Multiply($w, [System.Runtime.Intrinsics.Vector256]::Create($this.Padded[$at + 5])))
+                        $s6 = [System.Runtime.Intrinsics.Vector256]::Add($s6, [System.Runtime.Intrinsics.Vector256]::Multiply($w, [System.Runtime.Intrinsics.Vector256]::Create($this.Padded[$at + 6])))
+                        $s7 = [System.Runtime.Intrinsics.Vector256]::Add($s7, [System.Runtime.Intrinsics.Vector256]::Multiply($w, [System.Runtime.Intrinsics.Vector256]::Create($this.Padded[$at + 7])))
                     }
                 }
                 $this.Store($s0, $block, $t); $this.Store($s1, $block, $t + 1); $this.Store($s2, $block, $t + 2); $this.Store($s3, $block, $t + 3)
@@ -479,12 +474,10 @@ class OfflineDenseWorker {
     [void] Store([System.Runtime.Intrinsics.Vector256[double]] $sum, [int] $block, [int] $row) {
         if ($row -ge $this.Rows) { return }
         $at = $row * $this.OutputChannels + $block * 4
-        $low = [System.Runtime.Intrinsics.X86.Sse2]::ConvertToVector128Single([System.Runtime.Intrinsics.X86.Avx]::ExtractVector128($sum, [byte]0))
-        $high = [System.Runtime.Intrinsics.X86.Sse2]::ConvertToVector128Single([System.Runtime.Intrinsics.X86.Avx]::ExtractVector128($sum, [byte]1))
-        $this.Output[$at] = [System.Runtime.Intrinsics.X86.Sse41]::Extract($low, [byte]0)
-        if ($block * 4 + 1 -lt $this.OutputChannels) { $this.Output[$at + 1] = [System.Runtime.Intrinsics.X86.Sse41]::Extract($low, [byte]1) }
-        if ($block * 4 + 2 -lt $this.OutputChannels) { $this.Output[$at + 2] = [System.Runtime.Intrinsics.X86.Sse41]::Extract($high, [byte]0) }
-        if ($block * 4 + 3 -lt $this.OutputChannels) { $this.Output[$at + 3] = [System.Runtime.Intrinsics.X86.Sse41]::Extract($high, [byte]1) }
+        $this.Output[$at] = [float][System.Runtime.Intrinsics.Vector256]::GetElement($sum, 0)
+        if ($block * 4 + 1 -lt $this.OutputChannels) { $this.Output[$at + 1] = [float][System.Runtime.Intrinsics.Vector256]::GetElement($sum, 1) }
+        if ($block * 4 + 2 -lt $this.OutputChannels) { $this.Output[$at + 2] = [float][System.Runtime.Intrinsics.Vector256]::GetElement($sum, 2) }
+        if ($block * 4 + 3 -lt $this.OutputChannels) { $this.Output[$at + 3] = [float][System.Runtime.Intrinsics.Vector256]::GetElement($sum, 3) }
     }
 
     [void] Run() {
@@ -494,10 +487,10 @@ class OfflineDenseWorker {
                 $xAt = $r * $this.InputChannels; $wAt = $block * $this.InputChannels
                 for ($i = 0; $i -lt $this.InputChannels; $i++) {
                     $w = $this.Packed[$wAt + $i]
-                    $s0 = [System.Runtime.Intrinsics.X86.Avx]::Add($s0, [System.Runtime.Intrinsics.X86.Avx]::Multiply($w, [System.Runtime.Intrinsics.Vector256]::Create([double]$this.Input[$xAt + $i])))
-                    $s1 = [System.Runtime.Intrinsics.X86.Avx]::Add($s1, [System.Runtime.Intrinsics.X86.Avx]::Multiply($w, [System.Runtime.Intrinsics.Vector256]::Create([double]$this.Input[$xAt + $this.InputChannels + $i])))
-                    $s2 = [System.Runtime.Intrinsics.X86.Avx]::Add($s2, [System.Runtime.Intrinsics.X86.Avx]::Multiply($w, [System.Runtime.Intrinsics.Vector256]::Create([double]$this.Input[$xAt + 2 * $this.InputChannels + $i])))
-                    $s3 = [System.Runtime.Intrinsics.X86.Avx]::Add($s3, [System.Runtime.Intrinsics.X86.Avx]::Multiply($w, [System.Runtime.Intrinsics.Vector256]::Create([double]$this.Input[$xAt + 3 * $this.InputChannels + $i])))
+                    $s0 = [System.Runtime.Intrinsics.Vector256]::Add($s0, [System.Runtime.Intrinsics.Vector256]::Multiply($w, [System.Runtime.Intrinsics.Vector256]::Create([double]$this.Input[$xAt + $i])))
+                    $s1 = [System.Runtime.Intrinsics.Vector256]::Add($s1, [System.Runtime.Intrinsics.Vector256]::Multiply($w, [System.Runtime.Intrinsics.Vector256]::Create([double]$this.Input[$xAt + $this.InputChannels + $i])))
+                    $s2 = [System.Runtime.Intrinsics.Vector256]::Add($s2, [System.Runtime.Intrinsics.Vector256]::Multiply($w, [System.Runtime.Intrinsics.Vector256]::Create([double]$this.Input[$xAt + 2 * $this.InputChannels + $i])))
+                    $s3 = [System.Runtime.Intrinsics.Vector256]::Add($s3, [System.Runtime.Intrinsics.Vector256]::Multiply($w, [System.Runtime.Intrinsics.Vector256]::Create([double]$this.Input[$xAt + 3 * $this.InputChannels + $i])))
                 }
                 $this.Store($s0, $block, $r); $this.Store($s1, $block, $r + 1); $this.Store($s2, $block, $r + 2); $this.Store($s3, $block, $r + 3)
             }
@@ -1197,11 +1190,9 @@ $upstreamMath = $assembly.GetType('OfflineUpstreamMath', $true)
 $directConvolution = $assembly.GetType('OfflineDirectConvolutionWorker', $true)
 $denseWorker = $assembly.GetType('OfflineDenseWorker', $true)
 $lstmWorker = $assembly.GetType('OfflineLstmWorker', $true)
-if (-not [System.Runtime.Intrinsics.X86.Avx2]::IsSupported) { throw 'The direct convolution kernel needs AVX2.' }
 $frameIndices = $mathType.GetMethod('FrameIndices').CreateDelegate([Func[int,int,int,int,int,int,bool,int[]]])
 $packInputs = $mathType.GetMethod('PackInputs').CreateDelegate([Func[float[],int[],int,int,int,int,System.Runtime.Intrinsics.Vector128[float][]]])
 $activeIndices = $mathType.GetMethod('ActiveIndices').CreateDelegate([Func[int[],int,bool[]]])
-if (-not [Sse]::IsSupported -or -not [Sse41]::IsSupported) { throw 'Required SSE/SSE4.1 intrinsics unavailable on this host.' }
 $workers = [Collections.Generic.List[object]]::new()
 $tasks = [Collections.Generic.List[Threading.Tasks.Task]]::new()
 $testOutput = [float[]]::new(16)
