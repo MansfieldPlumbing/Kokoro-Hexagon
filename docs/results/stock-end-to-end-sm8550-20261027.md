@@ -79,3 +79,29 @@ result; with supplied coefficients the comparison is spectral distance against t
 listening on more varied material.
 
 Receipt: `build/voice-base-vs-matched-20261027T183928` (matched.wav, matched-seed2.wav, voice-base.wav).
+
+## Any length: decoder by overlap-save, both on voice bases
+
+The speech renderer's `Decode` now takes a decoder constants table: the stream decodes in chunks whose interiors are a
+multiple of 16 frames (whole 32-tick output tiles), each with 16 frames of halo per side, in the decoder job's Constants
+mode. Without a table it runs the one accumulating job as before. `DecoderConstants` exports a 128-frame stretch as a
+constants table (`New-KokoroDecoderConstantsTables`, which checks every exported K and M against its exact terms);
+`DecoderVoiceBase` averages such exports as `VoiceBase` does for the generator. The decoder voice base here is the mean of
+six exports from paragraphs of `build/grammar-corpus/raw/pg14006.txt` taken at a fixed stride.
+
+**Stitching.** "The quick brown fox jumps over the dog." (114 frames) decoded with the same table at interiors of 96, 48
+and 32 frames (2, 3 and 4 chunks): identical x in all three (`EC352C59...`). With supplied constants the chunk boundaries
+do not reach the output.
+
+**An 11.775 s sentence** (471 frames), decoder and generator each on its voice base, one pass on the DSP:
+
+| Stage | DSP | Per audio second |
+| --- | ---: | ---: |
+| Decoder, 5 chunks | 60.8 ms | 5.2 ms |
+| Generator (depth-first, kept settings) | 289.6 ms | 24.6 ms (40.7 times real time) |
+| Total | 350.4 ms | 29.8 ms (33.6 times real time) |
+
+A decoder chunk takes about 12 ms, most of it deriving coefficients from the table on the DSP (as in
+`decoder-direct-coefficients-sm8550-20261010.md`, where direct coefficients took a chunk from 13.4 to 2.9 ms).
+
+Receipt: `build/streaming-decoder-20261027T185820` (streaming-decoder.clixml, decoder-base.bin, passage.wav).

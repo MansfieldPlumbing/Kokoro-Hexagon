@@ -1689,7 +1689,7 @@ function New-KokoroSpeechRenderer {
         DecoderWeights=[IO.File]::ReadAllBytes((Join-Path $DecoderPlan 'weights.bin'));DecoderTables=[IO.File]::ReadAllBytes((Join-Path $DecoderPlan 'tables.bin'))
         NoiseScale=[int][math]::Round([math]::Sqrt($sum)*4096*65536/37837.2)
         Statistics=[IO.File]::ReadAllBytes((Join-Path $GeneratorFixture 'tables.bin'));Weights=[IO.File]::ReadAllBytes((Join-Path $GeneratorFixture 'weights.bin'))
-        Int8=$null;Packing=$null;InputsSHA256=$null;ConstantsCache=(Join-Path $Build 'generator-constants');ResidentRenders=$true}
+        Int8=$null;Packing=$null;DecoderLayout=$null;InputsSHA256=$null;ConstantsCache=(Join-Path $Build 'generator-constants');ResidentRenders=$true}
     $renderer | Add-Member -MemberType ScriptMethod -Name Run -Value { param($Emission,[byte[]]$Activation,[byte[]]$Tables,[byte[]]$WeightBytes,[bool]$OneShot)
         $this.Runs=$this.Runs+1; $directory=Join-Path $this.Directory ('run-{0:d3}' -f $this.Runs); [void][IO.Directory]::CreateDirectory($directory)
         [IO.File]::WriteAllBytes((Join-Path $directory 'activations.bin'),$Activation); [IO.File]::WriteAllBytes((Join-Path $directory 'tables.bin'),$Tables); [IO.File]::WriteAllBytes((Join-Path $directory 'weights.bin'),$WeightBytes)
@@ -1743,11 +1743,13 @@ function New-KokoroSpeechRenderer {
         if(-not $this.Packing){throw 'Reading normalization terms needs the export layout (run Constants first).'}
         foreach($site in $this.Packing.MomentSites){ for($c=0;$c -lt $site.Width;$c++){ $at=[int]($this.Packing.ConstantsTableOffset+$site.Offset+16L*$c)
             [pscustomobject]@{Site=$site.Name;Channel=$c;Inverse=[double][BitConverter]::ToUInt32($Table,$at)/[BitConverter]::ToUInt32($Table,$at+4);Mean=[double][BitConverter]::ToInt32($Table,$at+8)/[BitConverter]::ToUInt32($Table,$at+12)} } } }
-    $renderer | Add-Member -MemberType ScriptMethod -Name Decode -Value { param([float[]]$Aligned,[float[]]$Pitch,[float[]]$Energy)
+    # One decoder job over at most Capacity frames: Accumulate (moments measured in the job), Export (also returns them and
+    # the coefficients) or Constants (normalization supplied in -Tables).
+    $renderer | Add-Member -MemberType ScriptMethod -Name DecoderRun -Value { param([float[]]$Aligned,[float[]]$Pitch,[float[]]$Energy,[string]$Moments='Accumulate',[byte[]]$Tables=$null)
         $frames=[int]($Aligned.Length/512)
         if($frames -lt 2 -or $frames -gt $this.Capacity){throw "The decoder plan holds $($this.Capacity) frames; this stream has $frames."}
         if($Pitch.Length -ne 2*$frames -or $Energy.Length -ne 2*$frames){throw 'Decode needs the f0 and N curves at two values per frame.'}
-        $emission=Invoke-KokoroEmission -Kernel KokoroDecoder16Run -Parameters @{DecoderFrames=$this.Capacity;DecoderRuntimeFrames=$true;DecoderMoments='Accumulate'}
+        $emission=Invoke-KokoroEmission -Kernel KokoroDecoder16Run -Parameters @{DecoderFrames=$this.Capacity;DecoderRuntimeFrames=$true;DecoderMoments=$Moments}
         $layout=$emission.Layout; $tiles=[int]$layout.Tiles; $curveBytes=[long][math]::Ceiling(8*$this.Capacity/128)*128
         $activation=[byte[]]::new($layout.InputBytes)
         $croutons=[byte[]]::new($tiles*32768L); $z=[uint16[]]::new($croutons.Length/2); [Array]::Fill($z,[uint16]0x8000); [Buffer]::BlockCopy($z,0,$croutons,0,$croutons.Length)
@@ -1756,9 +1758,51 @@ function New-KokoroSpeechRenderer {
         foreach($pair in @(@($Pitch,($tiles*32768L),$this.F0CurveScale),@($Energy,($tiles*32768L+$curveBytes),$this.NCurveScale))){
             for($i=0;$i -lt 2*$frames;$i++){ [Array]::Copy([BitConverter]::GetBytes([int][math]::Round([double]$pair[0][$i]/$pair[2],[MidpointRounding]::ToEven)),0,$activation,$pair[1]+4*$i,4) } }
         [Array]::Copy([BitConverter]::GetBytes([int]$frames),0,$activation,[long]$layout.FramesOffset,4)
-        $job=$this.Run($emission,$activation,$this.DecoderTables,$this.DecoderWeights,$false)
-        $xBytes=[long][math]::Ceiling(2*$frames/32)*32768; $x=[byte[]]::new($xBytes); [Array]::Copy($job.Output,[long]$layout.OutputOffset,$x,0,$xBytes)
-        [pscustomobject]@{PSTypeName='Kokoro.DecodedSpeech';Frames=$frames;Ticks=2*$frames;XCroutons=$x;DspMs=$job.MedianMs} }
+        $job=$this.Run($emission,$activation,$(if($null -ne $Tables){$Tables}else{$this.DecoderTables}),$this.DecoderWeights,$false)
+        [pscustomobject]@{Job=$job;Layout=$layout;Frames=$frames} }
+    # The decoder's x for a stream. Without -Constants one job measures the stream's own moments (at most Capacity
+    # frames). With -Constants (a decoder constants table: an export's or a voice base) any length decodes in chunks of
+    # -Interior frames (a multiple of 16, so chunks join on whole 32-tick tiles) with 16 frames of halo each side.
+    $renderer | Add-Member -MemberType ScriptMethod -Name Decode -Value { param([float[]]$Aligned,[float[]]$Pitch,[float[]]$Energy,[byte[]]$Constants=$null,[int]$Interior=0)
+        $frames=[int]($Aligned.Length/512)
+        if($null -eq $Constants){
+            $run=$this.DecoderRun($Aligned,$Pitch,$Energy,'Accumulate',$null)
+            $xBytes=[long][math]::Ceiling(2*$frames/32)*32768; $x=[byte[]]::new($xBytes); [Array]::Copy($run.Job.Output,[long]$run.Layout.OutputOffset,$x,0,$xBytes)
+            return [pscustomobject]@{PSTypeName='Kokoro.DecodedSpeech';Frames=$frames;Ticks=2*$frames;XCroutons=$x;DspMs=$run.Job.MedianMs;Chunks=1}
+        }
+        $halo=16; if($Interior -le 0){ $Interior=$this.Capacity-2*$halo }
+        if($Interior % 16 -or $Interior+2*$halo -gt $this.Capacity){throw "Decoder chunks need an interior that is a multiple of 16 frames and fits $($this.Capacity) frames with its halo."}
+        $x=[byte[]]::new([long][math]::Ceiling(2*$frames/32)*32768); $dspMs=0.0; $chunks=0
+        $slice={param([float[]]$Values,[int]$Channels,[int]$T,[int]$A,[int]$B) $n=$B-$A; $r=[float[]]::new($Channels*$n); for($c=0;$c -lt $Channels;$c++){ [Array]::Copy($Values,$c*$T+$A,$r,$c*$n,$n) }; ,$r}
+        for($a=0;$a -lt $frames;$a+=$Interior){
+            $b=[math]::Min($frames,$a+$Interior); $lo=[math]::Max(0,$a-$halo); $hi=[math]::Min($frames,$b+$halo)
+            $run=$this.DecoderRun((& $slice $Aligned 512 $frames $lo $hi),(& $slice $Pitch 1 (2*$frames) (2*$lo) (2*$hi)),(& $slice $Energy 1 (2*$frames) (2*$lo) (2*$hi)),'Constants',$Constants)
+            # Interior ticks [2a, 2b) start on a tile boundary in both the chunk's output and the stream's.
+            $bytes=[long][math]::Ceiling(2*($b-$a)/32)*32768
+            [Array]::Copy($run.Job.Output,[long]$run.Layout.OutputOffset+(2L*($a-$lo)/32)*32768,$x,(2L*$a/32)*32768,[math]::Min($bytes,$x.Length-(2L*$a/32)*32768))
+            $dspMs+=$run.Job.MedianMs; $chunks++
+        }
+        [pscustomobject]@{PSTypeName='Kokoro.DecodedSpeech';Frames=$frames;Ticks=2*$frames;XCroutons=$x;DspMs=$dspMs;Chunks=$chunks} }
+    # A stretch of exactly Capacity frames: its exported decoder moments as a constants table and their terms.
+    $renderer | Add-Member -MemberType ScriptMethod -Name DecoderConstants -Value { param([float[]]$Aligned,[float[]]$Pitch,[float[]]$Energy)
+        if([int]($Aligned.Length/512) -ne $this.Capacity){throw "Decoder constants are exported from stretches of exactly $($this.Capacity) frames."}
+        $run=$this.DecoderRun($Aligned,$Pitch,$Energy,'Export',$null)
+        if($null -eq $this.DecoderLayout){ . (Join-Path $Root 'src/jobs/Kokoro.DecoderRun16.ps1'); $this.DecoderLayout=Get-KokoroDecoder16Layout -Frames $this.Capacity }
+        $layout=$this.DecoderLayout; $offset=[long]$run.Layout.OutputOffset
+        $observation=[byte[]]::new($offset+$layout.OutputBytes+$layout.MomentsBytes+$layout.KmBytes); [Array]::Copy($run.Job.Output,$observation,$observation.Length)
+        New-KokoroDecoderConstantsTables -Layout $layout -Tables $this.DecoderTables -Observation $observation -OutputOffset $offset }
+    # The decoder's voice base: per site and channel the geometric mean of the exports' inverse deviations and the mean of
+    # their standardized means (as VoiceBase does for the generator).
+    $renderer | Add-Member -MemberType ScriptMethod -Name DecoderVoiceBase -Value { param([object[]]$Exports)
+        if(-not $Exports.Count -or -not $this.DecoderLayout){throw 'A decoder voice base needs exported decoder constants.'}
+        $layout=$this.DecoderLayout; $count=$Exports.Count; $terms=$Exports[0].Terms.Count; $logInverse=[double[]]::new($terms); $standardMean=[double[]]::new($terms)
+        foreach($export in $Exports){ for($i=0;$i -lt $terms;$i++){ $term=$export.Terms[$i]; $logInverse[$i]+=[math]::Log($term.Inverse)/$count; $standardMean[$i]+=$term.Mean*$term.Inverse/$count } }
+        $sites=@{}; foreach($site in $layout.MomentSites){ $sites[$site.Name]=$site }
+        $table=[byte[]]$Exports[0].Tables.Clone()
+        for($i=0;$i -lt $terms;$i++){ $term=$Exports[0].Terms[$i]; $site=$sites[$term.Site]; $inverse=[math]::Exp($logInverse[$i])
+            $blockIndex=[int][math]::Floor($site.Index/2); $recordAt=if($site.Index%2){$layout.BlockParams[$blockIndex].Records2}else{$layout.BlockParams[$blockIndex].Records1}
+            Set-KokoroDecoderConstantRatio -Tables $table -Offset ([int]($layout.ConstantsTableOffset+$site.Offset+16L*$term.Channel)) -Inverse $inverse -Mean ($standardMean[$i]/$inverse) -Ka ([bigint][BitConverter]::ToInt64($this.DecoderTables,[int]($recordAt+32L*$term.Channel))) }
+        ,$table }
     $renderer | Add-Member -MemberType ScriptMethod -Name Render -Value { param([byte[]]$XCroutons,[float[]]$Pitch,[int]$Ticks,[byte[]]$Constants,[object]$Resident=$null)
         $onResident=if($null -eq $Resident){[bool]$this.ResidentRenders}else{[bool]$Resident}
         $emission=$this.GeneratorEmission($Ticks,'Constants')
