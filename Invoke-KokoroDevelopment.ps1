@@ -901,10 +901,11 @@ function Test-KokoroDecoderConstants {
 # Depth-first decoder, delayed tensors (Get-KokoroDecoder16Layout -Delayed: each convolution reads only rows at or before
 # the row it writes) against the layer job: both whole-tensor Direct jobs on the phone from the same input, tables, weights
 # and K/M (the decoder voice base). x must match byte for byte after the delayed job's output delay. Each frame count is
-# a slice of the stock decoder capture's inputs from frame 0; whole-tensor delayed jobs fit VTCM up to 118 frames.
+# a slice of the stock decoder capture's inputs from frame 0. Schedules: Whole (every layer over whole tensors; fits VTCM
+# up to 118 frames) and Spans (one 32-frame span at a time through every layer; VTCM constant in length).
 function Test-KokoroDecoderDelayEquivalence {
     param([Parameter(Mandatory)][string]$OutputDirectory,[string]$Soc='SM8550',[string]$Package='dev.mansfieldplumbing.kokoro',
-        [ValidateRange(2,118)][int[]]$Frames=@(100,118),
+        [ValidateRange(2,4096)][int[]]$Frames=@(100,118),[ValidateSet('Whole','Spans')][string[]]$Schedules=@('Whole','Spans'),
         [string]$Capture=(Join-Path $Build 'stock-decoder-capture-cal-af_heart-20261008'),
         [string]$DecoderPlan=(Join-Path $Build 'decoder16-plan-af_heart-f128'),
         # A decoder constants table (DecoderVoiceBase); by default the newest under build/streaming-decoder-*.
@@ -930,15 +931,16 @@ function Test-KokoroDecoderDelayEquivalence {
         $directory=Join-Path $out "frames-$f"; [void][IO.Directory]::CreateDirectory($directory)
         [IO.File]::WriteAllBytes((Join-Path $directory 'activations.bin'),$activation)
         foreach($name in 'tables.bin','weights.bin'){ [IO.File]::Copy((Join-Path $DecoderPlan $name),(Join-Path $directory $name)) }
-        $jobs=foreach($delayed in $false,$true){
-            $parameters=@{DecoderFrames=$f;DecoderMoments='Direct'}; if($delayed){ $parameters.DecoderDelayed=$true }
+        $jobs=foreach($schedule in @('Layer')+$Schedules){
+            $parameters=@{DecoderFrames=$f;DecoderMoments='Direct'}; if($schedule -ne 'Layer'){ $parameters.DecoderDelayed=$true }; if($schedule -eq 'Spans'){ $parameters.DecoderSpans=$true }
             $emission=Invoke-KokoroEmission -Kernel KokoroDecoder16Run -Parameters $parameters
             $run=Invoke-KokoroDeviceJob -EmissionDirectory $emission.Directory -EmissionArtifact $emission -InputDirectory $directory -Soc $Soc -Runs 1 -Package $Package
-            [pscustomobject]@{Emission=$emission;Run=$run} }
+            [pscustomobject]@{Schedule=$schedule;Emission=$emission;Run=$run} }
         [IO.File]::Delete((Join-Path $directory 'weights.bin'))
         # x croutons: tile stride 32768, 32-channel blocks of 2048 bytes, a row pair per 128-byte vector; the delay is even.
-        $layer=[byte[]]$jobs[0].Run.Output; $delayedOutput=[byte[]]$jobs[1].Run.Output; $at=[long]$jobs[0].Emission.Layout.OutputOffset
-        $delayTicks=[int]$jobs[1].Emission.Layout.OutputDelayTicks
+        $layer=[byte[]]$jobs[0].Run.Output; $at=[long]$jobs[0].Emission.Layout.OutputOffset
+        foreach($job in $jobs[1..($jobs.Count-1)]){
+        $delayedOutput=[byte[]]$job.Run.Output; $delayTicks=[int]$job.Emission.Layout.OutputDelayTicks
         # Different bytes of layer x against delayed x read Shift row pairs later, and the first one.
         $compare={param([int]$shift) $different=0L; $first=$null
             for($pair=0;$pair -lt $f;$pair++){ $q=$pair+$shift
@@ -952,10 +954,11 @@ function Test-KokoroDecoderDelayEquivalence {
         # Controls: x is not the zero fill, and the comparison without the delay finds differences.
         $zeroVector=[byte[]]::new(128); for($k=0;$k -lt 128;$k+=2){ $zeroVector[$k+1]=0x80 }; $live=0
         for($v=0;$v -lt 16*$f;$v++){ if(-not [Linq.Enumerable]::SequenceEqual([ArraySegment[byte]]::new($layer,$at+128L*$v,128),$zeroVector)){ $live++ } }
-        [pscustomobject]@{Frames=$f;Ticks=2*$f;OutputDelayTicks=$delayTicks;ComparedBytes=2048L*$f;DifferentBytes=$shifted.Different;FirstDifference=$shifted.First
-            UnshiftedDifferentBytes=$unshifted.Different;NonZeroVectors=$live;Vectors=16*$f
-            LayerLibrarySHA256=$jobs[0].Emission.LibrarySHA256;DelayedLibrarySHA256=$jobs[1].Emission.LibrarySHA256;LayerDspMs=$jobs[0].Run.MedianMs;DelayedDspMs=$jobs[1].Run.MedianMs
-            LayerOutputPath=$jobs[0].Run.OutputPath;DelayedOutputPath=$jobs[1].Run.OutputPath}
+        [pscustomobject]@{Frames=$f;Schedule=$job.Schedule;Ticks=2*$f;OutputDelayTicks=$delayTicks;ComparedBytes=2048L*$f;DifferentBytes=$shifted.Different;FirstDifference=$shifted.First
+            UnshiftedDifferentBytes=$unshifted.Different;NonZeroVectors=$live;Vectors=16*$f;DelayedVtcmBytes=$job.Emission.Layout.VtcmBytes
+            LayerLibrarySHA256=$jobs[0].Emission.LibrarySHA256;DelayedLibrarySHA256=$job.Emission.LibrarySHA256;LayerDspMs=$jobs[0].Run.MedianMs;DelayedDspMs=$job.Run.MedianMs
+            LayerOutputPath=$jobs[0].Run.OutputPath;DelayedOutputPath=$job.Run.OutputPath}
+        }
     }
     $result=[pscustomobject]@{PSTypeName='Kokoro.DecoderDelayEquivalence';Status=$(if(@($rows | Where-Object { $_.DifferentBytes -ne 0 -or $_.UnshiftedDifferentBytes -eq 0 -or $_.NonZeroVectors -eq 0 }).Count){'Failed'}else{'Passed'});Soc=$Soc
         Capture=[IO.Path]::GetFileName($Capture);DecoderBase=$DecoderBase;Rows=@($rows)}

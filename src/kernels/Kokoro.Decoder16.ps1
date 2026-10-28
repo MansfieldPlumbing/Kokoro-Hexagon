@@ -189,7 +189,8 @@ function New-KokoroFrameDouble16Steps {
 # r0 = a tiles, r1 = high window tile 0, r2 = low window tile 0, r3 = constants, 512 B per block: W0[32], W1[32], W2[32],
 # B[32] (int32), r4 = input tiles >= 1. Uses r0..r15, r28, v0..v21, v30, v31.
 # -OutputRowDelay 2: output rows 2 later (p[2t] at row 2t + 2), so every output row reads only input rows at or before
-# half its index; rows 0 and 1 are not written and the last row pair lands in vector 0 of output tile 2 * tiles.
+# half its index. Output tiles 2t and 2t + 1 read input tile t and the last row pair of tile t - 1 (vector 15 of the tile
+# before r0 for t = 0, which must hold a[-1] = 0 or the previous span's row pair); rows of a past F hold 0 as above.
 function New-KokoroPool2Steps {
     param([ValidateRange(32,2048)][int]$Channels=1120,[string]$LabelPrefix='pool2',[switch]$NoReturn,[ValidateSet(0,2)][int]$OutputRowDelay=0)
     if ($Channels % 32) { throw 'Channels must be whole 32-channel blocks' }
@@ -219,10 +220,28 @@ function New-KokoroPool2Steps {
     $s.Add(@{Op='vload';d=14;s=3;Offset=0}); $s.Add(@{Op='vload';d=15;s=3;Offset=128}); $s.Add(@{Op='vload';d=16;s=3;Offset=256}); $s.Add(@{Op='vload';d=17;s=3;Offset=384})
     $s.Add(@{Op='addi';d=5;s=14;i=0}); $s.Add(@{Op='addi';d=6;s=15;i=0}); $s.Add(@{Op='addi';d=13;s=10;i=0})
     $s.Add(@{Op='addi';d=2;s=4;i=0})
+    # Delayed: the row pair before tile 0 (vector 15 of the tile before it, the lead tile) is the first previous pair.
+    if ($OutputRowDelay) { $s.Add(@{Op='sub';d=0;s=5;t=28}); $s.Add(@{Op='addi';d=0;s=0;i=1920}); $s.Add(@{Op='vload';d=0;s=0;Offset=0}); $s.Add(@{Op='vxor';d=0;s=0;t=31}) }
     $s.Add(@{Op='label';Name="${LabelPrefix}_tile"})
-    $s.Add(@{Op='vload';d=0;s=5;Offset=0}); $s.Add(@{Op='vxor';d=0;s=0;t=31})
+    if (-not $OutputRowDelay) { $s.Add(@{Op='vload';d=0;s=5;Offset=0}); $s.Add(@{Op='vxor';d=0;s=0;t=31}) }
     for ($v = 0; $v -lt 16; $v++) {
         if ($v -eq 8) { $s.Add(@{Op='add';d=6;s=6;t=28}); $s.Add(@{Op='addi';d=6;s=6;i=-2048}); $s.Add(@{Op='add';d=13;s=13;t=28}); $s.Add(@{Op='addi';d=13;s=13;i=-2048}) }
+        if ($OutputRowDelay) {
+            # v0: the previous row pair, v1: this one (bias removed). Output vector 2v holds p[4v-2], p[4v-1], vector 2v+1
+            # p[4v], p[4v+1]: each reads rows at or before row 2v+1 of the input tile.
+            $s.Add(@{Op='vload';d=1;s=5;Offset=0}); $s.Add(@{Op='vxor';d=1;s=1;t=31})
+            $s.Add(@{Op='vand';d=3;s=0;t=30})                    # a[2v-1] * 2^16
+            $s.Add(@{Op='vasl-w';d=2;s=1;t=8})                   # a[2v] * 2^16
+            $s.Add(@{Op='vand';d=4;s=1;t=30})                    # a[2v+1] * 2^16
+            & $mul 5 3 15; & $clamp 5                             # p[4v-2] = w1 a[2v-1] + b
+            & $mul 6 3 16; & $mul 6 2 14 -Acc; & $clamp 6         # p[4v-1] = w2 a[2v-1] + w0 a[2v] + b
+            & $mul 7 2 15; & $clamp 7                             # p[4v]   = w1 a[2v] + b
+            & $mul 8 2 16; & $mul 8 4 14 -Acc; & $clamp 8         # p[4v+1] = w2 a[2v] + w0 a[2v+1] + b
+            & $windows 5 6 0; & $windows 7 8 128
+            $s.Add(@{Op='addi';d=6;s=6;i=256}); $s.Add(@{Op='addi';d=13;s=13;i=256}); $s.Add(@{Op='addi';d=5;s=5;i=128})
+            $s.Add(@{Op='vor';d=0;s=1;t=1})
+            continue
+        }
         # Next row pair: the next vector, or row pair 0 of the next tile's same block.
         if ($v -lt 15) { $s.Add(@{Op='vload';d=1;s=5;Offset=128}) } else { $s.Add(@{Op='add';d=0;s=5;t=28}); $s.Add(@{Op='addi';d=0;s=0;i=-1920}); $s.Add(@{Op='vload';d=1;s=0;Offset=0}) }
         $s.Add(@{Op='vxor';d=1;s=1;t=31})
@@ -233,14 +252,7 @@ function New-KokoroPool2Steps {
         & $mul 6 2 16; & $mul 6 3 14 -Acc; & $clamp 6             # p[4v+1] = w2 a[2v] + w0 a[2v+1] + b
         & $mul 7 3 15; & $clamp 7                                 # p[4v+2] = w1 a[2v+1] + b
         & $mul 8 3 16; & $mul 8 4 14 -Acc; & $clamp 8             # p[4v+3] = w2 a[2v+1] + w0 a[2v+2] + b
-        if ($OutputRowDelay -eq 0) { & $windows 5 6 0; & $windows 7 8 128 }
-        elseif ($v % 8 -ne 7) { & $windows 5 6 128; & $windows 7 8 256 }
-        else {
-            # The second pair is vector 0 of the next output tile (r1, r0: free after the copies and the next-pair load).
-            & $windows 5 6 128
-            $s.Add(@{Op='add';d=1;s=6;t=28}); $s.Add(@{Op='addi';d=1;s=1;i=-1792}); $s.Add(@{Op='add';d=0;s=13;t=28}); $s.Add(@{Op='addi';d=0;s=0;i=-1792})
-            & $windows 7 8 0 1 0
-        }
+        & $windows 5 6 0; & $windows 7 8 128
         $s.Add(@{Op='addi';d=6;s=6;i=256}); $s.Add(@{Op='addi';d=13;s=13;i=256}); $s.Add(@{Op='addi';d=5;s=5;i=128})
         $s.Add(@{Op='vor';d=0;s=1;t=1})                          # the next row pair, bias removed, is the next current one
     }
@@ -259,6 +271,24 @@ function New-KokoroPool2Steps {
     $s.ToArray()
 }
 
+# The last Vectors row pairs of every 32-channel block of one tile, copied between a tile (block stride 2048, vectors
+# 16 - Vectors .. 15) and a packed store (block stride 128 * Vectors): the rows a delayed convolution or the delayed pool
+# reads from the tile before its first output row. r0 = source, r1 = destination. Uses r2, r3, v0.
+function New-KokoroTileTailCopy16Steps {
+    param([ValidateRange(32,2048)][int]$Channels=1120,[ValidateRange(1,16)][int]$Vectors=1,[ValidateSet('Tile','Packed')][string]$From='Tile',
+        [ValidateSet('Tile','Packed')][string]$To='Packed',[string]$LabelPrefix='tiletail16',[switch]$NoReturn)
+    if ($Channels % 32) { throw 'Channels must be whole 32-channel blocks' }
+    $s = [Collections.Generic.List[hashtable]]::new()
+    $s.Add(@{Op='imm';d=2;i=[int]($Channels/32)}); $s.Add(@{Op='imm';d=3;i=0})
+    if ($From -eq 'Tile') { $s.Add(@{Op='addi';d=0;s=0;i=(128*(16-$Vectors))}) }
+    if ($To -eq 'Tile') { $s.Add(@{Op='addi';d=1;s=1;i=(128*(16-$Vectors))}) }
+    $s.Add(@{Op='label';Name="${LabelPrefix}_block"})
+    for ($k = 0; $k -lt $Vectors; $k++) { $s.Add(@{Op='vload';d=0;s=0;Offset=(128*$k)}); $s.Add(@{Op='vstore';s=1;t=0;Offset=(128*$k)}) }
+    $s.Add(@{Op='addi';d=0;s=0;i=$(if($From -eq 'Tile'){2048}else{128*$Vectors})}); $s.Add(@{Op='addi';d=1;s=1;i=$(if($To -eq 'Tile'){2048}else{128*$Vectors})})
+    $s.Add(@{Op='addi';d=2;s=2;i=-1}); $s.Add(@{Op='gtu';d=0;s=2;t=3}); $s.Add(@{Op='jump-p';u=0;Label="${LabelPrefix}_block"})
+    if (-not $NoReturn) { $s.Add(@{Op='return'}) }
+    $s.ToArray()
+}
 # Per-channel conversion of a stored tensor to another representation (the decoder output into the generator's input
 # scales): x' = clamp(round(x * m_c * 2^e_c)), m_c below 1 as a Q31 word, e_c 0..15 (ratios under 1 use e = 0), in place.
 # e >= 0 keeps y + 2^(15 - e) inside int32 for every input. The product stays 32-bit until the
@@ -306,16 +336,20 @@ function New-KokoroStrideConv16Steps {
     # -RuntimeFrames: the caller passes Frames in r11 (Frames is then ignored). -Delay: frame t is stored at row t + Delay.
     param([ValidateRange(1,1048576)][int]$Frames=1,[ValidateRange(32,2048)][int]$Channels=1120,
         [Parameter(Mandatory)][ValidateRange(0,2047)][int]$Channel,[string]$LabelPrefix='strideconv16',[switch]$NoReturn,[switch]$RuntimeFrames,
-        [ValidateRange(0,31)][int]$Delay=0)
+        [ValidateRange(0,31)][int]$Delay=0,
+        # -CallerStart: the caller positions the run: r0 = c[2t0], r1 = the channel's halfword at the first row, r3 = c[2t0 - 1]
+        # (0 for t0 = 0), r10 = rows left in that tile (from the first row's parity), r11 = frames >= 1. Channel is then ignored.
+        [switch]$CallerStart)
     $tileBytes = 64 * $Channels
     $s = [Collections.Generic.List[hashtable]]::new()
     $imm = { param([int]$r,[long]$v) $u=[long]([uint32]($v -band 0xffffffffL)); $s.Add(@{Op='lo';x=$r;i=($u -band 65535)}); $s.Add(@{Op='hi';x=$r;i=($u -shr 16)}) }
-    & $imm 3 ([long][math]::Floor($Channel / 32) * 2048 + 4 * ($Channel % 32) + 128 * [math]::Floor($Delay / 2) + 2 * ($Delay % 2)); $s.Add(@{Op='add';d=1;s=1;t=3})   # row Delay of the channel
+    if (-not $CallerStart) { & $imm 3 ([long][math]::Floor($Channel / 32) * 2048 + 4 * ($Channel % 32) + 128 * [math]::Floor($Delay / 2) + 2 * ($Delay % 2)); $s.Add(@{Op='add';d=1;s=1;t=3}) }   # row Delay of the channel
     $s.Add(@{Op='load';d=12;s=2;Offset=0}); $s.Add(@{Op='load';d=13;s=2;Offset=4}); $s.Add(@{Op='load';d=14;s=2;Offset=8})
-    $s.Add(@{Op='imm';d=3;i=0})                                   # c[2t-1], zero for t = 0
-    if (-not $RuntimeFrames) { $s.Add(@{Op='imm';d=11;i=$Frames}) }; $s.Add(@{Op='imm';d=15;i=0})
+    if (-not $CallerStart) { $s.Add(@{Op='imm';d=3;i=0}) }       # c[2t-1], zero for t = 0
+    if (-not $RuntimeFrames -and -not $CallerStart) { $s.Add(@{Op='imm';d=11;i=$Frames}) }; $s.Add(@{Op='imm';d=15;i=0})
     & $imm 7 ($tileBytes - 2048)
-    if ($Delay) { $s.Add(@{Op='imm';d=10;i=(32 - $Delay)}); $s.Add(@{Op='eq';d=0;s=15;t=15}); $s.Add(@{Op='jump-p';u=0;Label="${LabelPrefix}_row"}) }   # rows left in tile 0
+    if ($CallerStart) { $s.Add(@{Op='eq';d=0;s=15;t=15}); $s.Add(@{Op='jump-p';u=0;Label="${LabelPrefix}_row"}) }
+    elseif ($Delay) { $s.Add(@{Op='imm';d=10;i=(32 - $Delay)}); $s.Add(@{Op='eq';d=0;s=15;t=15}); $s.Add(@{Op='jump-p';u=0;Label="${LabelPrefix}_row"}) }   # rows left in tile 0
     $s.Add(@{Op='label';Name="${LabelPrefix}_tile"})
     $s.Add(@{Op='imm';d=10;i=32})
     $s.Add(@{Op='label';Name="${LabelPrefix}_row"})

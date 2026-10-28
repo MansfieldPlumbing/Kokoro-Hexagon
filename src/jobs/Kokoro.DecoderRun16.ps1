@@ -16,27 +16,45 @@
 # delay d is row f + d. Block inputs sit at 0, 2, 4, 6, 8 frames (asr_res, F0 and N are written into each block's output at
 # the next block's delay), decode.3's pool windows at 18 ticks, and x at OutputDelayTicks (20). Rows before the delay hold
 # zero as rows past it do. Tiles cover F + 10 frames and 2F + 20 ticks; the input stays at F frames (InputTiles).
+#
+# -Spans (with -Delayed): the job loops over Tiles spans; span s takes frame tile s (tick tiles 2s, 2s + 1) through every
+# layer. Each tensor holds one span (frame tensors one tile, tick tensors two) after a lead tile, so VTCM does not grow
+# with length. The rows a delayed convolution reads before its first output row (History: the last 1 to 4 row pairs of
+# each 32-channel block of its input windows' last tile) are saved after each span and restored into the lead tile before
+# the next; the pool's input keeps its last row pair in its lead tile.
 
 function Get-KokoroDecoder16Layout {
-    param([Parameter(Mandatory)][ValidateRange(2,4096)][int]$Frames,[switch]$Delayed)
+    param([Parameter(Mandatory)][ValidateRange(2,4096)][int]$Frames,[switch]$Delayed,[switch]$Spans)
+    if($Spans -and -not $Delayed){throw 'Spans run the delayed decoder (-Delayed)'}
     $F=$Frames; $lag=if($Delayed){10}else{0}; $T=[int][math]::Ceiling(($F+$lag)/32); $T2=[int][math]::Ceiling((2*$F+2*$lag)/32); $TI=[int][math]::Ceiling($F/32)
+    $spanCount=$T; if($Spans){ $T=1; $T2=2 }
     $tb={param([int]$c) 64L*$c}
     $al={param([long]$v) [long]([math]::Ceiling($v/65536)*65536)}
     $planeStride=[long]([math]::Max($T*32,$T2*16))*2048
+    # History entries (Spans): E's identity windows (asr_res reads up to 8 rows back), then per block its shortcut's
+    # identity windows (blocks after encode), conv1's and conv2's windows; high plane then low plane, packed per block.
+    $history=[ordered]@{}; $hAt=0L
+    if($Spans){
+        $entries=@(,@('E',544,4))
+        foreach($j in 0..4){ $cin=if($j){1120}else{544}; $cout=if($j -eq 4){512}else{1024}
+            if($j){ $entries+=,@("sc$j",$cin,1) }; $entries+=,@("w1_$j",$cin,1); $entries+=,@("w2_$j",$cout,1) }
+        foreach($e in $entries){ $plane=128L*$e[2]*$e[1]/32; $history[$e[0]]=[ordered]@{Offset=$hAt;Width=$e[1];Vectors=$e[2];PlaneBytes=$plane}; $hAt+=2*$plane }
+    }
     # HMX activation reads span a crouton plus the next tile; an extent that straddles a 2 MiB VTCM boundary faults in the
     # V73 simulator (exception 0x26). Regions HMX reads (windows, block inputs) keep
     # their bytes plus one 1120-wide tile and a crouton inside one 1 MiB page (faults seen crossing 0x100000 and 0x200000).
     # Regions HMX does not read fill the gaps.
     $small=[ordered]@{Moments=0L;Km=18432L;RatioA=27648L;RatioB=31744L;Tables=35840L;Records=68608L;Pool=104448L;Stride=122368L;Curves=122880L}
     $curveBytes=[long]([math]::Ceiling(8*$F/128)*128)
-    # Counts (runtime frames): F, 2F, ceil(F/32), ceil(2F/32) as int32, after the curves.
-    $small['Counts']=$small.Curves+2*$curveBytes
+    # Counts (runtime frames): F, 2F, ceil(F/32), ceil(2F/32) as int32, after the curves; then the span index (Spans).
+    $small['Counts']=$small.Curves+2*$curveBytes; $small['Span']=$small.Counts+16
     $page=1048576L; $slack=(& $tb 1120)+2048
     $regions=[ordered]@{}; $at=0L
     foreach($r in @(@('WinHi',((2*$T+2)*(& $tb 1120)),$true),@('C',([math]::Max($T*(& $tb 1024),$T2*(& $tb 512))),$false),@('S',($T*(& $tb 512)),$false),
-        @('WinLo',((2*$T+2)*(& $tb 1120)),$true),@('A',(($T+1)*(& $tb 1120)),$false),@('XA',($T*(& $tb 1120)),$true),@('XB',($T*(& $tb 1120)),$true),
-        @('E',($T*(& $tb 544)),$true),@('Small',0,$false),@('Planes',(4*$planeStride),$false),@('O',(2*$T*(& $tb 512)),$false))){
+        @('WinLo',((2*$T+2)*(& $tb 1120)),$true),@('A',(($T+$(if($Delayed){2}else{1}))*(& $tb 1120)),$false),@('XA',($T*(& $tb 1120)),$true),@('XB',($T*(& $tb 1120)),$true),
+        @('E',($T*(& $tb 544)),$true),@('Small',0,$false),@('Planes',(4*$planeStride),$false),@('O',(2*$T*(& $tb 512)),$false),@('History',$hAt,$false))){
         if($r[0] -eq 'Small'){ $regions['Small']=[ordered]@{Offset=$at;Bytes=($small.Counts+128)}; $at+=& $al $regions.Small.Bytes; continue }
+        if($r[0] -eq 'History' -and -not $Spans){ continue }
         if($r[2] -and [math]::Floor($at/$page) -ne [math]::Floor(($at+$r[1]+$slack-1)/$page)){ $at=[long]([math]::Ceiling($at/$page)*$page) }
         if($r[2] -and [math]::Floor($at/$page) -ne [math]::Floor(($at+$r[1]+$slack-1)/$page)){ throw "$($r[0]) and its read extent exceed one 2 MiB VTCM page" }
         $regions[$r[0]]=[ordered]@{Offset=$at;Bytes=[long]$r[1]}; $at+=& $al $r[1] }
@@ -79,9 +97,10 @@ function Get-KokoroDecoder16Layout {
     foreach($b in $blocks){ foreach($e in @(@(1,$b.Cin,'F'),@(2,$b.Cout,$(if($b.Up){'F2'}else{'F'})))){
         $sites.Add([ordered]@{Index=$sites.Count;Name="$($b.Name).adain$($e[0])";Width=$e[1];Count=$e[2];Offset=$mAt;Bytes=16L*$e[1];KmOffset=$kAt;KmBytes=8L*$e[1]}); $mAt+=16L*$e[1]; $kAt+=8L*$e[1] } }
     $input['Moments']=$inputBytes+128; $input['MomentCounts']=$input.Moments+$mAt; $input['KmDeltas']=$input.MomentCounts+128
-    [pscustomobject]@{Frames=$F;Tiles=$T;Tiles2=$T2;InputTiles=$TI;Delayed=[bool]$Delayed;OutputDelayTicks=2*$lag;OutputTiles=2*$T;PlaneStride=$planeStride;Regions=$regions;Small=$small;CurveBytes=$curveBytes
+    [pscustomobject]@{Frames=$F;Tiles=$T;Tiles2=$T2;InputTiles=$TI;Delayed=[bool]$Delayed;Spans=[bool]$Spans;SpanCount=$(if($Spans){$spanCount}else{0});History=$history
+        OutputDelayTicks=2*$lag;OutputTiles=2*$T;PlaneStride=$planeStride;Regions=$regions;Small=$small;CurveBytes=$curveBytes
         Input=$input;InputBytes=$inputBytes;RuntimeInputBytes=($inputBytes+128);SuppliedInputBytes=($input.MomentCounts+128);CorrectedInputBytes=($input.KmDeltas+$kAt);KmBytes=$kAt;Blocks=$blocks;Convs=$convs.ToArray();WeightBytes=$w;Params=$p;BlockParams=$blockParams.ToArray();ParameterBytes=$pAt
-        MomentSites=$sites.ToArray();MomentsBytes=$mAt;OutputBytes=($T2*32768L);VtcmBytes=$vtcm
+        MomentSites=$sites.ToArray();MomentsBytes=$mAt;OutputBytes=$(if($Spans){2L*$spanCount*32768}else{$T2*32768L});VtcmBytes=$vtcm
         ConstantsTableOffset=$pAt;ConstantsBytes=$mAt;ConstantsParameterBytes=($pAt+$mAt)}
 }
 
@@ -108,13 +127,15 @@ function Add-KokoroDecoder16JobSteps {
         # supplied minus local difference is the exact Corrected delta on the supplied trajectory. Direct loads each site's
         # absolute coefficients from the KmDeltas region and computes no moments and no coefficients.
         [ValidateSet('Accumulate','Export','Supplied','SuppliedExport','Corrected','Direct','Constants')][string]$Moments='Accumulate',
-        # Delayed tensors (Get-KokoroDecoder16Layout -Delayed); the output is x at Layout.OutputDelayTicks.
-        [switch]$Delayed)
+        # Delayed tensors (Get-KokoroDecoder16Layout -Delayed); the output is x at Layout.OutputDelayTicks. -Spans runs them
+        # one 32-frame span at a time through every layer (Get-KokoroDecoder16Layout -Spans).
+        [switch]$Delayed,[switch]$Spans)
     if($RuntimeFrames -and $StopAfterBlock -ge 0){throw 'Dump points need a fixed frame count'}
     if($Moments -ne 'Accumulate' -and $StopAfterBlock -ge 0){throw 'Exported or supplied moments need the whole decoder'}
     if($Delayed -and $StopAfterBlock -ge 0){throw 'Dump points read undelayed tensors'}
     if($Delayed -and $Moments -notin 'Direct','Constants'){throw 'Delayed tensors take supplied coefficients (Direct or Constants)'}
-    $L=Get-KokoroDecoder16Layout -Frames $Frames -Delayed:$Delayed
+    if($Spans -and $RuntimeFrames){throw 'Span jobs take a fixed frame count'}
+    $L=Get-KokoroDecoder16Layout -Frames $Frames -Delayed:$Delayed -Spans:$Spans
     $F=$Frames; $nT=$L.Tiles; $nT2=$L.Tiles2; $reg=$L.Regions; $sm=$reg.Small.Offset; $small=$L.Small; $planes=$reg.Planes.Offset
     $s=$Steps; $callList=$Calls
     $imm={param([int]$r,[long]$v) $u=[long]([uint32]($v -band 0xffffffffL));$s.Add(@{Op='lo';x=$r;i=($u -band 65535)});$s.Add(@{Op='hi';x=$r;i=($u -shr 16)})}
@@ -138,6 +159,16 @@ function Add-KokoroDecoder16JobSteps {
         & $imm 6 $pattern; $s.Add(@{Op='vsplat';d=0;s=6}); & $imm 5 ($bytes/128); $s.Add(@{Op='imm';d=7;i=0})
         $n=& $label; $s.Add(@{Op='label';Name=$n});$s.Add(@{Op='vstore';s=4;t=0;Offset=0});$s.Add(@{Op='addi';d=4;s=4;i=128});$s.Add(@{Op='addi';d=5;s=5;i=-1});$s.Add(@{Op='gtu';d=0;s=5;t=7});$s.Add(@{Op='jump-p';u=0;Label=$n}) }
     $fill={param([long]$off,[long]$bytes,[long]$pattern) & $ptr 4 18 $off; & $fillR4 $bytes $pattern }
+    # Spans: the span index (int32 in Small); r <- base + offset + (span << shift) (uses r6, r7); predicate jumps.
+    $spanAt=$sm+$small.Span
+    $loadSpan={param([int]$r) & $ptr $r 18 $spanAt; $s.Add(@{Op='load';d=$r;s=$r;Offset=0}) }
+    $ptrSpan={param([int]$r,[int]$baseReg,[long]$offset,[int]$shift) & $loadSpan 6; $s.Add(@{Op='asl-i';d=6;s=6;i=$shift}); & $imm 7 $offset; $s.Add(@{Op='add';d=6;s=6;t=7}); $s.Add(@{Op='add';d=$r;s=$baseReg;t=6}) }
+    $jumpIfSpan={param([string]$test,[string]$target) & $loadSpan 6; $s.Add(@{Op='imm';d=7;i=0}); $s.Add(@{Op=$test;d=0;s=6;t=7}); $s.Add(@{Op='jump-p';u=0;Label=$target}) }
+    $jump={param([string]$target) $s.Add(@{Op='eq';d=0;s=15;t=15}); $s.Add(@{Op='jump-p';u=0;Label=$target}) }
+    $dmaSpan={param([int]$destBase,[long]$destOff,[int]$destShift,[int]$srcBase,[long]$srcOff,[int]$srcShift,[long]$length)
+        if($srcShift -ge 0){ & $ptrSpan 1 $srcBase $srcOff $srcShift } else { & $ptr 1 $srcBase $srcOff }
+        if($destShift -ge 0){ & $ptrSpan 2 $destBase $destOff $destShift } else { & $ptr 2 $destBase $destOff }
+        & $imm 3 $length; $s.Add(@{Op='addi';d=0;s=24;i=0}); foreach($step in @(New-KokoroDmaCopySteps -NoReturn)){$s.Add($step)} }
     $padUsed=[Collections.Generic.HashSet[string]]::new()
     # A stored tensor's pad: rows past the count, or with -Delayed rows outside [delay, count + delay) ($padDelayed below).
     $padAt={param([long]$off,[string]$fr,[int]$width,[int]$halfword,[int]$delay,[string]$tiles) if($Delayed){ & $padDelayed $off $fr $width $halfword $delay $tiles } else { & $pad $off $fr $width $halfword } }
@@ -149,6 +180,14 @@ function Add-KokoroDecoder16JobSteps {
     # Delayed: rows before the tensor's delay (static, tile 0) and rows from count + delay through the tile count.
     $leadUsed=[Collections.Generic.HashSet[string]]::new(); $capacityUsed=[Collections.Generic.HashSet[string]]::new()
     $padDelayed={param([long]$off,[string]$fr,[int]$width,[int]$halfword,[int]$delay,[string]$tiles)
+        if($Spans){
+            # Lead rows in span 0 only; rows from count + delay - 32k * span (clamped to 0 .. 32k) through the span's k tiles.
+            if($delay -gt 0){ $skipLead=& $label; & $jumpIfSpan 'gtu' $skipLead; & $ptr 0 18 $off; & $call "dec_lead_${delay}_${width}_$halfword"; [void]$leadUsed.Add("$delay,$width,$halfword"); $s.Add(@{Op='label';Name=$skipLead}) }
+            $k=$countValue[$tiles]
+            & $loadSpan 6; $s.Add(@{Op='asl-i';d=6;s=6;i=(4+$k)}); & $imm 5 ($countValue[$fr]+$delay); $s.Add(@{Op='sub';d=5;s=5;t=6})
+            $s.Add(@{Op='imm';d=7;i=0}); $s.Add(@{Op='max';d=5;s=5;t=7}); $s.Add(@{Op='imm';d=7;i=(32*$k)}); $s.Add(@{Op='min';d=5;s=5;t=7}); $s.Add(@{Op='imm';d=6;i=$k})
+            & $ptr 0 18 $off; & $call "dec_padcap_${width}_$halfword"; [void]$capacityUsed.Add("$width,$halfword"); return
+        }
         if($delay -gt 0){ & $ptr 0 18 $off; & $call "dec_lead_${delay}_${width}_$halfword"; [void]$leadUsed.Add("$delay,$width,$halfword") }
         & $ptr 0 18 $off; & $cnt 5 $fr; if($delay -gt 0){ $s.Add(@{Op='addi';d=5;s=5;i=$delay}) }; & $cnt 6 $tiles
         & $call "dec_padcap_${width}_$halfword"; [void]$capacityUsed.Add("$width,$halfword") }
@@ -213,6 +252,17 @@ function Add-KokoroDecoder16JobSteps {
         }
         & $sync }
     $weights={param([int]$index) $c=$L.Convs[$index]; & $dma 18 $reg.Weights.Offset $WeightsBase ($WeightsOffset+$c.Offset) $c.Bytes }
+    # Spans: restore a conv input's history into its windows' lead tile (spans after the first), then save the tail of the
+    # windows' last tile (-NoSave: a later use in this span saves it).
+    $tailUsed=[Collections.Generic.HashSet[string]]::new()
+    $history={param([string]$name,[int]$curTiles,[switch]$NoSave)
+        $e=$L.History[$name]; $w=& $tbw $e.Width; $v=$e.Vectors; $at=$reg.History.Offset+$e.Offset
+        $planesAt=@(@($reg.WinHi.Offset,$at),@($reg.WinLo.Offset,($at+$e.PlaneBytes)))
+        $skip=& $label; & $jumpIfSpan 'eq' $skip
+        foreach($pl in $planesAt){ & $ptr 0 18 $pl[1]; & $ptr 1 18 $pl[0]; & $call "dec_tailrestore_$($e.Width)_$v" }
+        $s.Add(@{Op='label';Name=$skip}); [void]$tailUsed.Add("Packed,Tile,$($e.Width),$v")
+        if(-not $NoSave){ foreach($pl in $planesAt){ & $ptr 0 18 ($pl[0]+$curTiles*$w); & $ptr 1 18 $pl[1]; & $call "dec_tailsave_$($e.Width)_$v" }; [void]$tailUsed.Add("Tile,Packed,$($e.Width),$v") }
+        & $sync }
 
     # Inputs: asr into E (544 wide), F0 and N through their stride-2 convs into E (512, 513) and both wide tensors (1088, 1089).
     if($RuntimeFrames){
@@ -230,7 +280,8 @@ function Add-KokoroDecoder16JobSteps {
     if($RuntimeFrames){ & $fill $reg.O.Offset $reg.O.Bytes 0x80008000L }
     $asrDone=& $label
     # Delayed: every input tile (the input holds zero past the runtime frame count); E's tiles past them stay zero.
-    $inputTiles=if($Delayed){$L.InputTiles}else{$nT}
+    # Spans: one input tile per span, in the loop.
+    $inputTiles=if($Spans){0}elseif($Delayed){$L.InputTiles}else{$nT}
     for($t=0;$t -lt $inputTiles;$t++){
         # Runtime: tile t only while t < T.
         if($RuntimeFrames -and -not $Delayed -and $t -gt 0){ & $cnt 0 'T'; & $imm 1 ($t+1); $s.Add(@{Op='gtu';d=0;s=1;t=0}); $s.Add(@{Op='jump-p';u=0;Label=$asrDone}) }
@@ -241,6 +292,20 @@ function Add-KokoroDecoder16JobSteps {
     $stride=[Collections.Generic.HashSet[string]]::new()
     # F0 and N into one tensor's channels at a delay (the stride constants and curves stay in Small).
     $strideInto={param([long]$off,[int]$width,[int]$channel,[int]$curve,[int]$delay)
+        if($Spans){
+            # Frames t with t + delay in this span's tile: span 0 from row delay, frame 0; span s from row 0, frame 32s - delay.
+            $first=& $label; $done=& $label; $at=$off+[long][math]::Floor($channel/32)*2048+4*($channel%32); $curveAt=$sm+$small.Curves+$curve*$L.CurveBytes
+            & $jumpIfSpan 'eq' $first
+            & $loadSpan 4; $s.Add(@{Op='asl-i';d=6;s=4;i=5}); $s.Add(@{Op='addi';d=6;s=6;i=-$delay})
+            & $imm 11 $F; $s.Add(@{Op='sub';d=11;s=11;t=6}); $s.Add(@{Op='imm';d=5;i=0}); $s.Add(@{Op='max';d=11;s=11;t=5}); $s.Add(@{Op='imm';d=5;i=32}); $s.Add(@{Op='min';d=11;s=11;t=5})
+            $s.Add(@{Op='imm';d=5;i=0}); $s.Add(@{Op='eq';d=0;s=11;t=5}); $s.Add(@{Op='jump-p';u=0;Label=$done})
+            $s.Add(@{Op='asl-i';d=7;s=6;i=3}); & $ptr 0 18 $curveAt; $s.Add(@{Op='add';d=0;s=0;t=7}); $s.Add(@{Op='load';d=3;s=0;Offset=-4})
+            & $ptr 1 18 $at; $s.Add(@{Op='imm';d=10;i=32}); & $ptr 2 18 ($sm+$small.Stride+32*$curve); & $call "dec_stridespan_$width"; & $jump $done
+            $s.Add(@{Op='label';Name=$first})
+            & $ptr 0 18 $curveAt; $s.Add(@{Op='imm';d=3;i=0}); & $ptr 1 18 ($at+128*[math]::Floor($delay/2)+2*($delay%2)); $s.Add(@{Op='imm';d=10;i=(32-$delay)})
+            $s.Add(@{Op='imm';d=11;i=[math]::Min($F,32-$delay)}); & $ptr 2 18 ($sm+$small.Stride+32*$curve); & $call "dec_stridespan_$width"
+            $s.Add(@{Op='label';Name=$done}); [void]$stride.Add("span,$width"); return
+        }
         & $ptr 0 18 ($sm+$small.Curves+$curve*$L.CurveBytes); & $ptr 1 18 $off; & $ptr 2 18 ($sm+$small.Stride+32*$curve)
         if($RuntimeFrames){ & $cnt 11 'F' }
         if($Delayed){ & $call "dec_stride_${width}_${channel}_$delay"; [void]$stride.Add("$width,$channel,$delay") }
@@ -249,6 +314,19 @@ function Add-KokoroDecoder16JobSteps {
     $identityE={param([long]$hi,[long]$lo)
         & $dma 18 ($sm+$small.Km) $TablesBase ($TablesOffset+$L.Params.IdentityE) 4352
         & $ptr 0 18 $reg.E.Offset; & $ptr 1 18 $hi; & $ptr 2 18 $lo; & $ptr 3 18 ($sm+$small.Km); & $cnt 4 'T'; & $call 'dec_identity_544'; & $sync }
+    $spanTop=& $label
+    if($Spans){
+        # The pool's input lead tile (a[-1] = 0) and channels nothing writes hold zero from here on; span 0.
+        & $fill $reg.A.Offset $reg.A.Bytes 0x80008000L
+        $s.Add(@{Op='imm';d=6;i=0}); & $ptr 7 18 $spanAt; $s.Add(@{Op='store';s=7;t=6;Offset=0})
+        $s.Add(@{Op='label';Name=$spanTop})
+        # E <- input tile span (tiles past the input hold zero).
+        $eFill=& $label; $eDone=& $label
+        & $loadSpan 6; & $imm 7 ($L.InputTiles-1); $s.Add(@{Op='gtu';d=0;s=6;t=7}); $s.Add(@{Op='jump-p';u=0;Label=$eFill})
+        & $dmaSpan 18 $reg.E.Offset -1 $InputBase ($InputOffset+$L.Input.Asr) 15 32768; & $jump $eDone
+        $s.Add(@{Op='label';Name=$eFill}); & $fill $reg.E.Offset $reg.E.Bytes 0x80008000L
+        $s.Add(@{Op='label';Name=$eDone})
+    }
     if($Delayed){
         & $strideInto $reg.E.Offset 544 512 0 0; & $strideInto $reg.E.Offset 544 513 1 0
     } else {
@@ -273,6 +351,7 @@ function Add-KokoroDecoder16JobSteps {
         $d=2*$j; $shortcutAt=if($Delayed){$inW}else{0L}
         if($Delayed -and -not $b.Up){
             & $identityE ($reg.WinHi.Offset+(& $tbw 544)) ($reg.WinLo.Offset+(& $tbw 544))
+            if($Spans){ & $history 'E' 1 -NoSave:($j -ne 3) }
             & $weights 0; & $dma 18 ($sm+$small.Tables) $TablesBase ($TablesOffset+$L.Params.AsrTables) 2048
             & $conv ($reg.WinHi.Offset+(& $tbw 544)) ($reg.WinLo.Offset+(& $tbw 544)) 544 64 1 'T' ($d+2)
             & $combine 'Conv' 64 ($reg[$dst].Offset+32*2048) 0 'T' ((1120-64)*64)
@@ -283,6 +362,7 @@ function Add-KokoroDecoder16JobSteps {
         if($j -gt 0){
             & $dma 18 ($sm+$small.Km) $TablesBase ($TablesOffset+$q.IdentitySc) (256L*$cin/32)
             & $ptr 0 18 $xOff; & $ptr 1 18 ($reg.WinHi.Offset+$shortcutAt); & $ptr 2 18 ($reg.WinLo.Offset+$shortcutAt); & $ptr 3 18 ($sm+$small.Km); & $cnt 4 'T'; & $call "dec_identity_$cin"; & $sync
+            if($Spans){ & $history "sc$j" 1 }
         }
         & $weights $ci; & $dma 18 ($sm+$small.Tables) $TablesBase ($TablesOffset+$q.TablesSc) (1024L*$ob); & $dma 18 ($sm+$small.RatioA) $TablesBase ($TablesOffset+$q.RatioSc) (128L*$ob)
         & $conv ($reg.WinHi.Offset+$shortcutAt) ($reg.WinLo.Offset+$shortcutAt) $cin $cout 1 'T' 2
@@ -290,14 +370,18 @@ function Add-KokoroDecoder16JobSteps {
         if($j -eq $StopAfterBlock -and $DumpPoint -eq 'Shortcut'){ & $dma $OutputBase $OutputOffset 18 $outOff $(if($b.Up){$nT*(& $tbw 512)}else{$reg[$dst].Bytes}); break }
         # AdaIN1 + LeakyReLU, conv1.
         $cf='F'; $ct='T'
+        # Delayed: the pool's input after a lead tile (the row pair before tile 0).
+        $aAt=if($Delayed){$reg.A.Offset+$inW}else{$reg.A.Offset}
         if($b.Up){
-            & $fill $reg.A.Offset $reg.A.Bytes 0x80008000L
-            & $adain $xOff $cin 'F' 'T' $q.Records1 'Tensor' $reg.A.Offset 0
+            if(-not $Spans){ & $fill $reg.A.Offset $reg.A.Bytes 0x80008000L }
+            & $adain $xOff $cin 'F' 'T' $q.Records1 'Tensor' $aAt 0
             if($j -eq $StopAfterBlock -and $DumpPoint -eq 'Coeff'){ & $dma $OutputBase $OutputOffset 18 ($sm+$small.Moments) (16L*$cin); & $dma $OutputBase ($OutputOffset+18432) 18 ($sm+$small.Km) (8L*$cin); & $dma $OutputBase ($OutputOffset+36864) 18 ($sm+$small.Records) (32L*$cin); break }
-            & $padAt $reg.A.Offset 'F' $cin 0x8000 $d 'T'; & $sync
+            & $padAt $aAt 'F' $cin 0x8000 $d 'T'; & $sync
             if($j -eq $StopAfterBlock -and $DumpPoint -eq 'Pool'){ & $dma $OutputBase $OutputOffset 18 $reg.A.Offset ($nT*$inW) }
             & $dma 18 ($sm+$small.Pool) $TablesBase ($TablesOffset+$q.Pool) (512L*$cin/32)
-            & $ptr 0 18 $reg.A.Offset; & $ptr 1 18 ($reg.WinHi.Offset+$inW); & $ptr 2 18 ($reg.WinLo.Offset+$inW); & $ptr 3 18 ($sm+$small.Pool); & $cnt 4 'T'; & $call $(if($Delayed){"dec_pool_${cin}_delayed"}else{"dec_pool_$cin"}); & $sync
+            & $ptr 0 18 $aAt; & $ptr 1 18 ($reg.WinHi.Offset+$inW); & $ptr 2 18 ($reg.WinLo.Offset+$inW); & $ptr 3 18 ($sm+$small.Pool); & $cnt 4 'T'; & $call $(if($Delayed){"dec_pool_${cin}_delayed"}else{"dec_pool_$cin"}); & $sync
+            # Spans: this span's last row pair of a becomes the next span's previous one.
+            if($Spans){ & $ptr 0 18 $aAt; & $ptr 1 18 $reg.A.Offset; & $call "dec_tailtile_${cin}_1"; [void]$tailUsed.Add("Tile,Tile,$cin,1"); & $sync }
             $cf='F2'; $ct='T2'
         } else {
             & $adain $xOff $cin 'F' 'T' $q.Records1 'Windows' ($reg.WinHi.Offset+$inW) ($reg.WinLo.Offset+$inW)
@@ -305,6 +389,7 @@ function Add-KokoroDecoder16JobSteps {
         # Windows1 delay: the block input's, or for decode.3 the pool's (2d + 2 ticks).
         $w1=if($b.Up){2*$d+2}else{$d}
         & $windowsFix $cin $cf $ct $w1
+        if($Spans){ & $history "w1_$j" $countValue[$ct] }
         $ctv=$countValue[$ct]
         if($j -eq $StopAfterBlock -and $DumpPoint -in 'Windows1','Pool'){ $at0=if($DumpPoint -eq 'Pool'){$nT*$inW}else{0L}; & $dma $OutputBase ($OutputOffset+$at0) 18 ($reg.WinHi.Offset+$inW) ($ctv*$inW); & $dma $OutputBase ($OutputOffset+$at0+$ctv*$inW) 18 ($reg.WinLo.Offset+$inW) ($ctv*$inW); break }
         & $weights ($ci+1); & $dma 18 ($sm+$small.Tables) $TablesBase ($TablesOffset+$q.Tables1) (1024L*$ob)
@@ -316,6 +401,7 @@ function Add-KokoroDecoder16JobSteps {
         $cw=& $tbw $cout
         & $adain $reg.C.Offset $cout $cf $ct $q.Records2 'Windows' ($reg.WinHi.Offset+$cw) ($reg.WinLo.Offset+$cw)
         & $windowsFix $cout $cf $ct ($w1+1)
+        if($Spans){ & $history "w2_$j" $countValue[$ct] }
         & $weights ($ci+2); & $dma 18 ($sm+$small.Tables) $TablesBase ($TablesOffset+$q.Tables2) (1024L*$ob); & $dma 18 ($sm+$small.RatioB) $TablesBase ($TablesOffset+$q.Ratio2) (128L*$ob)
         & $conv ($reg.WinHi.Offset+$cw) ($reg.WinLo.Offset+$cw) $cout $cout 3 $ct 1
         if($b.Up){
@@ -325,7 +411,8 @@ function Add-KokoroDecoder16JobSteps {
             # decode.3 holds its output in its own scales; one conversion into the generator's input scales saturates there.
             & $dma 18 ($sm+$small.Pool) $TablesBase ($TablesOffset+$q.Convert) 6144
             & $ptr 0 18 $reg.O.Offset; & $ptr 1 18 ($sm+$small.Pool); & $cnt 2 $ct; & $call 'dec_convert_512'; & $sync
-            & $dma $OutputBase $OutputOffset 18 $reg.O.Offset $L.OutputBytes
+            if($Spans){ & $dmaSpan $OutputBase $OutputOffset 16 18 $reg.O.Offset -1 65536 }
+            else { & $dma $OutputBase $OutputOffset 18 $reg.O.Offset $L.OutputBytes }
         } else {
             & $combine 'Residual' $cout $reg[$dst].Offset ($sm+$small.RatioB) 'T' $skip
             & $padAt $reg[$dst].Offset 'F' 1120 0x8000 ($d+2) 'T'; & $sync
@@ -334,8 +421,12 @@ function Add-KokoroDecoder16JobSteps {
         $ci+=3; $src=$dst; $dst=if($dst -eq 'XA'){'XB'}else{'XA'}
     }
     if($StopAfterBlock -lt 0 -and $siteIndex.Value -ne $L.MomentSites.Count){throw "The decoder ran $($siteIndex.Value) AdaIN sites; the layout has $($L.MomentSites.Count)"}
+    if($Spans){
+        & $loadSpan 6; $s.Add(@{Op='addi';d=6;s=6;i=1}); & $ptr 7 18 $spanAt; $s.Add(@{Op='store';s=7;t=6;Offset=0})
+        & $imm 8 $L.SpanCount; $s.Add(@{Op='gtu';d=0;s=8;t=6}); $s.Add(@{Op='jump-p';u=0;Label=$spanTop})
+    }
     [pscustomobject]@{Layout=$L;Pads=@($padUsed);Combines=@($combines);Stride=@($stride);RuntimeFrames=[bool]$RuntimeFrames;Constants=($Moments -eq 'Constants')
-        Delayed=[bool]$Delayed;Convs=@($convUsed);Leads=@($leadUsed);Capacities=@($capacityUsed)}
+        Delayed=[bool]$Delayed;Spans=[bool]$Spans;Convs=@($convUsed);Leads=@($leadUsed);Capacities=@($capacityUsed);Tails=@($tailUsed)}
 }
 
 # Bodies the job calls (labels as Add-KokoroDecoder16JobSteps emits them).
@@ -374,7 +465,11 @@ function Get-KokoroDecoder16Bodies {
     foreach($p in $Job.Pads){ $f,$w,$h=$p -split ','
         if($f -eq 'rt'){ $bodies.Add(@("dec_padrt_${w}_$h",@(New-KokoroPadRows16RuntimeSteps -Channels ([int]$w) -Halfword ([int]$h) -LabelPrefix "decpadrt_${w}_$h"))); continue }
         $bodies.Add(@("dec_pad_${f}_${w}_$h",@(New-KokoroPadRows16Steps -Frames ([int]$f) -Channels ([int]$w) -Halfword ([int]$h) -LabelPrefix "decpad_${f}_${w}_$h"))) }
+    foreach($p in $Job.Tails){ $from,$to,$w,$v=$p -split ','
+        $name=if($from -eq 'Packed'){'tailrestore'}elseif($to -eq 'Packed'){'tailsave'}else{'tailtile'}
+        $bodies.Add(@("dec_${name}_${w}_$v",@(New-KokoroTileTailCopy16Steps -Channels ([int]$w) -Vectors ([int]$v) -From $from -To $to -LabelPrefix "dec${name}_${w}_$v"))) }
     foreach($p in $Job.Stride){ $w,$c,$d=$p -split ','
+        if($w -eq 'span'){ $bodies.Add(@("dec_stridespan_$c",@(New-KokoroStrideConv16Steps -Channels ([int]$c) -Channel 0 -CallerStart -LabelPrefix "decstridespan_$c"))); continue }
         if($null -ne $d){ $bodies.Add(@("dec_stride_${w}_${c}_$d",@(New-KokoroStrideConv16Steps -Frames $L.Frames -Channels ([int]$w) -Channel ([int]$c) -Delay ([int]$d) -LabelPrefix "decstride_${w}_${c}_$d" -RuntimeFrames:$Job.RuntimeFrames))); continue }
         $bodies.Add(@("dec_stride_${w}_$c",@(New-KokoroStrideConv16Steps -Frames $L.Frames -Channels ([int]$w) -Channel ([int]$c) -LabelPrefix "decstride_${w}_$c" -RuntimeFrames:$Job.RuntimeFrames))) }
     $bodies.ToArray()
@@ -385,10 +480,10 @@ function Get-KokoroDecoder16Bodies {
 # -StopAfterBlock).
 function New-KokoroDecoder16RunSteps {
     param([Parameter(Mandatory)][ValidateRange(2,4096)][int]$Frames,[ValidateRange(-1,4)][int]$StopAfterBlock=-1,[ValidateSet('Block','Shortcut','Conv1','Windows1','Pool','Coeff')][string]$DumpPoint='Block',[switch]$RuntimeFrames,
-        [ValidateSet('Accumulate','Export','Supplied','SuppliedExport','Corrected','Direct','Constants')][string]$Moments='Accumulate',[switch]$Delayed)
+        [ValidateSet('Accumulate','Export','Supplied','SuppliedExport','Corrected','Direct','Constants')][string]$Moments='Accumulate',[switch]$Delayed,[switch]$Spans)
     . (Join-Path $PSScriptRoot 'Kokoro.ResBlockRun.ps1')
     foreach($file in '../kernels/Kokoro.HmxConvPlanes.ps1','../kernels/Kokoro.PlaneCombine.ps1','../kernels/Kokoro.AdaInMoments16.ps1','../kernels/Kokoro.AdaInTurnsCoefficients.ps1','../kernels/Kokoro.AdaInLeaky16.ps1','../kernels/Kokoro.Decoder16.ps1','../hexagon/Kokoro.DmaCopy.ps1') { . (Join-Path $PSScriptRoot $file) }
-    $L=Get-KokoroDecoder16Layout -Frames $Frames -Delayed:$Delayed
+    $L=Get-KokoroDecoder16Layout -Frames $Frames -Delayed:$Delayed -Spans:$Spans
     $outputBytes=256L+$(if($StopAfterBlock -ge 0){[math]::Max($L.Regions.XA.Bytes,($L.Tiles+2*$L.Tiles2)*71680L)}else{$L.OutputBytes})+$(if($Moments -in 'Export','SuppliedExport'){$L.MomentsBytes+$L.KmBytes}else{0L})
     $s=[Collections.Generic.List[hashtable]]::new()
     $calls=[Collections.Generic.List[object]]::new()
@@ -418,7 +513,7 @@ function New-KokoroDecoder16RunSteps {
     foreach($r in 16,18,20,22,24,26){$s.Add(@{Op='store-d';s=29;t=$r;Offset=(($r-16)*4)})}
     $s.Add(@{Op='addi';d=24;s=29;i=(64+63)}); & $imm 0 -64; $s.Add(@{Op='and';d=24;s=24;t=0})
     $s.Add(@{Op='hwticks';d=26})
-    $job=Add-KokoroDecoder16JobSteps -Steps $s -Calls $calls -Frames $Frames -OutputBase 23 -OutputOffset 256 -StopAfterBlock $StopAfterBlock -DumpPoint $DumpPoint -RuntimeFrames:$RuntimeFrames -Moments $Moments -Delayed:$Delayed
+    $job=Add-KokoroDecoder16JobSteps -Steps $s -Calls $calls -Frames $Frames -OutputBase 23 -OutputOffset 256 -StopAfterBlock $StopAfterBlock -DumpPoint $DumpPoint -RuntimeFrames:$RuntimeFrames -Moments $Moments -Delayed:$Delayed -Spans:$Spans
     $s.Add(@{Op='hwticks';d=0});$s.Add(@{Op='store-d';s=23;t=26;Offset=0});$s.Add(@{Op='store-d';s=23;t=0;Offset=8})
     $s.Add(@{Op='imm';d=0;i=1});$s.Add(@{Op='store';s=23;t=0;Offset=44})
     foreach($r in 16,18,20,22,24,26){$s.Add(@{Op='load-d';d=$r;s=29;Offset=(($r-16)*4)})}
@@ -427,6 +522,6 @@ function New-KokoroDecoder16RunSteps {
     $labels=@{};$pcs=[Collections.Generic.Dictionary[object,long]]::new();$pc=0L;$isa=Get-InstructionSet
     foreach($step in $s){if($step.Op -eq 'label'){if($labels.ContainsKey($step.Name)){throw "Duplicate label $($step.Name)"};$labels[$step.Name]=$pc};$pcs[$step]=$pc;$pc+=& $isa.Length $step}
     foreach($c in $calls){if(-not $labels.ContainsKey($c.label)){throw "Missing body $($c.label)"};$delta=[long]([uint32](($labels[$c.label]-$pcs[$c.pc]) -band 0xffffffffL));$c.low.i=$delta -band 65535;$c.high.i=$delta -shr 16}
-    [pscustomobject]@{Steps=$s.ToArray();Layout=[ordered]@{Frames=$Frames;RuntimeFrames=[bool]$RuntimeFrames;FramesOffset=$L.Input.Frames;Tiles=$L.InputTiles;Tiles2=$L.Tiles2;Delayed=[bool]$Delayed;OutputDelayTicks=$L.OutputDelayTicks;InputBytes=$inBytes;WeightBytes=$L.WeightBytes;ParameterBytes=$parameterBytes;OutputBytes=$outputBytes;OutputOffset=256;PcmOffset=256;Samples=1;VtcmBytes=$L.VtcmBytes;StopAfterBlock=$StopAfterBlock
+    [pscustomobject]@{Steps=$s.ToArray();Layout=[ordered]@{Frames=$Frames;RuntimeFrames=[bool]$RuntimeFrames;FramesOffset=$L.Input.Frames;Tiles=$L.InputTiles;Tiles2=$L.Tiles2;Delayed=[bool]$Delayed;Spans=[bool]$Spans;SpanCount=$L.SpanCount;OutputDelayTicks=$L.OutputDelayTicks;InputBytes=$inBytes;WeightBytes=$L.WeightBytes;ParameterBytes=$parameterBytes;OutputBytes=$outputBytes;OutputOffset=256;PcmOffset=256;Samples=1;VtcmBytes=$L.VtcmBytes;StopAfterBlock=$StopAfterBlock
         Moments=$Moments;MomentsInputOffset=$L.Input.Moments;MomentCountsInputOffset=$L.Input.MomentCounts;MomentsOutputOffset=(256L+$L.OutputBytes);KmOutputOffset=(256L+$L.OutputBytes+$L.MomentsBytes);KmDeltasInputOffset=$L.Input.KmDeltas;MomentSites=$L.MomentSites}}
 }
