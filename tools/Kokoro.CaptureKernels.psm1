@@ -630,6 +630,20 @@ function ConvertTo-KokoroDecoderInput {
     , $activation
 }
 
+function ConvertFrom-KokoroDelayedCroutons {
+    # x croutons (512 channels, ceil(Ticks / 32) tiles, tick 0 first) from a delayed decoder job's output, whose tick t
+    # is row t + DelayTicks (Get-KokoroDecoder16Layout -Delayed). Row pairs move whole: DelayTicks is even. Rows past
+    # Ticks in the last tile hold the zero fill.
+    param([Parameter(Mandatory)][byte[]]$Output, [Parameter(Mandatory)][long]$Offset, [Parameter(Mandatory)][int]$Ticks, [Parameter(Mandatory)][ValidateRange(0, 4096)][int]$DelayTicks)
+    if ($DelayTicks % 2 -or $Ticks % 2) { throw 'Delayed x moves by whole row pairs: ticks and delay must be even.' }
+    $x = [byte[]]::new([long][math]::Ceiling($Ticks / 32) * 32768); $zero = [uint16[]]::new($x.Length / 2); [Array]::Fill($zero, [uint16]0x8000); [Buffer]::BlockCopy($zero, 0, $x, 0, $x.Length)
+    $shift = $DelayTicks / 2
+    if ($Offset + 32768L * [math]::Ceiling(($Ticks / 2 + $shift) / 16) -gt $Output.Length) { throw 'The decoder output is shorter than its delayed x.' }
+    for ($pair = 0; $pair -lt $Ticks / 2; $pair++) { $q = $pair + $shift
+        for ($block = 0; $block -lt 16; $block++) {
+            [Array]::Copy($Output, $Offset + 32768L * ($q -shr 4) + 2048L * $block + 128L * ($q -band 15), $x, 32768L * ($pair -shr 4) + 2048L * $block + 128L * ($pair -band 15), 128) } }
+    , $x
+}
 function Invoke-KokoroDecoderChunks {
     # A stream of any length decoded in chunks of -Interior frames (a multiple of 16, so chunks join on whole 32-tick
     # tiles) with -Halo frames each side, every chunk at most -Capacity frames. -RunChunk (aligned, f0, N slices) runs one
@@ -674,4 +688,4 @@ function ConvertFrom-KokoroPcm16 {
     , $pcm
 }
 
-Export-ModuleMember -Function ConvertTo-KokoroDecoderInput, Invoke-KokoroDecoderChunks, ConvertTo-KokoroGeneratorInput, ConvertFrom-KokoroPcm16, Get-ClampedErrorKernel, Get-SaturatedCountKernel, Get-CrossProductKernel, Get-MatrixApplyKernel, Get-FoldConvWeightsKernel, Get-QuantizeRowsKernel, Get-SplitPlanesKernel, Get-LowLowWindowShapedKernel, Get-Conv1dKernel, Get-PackWeightPlanesShapedKernel, Get-LowLowWindowKernel, Get-QuantizeCroutons16Kernel, Get-PackWeightPlanesKernel, Get-Mean3Kernel, Get-Croutons16ErrorKernel, Get-ChannelStatsKernel, Get-ColumnPeaksKernel, Get-DecodeCroutons16Kernel, Get-InterleavePlanesKernel, Get-Fp16CroutonsKernel, Get-PackFp16WeightsKernel, Get-GeneratorCoefficientsKernel, Get-Fp16ConversionTableKernel
+Export-ModuleMember -Function ConvertTo-KokoroDecoderInput, ConvertFrom-KokoroDelayedCroutons, Invoke-KokoroDecoderChunks, ConvertTo-KokoroGeneratorInput, ConvertFrom-KokoroPcm16, Get-ClampedErrorKernel, Get-SaturatedCountKernel, Get-CrossProductKernel, Get-MatrixApplyKernel, Get-FoldConvWeightsKernel, Get-QuantizeRowsKernel, Get-SplitPlanesKernel, Get-LowLowWindowShapedKernel, Get-Conv1dKernel, Get-PackWeightPlanesShapedKernel, Get-LowLowWindowKernel, Get-QuantizeCroutons16Kernel, Get-PackWeightPlanesKernel, Get-Mean3Kernel, Get-Croutons16ErrorKernel, Get-ChannelStatsKernel, Get-ColumnPeaksKernel, Get-DecodeCroutons16Kernel, Get-InterleavePlanesKernel, Get-Fp16CroutonsKernel, Get-PackFp16WeightsKernel, Get-GeneratorCoefficientsKernel, Get-Fp16ConversionTableKernel

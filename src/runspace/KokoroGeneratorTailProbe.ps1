@@ -232,12 +232,20 @@ try {
                 $speechTicks = 2 * [int](([int[]]$front.Durations | Measure-Object -Sum).Sum)
                 if ($speechTicks -ne [int]$pack.Ticks) { throw "The front end gave $speechTicks ticks; this generator library renders $($pack.Ticks)." }
                 $clock.Restart()
+                # Span decoder (DecoderDelayTicks > 0): one job for the whole text, x moved back by its output delay.
+                if ([int]$pack.DecoderDelayTicks -gt 0) {
+                    $decoderInput = ConvertTo-KokoroDecoderInput -Aligned ([float[]]$front.Aligned) -Pitch ([float[]]$front.F0) -Energy ([float[]]$front.N) -Capacity $pack.DecoderCapacity -Tiles $pack.DecoderTiles -InputBytes $pack.DecoderInputBytes -FramesOffset $pack.DecoderFramesOffset -AsrScales ([double[]]$pack.AsrScales) -F0CurveScale $pack.F0CurveScale -NCurveScale $pack.NCurveScale -Coefficients $coefficients -CoefficientsOffset $pack.DecoderCoefficientsOffset
+                    $decoderJob = & $runJob $decoderHandle $pack.DecoderTiles $decoderInput $decoderWeights $decoderTables $pack.DecoderOutputBytes $pack.DecoderPcmOffset $pack.DecoderSamples 1
+                    if (-not $decoderJob.Ok) { throw "Decoder job failed: $($decoderJob.Lines -join ' ')" }
+                    $decoded = [pscustomobject]@{ XCroutons = (ConvertFrom-KokoroDelayedCroutons -Output $decoderJob.Output -Offset $pack.DecoderOutputOffset -Ticks $speechTicks -DelayTicks ([int]$pack.DecoderDelayTicks)); DspMs = $decoderJob.MedianMs; Chunks = 1 }
+                } else {
                 $decoded = Invoke-KokoroDecoderChunks -Aligned ([float[]]$front.Aligned) -Pitch ([float[]]$front.F0) -Energy ([float[]]$front.N) -Capacity $pack.DecoderCapacity -RunChunk {
                     param([float[]]$ChunkAligned, [float[]]$ChunkPitch, [float[]]$ChunkEnergy)
                     $chunkInput = ConvertTo-KokoroDecoderInput -Aligned $ChunkAligned -Pitch $ChunkPitch -Energy $ChunkEnergy -Capacity $pack.DecoderCapacity -Tiles $pack.DecoderTiles -InputBytes $pack.DecoderInputBytes -FramesOffset $pack.DecoderFramesOffset -AsrScales ([double[]]$pack.AsrScales) -F0CurveScale $pack.F0CurveScale -NCurveScale $pack.NCurveScale -Coefficients $coefficients -CoefficientsOffset $pack.DecoderCoefficientsOffset
                     $chunkJob = & $runJob $decoderHandle $pack.DecoderTiles $chunkInput $decoderWeights $decoderTables $pack.DecoderOutputBytes $pack.DecoderPcmOffset $pack.DecoderSamples 1
                     if (-not $chunkJob.Ok) { throw "Decoder job failed: $($chunkJob.Lines -join ' ')" }
                     [pscustomobject]@{ Output = $chunkJob.Output; OutputOffset = $pack.DecoderOutputOffset; DspMs = $chunkJob.MedianMs } }
+                }
                 $decoderMs = $clock.Elapsed.TotalMilliseconds
                 $clock.Restart()
                 $generatorInput = ConvertTo-KokoroGeneratorInput -XCroutons $decoded.XCroutons -Pitch ([float[]]$front.F0) -Ticks $speechTicks -InputBytes ([long]$kv.InputBytes) -NoiseOffset $pack.NoiseOffset -Seed $pack.Seed -NoiseScale $pack.NoiseScale

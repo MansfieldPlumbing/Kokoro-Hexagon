@@ -1819,7 +1819,10 @@ function New-KokoroSpeechRenderer {
         DecoderWeights=[IO.File]::ReadAllBytes((Join-Path $DecoderPlan 'weights.bin'));DecoderTables=[IO.File]::ReadAllBytes((Join-Path $DecoderPlan 'tables.bin'))
         NoiseScale=[int][math]::Round([math]::Sqrt($sum)*4096*65536/37837.2)
         Statistics=[IO.File]::ReadAllBytes((Join-Path $GeneratorFixture 'tables.bin'));Weights=[IO.File]::ReadAllBytes((Join-Path $GeneratorFixture 'weights.bin'))
-        Int8=$null;Packing=$null;DecoderLayout=$null;InputsSHA256=$null;ConstantsCache=(Join-Path $Build 'generator-constants');ResidentRenders=$true}
+        Int8=$null;Packing=$null;DecoderLayout=$null;InputsSHA256=$null;ConstantsCache=(Join-Path $Build 'generator-constants');ResidentRenders=$true
+        # Decode with supplied coefficients: Spans (the delayed span decoder, frame count read at run time, one job for up
+        # to DecoderSpanCapacity frames) or Chunks (the layer job in overlap-save chunks of Capacity frames).
+        DecoderSchedule='Spans';DecoderSpanCapacity=512;DecoderSpanLayout=$null}
     $renderer | Add-Member -MemberType ScriptMethod -Name Run -Value { param($Emission,[byte[]]$Activation,[byte[]]$Tables,[byte[]]$WeightBytes,[bool]$OneShot)
         $this.Runs=$this.Runs+1; $directory=Join-Path $this.Directory ('run-{0:d3}' -f $this.Runs); [void][IO.Directory]::CreateDirectory($directory)
         [IO.File]::WriteAllBytes((Join-Path $directory 'activations.bin'),$Activation); [IO.File]::WriteAllBytes((Join-Path $directory 'tables.bin'),$Tables); [IO.File]::WriteAllBytes((Join-Path $directory 'weights.bin'),$WeightBytes)
@@ -1877,12 +1880,18 @@ function New-KokoroSpeechRenderer {
         [pscustomobject]@{Job=$job;Layout=$layout;Frames=[int]($Aligned.Length/512)} }
     $renderer | Add-Member -MemberType ScriptMethod -Name DecoderEmission -Value { param([string]$Moments)
         Invoke-KokoroEmission -Kernel KokoroDecoder16Run -Parameters @{DecoderFrames=$this.Capacity;DecoderRuntimeFrames=$true;DecoderMoments=$Moments} }
+    # The span decoder: Direct, delayed, frame count read at run time, DecoderSpanCapacity frames.
+    $renderer | Add-Member -MemberType ScriptMethod -Name DecoderSpanEmission -Value {
+        if($null -eq $this.DecoderSpanLayout){ . (Join-Path $Root 'src/jobs/Kokoro.DecoderRun16.ps1'); $this.DecoderSpanLayout=Get-KokoroDecoder16Layout -Frames $this.DecoderSpanCapacity -Delayed -Spans }
+        Invoke-KokoroEmission -Kernel KokoroDecoder16Run -Parameters @{DecoderFrames=$this.DecoderSpanCapacity;DecoderRuntimeFrames=$true;DecoderMoments='Direct';DecoderDelayed=$true;DecoderSpans=$true} }
     # The decoder's x for a stream. Without -Constants one job measures the stream's own moments (at most Capacity
     # frames). With -Constants (a decoder constants table: an export's or a voice base) any length decodes in chunks of
     # -Interior frames (a multiple of 16, so chunks join on whole 32-tick tiles) with 16 frames of halo each side.
     # With -Constants the chunks run in Direct mode on K/M computed once on the host from the table (-Mode Constants
-    # derives them on the DSP in every chunk instead; both give the same x).
-    $renderer | Add-Member -MemberType ScriptMethod -Name Decode -Value { param([float[]]$Aligned,[float[]]$Pitch,[float[]]$Energy,[byte[]]$Constants=$null,[int]$Interior=0,[ValidateSet('Direct','Constants')][string]$Mode='Direct')
+    # derives them on the DSP in every chunk instead; both give the same x). In Direct mode with the Spans schedule
+    # (DecoderSchedule, or -Schedule) a stream of at most DecoderSpanCapacity frames decodes in one span-decoder job
+    # instead, its x moved back by the job's output delay; longer streams fall back to chunks.
+    $renderer | Add-Member -MemberType ScriptMethod -Name Decode -Value { param([float[]]$Aligned,[float[]]$Pitch,[float[]]$Energy,[byte[]]$Constants=$null,[int]$Interior=0,[ValidateSet('Direct','Constants')][string]$Mode='Direct',[string]$Schedule)
         $frames=[int]($Aligned.Length/512)
         if($null -eq $Constants){
             $run=$this.DecoderRun($Aligned,$Pitch,$Energy,'Accumulate',$null)
@@ -1891,6 +1900,16 @@ function New-KokoroSpeechRenderer {
         }
         if($null -eq $this.DecoderLayout){ . (Join-Path $Root 'src/jobs/Kokoro.DecoderRun16.ps1'); $this.DecoderLayout=Get-KokoroDecoder16Layout -Frames $this.Capacity }
         $coefficients=if($Mode -eq 'Direct'){ ConvertTo-KokoroDecoderCoefficients -Tables $Constants -Layout $this.DecoderLayout }else{ $null }
+        if(-not $Schedule){ $Schedule=$this.DecoderSchedule }
+        if($Schedule -notin 'Spans','Chunks'){ throw "Unknown decoder schedule $Schedule (Spans or Chunks)." }
+        if($Mode -eq 'Direct' -and $Schedule -eq 'Spans' -and $frames -le $this.DecoderSpanCapacity){
+            $emission=$this.DecoderSpanEmission(); $layout=$emission.Layout
+            $activation=ConvertTo-KokoroDecoderInput -Aligned $Aligned -Pitch $Pitch -Energy $Energy -Capacity $this.DecoderSpanCapacity -Tiles $layout.Tiles -InputBytes $layout.InputBytes -FramesOffset $layout.FramesOffset `
+                -AsrScales $this.AsrScales -F0CurveScale $this.F0CurveScale -NCurveScale $this.NCurveScale -Coefficients $coefficients -CoefficientsOffset ([long]$this.DecoderSpanLayout.Input.KmDeltas)
+            $job=$this.Run($emission,$activation,$Constants,$this.DecoderWeights,$false)
+            $x=ConvertFrom-KokoroDelayedCroutons -Output $job.Output -Offset ([long]$layout.OutputOffset) -Ticks (2*$frames) -DelayTicks ([int]$layout.OutputDelayTicks)
+            return [pscustomobject]@{PSTypeName='Kokoro.DecodedSpeech';Frames=$frames;Ticks=2*$frames;XCroutons=$x;DspMs=$job.MedianMs;Chunks=1;Schedule='Spans'}
+        }
         $self=$this
         $chunk={ param([float[]]$ChunkAligned,[float[]]$ChunkPitch,[float[]]$ChunkEnergy) $run=$self.DecoderRun($ChunkAligned,$ChunkPitch,$ChunkEnergy,$Mode,$Constants,$coefficients)
             [pscustomobject]@{Output=$run.Job.Output;OutputOffset=$run.Layout.OutputOffset;DspMs=$run.Job.MedianMs} }
@@ -1968,7 +1987,11 @@ function Invoke-KokoroPhoneSpeech {
     param([Parameter(Mandatory)][string]$Text,[string]$OutputDirectory,[string]$Soc='SM8550',[string]$Package='dev.mansfieldplumbing.kokoro',[ValidateRange(1,20)][int]$Runs=3,
         # The voice bases (a decoder constants table, DecoderVoiceBase; generator constants, VoiceBase); by default the newest under build/.
         [string]$DecoderBase,[string]$GeneratorBase,
-        [string]$Phonemizer='build/phonemizer/english/driver/340D763896245937C41417BF7D3D197B6FE407AC750130B9299062E4D3152348-library-dll')
+        [string]$Phonemizer='build/phonemizer/english/driver/340D763896245937C41417BF7D3D197B6FE407AC750130B9299062E4D3152348-library-dll',
+        # The decoder on the phone and in the reference: Spans (the span decoder in one job, up to the renderer's span
+        # capacity; longer text falls back) or Chunks (the layer job in overlap-save chunks). The reference is also
+        # decoded on the other schedule and its x compared byte for byte.
+        [ValidateSet('Spans','Chunks')][string]$DecoderSchedule='Spans')
     $out=if($OutputDirectory){[IO.Path]::GetFullPath($OutputDirectory)}else{Join-Path $Build ('phone-speech-{0:yyyyMMddTHHmmss}' -f [DateTime]::UtcNow)}
     if(Test-Path -LiteralPath $out){throw "Output directory already exists: $out"}; [void][IO.Directory]::CreateDirectory($out)
     $newest={param([string]$Given,[string]$Wildcard,[string]$What)
@@ -1991,9 +2014,14 @@ function Invoke-KokoroPhoneSpeech {
         $frames=[int](([int[]]$front.Durations | Measure-Object -Sum).Sum); $ticks=2*$frames
         $renderer=New-KokoroSpeechRenderer -OutputDirectory (Join-Path $out 'renderer') -Soc $Soc -Package $Package
         . (Join-Path $Root 'src/jobs/Kokoro.DecoderRun16.ps1'); $renderer.DecoderLayout=Get-KokoroDecoder16Layout -Frames $renderer.Capacity
-        $decoderEmission=$renderer.DecoderEmission('Direct'); $generator=$renderer.GeneratorJob($ticks,$generatorBaseBytes)
-        # Reference: the host front end's outputs through the renderer on the resident listener.
+        if($DecoderSchedule -eq 'Spans' -and $frames -gt $renderer.DecoderSpanCapacity){ $DecoderSchedule='Chunks' }
+        $renderer.DecoderSchedule=$DecoderSchedule
+        $spans=$DecoderSchedule -eq 'Spans'
+        $decoderEmission=if($spans){ $renderer.DecoderSpanEmission() }else{ $renderer.DecoderEmission('Direct') }; $generator=$renderer.GeneratorJob($ticks,$generatorBaseBytes)
+        # Reference: the host front end's outputs through the renderer on the resident listener; x also on the other schedule.
         $decoded=$renderer.Decode([float[]]$front.Aligned,[float[]]$front.F0,[float[]]$front.N,$decoderBaseBytes,0)
+        $otherSchedule=if($spans){'Chunks'}else{'Spans'}
+        $other=if($frames -le $renderer.DecoderSpanCapacity){ $renderer.Decode([float[]]$front.Aligned,[float[]]$front.F0,[float[]]$front.N,$decoderBaseBytes,0,'Direct',$otherSchedule) }
         $rendering=$renderer.Render($decoded.XCroutons,[float[]]$front.F0,$decoded.Ticks,$generatorBaseBytes)
         $referenceWave=Join-Path $out 'reference.wav'; Write-OfflineWave $referenceWave $rendering.Pcm
         Stop-KokoroDeviceSession
@@ -2008,8 +2036,9 @@ function Invoke-KokoroPhoneSpeech {
     & $put 'decoder-coefficients.bin' (ConvertTo-KokoroDecoderCoefficients -Tables $decoderBaseBytes -Layout $renderer.DecoderLayout)
     [IO.File]::WriteAllText((Join-Path $pack 'speech-text.txt'),$Text)
     $decoderLayout=$decoderEmission.Layout
-    [ordered]@{Voice='af_heart';Ticks=$ticks;DecoderCapacity=$renderer.Capacity;DecoderTiles=[int]$decoderLayout.Tiles;DecoderInputBytes=[long]$decoderLayout.InputBytes
-        DecoderFramesOffset=[long]$decoderLayout.FramesOffset;DecoderCoefficientsOffset=[long]$renderer.DecoderLayout.Input.KmDeltas;DecoderOutputBytes=[int]$decoderLayout.OutputBytes
+    [ordered]@{Voice='af_heart';Ticks=$ticks;DecoderCapacity=$(if($spans){$renderer.DecoderSpanCapacity}else{$renderer.Capacity});DecoderTiles=[int]$decoderLayout.Tiles;DecoderInputBytes=[long]$decoderLayout.InputBytes
+        DecoderFramesOffset=[long]$decoderLayout.FramesOffset;DecoderCoefficientsOffset=[long]$(if($spans){$renderer.DecoderSpanLayout.Input.KmDeltas}else{$renderer.DecoderLayout.Input.KmDeltas});DecoderOutputBytes=[int]$decoderLayout.OutputBytes
+        DecoderSchedule=$DecoderSchedule;DecoderDelayTicks=$(if($spans){[int]$decoderLayout.OutputDelayTicks}else{0})
         DecoderPcmOffset=[int]$decoderLayout.PcmOffset;DecoderSamples=[int]$decoderLayout.Samples;DecoderOutputOffset=[long]$decoderLayout.OutputOffset
         AsrScales=$renderer.AsrScales;F0CurveScale=$renderer.F0CurveScale;NCurveScale=$renderer.NCurveScale
         NoiseOffset=[long]$generator.Emission.Layout.SourceNoise.InputOffset;Seed=[uint32]$renderer.Seed;NoiseScale=[int]$renderer.NoiseScale} |
@@ -2038,6 +2067,9 @@ function Invoke-KokoroPhoneSpeech {
     $result=[pscustomobject]@{PSTypeName='Kokoro.PhoneSpeech';Text=$Text;Phonemes=$phonemes.Length;Ticks=$ticks;AudioSeconds=$ticks/80.0;Runs=$speechRuns
         LoadMs=$(if($receiptText -match '(?m)^SpeechLoadMs=(\S+)'){[double]$Matches[1]}); PhoneWave=$phoneWave;ReferenceWave=$referenceWave
         ReferenceDecoderDspMs=$decoded.DspMs;ReferenceGeneratorDspMs=$rendering.DspMs;Comparison=$comparison
+        DecoderSchedule=$DecoderSchedule;DecoderLibrarySHA256=$decoderEmission.LibrarySHA256;OtherSchedule=$otherSchedule;OtherDecoderDspMs=$(if($other){$other.DspMs})
+        ReferenceXSHA256=[Convert]::ToHexString([Security.Cryptography.SHA256]::HashData([byte[]]$decoded.XCroutons))
+        OtherScheduleXIdentical=$(if($other){[Linq.Enumerable]::SequenceEqual([byte[]]$decoded.XCroutons,[byte[]]$other.XCroutons)})
         DecoderBase=$decoderBasePath;GeneratorBase=$generatorBasePath;GeneratorLibrarySHA256=$generator.Emission.LibrarySHA256;Lines=$lines}
     $result | Export-Clixml -LiteralPath (Join-Path $out 'phone-speech.clixml') -Depth 6
     $result
