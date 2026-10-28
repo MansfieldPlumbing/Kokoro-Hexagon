@@ -24,7 +24,7 @@ The tail's VTCM, from `Get-KokoroGeneratorTail16Layout` (16-tile batches):
 
 | Range | Before | Streamed |
 | --- | ---: | ---: |
-| 244 tiles (3.25 s, one call) | 6,291,456 B | 1,638,400 B |
+| 244 tiles (1.625 s, one call) | 6,291,456 B | 1,638,400 B |
 | One 60-tile span's 360 tiles and halo | 8,650,752 B | 1,638,400 B |
 
 The 60-tile span's tail no longer exceeds VTCM. The 128-channel span front still does (11,599,872 B at 31,201 frames,

@@ -234,6 +234,8 @@ function New-KokoroGenerator60x16RunSteps {
             if(($two -and $reached.T -eq $fastTiles) -or (-not $two -and $reached.J -eq $slowSteps)){ break }
         }
     }
+    # The 128-channel span front's piece: the 256-channel mean tiles of one x tile (ups[0] makes 10 of each).
+    $frontPieceTiles=10
     if($WorkspaceWindows -and (-not $spanMode -or $ExportFrontTensors)){ throw 'Workspace windows are a span option without exported front tensors.' }
     # Workspace plan (Layout.Workspace): each tensor one span stage hands to another, with every span's accesses, tiles
     # [First, End) in the tensor's own tiles, as the stages below make them (halos included; x and har are job inputs).
@@ -389,10 +391,11 @@ function New-KokoroGenerator60x16RunSteps {
             . $place PhaseA ($n*16384L); . $place PhaseB ($n*16384L); . $place Target ((10L*$n+1)*16384); . $place Sum (10L*$n*16384)
             . $place Weights 786432; . $place Tables 163840
         } elseif($Front){
-            $n=& $spanMax 'S0' 'S1'
+            # One piece of the span's mean tiles at a time; the three phase pairs' weights resident for the span.
+            $n=[math]::Min((& $spanMax 'S0' 'S1'),$frontPieceTiles)
             . $place Planes (6L*$planeStride); . $place Input (($n+2)*16384L); . $place High (($n+2)*16384L) -Hmx; . $place Low (($n+2)*16384L) -Hmx
             . $place Phase ($n*16384L); . $place Target ((6L*$n+4)*8192); . $place Sum (6L*$n*8192)
-            . $place Weights 393216; . $place Tables 65536
+            . $place Weights 393216 -Hmx; . $place Weights1 393216 -Hmx; . $place Weights2 393216 -Hmx; . $place Tables 65536
         }
         elseif($sec.Source){
             # noise_convs over a tile range in batches: har windows (a tile of halo each side), the sum, weights, tables.
@@ -1455,13 +1458,21 @@ function New-KokoroGenerator60x16RunSteps {
         & $sync; & $dma 25 ($r0Slot+$t0*16384L) 18 $F.Sum (($t1-$t0)*16384L)
     }
     # 128-channel front over 256-channel mean tiles s0 .. s1 - 1 (mean at chainOffset): LeakyReLU(0.1), the three ups[1]
-    # phase pairs, interleave, the reflection of frame 0 at the start.
+    # phase pairs, interleave, the reflection of frame 0 at the start. Tables and the three phase pairs' weights load once;
+    # the tiles run in pieces of at most frontPieceTiles, each with its own halo, so VTCM does not grow with the span.
     $spanFront1={param([int]$s0,[int]$s1)
+        $F=$spanFront
+        & $wsCheck 'Main256.Final' $span.Index 'Read' ([math]::Max(0,$s0-1)) ([math]::Min($upTiles,$s1+1))
+        if($Source){ & $wsCheck 'Source128.Final' $span.Index 'Read' (6*$s0) ([math]::Min($tiles,6*$s1)) }; & $wsCheck 'Main128.Input' $span.Index 'Write' (6*$s0) ([math]::Min($tiles,6*$s1))
+        & $dma 18 $F.Tables 22 $frontParameterOffset 65536
+        $slots=@($F.Weights,$F.Weights1,$F.Weights2)
+        for($c=0;$c -lt 3;$c++){ & $dma 18 $slots[$c] 21 ($frontWeightOffset+49152+$c*393216L) 393216 }
+        for($p0=$s0;$p0 -lt $s1;$p0+=$frontPieceTiles){ & $frontPiece1 $p0 ([math]::Min($s1,$p0+$frontPieceTiles)) $slots }
+    }
+    $frontPiece1={param([int]$s0,[int]$s1,[long[]]$slots)
         $F=$spanFront; $n=$s1-$s0; $first=[math]::Max(0,$s0-1); $last=[math]::Min($upTiles,$s1+1)
         $t0=6*$s0; $t1=[math]::Min($tiles,6*$s1)
-        & $wsCheck 'Main256.Final' $span.Index 'Read' $first $last; if($Source){ & $wsCheck 'Source128.Final' $span.Index 'Read' $t0 $t1 }; & $wsCheck 'Main128.Input' $span.Index 'Write' $t0 $t1
         $pairs=if($s1 -eq $upTiles){[int][math]::Ceiling(($upFrames-32*$s0)/2)}else{16*$n}
-        & $dma 18 $F.Tables 22 $frontParameterOffset 65536
         & $dma 18 ($F.Input+($first-$s0+1)*16384L) 25 ($chainOffset+$first*16384L) (($last-$first)*16384L)
         & $ptr 0 18 ($F.Input+($first-$s0+1)*16384L); & $ptr 1 18 ($F.High+($first-$s0+1)*16384L); & $ptr 2 18 ($F.Low+($first-$s0+1)*16384L); & $imm 3 (($last-$first)*128)
         & $call 'body_leaky_up'
@@ -1469,10 +1480,9 @@ function New-KokoroGenerator60x16RunSteps {
         if($s1 -eq $upTiles){ & $fillVectors ($F.High+($n+1)*16384L) 128 0x80008000L; & $fillVectors ($F.Low+($n+1)*16384L) 128 0 }
         & $sync
         for($c=0;$c -lt 3;$c++){
-            & $dma 18 $F.Weights 21 ($frontWeightOffset+49152+$c*393216L) 393216
             for($start=0;$start -lt $n;$start+=$upBatch){
                 $count=[math]::Min($upBatch,$n-$start)
-                & $ptr 0 18 ($F.High+($start+1)*16384L); & $ptr 1 18 ($F.Low+($start+1)*16384L); & $ptr 2 18 $F.Weights; & $ptr 3 18 ($F.Tables+16384+12288*$c); & $imm 4 $count; & $ptr 5 18 $F.Planes
+                & $ptr 0 18 ($F.High+($start+1)*16384L); & $ptr 1 18 ($F.Low+($start+1)*16384L); & $ptr 2 18 $slots[$c]; & $ptr 3 18 ($F.Tables+16384+12288*$c); & $imm 4 $count; & $ptr 5 18 $F.Planes
                 & $call 'body_conv_front_up'; & $mark 'HmxConv'; & $sync
                 & $ptr 0 18 $F.Planes; & $ptr 1 18 ($F.Phase+$start*16384L); & $ptr 2 18 ($F.Tables+53248+2048*$c-1024); & $imm 3 $count
                 & $call 'body_combine_conv256'; & $mark 'Combine'; & $sync

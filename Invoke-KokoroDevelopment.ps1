@@ -2329,7 +2329,9 @@ function Test-KokoroGeneratorTileEquivalence {
                 $zLong=& $repeatValues ([long]$layer.Layout.SourceNoise.InputOffset) 2 $shortSamples ($shortSamples*$Repeat); [Array]::Copy($zLong,0,$longInput,[long]$emission.Layout.SourceNoise.InputOffset,$zLong.Length)
             }
             else { $streams=@($emission.Layout.SourceStreams); for($i=0;$i -lt 2;$i++){ if($streamLong[$i].Length -ne $streams[$i].Bytes){throw "Long source stream $i has the wrong size."}; [Array]::Copy($streamLong[$i],0,$longInput,[long]$streams[$i].InputOffset,$streamLong[$i].Length) } }
-            $run=Invoke-KokoroDeviceJob -EmissionDirectory $emission.Directory -EmissionArtifact $emission -InputDirectory (& $stage "spans-$size" $runTables $runWeights $longInput) -Soc $Soc -Runs $Runs -Package $Package -OneShot
+            # The kept settings read finished K/M/S after the parameters (as the single-length jobs above).
+            $spanTables=Add-KokoroGeneratorHostCoefficients -Tables $runTables -Layout $emission.Layout
+            $run=Invoke-KokoroDeviceJob -EmissionDirectory $emission.Directory -EmissionArtifact $emission -InputDirectory (& $stage "spans-$size$(if($windowed){'-windows'})" $spanTables $runWeights $longInput) -Soc $Soc -Runs $Runs -Package $Package -OneShot
             $pcmAt=[long]$emission.Layout.PcmOffset; $pcmBytes=& $slice $run.Output $pcmAt (2L*[int]$emission.Layout.Samples)
             $outputs=@(foreach($section in @($emission.Layout.Sections)){ if($section.Section -in $windowedSections){ continue }; $at=128+[long]$section.FinalWorkspaceOffset; [Convert]::ToHexString([Security.Cryptography.SHA256]::HashData((& $slice $run.Output $at $section.Bytes))) })
             [pscustomobject]@{SpanTiles=$size;WorkspaceWindows=$windowed;Spans=@($emission.Layout.Spans).Count;DspMs=$run.MedianMs;LibraryBytes=$emission.Bytes;VtcmBytes=$emission.Layout.VtcmBytes;OutputBytes=$emission.Layout.OutputBytes
