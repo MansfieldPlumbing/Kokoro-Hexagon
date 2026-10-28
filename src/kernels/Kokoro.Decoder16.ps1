@@ -6,12 +6,33 @@
 
 # Rows Frames .. 32 * Tiles - 1 of the last tile <- one halfword value (0x8000: x = 0 or the high-window zero; 0: the
 # low-window zero). r0 = tile 0. Uses r1..r4, v0, v1, v29. Nothing when Frames is a multiple of 32.
+# -Leading: rows 0 .. Frames - 1 of tile 0 instead (Frames 1 .. 32; the rows before a delayed tensor's first frame).
 function New-KokoroPadRows16Steps {
     param([Parameter(Mandatory)][ValidateRange(1,1048576)][int]$Frames,[ValidateRange(32,2048)][int]$Channels=1120,
-        [ValidateSet(0,0x8000)][int]$Halfword=0x8000,[string]$LabelPrefix='padrows16',[switch]$NoReturn)
+        [ValidateSet(0,0x8000)][int]$Halfword=0x8000,[string]$LabelPrefix='padrows16',[switch]$NoReturn,[switch]$Leading)
     if ($Channels % 32) { throw 'Channels must be whole 32-channel blocks' }
     $s = [Collections.Generic.List[hashtable]]::new()
     $imm = { param([int]$r,[long]$v) $u=[long]([uint32]($v -band 0xffffffffL)); $s.Add(@{Op='lo';x=$r;i=($u -band 65535)}); $s.Add(@{Op='hi';x=$r;i=($u -shr 16)}) }
+    if ($Leading) {
+        if ($Frames -gt 32) { throw 'Leading rows lie in tile 0' }
+        & $imm 2 ([long]$Halfword -bor ([long]$Halfword -shl 16)); $s.Add(@{Op='vsplat';d=0;s=2})
+        & $imm 2 0xFFFF0000L; $s.Add(@{Op='vsplat';d=29;s=2})
+        & $imm 2 ([long]$Halfword); $s.Add(@{Op='vsplat';d=1;s=2})
+        $s.Add(@{Op='addi';d=1;s=0;i=0})
+        $s.Add(@{Op='imm';d=3;i=[int]($Channels/32)}); $s.Add(@{Op='imm';d=4;i=0})
+        $s.Add(@{Op='label';Name="${LabelPrefix}_block"})
+        $s.Add(@{Op='addi';d=2;s=1;i=0})
+        for ($k = 0; $k -lt [math]::Floor($Frames / 2); $k++) { $s.Add(@{Op='vstore';s=2;t=0;Offset=0}); $s.Add(@{Op='addi';d=2;s=2;i=128}) }
+        if ($Frames % 2) {                                        # row Frames - 1 is padded, row Frames stays
+            $s.Add(@{Op='vload';d=2;s=2;Offset=0}); $s.Add(@{Op='vand';d=2;s=2;t=29}); $s.Add(@{Op='vor';d=2;s=2;t=1}); $s.Add(@{Op='vstore';s=2;t=2;Offset=0})
+        }
+        $s.Add(@{Op='addi';d=1;s=1;i=2048})
+        $s.Add(@{Op='addi';d=3;s=3;i=-1})
+        $s.Add(@{Op='gtu';d=0;s=3;t=4})
+        $s.Add(@{Op='jump-p';u=0;Label="${LabelPrefix}_block"})
+        if (-not $NoReturn) { $s.Add(@{Op='return'}) }
+        return $s.ToArray()
+    }
     $f = $Frames % 32
     if ($f -ne 0) {
         $tiles = [int][math]::Ceiling($Frames / 32)
@@ -81,14 +102,15 @@ function New-KokoroPadRows16RuntimeSteps {
 # r0 = tensor, r5 = live frames (0 .. 32*r6), r6 = capacity tiles. Uses r1..r13 and v0..v2,v29.
 # The partial-tile operation is the existing runtime decoder pad; complete inactive tiles follow it.
 function New-KokoroPadCapacity16Steps {
-    param([ValidateRange(32,256)][int]$Channels=128,[ValidateSet(0,0x8000)][int]$Halfword=0x8000,
+    param([ValidateRange(32,2048)][int]$Channels=128,[ValidateSet(0,0x8000)][int]$Halfword=0x8000,
         [string]$LabelPrefix='padcapacity16',[switch]$NoReturn)
     if ($Channels % 32) { throw 'Channels must be whole 32-channel blocks' }
     $s=[Collections.Generic.List[hashtable]]::new()
     $s.Add(@{Op='addi';d=13;s=6;i=0})
     foreach($step in (New-KokoroPadRows16RuntimeSteps -Channels $Channels -Halfword $Halfword -LabelPrefix "${LabelPrefix}_partial" -NoReturn)) { $s.Add($step) }
     $s.Add(@{Op='addi';d=6;s=5;i=31}); $s.Add(@{Op='lsr-i';d=6;s=6;i=5})
-    $s.Add(@{Op='imm';d=8;i=(64*$Channels)}); $s.Add(@{Op='mpy-d';d=10;s=6;t=8})
+    if(64*$Channels -le 32767){ $s.Add(@{Op='imm';d=8;i=(64*$Channels)}) } else { $s.Add(@{Op='lo';x=8;i=((64*$Channels) -band 65535)}); $s.Add(@{Op='hi';x=8;i=((64*$Channels) -shr 16)}) }
+    $s.Add(@{Op='mpy-d';d=10;s=6;t=8})
     $s.Add(@{Op='add';d=1;s=0;t=10}); $s.Add(@{Op='sub';d=13;s=13;t=6})
     $s.Add(@{Op='imm';d=8;i=[int]($Channels/2)}); $s.Add(@{Op='mpy-d';d=10;s=13;t=8})
     $s.Add(@{Op='imm';d=12;i=0}); $s.Add(@{Op='eq';d=0;s=10;t=12}); $s.Add(@{Op='jump-p';u=0;Label="${LabelPrefix}_done"})
@@ -166,8 +188,10 @@ function New-KokoroFrameDouble16Steps {
 # Rows of a past F must hold 0 and one zero tile must follow the input (a[F] for F a multiple of 32).
 # r0 = a tiles, r1 = high window tile 0, r2 = low window tile 0, r3 = constants, 512 B per block: W0[32], W1[32], W2[32],
 # B[32] (int32), r4 = input tiles >= 1. Uses r0..r15, r28, v0..v21, v30, v31.
+# -OutputRowDelay 2: output rows 2 later (p[2t] at row 2t + 2), so every output row reads only input rows at or before
+# half its index; rows 0 and 1 are not written and the last row pair lands in vector 0 of output tile 2 * tiles.
 function New-KokoroPool2Steps {
-    param([ValidateRange(32,2048)][int]$Channels=1120,[string]$LabelPrefix='pool2',[switch]$NoReturn)
+    param([ValidateRange(32,2048)][int]$Channels=1120,[string]$LabelPrefix='pool2',[switch]$NoReturn,[ValidateSet(0,2)][int]$OutputRowDelay=0)
     if ($Channels % 32) { throw 'Channels must be whole 32-channel blocks' }
     $tileBytes = 64 * $Channels
     $s = [Collections.Generic.List[hashtable]]::new()
@@ -182,13 +206,13 @@ function New-KokoroPool2Steps {
         else { $s.Add(@{Op='vmpye-w-uh';d=$d;s=$x;t=$w}); $s.Add(@{Op='vmpyo-acc-w-h-rnd-sat-shift';d=$d;s=$x;t=$w}) } }
     $clamp = { param([int]$d) $s.Add(@{Op='vadd-w';d=$d;s=$d;t=17}); $s.Add(@{Op='vmax-w';d=$d;s=$d;t=19}); $s.Add(@{Op='vmin-w';d=$d;s=$d;t=18}) }
     # Windows of one output vector from even-row words p and odd-row words q, stored at hi r6 / lo r13 (+ offset).
-    $windows = { param([int]$p,[int]$q,[int]$offset)
+    $windows = { param([int]$p,[int]$q,[int]$offset,[int]$hiBase=6,[int]$loBase=13)
         $s.Add(@{Op='vasr-w';d=11;s=$p;t=9}); $s.Add(@{Op='vadd-w';d=11;s=11;t=21}); $s.Add(@{Op='vasl-w';d=11;s=11;t=9})
         $s.Add(@{Op='vasr-w';d=12;s=$q;t=9}); $s.Add(@{Op='vadd-w';d=12;s=12;t=21}); $s.Add(@{Op='vasl-w';d=12;s=12;t=12})
-        $s.Add(@{Op='vor';d=11;s=11;t=12}); $s.Add(@{Op='vstore';s=6;t=11;Offset=$offset})
+        $s.Add(@{Op='vor';d=11;s=11;t=12}); $s.Add(@{Op='vstore';s=$hiBase;t=11;Offset=$offset})
         $s.Add(@{Op='vand';d=11;s=$p;t=20}); $s.Add(@{Op='vasl-w';d=11;s=11;t=9})
         $s.Add(@{Op='vand';d=12;s=$q;t=20}); $s.Add(@{Op='vasl-w';d=12;s=12;t=12})
-        $s.Add(@{Op='vor';d=11;s=11;t=12}); $s.Add(@{Op='vstore';s=13;t=11;Offset=$offset}) }
+        $s.Add(@{Op='vor';d=11;s=11;t=12}); $s.Add(@{Op='vstore';s=$loBase;t=11;Offset=$offset}) }
     $s.Add(@{Op='addi';d=14;s=0;i=0}); $s.Add(@{Op='addi';d=15;s=1;i=0}); $s.Add(@{Op='addi';d=10;s=2;i=0})   # block 0 bases
     $s.Add(@{Op='imm';d=11;i=[int]($Channels/32)})
     $s.Add(@{Op='label';Name="${LabelPrefix}_block"})
@@ -209,7 +233,14 @@ function New-KokoroPool2Steps {
         & $mul 6 2 16; & $mul 6 3 14 -Acc; & $clamp 6             # p[4v+1] = w2 a[2v] + w0 a[2v+1] + b
         & $mul 7 3 15; & $clamp 7                                 # p[4v+2] = w1 a[2v+1] + b
         & $mul 8 3 16; & $mul 8 4 14 -Acc; & $clamp 8             # p[4v+3] = w2 a[2v+1] + w0 a[2v+2] + b
-        & $windows 5 6 0; & $windows 7 8 128
+        if ($OutputRowDelay -eq 0) { & $windows 5 6 0; & $windows 7 8 128 }
+        elseif ($v % 8 -ne 7) { & $windows 5 6 128; & $windows 7 8 256 }
+        else {
+            # The second pair is vector 0 of the next output tile (r1, r0: free after the copies and the next-pair load).
+            & $windows 5 6 128
+            $s.Add(@{Op='add';d=1;s=6;t=28}); $s.Add(@{Op='addi';d=1;s=1;i=-1792}); $s.Add(@{Op='add';d=0;s=13;t=28}); $s.Add(@{Op='addi';d=0;s=0;i=-1792})
+            & $windows 7 8 0 1 0
+        }
         $s.Add(@{Op='addi';d=6;s=6;i=256}); $s.Add(@{Op='addi';d=13;s=13;i=256}); $s.Add(@{Op='addi';d=5;s=5;i=128})
         $s.Add(@{Op='vor';d=0;s=1;t=1})                          # the next row pair, bias removed, is the next current one
     }
@@ -272,17 +303,19 @@ function New-KokoroScaleConvert16Steps {
 # r0 = curve, r1 = tensor tile 0, r2 = constants W0, W1, W2 (int32), B (int64) at 0, 4, 8, 16. Rows past F are untouched.
 # Uses r3..r15 (callee-saved registers are not touched).
 function New-KokoroStrideConv16Steps {
-    # -RuntimeFrames: the caller passes Frames in r11 (Frames is then ignored).
+    # -RuntimeFrames: the caller passes Frames in r11 (Frames is then ignored). -Delay: frame t is stored at row t + Delay.
     param([ValidateRange(1,1048576)][int]$Frames=1,[ValidateRange(32,2048)][int]$Channels=1120,
-        [Parameter(Mandatory)][ValidateRange(0,2047)][int]$Channel,[string]$LabelPrefix='strideconv16',[switch]$NoReturn,[switch]$RuntimeFrames)
+        [Parameter(Mandatory)][ValidateRange(0,2047)][int]$Channel,[string]$LabelPrefix='strideconv16',[switch]$NoReturn,[switch]$RuntimeFrames,
+        [ValidateRange(0,31)][int]$Delay=0)
     $tileBytes = 64 * $Channels
     $s = [Collections.Generic.List[hashtable]]::new()
     $imm = { param([int]$r,[long]$v) $u=[long]([uint32]($v -band 0xffffffffL)); $s.Add(@{Op='lo';x=$r;i=($u -band 65535)}); $s.Add(@{Op='hi';x=$r;i=($u -shr 16)}) }
-    & $imm 3 ([long][math]::Floor($Channel / 32) * 2048 + 4 * ($Channel % 32)); $s.Add(@{Op='add';d=1;s=1;t=3})   # row 0 of the channel
+    & $imm 3 ([long][math]::Floor($Channel / 32) * 2048 + 4 * ($Channel % 32) + 128 * [math]::Floor($Delay / 2) + 2 * ($Delay % 2)); $s.Add(@{Op='add';d=1;s=1;t=3})   # row Delay of the channel
     $s.Add(@{Op='load';d=12;s=2;Offset=0}); $s.Add(@{Op='load';d=13;s=2;Offset=4}); $s.Add(@{Op='load';d=14;s=2;Offset=8})
     $s.Add(@{Op='imm';d=3;i=0})                                   # c[2t-1], zero for t = 0
     if (-not $RuntimeFrames) { $s.Add(@{Op='imm';d=11;i=$Frames}) }; $s.Add(@{Op='imm';d=15;i=0})
     & $imm 7 ($tileBytes - 2048)
+    if ($Delay) { $s.Add(@{Op='imm';d=10;i=(32 - $Delay)}); $s.Add(@{Op='eq';d=0;s=15;t=15}); $s.Add(@{Op='jump-p';u=0;Label="${LabelPrefix}_row"}) }   # rows left in tile 0
     $s.Add(@{Op='label';Name="${LabelPrefix}_tile"})
     $s.Add(@{Op='imm';d=10;i=32})
     $s.Add(@{Op='label';Name="${LabelPrefix}_row"})

@@ -1175,7 +1175,7 @@ $script:Kernels=@(
 } }
     @{ Names=@('KokoroDecoder16Run'); Build={
     . (Join-Path $script:HexagonToolsRoot '..\src\jobs\Kokoro.DecoderRun16.ps1')
-    $run=New-KokoroDecoder16RunSteps -Frames $DecoderFrames -StopAfterBlock $DecoderStopAfterBlock -DumpPoint $DecoderDumpPoint -RuntimeFrames:$DecoderRuntimeFrames -Moments $DecoderMoments
+    $run=New-KokoroDecoder16RunSteps -Frames $DecoderFrames -StopAfterBlock $DecoderStopAfterBlock -DumpPoint $DecoderDumpPoint -RuntimeFrames:$DecoderRuntimeFrames -Moments $DecoderMoments -Delayed:$DecoderDelayed
     $steps=@($run.Steps)
     # The phone harness (tools/Invoke-GeneratorTailProbe.ps1) runs every generator job under the tail skel's name.
     $symbol='kokoro_generator_tail_skel_handle_invoke'; $soname='libkokoro_generator_tail_skel.so'
@@ -1421,6 +1421,8 @@ param(
     [ValidateSet('Block','Shortcut','Conv1','Windows1','Pool','Coeff')][string] $DecoderDumpPoint = 'Block',
     # KokoroDecoder16Run: read the frame count at run time (DecoderFrames is the capacity).
     [switch] $DecoderRuntimeFrames,
+    # KokoroDecoder16Run: delayed tensors (each convolution reads only rows at or before the row it writes; x at 20 ticks).
+    [switch] $DecoderDelayed,
     # Residual generator stages: ResBlockFrames is capacity; live frames follow the input tensor.
     [switch] $GeneratorRuntimeFrames,
     # KokoroDecoder16Run AdaIN statistics: Accumulate, Export (records and coefficients after the output), Supplied (records

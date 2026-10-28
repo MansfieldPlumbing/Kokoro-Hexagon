@@ -10,10 +10,16 @@
 # 1/sqrt(2) is in both ratios. decode.3: AdaIN1 + LeakyReLU to a tensor, the pool to windows at 2F frames, the shortcut at
 # F frames then doubled. Weights are W8 per output channel (one plane), streamed per conv into one VTCM buffer.
 # Rows past the frame count hold zero in every stored tensor and the conv-input zero in every window.
+#
+# -Delayed: every convolution reads only rows at or before the row it writes (kernel-3 convs TapDelay 1, 1x1 shortcuts
+# TapDelay 2, the pool one row pair later), so each tensor lags its input by its layer's lookahead: frame f of a tensor at
+# delay d is row f + d. Block inputs sit at 0, 2, 4, 6, 8 frames (asr_res, F0 and N are written into each block's output at
+# the next block's delay), decode.3's pool windows at 18 ticks, and x at OutputDelayTicks (20). Rows before the delay hold
+# zero as rows past it do. Tiles cover F + 10 frames and 2F + 20 ticks; the input stays at F frames (InputTiles).
 
 function Get-KokoroDecoder16Layout {
-    param([Parameter(Mandatory)][ValidateRange(2,4096)][int]$Frames)
-    $F=$Frames; $T=[int][math]::Ceiling($F/32); $T2=[int][math]::Ceiling(2*$F/32)
+    param([Parameter(Mandatory)][ValidateRange(2,4096)][int]$Frames,[switch]$Delayed)
+    $F=$Frames; $lag=if($Delayed){10}else{0}; $T=[int][math]::Ceiling(($F+$lag)/32); $T2=[int][math]::Ceiling((2*$F+2*$lag)/32); $TI=[int][math]::Ceiling($F/32)
     $tb={param([int]$c) 64L*$c}
     $al={param([long]$v) [long]([math]::Ceiling($v/65536)*65536)}
     $planeStride=[long]([math]::Max($T*32,$T2*16))*2048
@@ -41,7 +47,7 @@ function Get-KokoroDecoder16Layout {
     $regions['Weights']=[ordered]@{Offset=$weightAt;Bytes=3440640L}
     # Inputs: asr (512-wide croutons, T tiles), F0 curve and N curve (int32, 2F samples each, 128-byte padded).
     # Frames: the runtime frame count (int32), read only by a -RuntimeFrames job; Frames is then the capacity.
-    $input=[ordered]@{Asr=0L;F0=($T*32768L);N=($T*32768L+$curveBytes);Frames=($T*32768L+2*$curveBytes)}; $inputBytes=$T*32768L+2*$curveBytes
+    $input=[ordered]@{Asr=0L;F0=($TI*32768L);N=($TI*32768L+$curveBytes);Frames=($TI*32768L+2*$curveBytes)}; $inputBytes=$TI*32768L+2*$curveBytes
     # Convs in run order: asr_res, then per block shortcut, conv1, conv2. Weights Cout * Cin * K bytes each.
     $blocks=@(@{Name='encode';Cin=544;Cout=1024;Wide=1120},@{Name='decode.0';Cin=1120;Cout=1024;Wide=1120},@{Name='decode.1';Cin=1120;Cout=1024;Wide=1120},
         @{Name='decode.2';Cin=1120;Cout=1024;Wide=1120},@{Name='decode.3';Cin=1120;Cout=512;Wide=512;Up=$true})
@@ -73,7 +79,7 @@ function Get-KokoroDecoder16Layout {
     foreach($b in $blocks){ foreach($e in @(@(1,$b.Cin,'F'),@(2,$b.Cout,$(if($b.Up){'F2'}else{'F'})))){
         $sites.Add([ordered]@{Index=$sites.Count;Name="$($b.Name).adain$($e[0])";Width=$e[1];Count=$e[2];Offset=$mAt;Bytes=16L*$e[1];KmOffset=$kAt;KmBytes=8L*$e[1]}); $mAt+=16L*$e[1]; $kAt+=8L*$e[1] } }
     $input['Moments']=$inputBytes+128; $input['MomentCounts']=$input.Moments+$mAt; $input['KmDeltas']=$input.MomentCounts+128
-    [pscustomobject]@{Frames=$F;Tiles=$T;Tiles2=$T2;OutputTiles=2*$T;PlaneStride=$planeStride;Regions=$regions;Small=$small;CurveBytes=$curveBytes
+    [pscustomobject]@{Frames=$F;Tiles=$T;Tiles2=$T2;InputTiles=$TI;Delayed=[bool]$Delayed;OutputDelayTicks=2*$lag;OutputTiles=2*$T;PlaneStride=$planeStride;Regions=$regions;Small=$small;CurveBytes=$curveBytes
         Input=$input;InputBytes=$inputBytes;RuntimeInputBytes=($inputBytes+128);SuppliedInputBytes=($input.MomentCounts+128);CorrectedInputBytes=($input.KmDeltas+$kAt);KmBytes=$kAt;Blocks=$blocks;Convs=$convs.ToArray();WeightBytes=$w;Params=$p;BlockParams=$blockParams.ToArray();ParameterBytes=$pAt
         MomentSites=$sites.ToArray();MomentsBytes=$mAt;OutputBytes=($T2*32768L);VtcmBytes=$vtcm
         ConstantsTableOffset=$pAt;ConstantsBytes=$mAt;ConstantsParameterBytes=($pAt+$mAt)}
@@ -101,10 +107,14 @@ function Add-KokoroDecoder16JobSteps {
         # also exports each site's local coefficients (from this job's own moments) where Export puts coefficients: the
         # supplied minus local difference is the exact Corrected delta on the supplied trajectory. Direct loads each site's
         # absolute coefficients from the KmDeltas region and computes no moments and no coefficients.
-        [ValidateSet('Accumulate','Export','Supplied','SuppliedExport','Corrected','Direct','Constants')][string]$Moments='Accumulate')
+        [ValidateSet('Accumulate','Export','Supplied','SuppliedExport','Corrected','Direct','Constants')][string]$Moments='Accumulate',
+        # Delayed tensors (Get-KokoroDecoder16Layout -Delayed); the output is x at Layout.OutputDelayTicks.
+        [switch]$Delayed)
     if($RuntimeFrames -and $StopAfterBlock -ge 0){throw 'Dump points need a fixed frame count'}
     if($Moments -ne 'Accumulate' -and $StopAfterBlock -ge 0){throw 'Exported or supplied moments need the whole decoder'}
-    $L=Get-KokoroDecoder16Layout -Frames $Frames
+    if($Delayed -and $StopAfterBlock -ge 0){throw 'Dump points read undelayed tensors'}
+    if($Delayed -and $Moments -notin 'Direct','Constants'){throw 'Delayed tensors take supplied coefficients (Direct or Constants)'}
+    $L=Get-KokoroDecoder16Layout -Frames $Frames -Delayed:$Delayed
     $F=$Frames; $nT=$L.Tiles; $nT2=$L.Tiles2; $reg=$L.Regions; $sm=$reg.Small.Offset; $small=$L.Small; $planes=$reg.Planes.Offset
     $s=$Steps; $callList=$Calls
     $imm={param([int]$r,[long]$v) $u=[long]([uint32]($v -band 0xffffffffL));$s.Add(@{Op='lo';x=$r;i=($u -band 65535)});$s.Add(@{Op='hi';x=$r;i=($u -shr 16)})}
@@ -129,13 +139,24 @@ function Add-KokoroDecoder16JobSteps {
         $n=& $label; $s.Add(@{Op='label';Name=$n});$s.Add(@{Op='vstore';s=4;t=0;Offset=0});$s.Add(@{Op='addi';d=4;s=4;i=128});$s.Add(@{Op='addi';d=5;s=5;i=-1});$s.Add(@{Op='gtu';d=0;s=5;t=7});$s.Add(@{Op='jump-p';u=0;Label=$n}) }
     $fill={param([long]$off,[long]$bytes,[long]$pattern) & $ptr 4 18 $off; & $fillR4 $bytes $pattern }
     $padUsed=[Collections.Generic.HashSet[string]]::new()
+    # A stored tensor's pad: rows past the count, or with -Delayed rows outside [delay, count + delay) ($padDelayed below).
+    $padAt={param([long]$off,[string]$fr,[int]$width,[int]$halfword,[int]$delay,[string]$tiles) if($Delayed){ & $padDelayed $off $fr $width $halfword $delay $tiles } else { & $pad $off $fr $width $halfword } }
     # Rows past the frame count (F or F2) of the tensor at off <- the halfword.
     $pad={param([long]$off,[string]$fr,[int]$width,[int]$halfword)
         & $ptr 0 18 $off
         if($RuntimeFrames){ & $cnt 5 $fr; & $call "dec_padrt_${width}_$halfword"; [void]$padUsed.Add("rt,$width,$halfword") }
         else { $v=$countValue[$fr]; & $call "dec_pad_${v}_${width}_$halfword"; [void]$padUsed.Add("$v,$width,$halfword") } }
+    # Delayed: rows before the tensor's delay (static, tile 0) and rows from count + delay through the tile count.
+    $leadUsed=[Collections.Generic.HashSet[string]]::new(); $capacityUsed=[Collections.Generic.HashSet[string]]::new()
+    $padDelayed={param([long]$off,[string]$fr,[int]$width,[int]$halfword,[int]$delay,[string]$tiles)
+        if($delay -gt 0){ & $ptr 0 18 $off; & $call "dec_lead_${delay}_${width}_$halfword"; [void]$leadUsed.Add("$delay,$width,$halfword") }
+        & $ptr 0 18 $off; & $cnt 5 $fr; if($delay -gt 0){ $s.Add(@{Op='addi';d=5;s=5;i=$delay}) }; & $cnt 6 $tiles
+        & $call "dec_padcap_${width}_$halfword"; [void]$capacityUsed.Add("$width,$halfword") }
     $tbw={param([int]$c) 64L*$c}
-    $conv={param([long]$hi,[long]$lo,[int]$cin,[int]$cout,[int]$k,[string]$tiles) & $ptr 0 18 $hi; & $ptr 1 18 $lo; & $ptr 2 18 $reg.Weights.Offset; & $ptr 3 18 ($sm+$small.Tables); & $cnt 4 $tiles; & $ptr 5 18 $planes; & $call "dec_conv_${cin}_${cout}_$k"; & $sync }
+    $convUsed=[Collections.Generic.HashSet[string]]::new()
+    $conv={param([long]$hi,[long]$lo,[int]$cin,[int]$cout,[int]$k,[string]$tiles,[int]$delay=0)
+        $name=if($Delayed){"dec_conv_${cin}_${cout}_${k}_$delay"}else{"dec_conv_${cin}_${cout}_$k"}; [void]$convUsed.Add("$cin,$cout,$k,$delay")
+        & $ptr 0 18 $hi; & $ptr 1 18 $lo; & $ptr 2 18 $reg.Weights.Offset; & $ptr 3 18 ($sm+$small.Tables); & $cnt 4 $tiles; & $ptr 5 18 $planes; & $call $name; & $sync }
     $combine={param([string]$mode,[int]$cout,[long]$out,[long]$ratio,[string]$tiles,[long]$skip) & $ptr 0 18 $planes; & $ptr 1 18 $out; & $ptr 2 18 $ratio; & $cnt 3 $tiles; & $call "dec_combine_$($mode.ToLower())_${cout}_$skip"; [void]$combines.Add("$mode,$cout,$skip"); & $sync }
     $siteIndex=[ref]0
     $adain={param([long]$x,[int]$width,[string]$fr,[string]$tiles,[long]$records,[string]$output,[long]$hi,[long]$lo)
@@ -181,12 +202,15 @@ function Add-KokoroDecoder16JobSteps {
             $s.Add(@{Op='addi';d=4;s=4;i=128}); $s.Add(@{Op='addi';d=5;s=5;i=128}); $s.Add(@{Op='addi';d=6;s=6;i=-1}); $s.Add(@{Op='gtu';d=0;s=6;t=7}); $s.Add(@{Op='jump-p';u=0;Label=$n})
         }
         & $ptr 0 18 $x; & $ptr 1 18 $hi; & $ptr 2 18 $lo; & $ptr 3 18 ($sm+$small.Km); & $cnt 4 $tiles; & $call "dec_leaky_$($output.ToLower())_$width"; & $sync }
-    $windowsFix={param([int]$width,[string]$fr,[string]$tiles)
+    $windowsFix={param([int]$width,[string]$fr,[string]$tiles,[int]$delay=0)
         $w=& $tbw $width
         & $fill $reg.WinHi.Offset $w 0x80008000L; & $fill $reg.WinLo.Offset $w 0
         & $ptrN 4 ($reg.WinHi.Offset+$w) $tiles $w; & $fillR4 $w 0x80008000L; & $ptrN 4 ($reg.WinLo.Offset+$w) $tiles $w; & $fillR4 $w 0
+        if($Delayed){ & $padDelayed ($reg.WinHi.Offset+$w) $fr $width 0x8000 $delay $tiles; & $padDelayed ($reg.WinLo.Offset+$w) $fr $width 0 $delay $tiles }
+        else {
         & $pad ($reg.WinHi.Offset+$w) $fr $width 0x8000
         & $pad ($reg.WinLo.Offset+$w) $fr $width 0
+        }
         & $sync }
     $weights={param([int]$index) $c=$L.Convs[$index]; & $dma 18 $reg.Weights.Offset $WeightsBase ($WeightsOffset+$c.Offset) $c.Bytes }
 
@@ -197,47 +221,71 @@ function Add-KokoroDecoder16JobSteps {
         & $imm 2 $F; $s.Add(@{Op='min';d=1;s=1;t=2}); $s.Add(@{Op='imm';d=2;i=2}); $s.Add(@{Op='max';d=1;s=1;t=2})
         & $ptr 3 18 ($sm+$small.Counts); $s.Add(@{Op='store';s=3;t=1;Offset=0})
         $s.Add(@{Op='add';d=2;s=1;t=1}); $s.Add(@{Op='store';s=3;t=2;Offset=4})
-        $s.Add(@{Op='addi';d=4;s=1;i=31}); $s.Add(@{Op='lsr-i';d=4;s=4;i=5}); $s.Add(@{Op='store';s=3;t=4;Offset=8})
-        $s.Add(@{Op='addi';d=4;s=2;i=31}); $s.Add(@{Op='lsr-i';d=4;s=4;i=5}); $s.Add(@{Op='store';s=3;t=4;Offset=12})
+        $lag=if($Delayed){10}else{0}
+        $s.Add(@{Op='addi';d=4;s=1;i=(31+$lag)}); $s.Add(@{Op='lsr-i';d=4;s=4;i=5}); $s.Add(@{Op='store';s=3;t=4;Offset=8})
+        $s.Add(@{Op='addi';d=4;s=2;i=(31+2*$lag)}); $s.Add(@{Op='lsr-i';d=4;s=4;i=5}); $s.Add(@{Op='store';s=3;t=4;Offset=12})
     }
     foreach($region in 'E','XA','XB'){ & $fill $reg[$region].Offset $reg[$region].Bytes 0x80008000L }
     # Runtime: the output copies capacity tiles; tiles past the runtime count hold zero.
     if($RuntimeFrames){ & $fill $reg.O.Offset $reg.O.Bytes 0x80008000L }
     $asrDone=& $label
-    for($t=0;$t -lt $nT;$t++){
+    # Delayed: every input tile (the input holds zero past the runtime frame count); E's tiles past them stay zero.
+    $inputTiles=if($Delayed){$L.InputTiles}else{$nT}
+    for($t=0;$t -lt $inputTiles;$t++){
         # Runtime: tile t only while t < T.
-        if($RuntimeFrames -and $t -gt 0){ & $cnt 0 'T'; & $imm 1 ($t+1); $s.Add(@{Op='gtu';d=0;s=1;t=0}); $s.Add(@{Op='jump-p';u=0;Label=$asrDone}) }
+        if($RuntimeFrames -and -not $Delayed -and $t -gt 0){ & $cnt 0 'T'; & $imm 1 ($t+1); $s.Add(@{Op='gtu';d=0;s=1;t=0}); $s.Add(@{Op='jump-p';u=0;Label=$asrDone}) }
         & $dma 18 ($reg.E.Offset+$t*(& $tbw 544)) $InputBase ($InputOffset+$L.Input.Asr+$t*32768L) 32768 }
-    if($RuntimeFrames){ $s.Add(@{Op='label';Name=$asrDone}) }
+    if($RuntimeFrames -and -not $Delayed){ $s.Add(@{Op='label';Name=$asrDone}) }
     & $dma 18 ($sm+$small.Curves) $InputBase ($InputOffset+$L.Input.F0) (2*$L.CurveBytes)
     & $dma 18 ($sm+$small.Stride) $TablesBase ($TablesOffset+$L.Params.F0) 128
     $stride=[Collections.Generic.HashSet[string]]::new()
-    foreach($target in @(@('E',544,512,0),@('E',544,513,1),@('XA',1120,1088,0),@('XA',1120,1089,1),@('XB',1120,1088,0),@('XB',1120,1089,1))){
-        & $ptr 0 18 ($sm+$small.Curves+$target[3]*$L.CurveBytes); & $ptr 1 18 $reg[$target[0]].Offset; & $ptr 2 18 ($sm+$small.Stride+32*$target[3])
+    # F0 and N into one tensor's channels at a delay (the stride constants and curves stay in Small).
+    $strideInto={param([long]$off,[int]$width,[int]$channel,[int]$curve,[int]$delay)
+        & $ptr 0 18 ($sm+$small.Curves+$curve*$L.CurveBytes); & $ptr 1 18 $off; & $ptr 2 18 ($sm+$small.Stride+32*$curve)
         if($RuntimeFrames){ & $cnt 11 'F' }
-        & $call "dec_stride_$($target[1])_$($target[2])"; [void]$stride.Add("$($target[1]),$($target[2])") }
+        if($Delayed){ & $call "dec_stride_${width}_${channel}_$delay"; [void]$stride.Add("$width,$channel,$delay") }
+        else { & $call "dec_stride_${width}_$channel"; [void]$stride.Add("$width,$channel") } }
+    $combines=[Collections.Generic.HashSet[string]]::new()
+    $identityE={param([long]$hi,[long]$lo)
+        & $dma 18 ($sm+$small.Km) $TablesBase ($TablesOffset+$L.Params.IdentityE) 4352
+        & $ptr 0 18 $reg.E.Offset; & $ptr 1 18 $hi; & $ptr 2 18 $lo; & $ptr 3 18 ($sm+$small.Km); & $cnt 4 'T'; & $call 'dec_identity_544'; & $sync }
+    if($Delayed){
+        & $strideInto $reg.E.Offset 544 512 0 0; & $strideInto $reg.E.Offset 544 513 1 0
+    } else {
+    foreach($target in @(@('E',544,512,0),@('E',544,513,1),@('XA',1120,1088,0),@('XA',1120,1089,1),@('XB',1120,1088,0),@('XB',1120,1089,1))){
+        & $strideInto $reg[$target[0]].Offset $target[1] $target[2] $target[3] 0 }
     # asr_res: conv1x1 over E (zero weights past 512) into channels 1024..1087 of both wide tensors (Conv mode).
     # asr_res and the encode shortcut read E rescaled into one conv-input scale (identity windows; the weights fold that scale).
-    & $dma 18 ($sm+$small.Km) $TablesBase ($TablesOffset+$L.Params.IdentityE) 4352
-    & $ptr 0 18 $reg.E.Offset; & $ptr 1 18 $reg.WinHi.Offset; & $ptr 2 18 $reg.WinLo.Offset; & $ptr 3 18 ($sm+$small.Km); & $cnt 4 'T'; & $call 'dec_identity_544'; & $sync
+    & $identityE $reg.WinHi.Offset $reg.WinLo.Offset
     & $weights 0; & $dma 18 ($sm+$small.Tables) $TablesBase ($TablesOffset+$L.Params.AsrTables) 2048
     & $conv $reg.WinHi.Offset $reg.WinLo.Offset 544 64 1 'T'
-    $combines=[Collections.Generic.HashSet[string]]::new()
     foreach($x in 'XA','XB'){ & $combine 'Conv' 64 ($reg[$x].Offset+32*2048) 0 'T' ((1120-64)*64) }
+    }
 
     $src='E'; $dst='XA'; $ci=1
     for($j=0;$j -lt 5;$j++){
         $b=$L.Blocks[$j]; $q=$L.BlockParams[$j]; $cin=$b.Cin; $cout=$b.Cout; $ob=$cout/32; $inW=& $tbw $cin
         $xOff=$reg[$src].Offset
         $outOff=if($b.Up){$reg.S.Offset}else{$reg[$dst].Offset}; $skip=if($b.Up){0L}else{[long](1120-$cout)*64}
+        # Delayed: the block's input at 2j frames, its output (and its conv windows' lead tile at +width, so a delayed tap
+        # reads the zero tile before row 0). asr_res and F0, N go into the output at the next block's delay first; the
+        # encode shortcut then reads the identity windows of E that asr_res left.
+        $d=2*$j; $shortcutAt=if($Delayed){$inW}else{0L}
+        if($Delayed -and -not $b.Up){
+            & $identityE ($reg.WinHi.Offset+(& $tbw 544)) ($reg.WinLo.Offset+(& $tbw 544))
+            & $weights 0; & $dma 18 ($sm+$small.Tables) $TablesBase ($TablesOffset+$L.Params.AsrTables) 2048
+            & $conv ($reg.WinHi.Offset+(& $tbw 544)) ($reg.WinLo.Offset+(& $tbw 544)) 544 64 1 'T' ($d+2)
+            & $combine 'Conv' 64 ($reg[$dst].Offset+32*2048) 0 'T' ((1120-64)*64)
+            & $strideInto $reg[$dst].Offset 1120 1088 0 ($d+2); & $strideInto $reg[$dst].Offset 1120 1089 1 ($d+2)
+        }
         # Shortcut (F frames) into the output (decode.3: into S, doubled later).
         # The shortcut reads its input rescaled into one conv-input scale (encode: E's windows from asr_res are still there).
         if($j -gt 0){
             & $dma 18 ($sm+$small.Km) $TablesBase ($TablesOffset+$q.IdentitySc) (256L*$cin/32)
-            & $ptr 0 18 $xOff; & $ptr 1 18 $reg.WinHi.Offset; & $ptr 2 18 $reg.WinLo.Offset; & $ptr 3 18 ($sm+$small.Km); & $cnt 4 'T'; & $call "dec_identity_$cin"; & $sync
+            & $ptr 0 18 $xOff; & $ptr 1 18 ($reg.WinHi.Offset+$shortcutAt); & $ptr 2 18 ($reg.WinLo.Offset+$shortcutAt); & $ptr 3 18 ($sm+$small.Km); & $cnt 4 'T'; & $call "dec_identity_$cin"; & $sync
         }
         & $weights $ci; & $dma 18 ($sm+$small.Tables) $TablesBase ($TablesOffset+$q.TablesSc) (1024L*$ob); & $dma 18 ($sm+$small.RatioA) $TablesBase ($TablesOffset+$q.RatioSc) (128L*$ob)
-        & $conv $reg.WinHi.Offset $reg.WinLo.Offset $cin $cout 1 'T'
+        & $conv ($reg.WinHi.Offset+$shortcutAt) ($reg.WinLo.Offset+$shortcutAt) $cin $cout 1 'T' 2
         & $combine 'Scale' $cout $outOff ($sm+$small.RatioA) 'T' $skip
         if($j -eq $StopAfterBlock -and $DumpPoint -eq 'Shortcut'){ & $dma $OutputBase $OutputOffset 18 $outOff $(if($b.Up){$nT*(& $tbw 512)}else{$reg[$dst].Bytes}); break }
         # AdaIN1 + LeakyReLU, conv1.
@@ -246,45 +294,48 @@ function Add-KokoroDecoder16JobSteps {
             & $fill $reg.A.Offset $reg.A.Bytes 0x80008000L
             & $adain $xOff $cin 'F' 'T' $q.Records1 'Tensor' $reg.A.Offset 0
             if($j -eq $StopAfterBlock -and $DumpPoint -eq 'Coeff'){ & $dma $OutputBase $OutputOffset 18 ($sm+$small.Moments) (16L*$cin); & $dma $OutputBase ($OutputOffset+18432) 18 ($sm+$small.Km) (8L*$cin); & $dma $OutputBase ($OutputOffset+36864) 18 ($sm+$small.Records) (32L*$cin); break }
-            & $pad $reg.A.Offset 'F' $cin 0x8000; & $sync
+            & $padAt $reg.A.Offset 'F' $cin 0x8000 $d 'T'; & $sync
             if($j -eq $StopAfterBlock -and $DumpPoint -eq 'Pool'){ & $dma $OutputBase $OutputOffset 18 $reg.A.Offset ($nT*$inW) }
             & $dma 18 ($sm+$small.Pool) $TablesBase ($TablesOffset+$q.Pool) (512L*$cin/32)
-            & $ptr 0 18 $reg.A.Offset; & $ptr 1 18 ($reg.WinHi.Offset+$inW); & $ptr 2 18 ($reg.WinLo.Offset+$inW); & $ptr 3 18 ($sm+$small.Pool); & $cnt 4 'T'; & $call "dec_pool_$cin"; & $sync
+            & $ptr 0 18 $reg.A.Offset; & $ptr 1 18 ($reg.WinHi.Offset+$inW); & $ptr 2 18 ($reg.WinLo.Offset+$inW); & $ptr 3 18 ($sm+$small.Pool); & $cnt 4 'T'; & $call $(if($Delayed){"dec_pool_${cin}_delayed"}else{"dec_pool_$cin"}); & $sync
             $cf='F2'; $ct='T2'
         } else {
             & $adain $xOff $cin 'F' 'T' $q.Records1 'Windows' ($reg.WinHi.Offset+$inW) ($reg.WinLo.Offset+$inW)
         }
-        & $windowsFix $cin $cf $ct
+        # Windows1 delay: the block input's, or for decode.3 the pool's (2d + 2 ticks).
+        $w1=if($b.Up){2*$d+2}else{$d}
+        & $windowsFix $cin $cf $ct $w1
         $ctv=$countValue[$ct]
         if($j -eq $StopAfterBlock -and $DumpPoint -in 'Windows1','Pool'){ $at0=if($DumpPoint -eq 'Pool'){$nT*$inW}else{0L}; & $dma $OutputBase ($OutputOffset+$at0) 18 ($reg.WinHi.Offset+$inW) ($ctv*$inW); & $dma $OutputBase ($OutputOffset+$at0+$ctv*$inW) 18 ($reg.WinLo.Offset+$inW) ($ctv*$inW); break }
         & $weights ($ci+1); & $dma 18 ($sm+$small.Tables) $TablesBase ($TablesOffset+$q.Tables1) (1024L*$ob)
-        & $conv ($reg.WinHi.Offset+$inW) ($reg.WinLo.Offset+$inW) $cin $cout 3 $ct
+        & $conv ($reg.WinHi.Offset+$inW) ($reg.WinLo.Offset+$inW) $cin $cout 3 $ct 1
         & $combine 'Conv' $cout $reg.C.Offset 0 $ct 0
-        & $pad $reg.C.Offset $cf $cout 0x8000; & $sync
+        & $padAt $reg.C.Offset $cf $cout 0x8000 ($w1+1) $ct; & $sync
         if($j -eq $StopAfterBlock -and $DumpPoint -eq 'Conv1'){ & $dma $OutputBase $OutputOffset 18 $reg.C.Offset ($ctv*(& $tbw $cout)); break }
         # AdaIN2 + LeakyReLU, conv2 added onto the shortcut.
         $cw=& $tbw $cout
         & $adain $reg.C.Offset $cout $cf $ct $q.Records2 'Windows' ($reg.WinHi.Offset+$cw) ($reg.WinLo.Offset+$cw)
-        & $windowsFix $cout $cf $ct
+        & $windowsFix $cout $cf $ct ($w1+1)
         & $weights ($ci+2); & $dma 18 ($sm+$small.Tables) $TablesBase ($TablesOffset+$q.Tables2) (1024L*$ob); & $dma 18 ($sm+$small.RatioB) $TablesBase ($TablesOffset+$q.Ratio2) (128L*$ob)
-        & $conv ($reg.WinHi.Offset+$cw) ($reg.WinLo.Offset+$cw) $cout $cout 3 $ct
+        & $conv ($reg.WinHi.Offset+$cw) ($reg.WinLo.Offset+$cw) $cout $cout 3 $ct 1
         if($b.Up){
             & $ptr 0 18 $reg.S.Offset; & $ptr 1 18 $reg.O.Offset; & $cnt 2 'T'; & $call 'dec_framedouble_512'; & $sync
             & $combine 'Residual' $cout $reg.O.Offset ($sm+$small.RatioB) $ct 0
-            & $pad $reg.O.Offset $cf 512 0x8000; & $sync
+            & $padAt $reg.O.Offset $cf 512 0x8000 ($w1+2) $ct; & $sync
             # decode.3 holds its output in its own scales; one conversion into the generator's input scales saturates there.
             & $dma 18 ($sm+$small.Pool) $TablesBase ($TablesOffset+$q.Convert) 6144
             & $ptr 0 18 $reg.O.Offset; & $ptr 1 18 ($sm+$small.Pool); & $cnt 2 $ct; & $call 'dec_convert_512'; & $sync
             & $dma $OutputBase $OutputOffset 18 $reg.O.Offset $L.OutputBytes
         } else {
             & $combine 'Residual' $cout $reg[$dst].Offset ($sm+$small.RatioB) 'T' $skip
-            & $pad $reg[$dst].Offset 'F' 1120 0x8000; & $sync
+            & $padAt $reg[$dst].Offset 'F' 1120 0x8000 ($d+2) 'T'; & $sync
             if($j -eq $StopAfterBlock){ & $dma $OutputBase $OutputOffset 18 $reg[$dst].Offset $reg[$dst].Bytes; break }
         }
         $ci+=3; $src=$dst; $dst=if($dst -eq 'XA'){'XB'}else{'XA'}
     }
     if($StopAfterBlock -lt 0 -and $siteIndex.Value -ne $L.MomentSites.Count){throw "The decoder ran $($siteIndex.Value) AdaIN sites; the layout has $($L.MomentSites.Count)"}
-    [pscustomobject]@{Layout=$L;Pads=@($padUsed);Combines=@($combines);Stride=@($stride);RuntimeFrames=[bool]$RuntimeFrames;Constants=($Moments -eq 'Constants')}
+    [pscustomobject]@{Layout=$L;Pads=@($padUsed);Combines=@($combines);Stride=@($stride);RuntimeFrames=[bool]$RuntimeFrames;Constants=($Moments -eq 'Constants')
+        Delayed=[bool]$Delayed;Convs=@($convUsed);Leads=@($leadUsed);Capacities=@($capacityUsed)}
 }
 
 # Bodies the job calls (labels as Add-KokoroDecoder16JobSteps emits them).
@@ -296,9 +347,19 @@ function Get-KokoroDecoder16Bodies {
     $bodies.Add(@('dec_identity_1120',@(New-KokoroAdaInLeaky16Steps -Channels 1120 -Output Windows -Identity -LabelPrefix 'decident_1120')))
     $bodies.Add(@('dec_framedouble_512',@(New-KokoroFrameDouble16Steps -Channels 512 -LabelPrefix 'decdouble')))
     $bodies.Add(@('dec_convert_512',@(New-KokoroScaleConvert16Steps -Channels 512 -LabelPrefix 'decconvert')))
+    if($Job.Delayed){
+        $bodies.Add(@('dec_pool_1120_delayed',@(New-KokoroPool2Steps -Channels 1120 -OutputRowDelay 2 -LabelPrefix 'decpooldelayed')))
+        foreach($c in $Job.Convs){ $shape=[int[]]($c -split ',')
+            $bodies.Add(@("dec_conv_$($shape -join '_')",@(New-KokoroHmxConvPlanesLoopSteps -InputChannels $shape[0] -OutputChannels $shape[1] -Kernel $shape[2] -TapDelay $shape[3] -WeightPlanes 1 -PlaneStride $ps -LabelPrefix "decconv_$($shape -join '_')"))) }
+        foreach($p in $Job.Leads){ $d,$w,$h=[int[]]($p -split ',')
+            $bodies.Add(@("dec_lead_${d}_${w}_$h",@(New-KokoroPadRows16Steps -Leading -Frames $d -Channels $w -Halfword $h -LabelPrefix "declead_${d}_${w}_$h"))) }
+        foreach($p in $Job.Capacities){ $w,$h=[int[]]($p -split ',')
+            $bodies.Add(@("dec_padcap_${w}_$h",@(New-KokoroPadCapacity16Steps -Channels $w -Halfword $h -LabelPrefix "decpadcap_${w}_$h"))) }
+    } else {
     $bodies.Add(@('dec_pool_1120',@(New-KokoroPool2Steps -Channels 1120 -LabelPrefix 'decpool')))
     foreach($shape in @(@(544,64,1),@(544,1024,1),@(544,1024,3),@(1024,1024,3),@(1120,1024,1),@(1120,1024,3),@(1120,512,1),@(1120,512,3),@(512,512,3))){
         $bodies.Add(@("dec_conv_$($shape[0])_$($shape[1])_$($shape[2])",@(New-KokoroHmxConvPlanesLoopSteps -InputChannels $shape[0] -OutputChannels $shape[1] -Kernel $shape[2] -WeightPlanes 1 -PlaneStride $ps -LabelPrefix "decconv_$($shape -join '_')"))) }
+    }
     foreach($c in $Job.Combines){ $m,$ch,$skip=$c -split ','
         $bodies.Add(@("dec_combine_$($m.ToLower())_${ch}_$skip",@(New-KokoroPlaneCombineLoopSteps -Mode $m -Channels ([int]$ch) -PlaneStride $ps -OutputTileSkip ([long]$skip) -LabelPrefix "deccombine_$($m.ToLower())_${ch}_$skip"))) }
     foreach($w in 544,1120,1024,512){
@@ -313,7 +374,8 @@ function Get-KokoroDecoder16Bodies {
     foreach($p in $Job.Pads){ $f,$w,$h=$p -split ','
         if($f -eq 'rt'){ $bodies.Add(@("dec_padrt_${w}_$h",@(New-KokoroPadRows16RuntimeSteps -Channels ([int]$w) -Halfword ([int]$h) -LabelPrefix "decpadrt_${w}_$h"))); continue }
         $bodies.Add(@("dec_pad_${f}_${w}_$h",@(New-KokoroPadRows16Steps -Frames ([int]$f) -Channels ([int]$w) -Halfword ([int]$h) -LabelPrefix "decpad_${f}_${w}_$h"))) }
-    foreach($p in $Job.Stride){ $w,$c=$p -split ','
+    foreach($p in $Job.Stride){ $w,$c,$d=$p -split ','
+        if($null -ne $d){ $bodies.Add(@("dec_stride_${w}_${c}_$d",@(New-KokoroStrideConv16Steps -Frames $L.Frames -Channels ([int]$w) -Channel ([int]$c) -Delay ([int]$d) -LabelPrefix "decstride_${w}_${c}_$d" -RuntimeFrames:$Job.RuntimeFrames))); continue }
         $bodies.Add(@("dec_stride_${w}_$c",@(New-KokoroStrideConv16Steps -Frames $L.Frames -Channels ([int]$w) -Channel ([int]$c) -LabelPrefix "decstride_${w}_$c" -RuntimeFrames:$Job.RuntimeFrames))) }
     $bodies.ToArray()
 }
@@ -323,10 +385,10 @@ function Get-KokoroDecoder16Bodies {
 # -StopAfterBlock).
 function New-KokoroDecoder16RunSteps {
     param([Parameter(Mandatory)][ValidateRange(2,4096)][int]$Frames,[ValidateRange(-1,4)][int]$StopAfterBlock=-1,[ValidateSet('Block','Shortcut','Conv1','Windows1','Pool','Coeff')][string]$DumpPoint='Block',[switch]$RuntimeFrames,
-        [ValidateSet('Accumulate','Export','Supplied','SuppliedExport','Corrected','Direct','Constants')][string]$Moments='Accumulate')
+        [ValidateSet('Accumulate','Export','Supplied','SuppliedExport','Corrected','Direct','Constants')][string]$Moments='Accumulate',[switch]$Delayed)
     . (Join-Path $PSScriptRoot 'Kokoro.ResBlockRun.ps1')
     foreach($file in '../kernels/Kokoro.HmxConvPlanes.ps1','../kernels/Kokoro.PlaneCombine.ps1','../kernels/Kokoro.AdaInMoments16.ps1','../kernels/Kokoro.AdaInTurnsCoefficients.ps1','../kernels/Kokoro.AdaInLeaky16.ps1','../kernels/Kokoro.Decoder16.ps1','../hexagon/Kokoro.DmaCopy.ps1') { . (Join-Path $PSScriptRoot $file) }
-    $L=Get-KokoroDecoder16Layout -Frames $Frames
+    $L=Get-KokoroDecoder16Layout -Frames $Frames -Delayed:$Delayed
     $outputBytes=256L+$(if($StopAfterBlock -ge 0){[math]::Max($L.Regions.XA.Bytes,($L.Tiles+2*$L.Tiles2)*71680L)}else{$L.OutputBytes})+$(if($Moments -in 'Export','SuppliedExport'){$L.MomentsBytes+$L.KmBytes}else{0L})
     $s=[Collections.Generic.List[hashtable]]::new()
     $calls=[Collections.Generic.List[object]]::new()
@@ -356,7 +418,7 @@ function New-KokoroDecoder16RunSteps {
     foreach($r in 16,18,20,22,24,26){$s.Add(@{Op='store-d';s=29;t=$r;Offset=(($r-16)*4)})}
     $s.Add(@{Op='addi';d=24;s=29;i=(64+63)}); & $imm 0 -64; $s.Add(@{Op='and';d=24;s=24;t=0})
     $s.Add(@{Op='hwticks';d=26})
-    $job=Add-KokoroDecoder16JobSteps -Steps $s -Calls $calls -Frames $Frames -OutputBase 23 -OutputOffset 256 -StopAfterBlock $StopAfterBlock -DumpPoint $DumpPoint -RuntimeFrames:$RuntimeFrames -Moments $Moments
+    $job=Add-KokoroDecoder16JobSteps -Steps $s -Calls $calls -Frames $Frames -OutputBase 23 -OutputOffset 256 -StopAfterBlock $StopAfterBlock -DumpPoint $DumpPoint -RuntimeFrames:$RuntimeFrames -Moments $Moments -Delayed:$Delayed
     $s.Add(@{Op='hwticks';d=0});$s.Add(@{Op='store-d';s=23;t=26;Offset=0});$s.Add(@{Op='store-d';s=23;t=0;Offset=8})
     $s.Add(@{Op='imm';d=0;i=1});$s.Add(@{Op='store';s=23;t=0;Offset=44})
     foreach($r in 16,18,20,22,24,26){$s.Add(@{Op='load-d';d=$r;s=29;Offset=(($r-16)*4)})}
@@ -365,6 +427,6 @@ function New-KokoroDecoder16RunSteps {
     $labels=@{};$pcs=[Collections.Generic.Dictionary[object,long]]::new();$pc=0L;$isa=Get-InstructionSet
     foreach($step in $s){if($step.Op -eq 'label'){if($labels.ContainsKey($step.Name)){throw "Duplicate label $($step.Name)"};$labels[$step.Name]=$pc};$pcs[$step]=$pc;$pc+=& $isa.Length $step}
     foreach($c in $calls){if(-not $labels.ContainsKey($c.label)){throw "Missing body $($c.label)"};$delta=[long]([uint32](($labels[$c.label]-$pcs[$c.pc]) -band 0xffffffffL));$c.low.i=$delta -band 65535;$c.high.i=$delta -shr 16}
-    [pscustomobject]@{Steps=$s.ToArray();Layout=[ordered]@{Frames=$Frames;RuntimeFrames=[bool]$RuntimeFrames;FramesOffset=$L.Input.Frames;Tiles=$L.Tiles;Tiles2=$L.Tiles2;InputBytes=$inBytes;WeightBytes=$L.WeightBytes;ParameterBytes=$parameterBytes;OutputBytes=$outputBytes;OutputOffset=256;PcmOffset=256;Samples=1;VtcmBytes=$L.VtcmBytes;StopAfterBlock=$StopAfterBlock
+    [pscustomobject]@{Steps=$s.ToArray();Layout=[ordered]@{Frames=$Frames;RuntimeFrames=[bool]$RuntimeFrames;FramesOffset=$L.Input.Frames;Tiles=$L.InputTiles;Tiles2=$L.Tiles2;Delayed=[bool]$Delayed;OutputDelayTicks=$L.OutputDelayTicks;InputBytes=$inBytes;WeightBytes=$L.WeightBytes;ParameterBytes=$parameterBytes;OutputBytes=$outputBytes;OutputOffset=256;PcmOffset=256;Samples=1;VtcmBytes=$L.VtcmBytes;StopAfterBlock=$StopAfterBlock
         Moments=$Moments;MomentsInputOffset=$L.Input.Moments;MomentCountsInputOffset=$L.Input.MomentCounts;MomentsOutputOffset=(256L+$L.OutputBytes);KmOutputOffset=(256L+$L.OutputBytes+$L.MomentsBytes);KmDeltasInputOffset=$L.Input.KmDeltas;MomentSites=$L.MomentSites}}
 }
