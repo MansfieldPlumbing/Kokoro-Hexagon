@@ -909,7 +909,7 @@ function Test-KokoroDecoderConstants {
 # not reach x).
 function Test-KokoroDecoderDelayEquivalence {
     param([Parameter(Mandatory)][string]$OutputDirectory,[string]$Soc='SM8550',[string]$Package='dev.mansfieldplumbing.kokoro',
-        [ValidateRange(2,4096)][int[]]$Frames=@(100,118),[ValidateSet('Whole','Spans','RuntimeSpans')][string[]]$Schedules=@('Whole','Spans'),
+        [ValidateRange(2,4096)][int[]]$Frames=@(100,118),[ValidateSet('Whole','Spans','RuntimeSpans','Stream')][string[]]$Schedules=@('Whole','Spans'),
         [ValidateRange(2,4096)][int]$Capacity=512,
         [string]$Capture=(Join-Path $Build 'stock-decoder-capture-cal-af_heart-20261008'),
         [string]$DecoderPlan=(Join-Path $Build 'decoder16-plan-af_heart-f128'),
@@ -942,7 +942,7 @@ function Test-KokoroDecoderDelayEquivalence {
         for($t0=0;$t0 -lt 2*$f;$t0+=2*$total){ $n=[math]::Min(2*$total,2*$f-$t0); [Array]::Copy($pitch,0,$p,$t0,$n); [Array]::Copy($energy,0,$e,$t0,$n) }
         $directory=Join-Path $out "frames-$f"; [void][IO.Directory]::CreateDirectory($directory)
         foreach($name in 'tables.bin','weights.bin'){ [IO.File]::Copy((Join-Path $DecoderPlan $name),(Join-Path $directory $name)) }
-        $fixedInput=if($f -le $layerLimit -or @($Schedules | Where-Object { $_ -ne 'RuntimeSpans' }).Count){ & $pack $a $p $e $f (Get-KokoroDecoder16Layout -Frames $f) }
+        $fixedInput=if($f -le $layerLimit -or @($Schedules | Where-Object { $_ -in 'Whole','Spans' }).Count){ & $pack $a $p $e $f (Get-KokoroDecoder16Layout -Frames $f) }
         # The reference: the layer job, or past its limit the layer job at its limit in chunks.
         if($f -le $layerLimit){
             $reference=& $runJob @{DecoderFrames=$f;DecoderMoments='Direct'} $fixedInput $directory; $reference | Add-Member Kind 'Layer'
@@ -956,6 +956,21 @@ function Test-KokoroDecoderDelayEquivalence {
                 Emission=[pscustomobject]@{LibrarySHA256=(@($libraries) -join ';')};OutputPath=($paths -join ';')}
         }
         $jobs=foreach($schedule in $Schedules){
+            if($schedule -eq 'Stream'){
+                # Stream steps of 96 frames over the input, enough to return x past the compared ticks; state carried from
+                # each step's output to the next step's input; the whole stream run twice.
+                $streamLayout=Get-KokoroDecoder16Layout -Frames 96 -Delayed -Spans -Stream; $streamCoefficients=ConvertTo-KokoroDecoderCoefficients -Tables $constants -Layout $streamLayout
+                $parameters=@{DecoderFrames=96;DecoderMoments='Direct';DecoderDelayed=$true;DecoderSpans=$true;DecoderStream=$true}
+                $emission=Invoke-KokoroEmission -Kernel KokoroDecoder16Run -Parameters $parameters
+                $steps=[int][math]::Ceiling(([math]::Floor(($f+5)/16)+2)/6)   # through x tile (last compared pair + the one-tile control) / 16
+                $stepRun={ param([byte[]]$Activation) $r=& $runJob $parameters $Activation $directory; [pscustomobject]@{Output=$r.Output;DspMs=$r.DspMs} }
+                $passes=foreach($pass in 1,2){ Invoke-KokoroDecoderStream -Aligned $a -Pitch $p -Energy $e -Steps $steps -Layout $emission.Layout -AsrScales ([double[]]$plan.AsrScales) `
+                    -F0CurveScale ([double]$plan.F0CurveScale) -NCurveScale ([double]$plan.NCurveScale) -Coefficients $streamCoefficients -RunStep $stepRun }
+                $job=[pscustomobject]@{Emission=$emission;Output=$passes[0].XCroutons;OutputOffset=0L;DspMs=($passes[0].StepDspMs | Measure-Object -Sum).Sum;OutputPath=''
+                    AlignPairs=0;ControlPairs=16;ComparePairs=($f-10);Steps=$steps;StepDspMs=$passes[0].StepDspMs;StateBytes=$passes[0].StateBytes
+                    ReplayIdentical=[Linq.Enumerable]::SequenceEqual([byte[]]$passes[0].XCroutons,[byte[]]$passes[1].XCroutons)}
+                $job | Add-Member Schedule $schedule; $job; continue
+            }
             if($schedule -eq 'RuntimeSpans'){
                 $rl=Get-KokoroDecoder16Layout -Frames $Capacity -Delayed -Spans
                 $job=& $runJob @{DecoderFrames=$Capacity;DecoderRuntimeFrames=$true;DecoderMoments='Direct';DecoderDelayed=$true;DecoderSpans=$true} (& $pack $a $p $e $Capacity $rl) $directory
@@ -969,26 +984,31 @@ function Test-KokoroDecoderDelayEquivalence {
         $layer=$reference.Output; $refAt=$reference.OutputOffset
         foreach($job in $jobs){
         $delayedOutput=$job.Output; $at=$job.OutputOffset; $delayTicks=[int]$job.Emission.Layout.OutputDelayTicks
+        # Stream x is already at tick 0; it is compared up to the reference's own end lookahead (20 ticks before it).
+        $alignPairs=if($null -ne $job.PSObject.Properties['AlignPairs']){$job.AlignPairs}else{$delayTicks/2}
+        $controlPairs=if($null -ne $job.PSObject.Properties['ControlPairs']){$job.ControlPairs}else{0}
+        $comparePairs=if($null -ne $job.PSObject.Properties['ComparePairs']){$job.ComparePairs}else{$f}
         # Different bytes of reference x against delayed x read Shift row pairs later, and the first one.
         $compare={param([int]$shift) $different=0L; $first=$null
-            for($pair=0;$pair -lt $f;$pair++){ $q=$pair+$shift
+            for($pair=0;$pair -lt $comparePairs;$pair++){ $q=$pair+$shift
                 for($block=0;$block -lt 16;$block++){
                     $ra=$refAt+32768L*($pair -shr 4)+2048L*$block+128L*($pair -band 15); $ca=$at+32768L*($q -shr 4)+2048L*$block+128L*($q -band 15)
                     if([Linq.Enumerable]::SequenceEqual([ArraySegment[byte]]::new($layer,$ra,128),[ArraySegment[byte]]::new($delayedOutput,$ca,128))){ continue }
                     for($k=0;$k -lt 128;$k++){ if($layer[$ra+$k] -ne $delayedOutput[$ca+$k]){ $different++
                         if($null -eq $first){ $first=[pscustomobject]@{Tick=(2*$pair+(($k -shr 1) -band 1));Channel=(32*$block+($k -shr 2))} } } } } }
             [pscustomobject]@{Different=$different;First=$first} }
-        $shifted=& $compare ($delayTicks/2); $unshifted=& $compare 0
+        $shifted=& $compare $alignPairs; $unshifted=& $compare $controlPairs
         # Controls: x is not the zero fill, and the comparison without the delay finds differences.
         $zeroVector=[byte[]]::new(128); for($k=0;$k -lt 128;$k+=2){ $zeroVector[$k+1]=0x80 }; $live=0
         for($v=0;$v -lt 16*$f;$v++){ if(-not [Linq.Enumerable]::SequenceEqual([ArraySegment[byte]]::new($layer,$refAt+128L*$v,128),$zeroVector)){ $live++ } }
-        [pscustomobject]@{Frames=$f;Schedule=$job.Schedule;Reference=$reference.Kind;Ticks=2*$f;OutputDelayTicks=$delayTicks;ComparedBytes=2048L*$f;DifferentBytes=$shifted.Different;FirstDifference=$shifted.First
+        [pscustomobject]@{Frames=$f;Schedule=$job.Schedule;Reference=$reference.Kind;Ticks=2*$f;OutputDelayTicks=$delayTicks;ComparedBytes=2048L*$comparePairs;
+            Steps=$job.Steps;StepDspMs=$job.StepDspMs;StateBytes=$job.StateBytes;ReplayIdentical=$job.ReplayIdentical;DifferentBytes=$shifted.Different;FirstDifference=$shifted.First
             UnshiftedDifferentBytes=$unshifted.Different;NonZeroVectors=$live;Vectors=16*$f;DelayedVtcmBytes=$job.Emission.Layout.VtcmBytes
             LayerLibrarySHA256=$reference.Emission.LibrarySHA256;DelayedLibrarySHA256=$job.Emission.LibrarySHA256;LayerDspMs=$reference.DspMs;DelayedDspMs=$job.DspMs
             LayerOutputPath=$reference.OutputPath;DelayedOutputPath=$job.OutputPath}
         }
     }
-    $result=[pscustomobject]@{PSTypeName='Kokoro.DecoderDelayEquivalence';Status=$(if(@($rows | Where-Object { $_.DifferentBytes -ne 0 -or $_.UnshiftedDifferentBytes -eq 0 -or $_.NonZeroVectors -eq 0 }).Count){'Failed'}else{'Passed'});Soc=$Soc
+    $result=[pscustomobject]@{PSTypeName='Kokoro.DecoderDelayEquivalence';Status=$(if(@($rows | Where-Object { $_.DifferentBytes -ne 0 -or $_.UnshiftedDifferentBytes -eq 0 -or $_.NonZeroVectors -eq 0 -or $_.ReplayIdentical -eq $false }).Count){'Failed'}else{'Passed'});Soc=$Soc
         Capture=[IO.Path]::GetFileName($Capture);DecoderBase=$DecoderBase;Rows=@($rows)}
     $result | Export-Clixml -LiteralPath (Join-Path $out 'decoder-delay-equivalence.clixml') -Depth 5
     $result

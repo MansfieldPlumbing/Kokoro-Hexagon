@@ -644,6 +644,57 @@ function ConvertFrom-KokoroDelayedCroutons {
             [Array]::Copy($Output, $Offset + 32768L * ($q -shr 4) + 2048L * $block + 128L * ($q -band 15), $x, 32768L * ($pair -shr 4) + 2048L * $block + 128L * ($pair -band 15), 128) } }
     , $x
 }
+function ConvertTo-KokoroDecoderStepInput {
+    # One decoder stream step's input (Get-KokoroDecoder16Layout -Stream): the step's aligned encoding [channel][frame]
+    # (512 x StepFrames) as 16-bit croutons at the plan's input units, the f0 and N curves (two values per frame) of the
+    # step and ContextFrames frames before it, the first-step flag, each site's K/M, and the previous step's state.
+    param([Parameter(Mandatory)][float[]]$Aligned, [Parameter(Mandatory)][float[]]$Pitch, [Parameter(Mandatory)][float[]]$Energy,
+        [Parameter(Mandatory)][int]$StepFrames, [Parameter(Mandatory)][int]$ContextFrames, [Parameter(Mandatory)][long]$InputBytes,
+        [Parameter(Mandatory)][long]$F0Offset, [Parameter(Mandatory)][long]$NOffset, [Parameter(Mandatory)][long]$FlagOffset, [bool]$FirstStep,
+        [Parameter(Mandatory)][double[]]$AsrScales, [Parameter(Mandatory)][double]$F0CurveScale, [Parameter(Mandatory)][double]$NCurveScale,
+        [Parameter(Mandatory)][byte[]]$Coefficients, [Parameter(Mandatory)][long]$CoefficientsOffset, [byte[]]$State = $null, [long]$StateOffset = 0)
+    if ($Aligned.Length -ne 512 * $StepFrames) { throw "A step's aligned encoding is 512 x $StepFrames." }
+    if ($Pitch.Length -ne 2 * ($StepFrames + $ContextFrames) -or $Energy.Length -ne $Pitch.Length) { throw 'A step takes the f0 and N curves of its frames and its context frames.' }
+    if (-not $FirstStep -and $null -eq $State) { throw 'Every step after the first takes the previous step''s state.' }
+    $activation = [byte[]]::new($InputBytes)
+    $croutons = [byte[]]::new($StepFrames / 32 * 32768L); $zero = [uint16[]]::new($croutons.Length / 2); [Array]::Fill($zero, [uint16]0x8000); [Buffer]::BlockCopy($zero, 0, $croutons, 0, $croutons.Length)
+    (Get-QuantizeCroutons16Kernel).Invoke($Aligned, $StepFrames, $AsrScales, $croutons); [Array]::Copy($croutons, $activation, $croutons.Length)
+    foreach ($pair in @(@($Pitch, $F0Offset, $F0CurveScale), @($Energy, $NOffset, $NCurveScale))) {
+        for ($i = 0; $i -lt $Pitch.Length; $i++) { [Array]::Copy([BitConverter]::GetBytes([int][math]::Round([double]$pair[0][$i] / $pair[2], [MidpointRounding]::ToEven)), 0, $activation, $pair[1] + 4 * $i, 4) } }
+    [Array]::Copy([BitConverter]::GetBytes([int]$(if ($FirstStep) { 1 } else { 0 })), 0, $activation, $FlagOffset, 4)
+    [Array]::Copy($Coefficients, 0, $activation, $CoefficientsOffset, $Coefficients.Length)
+    if (-not $FirstStep) { [Array]::Copy($State, 0, $activation, $StateOffset, $State.Length) }
+    , $activation
+}
+
+function Invoke-KokoroDecoderStream {
+    # Steps of the decoder stream over a timeline of aligned encodings ([channel][frame], 512 x frames) and curves (two
+    # values per frame): step s takes frames 96s .. 96s + 95 (zero past the timeline) with the curves' context before
+    # them, and the state step s - 1 returned. -RunStep (activation) runs one step and returns Output and DspMs. Step s
+    # returns x tiles 6s - 1 .. 6s + 4 (its output is OutputDelayTicks = 32 late); the stream's x croutons begin at tick 0.
+    param([Parameter(Mandatory)][float[]]$Aligned, [Parameter(Mandatory)][float[]]$Pitch, [Parameter(Mandatory)][float[]]$Energy,
+        [Parameter(Mandatory)][ValidateRange(1, 1000000)][int]$Steps, [Parameter(Mandatory)]$Layout,
+        [Parameter(Mandatory)][double[]]$AsrScales, [Parameter(Mandatory)][double]$F0CurveScale, [Parameter(Mandatory)][double]$NCurveScale,
+        [Parameter(Mandatory)][byte[]]$Coefficients, [Parameter(Mandatory)][scriptblock]$RunStep)
+    $frames = [int]($Aligned.Length / 512); $step = [int]$Layout.StepFrames; $context = [int]$Layout.CurveContextFrames
+    $tiles = [int]($Layout.XBytes / 32768); $late = [int]($Layout.OutputDelayTicks / 32)
+    if ($late * 32 -ne $Layout.OutputDelayTicks) { throw 'The stream step''s output delay is not whole tiles.' }
+    $x = [byte[]]::new([long]($Steps * $tiles - $late) * 32768); $state = $null; $dspMs = [Collections.Generic.List[double]]::new()
+    for ($s = 0; $s -lt $Steps; $s++) {
+        $a = [float[]]::new(512 * $step); $n = [math]::Max(0, [math]::Min($step, $frames - $step * $s))
+        if ($n -gt 0) { for ($c = 0; $c -lt 512; $c++) { [Array]::Copy($Aligned, $c * $frames + $step * $s, $a, $c * $step, $n) } }
+        $p = [float[]]::new(2 * ($step + $context)); $e = [float[]]::new($p.Length)
+        for ($i = 0; $i -lt $p.Length; $i++) { $at = 2 * ($step * $s - $context) + $i; if ($at -ge 0 -and $at -lt $Pitch.Length) { $p[$i] = $Pitch[$at]; $e[$i] = $Energy[$at] } }
+        $activation = ConvertTo-KokoroDecoderStepInput -Aligned $a -Pitch $p -Energy $e -StepFrames $step -ContextFrames $context -InputBytes $Layout.InputBytes `
+            -F0Offset $Layout.F0Offset -NOffset $Layout.NOffset -FlagOffset $Layout.FramesOffset -FirstStep ($s -eq 0) -AsrScales $AsrScales -F0CurveScale $F0CurveScale -NCurveScale $NCurveScale `
+            -Coefficients $Coefficients -CoefficientsOffset $Layout.CoefficientsOffset -State $state -StateOffset $Layout.StateInOffset
+        $run = & $RunStep $activation
+        $output = [byte[]]$run.Output; $dspMs.Add([double]$run.DspMs)
+        for ($k = 0; $k -lt $tiles; $k++) { $tile = $tiles * $s - $late + $k; if ($tile -ge 0) { [Array]::Copy($output, [long]$Layout.OutputOffset + 32768L * $k, $x, 32768L * $tile, 32768) } }
+        $state = [byte[]]::new($Layout.StateBytes); [Array]::Copy($output, [long]$Layout.StateOutOffset, $state, 0, $state.Length)
+    }
+    [pscustomobject]@{ PSTypeName = 'Kokoro.DecodedStream'; Steps = $Steps; XCroutons = $x; Ticks = 32 * ($Steps * $tiles - $late); StepDspMs = $dspMs.ToArray(); StateBytes = [long]$Layout.StateBytes }
+}
 function Invoke-KokoroDecoderChunks {
     # A stream of any length decoded in chunks of -Interior frames (a multiple of 16, so chunks join on whole 32-tick
     # tiles) with -Halo frames each side, every chunk at most -Capacity frames. -RunChunk (aligned, f0, N slices) runs one
@@ -688,4 +739,4 @@ function ConvertFrom-KokoroPcm16 {
     , $pcm
 }
 
-Export-ModuleMember -Function ConvertTo-KokoroDecoderInput, ConvertFrom-KokoroDelayedCroutons, Invoke-KokoroDecoderChunks, ConvertTo-KokoroGeneratorInput, ConvertFrom-KokoroPcm16, Get-ClampedErrorKernel, Get-SaturatedCountKernel, Get-CrossProductKernel, Get-MatrixApplyKernel, Get-FoldConvWeightsKernel, Get-QuantizeRowsKernel, Get-SplitPlanesKernel, Get-LowLowWindowShapedKernel, Get-Conv1dKernel, Get-PackWeightPlanesShapedKernel, Get-LowLowWindowKernel, Get-QuantizeCroutons16Kernel, Get-PackWeightPlanesKernel, Get-Mean3Kernel, Get-Croutons16ErrorKernel, Get-ChannelStatsKernel, Get-ColumnPeaksKernel, Get-DecodeCroutons16Kernel, Get-InterleavePlanesKernel, Get-Fp16CroutonsKernel, Get-PackFp16WeightsKernel, Get-GeneratorCoefficientsKernel, Get-Fp16ConversionTableKernel
+Export-ModuleMember -Function ConvertTo-KokoroDecoderInput, ConvertFrom-KokoroDelayedCroutons, ConvertTo-KokoroDecoderStepInput, Invoke-KokoroDecoderStream, Invoke-KokoroDecoderChunks, ConvertTo-KokoroGeneratorInput, ConvertFrom-KokoroPcm16, Get-ClampedErrorKernel, Get-SaturatedCountKernel, Get-CrossProductKernel, Get-MatrixApplyKernel, Get-FoldConvWeightsKernel, Get-QuantizeRowsKernel, Get-SplitPlanesKernel, Get-LowLowWindowShapedKernel, Get-Conv1dKernel, Get-PackWeightPlanesShapedKernel, Get-LowLowWindowKernel, Get-QuantizeCroutons16Kernel, Get-PackWeightPlanesKernel, Get-Mean3Kernel, Get-Croutons16ErrorKernel, Get-ChannelStatsKernel, Get-ColumnPeaksKernel, Get-DecodeCroutons16Kernel, Get-InterleavePlanesKernel, Get-Fp16CroutonsKernel, Get-PackFp16WeightsKernel, Get-GeneratorCoefficientsKernel, Get-Fp16ConversionTableKernel
