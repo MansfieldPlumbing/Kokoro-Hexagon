@@ -40,6 +40,10 @@ twice, or written as a scratch script, is a missing command: add it here.
                               distance, mel-cepstral distortion, loudness envelope, YIN f0 and voicing, HNR; with
                               -OutputDirectory also spectrogram, difference, pitch and envelope PNGs; with a yardstick
                               (a render the same by construction, e.g. another seed) the same measures for scale.
+  PhoneSpeech -Parameters @{Text=<sentence>; Runs=3} [-Soc] [-OutputDirectory]
+                              Text to WAV on the phone in one process: our phonemizer and the stock front end on the CPU,
+                              the decoder and the generator on the DSP (each on its voice base); per-stage times, the WAV,
+                              and a comparison with the same text rendered from the host front end.
   StockCapture [-Block albert|decoder|generator] [-Phonemes] [-Voice] [-Seed] [-PhonemesFrom capture] [-DecoderInput json] [-OutputDirectory]
                               Run pinned stock PyTorch Kokoro on Windows (reference only) and record one block's tensors
                               under build/ with source, checkpoint and voice integrity checks. -PhonemesFrom reuses the phonemes,
@@ -111,7 +115,7 @@ pwsh -NoProfile -File ./Invoke-KokoroDevelopment.ps1 Run -Case timing-passage-0-
 [CmdletBinding()]
 param(
     [Parameter(Position = 0)]
-    [ValidateSet('Status', 'Verify', 'LineEndings', 'BuildHost','Ratchet', 'Run', 'Emit', 'Check', 'Compare', 'JobInput', 'Capture', 'MeasureAudio', 'CompareAudio', 'StockCapture', 'Speak', 'FrontEnd', 'PrecomputedDecoder', 'Student', 'Zira', 'Albert', 'AlbertError', 'AlbertLinear', 'AlbertLayerNorm', 'AlbertGelu', 'AlbertAttention', 'AlbertEmbed', 'AlbertJob', 'Api', 'Find', 'Tools', 'StageResidency', 'CopySynthesis', 'WeightAssembly')]
+    [ValidateSet('Status', 'Verify', 'LineEndings', 'BuildHost','Ratchet', 'Run', 'Emit', 'Check', 'Compare', 'JobInput', 'Capture', 'MeasureAudio', 'CompareAudio', 'PhoneSpeech', 'StockCapture', 'Speak', 'FrontEnd', 'PrecomputedDecoder', 'Student', 'Zira', 'Albert', 'AlbertError', 'AlbertLinear', 'AlbertLayerNorm', 'AlbertGelu', 'AlbertAttention', 'AlbertEmbed', 'AlbertJob', 'Api', 'Find', 'Tools', 'StageResidency', 'CopySynthesis', 'WeightAssembly')]
     [string] $Command = 'Status',
     [string] $Case,
     [string] $Kernel,
@@ -1730,15 +1734,8 @@ function New-KokoroSpeechRenderer {
         if($Kind -ceq 'Export'){ $parameters+=@{ResidentBatchTiles=22;GeneratorMoments='Export';GeneratorSchedule='Layer'}; return Invoke-KokoroEmission -Kernel KokoroGenerator60x16Run -Parameters $parameters }
         Invoke-KokoroGeneratorDepthFirstEmission -Parameters ($parameters+@{ResidentBatchTiles=4;GeneratorMoments='Constants';GeneratorSchedule='Backward';GeneratorWeightPlanes=1}) }
     $renderer | Add-Member -MemberType ScriptMethod -Name GeneratorInput -Value { param($Emission,[byte[]]$XCroutons,[float[]]$Pitch,[int]$Ticks)
-        # x croutons (ceil(ticks / 32) tiles of 512 channels), f0 as int32 Q16 Hz per tick, the noise seed and scale.
-        $xBytes=[long][math]::Ceiling($Ticks/32)*32768; $f0Bytes=[long][math]::Ceiling(4*$Ticks/128)*128
-        if($Pitch.Length -ne $Ticks -or $XCroutons.Length -lt $xBytes){throw 'The generator input needs x for every tick and one f0 per tick.'}
         $noise=$Emission.Layout.SourceNoise; if(-not $noise.Seeded){throw 'The renderer job has no seeded noise.'}
-        $activation=[byte[]]::new($Emission.Layout.InputBytes); [Array]::Copy($XCroutons,$activation,$xBytes)
-        $f0At=[long]$noise.InputOffset-$f0Bytes
-        for($t=0;$t -lt $Ticks;$t++){ [Array]::Copy([BitConverter]::GetBytes([int][math]::Round([double]$Pitch[$t]*65536)),0,$activation,$f0At+4*$t,4) }
-        [Array]::Copy([BitConverter]::GetBytes([uint32]$this.Seed),0,$activation,[long]$noise.InputOffset,4); [Array]::Copy([BitConverter]::GetBytes([int]$this.NoiseScale),0,$activation,[long]$noise.InputOffset+4,4)
-        ,$activation }
+        ConvertTo-KokoroGeneratorInput -XCroutons $XCroutons -Pitch $Pitch -Ticks $Ticks -InputBytes $Emission.Layout.InputBytes -NoiseOffset $noise.InputOffset -Seed $this.Seed -NoiseScale $this.NoiseScale }
     $renderer | Add-Member -MemberType ScriptMethod -Name EncodeX -Value { param([float[]]$X,[int]$Ticks)
         $croutons=[byte[]]::new([long][math]::Ceiling($Ticks/32)*32768); $z=[uint16[]]::new($croutons.Length/2); [Array]::Fill($z,[uint16]0x8000); [Buffer]::BlockCopy($z,0,$croutons,0,$croutons.Length)
         (Get-QuantizeCroutons16Kernel).Invoke($X,$Ticks,$this.OutputUnits,$croutons); ,$croutons }
@@ -1776,22 +1773,14 @@ function New-KokoroSpeechRenderer {
     # One decoder job over at most Capacity frames: Accumulate (moments measured in the job), Export (also returns them and
     # the coefficients) or Constants (normalization supplied in -Tables).
     $renderer | Add-Member -MemberType ScriptMethod -Name DecoderRun -Value { param([float[]]$Aligned,[float[]]$Pitch,[float[]]$Energy,[string]$Moments='Accumulate',[byte[]]$Tables=$null,[byte[]]$Coefficients=$null)
-        $frames=[int]($Aligned.Length/512)
-        if($frames -lt 2 -or $frames -gt $this.Capacity){throw "The decoder plan holds $($this.Capacity) frames; this stream has $frames."}
-        if($Pitch.Length -ne 2*$frames -or $Energy.Length -ne 2*$frames){throw 'Decode needs the f0 and N curves at two values per frame.'}
-        $emission=Invoke-KokoroEmission -Kernel KokoroDecoder16Run -Parameters @{DecoderFrames=$this.Capacity;DecoderRuntimeFrames=$true;DecoderMoments=$Moments}
-        $layout=$emission.Layout; $tiles=[int]$layout.Tiles; $curveBytes=[long][math]::Ceiling(8*$this.Capacity/128)*128
-        $activation=[byte[]]::new($layout.InputBytes)
-        $croutons=[byte[]]::new($tiles*32768L); $z=[uint16[]]::new($croutons.Length/2); [Array]::Fill($z,[uint16]0x8000); [Buffer]::BlockCopy($z,0,$croutons,0,$croutons.Length)
-        $padded=[float[]]::new(512*$this.Capacity); for($c=0;$c -lt 512;$c++){ [Array]::Copy($Aligned,$c*$frames,$padded,$c*$this.Capacity,$frames) }
-        (Get-QuantizeCroutons16Kernel).Invoke($padded,$this.Capacity,$this.AsrScales,$croutons); [Array]::Copy($croutons,$activation,$croutons.Length)
-        foreach($pair in @(@($Pitch,($tiles*32768L),$this.F0CurveScale),@($Energy,($tiles*32768L+$curveBytes),$this.NCurveScale))){
-            for($i=0;$i -lt 2*$frames;$i++){ [Array]::Copy([BitConverter]::GetBytes([int][math]::Round([double]$pair[0][$i]/$pair[2],[MidpointRounding]::ToEven)),0,$activation,$pair[1]+4*$i,4) } }
-        [Array]::Copy([BitConverter]::GetBytes([int]$frames),0,$activation,[long]$layout.FramesOffset,4)
+        $emission=$this.DecoderEmission($Moments); $layout=$emission.Layout
         # Direct: every site's K/M (ConvertTo-KokoroDecoderCoefficients) in the input's KmDeltas region.
-        if($Moments -eq 'Direct'){ [Array]::Copy($Coefficients,0,$activation,[long]$this.DecoderLayout.Input.KmDeltas,$Coefficients.Length) }
+        $direct=if($Moments -eq 'Direct'){ @{Coefficients=$Coefficients;CoefficientsOffset=[long]$this.DecoderLayout.Input.KmDeltas} }else{ @{} }
+        $activation=ConvertTo-KokoroDecoderInput -Aligned $Aligned -Pitch $Pitch -Energy $Energy -Capacity $this.Capacity -Tiles $layout.Tiles -InputBytes $layout.InputBytes -FramesOffset $layout.FramesOffset -AsrScales $this.AsrScales -F0CurveScale $this.F0CurveScale -NCurveScale $this.NCurveScale @direct
         $job=$this.Run($emission,$activation,$(if($null -ne $Tables){$Tables}else{$this.DecoderTables}),$this.DecoderWeights,$false)
-        [pscustomobject]@{Job=$job;Layout=$layout;Frames=$frames} }
+        [pscustomobject]@{Job=$job;Layout=$layout;Frames=[int]($Aligned.Length/512)} }
+    $renderer | Add-Member -MemberType ScriptMethod -Name DecoderEmission -Value { param([string]$Moments)
+        Invoke-KokoroEmission -Kernel KokoroDecoder16Run -Parameters @{DecoderFrames=$this.Capacity;DecoderRuntimeFrames=$true;DecoderMoments=$Moments} }
     # The decoder's x for a stream. Without -Constants one job measures the stream's own moments (at most Capacity
     # frames). With -Constants (a decoder constants table: an export's or a voice base) any length decodes in chunks of
     # -Interior frames (a multiple of 16, so chunks join on whole 32-tick tiles) with 16 frames of halo each side.
@@ -1804,21 +1793,12 @@ function New-KokoroSpeechRenderer {
             $xBytes=[long][math]::Ceiling(2*$frames/32)*32768; $x=[byte[]]::new($xBytes); [Array]::Copy($run.Job.Output,[long]$run.Layout.OutputOffset,$x,0,$xBytes)
             return [pscustomobject]@{PSTypeName='Kokoro.DecodedSpeech';Frames=$frames;Ticks=2*$frames;XCroutons=$x;DspMs=$run.Job.MedianMs;Chunks=1}
         }
-        $halo=16; if($Interior -le 0){ $Interior=$this.Capacity-2*$halo }
-        if($Interior % 16 -or $Interior+2*$halo -gt $this.Capacity){throw "Decoder chunks need an interior that is a multiple of 16 frames and fits $($this.Capacity) frames with its halo."}
-        $x=[byte[]]::new([long][math]::Ceiling(2*$frames/32)*32768); $dspMs=0.0; $chunks=0
         if($null -eq $this.DecoderLayout){ . (Join-Path $Root 'src/jobs/Kokoro.DecoderRun16.ps1'); $this.DecoderLayout=Get-KokoroDecoder16Layout -Frames $this.Capacity }
         $coefficients=if($Mode -eq 'Direct'){ ConvertTo-KokoroDecoderCoefficients -Tables $Constants -Layout $this.DecoderLayout }else{ $null }
-        $slice={param([float[]]$Values,[int]$Channels,[int]$T,[int]$A,[int]$B) $n=$B-$A; $r=[float[]]::new($Channels*$n); for($c=0;$c -lt $Channels;$c++){ [Array]::Copy($Values,$c*$T+$A,$r,$c*$n,$n) }; ,$r}
-        for($a=0;$a -lt $frames;$a+=$Interior){
-            $b=[math]::Min($frames,$a+$Interior); $lo=[math]::Max(0,$a-$halo); $hi=[math]::Min($frames,$b+$halo)
-            $run=$this.DecoderRun((& $slice $Aligned 512 $frames $lo $hi),(& $slice $Pitch 1 (2*$frames) (2*$lo) (2*$hi)),(& $slice $Energy 1 (2*$frames) (2*$lo) (2*$hi)),$Mode,$Constants,$coefficients)
-            # Interior ticks [2a, 2b) start on a tile boundary in both the chunk's output and the stream's.
-            $bytes=[long][math]::Ceiling(2*($b-$a)/32)*32768
-            [Array]::Copy($run.Job.Output,[long]$run.Layout.OutputOffset+(2L*($a-$lo)/32)*32768,$x,(2L*$a/32)*32768,[math]::Min($bytes,$x.Length-(2L*$a/32)*32768))
-            $dspMs+=$run.Job.MedianMs; $chunks++
-        }
-        [pscustomobject]@{PSTypeName='Kokoro.DecodedSpeech';Frames=$frames;Ticks=2*$frames;XCroutons=$x;DspMs=$dspMs;Chunks=$chunks} }
+        $self=$this
+        $chunk={ param([float[]]$ChunkAligned,[float[]]$ChunkPitch,[float[]]$ChunkEnergy) $run=$self.DecoderRun($ChunkAligned,$ChunkPitch,$ChunkEnergy,$Mode,$Constants,$coefficients)
+            [pscustomobject]@{Output=$run.Job.Output;OutputOffset=$run.Layout.OutputOffset;DspMs=$run.Job.MedianMs} }
+        Invoke-KokoroDecoderChunks -Aligned $Aligned -Pitch $Pitch -Energy $Energy -Capacity $this.Capacity -Interior $Interior -RunChunk $chunk }
     # A stretch of exactly Capacity frames: its exported decoder moments as a constants table and their terms.
     $renderer | Add-Member -MemberType ScriptMethod -Name DecoderConstants -Value { param([float[]]$Aligned,[float[]]$Pitch,[float[]]$Energy)
         if([int]($Aligned.Length/512) -ne $this.Capacity){throw "Decoder constants are exported from stretches of exactly $($this.Capacity) frames."}
@@ -1841,14 +1821,19 @@ function New-KokoroSpeechRenderer {
         ,$table }
     $renderer | Add-Member -MemberType ScriptMethod -Name Render -Value { param([byte[]]$XCroutons,[float[]]$Pitch,[int]$Ticks,[byte[]]$Constants,[object]$Resident=$null)
         $onResident=if($null -eq $Resident){[bool]$this.ResidentRenders}else{[bool]$Resident}
+        $generator=$this.GeneratorJob($Ticks,$Constants); $emission=$generator.Emission
+        $job=$this.Run($emission,$this.GeneratorInput($emission,$XCroutons,$Pitch,$Ticks),$generator.Tables,$generator.Weights,-not $onResident)
+        $pcm=ConvertFrom-KokoroPcm16 -Output $job.Output -Offset $emission.Layout.PcmOffset -Samples (300*$Ticks)
+        [pscustomobject]@{PSTypeName='Kokoro.GeneratorRendering';Ticks=$Ticks;Pcm=$pcm;DspMs=$job.MedianMs;LibrarySHA256=$emission.LibrarySHA256} }
+    # The depth-first generator job for Ticks with supplied normalization (-Constants): its emission, tables (the int8
+    # corrections and host coefficients applied) and int8 weights.
+    $renderer | Add-Member -MemberType ScriptMethod -Name GeneratorJob -Value { param([int]$Ticks,[byte[]]$Constants)
         $emission=$this.GeneratorEmission($Ticks,'Constants')
         if($null -eq $this.Int8){ $this.Int8=ConvertTo-KokoroGeneratorInt8 -Tables $Constants -WeightBytes $this.Weights -Layout $emission.Layout -IncludeSource -CacheDirectory (Join-Path $Build 'generator-int8') }
         $tables=[byte[]]$Constants.Clone(); $corrections=$this.Int8.Corrections
         for($i=0;$i -lt $corrections.Length;$i+=2){ $at=[int]$corrections[$i]; [Array]::Copy([BitConverter]::GetBytes([int]([long][BitConverter]::ToInt32($tables,$at)+$corrections[$i+1])),0,$tables,$at,4) }
         $tables=Add-KokoroGeneratorHostCoefficients -Tables $tables -Layout $emission.Layout
-        $job=$this.Run($emission,$this.GeneratorInput($emission,$XCroutons,$Pitch,$Ticks),$tables,$this.Int8.Weights,-not $onResident)
-        $samples=300*$Ticks; $pcm=[float[]]::new($samples); for($i=0;$i -lt $samples;$i++){ $pcm[$i]=[BitConverter]::ToInt16($job.Output,$emission.Layout.PcmOffset+2*$i)/32768.0 }
-        [pscustomobject]@{PSTypeName='Kokoro.GeneratorRendering';Ticks=$Ticks;Pcm=$pcm;DspMs=$job.MedianMs;LibrarySHA256=$emission.LibrarySHA256} }
+        [pscustomobject]@{Emission=$emission;Tables=$tables;Weights=$this.Int8.Weights} }
     $renderer
 }
 
@@ -1875,6 +1860,91 @@ function Invoke-KokoroGeneratorScore {
     param([Parameter(Mandatory)][string]$OutputDirectory,[string]$Soc='SM8550',[string]$Package='dev.mansfieldplumbing.kokoro')
     $renderer=New-KokoroSpeechRenderer -OutputDirectory (Join-Path $OutputDirectory 'renderer') -Soc $Soc -Package $Package
     & (Join-Path $Root 'student/Invoke-Student.ps1') -Step Score -State $renderer -OutputPath $OutputDirectory
+}
+
+# Text to WAV on the phone in one process: our phonemizer and the stock front end on the CPU, the decoder (chunks on its
+# voice base) and the depth-first generator (on its voice base) on the DSP, all in the app's runspace
+# (src/runspace/KokoroGeneratorTailProbe.ps1 speech mode, packing shared with the renderer through
+# Kokoro.CaptureKernels.psm1). The host supplies what the phone does not build: the front end's prebuilt numeric kernels,
+# the decoder library and the generator library for this text's length, their tables and weights. The same text through
+# the host front end and the renderer is the reference the phone's WAV is compared with.
+function Invoke-KokoroPhoneSpeech {
+    param([Parameter(Mandatory)][string]$Text,[string]$OutputDirectory,[string]$Soc='SM8550',[string]$Package='dev.mansfieldplumbing.kokoro',[ValidateRange(1,20)][int]$Runs=3,
+        # The voice bases (a decoder constants table, DecoderVoiceBase; generator constants, VoiceBase); by default the newest under build/.
+        [string]$DecoderBase,[string]$GeneratorBase,
+        [string]$Phonemizer='build/phonemizer/english/driver/340D763896245937C41417BF7D3D197B6FE407AC750130B9299062E4D3152348-library-dll')
+    $out=if($OutputDirectory){[IO.Path]::GetFullPath($OutputDirectory)}else{Join-Path $Build ('phone-speech-{0:yyyyMMddTHHmmss}' -f [DateTime]::UtcNow)}
+    if(Test-Path -LiteralPath $out){throw "Output directory already exists: $out"}; [void][IO.Directory]::CreateDirectory($out)
+    $newest={param([string]$Given,[string]$Wildcard,[string]$What)
+        if($Given){ if(-not (Test-Path -LiteralPath $Given -PathType Leaf)){throw "$What not found: $Given"}; return [IO.Path]::GetFullPath($Given) }
+        $found=@(Get-ChildItem -Path (Join-Path $Build $Wildcard) -File -ErrorAction Ignore | Sort-Object LastWriteTime)
+        if(-not $found.Count){throw "No $What at build/$Wildcard; pass it explicitly."}; $found[-1].FullName }
+    $decoderBasePath=& $newest $DecoderBase 'streaming-decoder-*/decoder-base.bin' 'decoder voice base'
+    $generatorBasePath=& $newest $GeneratorBase 'student/voice/af_heart/adain-base-*.bin' 'generator voice base'
+    $decoderBaseBytes=[IO.File]::ReadAllBytes($decoderBasePath); $generatorBaseBytes=[IO.File]::ReadAllBytes($generatorBasePath)
+    $driverDirectory=Join-Path $Root $Phonemizer; $driverReceipt=Import-PowerShellDataFile (Join-Path $driverDirectory 'driver-receipt.psd1')
+    $driverPath=Join-Path $driverDirectory ([IO.Path]::GetFileName($driverReceipt.Output))
+    if((Get-FileHash -LiteralPath $driverPath).Hash -cne $driverReceipt.AssemblySha256){throw 'Compiled English phonemizer integrity mismatch.'}
+    $phonemize=[Reflection.Assembly]::LoadFrom($driverPath).GetType('CoreDriver',$true).GetMethod('Run').CreateDelegate([Func[string,object]])
+    # The host front end compiles the numeric kernels the phone loads prebuilt, and gives this text's tick count.
+    $port=New-Module -Name KokoroPhoneSpeechHost -ArgumentList (Join-Path $Root 'tools/Invoke-KokoroPrecomputedDecoder.ps1'),(Join-Path $out 'port'),8 -ScriptBlock {
+        param([string]$Reference,[string]$Output,[int]$WorkerThreads) . $Reference -Mode Library -OutputDirectory $Output -Threads $WorkerThreads; Export-ModuleMember -Function Invoke-OfflineSpeech,Write-OfflineWave }
+    try {
+        $phonemes=[string]$phonemize.Invoke($Text).KokoroPhones; if(-not $phonemes){throw 'The phonemizer gave no phonemes for this text.'}
+        $front=Invoke-OfflineSpeech -Phonemes $phonemes -Voice af_heart -SkipDecoder
+        $frames=[int](([int[]]$front.Durations | Measure-Object -Sum).Sum); $ticks=2*$frames
+        $renderer=New-KokoroSpeechRenderer -OutputDirectory (Join-Path $out 'renderer') -Soc $Soc -Package $Package
+        . (Join-Path $Root 'src/jobs/Kokoro.DecoderRun16.ps1'); $renderer.DecoderLayout=Get-KokoroDecoder16Layout -Frames $renderer.Capacity
+        $decoderEmission=$renderer.DecoderEmission('Direct'); $generator=$renderer.GeneratorJob($ticks,$generatorBaseBytes)
+        # Reference: the host front end's outputs through the renderer on the resident listener.
+        $decoded=$renderer.Decode([float[]]$front.Aligned,[float[]]$front.F0,[float[]]$front.N,$decoderBaseBytes,0)
+        $rendering=$renderer.Render($decoded.XCroutons,[float[]]$front.F0,$decoded.Ticks,$generatorBaseBytes)
+        $referenceWave=Join-Path $out 'reference.wav'; Write-OfflineWave $referenceWave $rendering.Pcm
+        Stop-KokoroDeviceSession
+        $kernelDll=@(Get-ChildItem (Join-Path $out 'port') -Recurse -Filter 'Kokoro.OfflineRender.dll')[0].FullName
+    } finally { Remove-Module -ModuleInfo $port -Force }
+    # The pack: the generator job's fixture (input of zeros, tables, weights) and the decoder's library, tables, weights
+    # and K/M, with the layout fields and units the phone packs inputs with.
+    $pack=Join-Path $out 'pack'; [void][IO.Directory]::CreateDirectory($pack)
+    $put={param([string]$Name,[byte[]]$Bytes) [IO.File]::WriteAllBytes((Join-Path $pack $Name),$Bytes)}
+    & $put 'activations.bin' ([byte[]]::new($generator.Emission.Layout.InputBytes)); & $put 'tables.bin' $generator.Tables; & $put 'weights.bin' $generator.Weights
+    [IO.File]::Copy($decoderEmission.Path,(Join-Path $pack 'decoder.so')); & $put 'decoder-tables.bin' $renderer.DecoderTables; & $put 'decoder-weights.bin' $renderer.DecoderWeights
+    & $put 'decoder-coefficients.bin' (ConvertTo-KokoroDecoderCoefficients -Tables $decoderBaseBytes -Layout $renderer.DecoderLayout)
+    [IO.File]::WriteAllText((Join-Path $pack 'speech-text.txt'),$Text)
+    $decoderLayout=$decoderEmission.Layout
+    [ordered]@{Voice='af_heart';Ticks=$ticks;DecoderCapacity=$renderer.Capacity;DecoderTiles=[int]$decoderLayout.Tiles;DecoderInputBytes=[long]$decoderLayout.InputBytes
+        DecoderFramesOffset=[long]$decoderLayout.FramesOffset;DecoderCoefficientsOffset=[long]$renderer.DecoderLayout.Input.KmDeltas;DecoderOutputBytes=[int]$decoderLayout.OutputBytes
+        DecoderPcmOffset=[int]$decoderLayout.PcmOffset;DecoderSamples=[int]$decoderLayout.Samples;DecoderOutputOffset=[long]$decoderLayout.OutputOffset
+        AsrScales=$renderer.AsrScales;F0CurveScale=$renderer.F0CurveScale;NCurveScale=$renderer.NCurveScale
+        NoiseOffset=[long]$generator.Emission.Layout.SourceNoise.InputOffset;Seed=[uint32]$renderer.Seed;NoiseScale=[int]$renderer.NoiseScale} |
+        ConvertTo-Json -Depth 3 | Set-Content -LiteralPath (Join-Path $pack 'speech-pack.json') -Encoding utf8NoBOM
+    # Files the phone loads besides the job's: the shared packing, the speech pack, and the front end in its repository layout.
+    $revision='f3ff3571791e39611d31c381e3a41a3af07b4987'
+    $encoderSource=Join-Path $Root 'src/frontend/Kokoro.TextEncoder.ps1'; $encoderDirectory="build/frontend/encoder/$((Get-FileHash -LiteralPath $encoderSource).Hash)/bb0f67a2bf16e54086c35ff96c0d8a5e523f0519"
+    $compiler='build/lowered-hexagon/compiler/6900FC735D5F463ECFDB0241B326D959CF7A8B8A252B56B1A7734F20D3BD9BD6/Export-LoweredAssembly.ps1'
+    $stage=@{'kokoro/Kokoro.CaptureKernels.psm1'=(Join-Path $Root 'tools/Kokoro.CaptureKernels.psm1')
+        'kokoro-frontend/build/prebuilt/Kokoro.OfflineRender.dll'=$kernelDll; 'kokoro-frontend/build/prebuilt/Phonemizer.dll'=$driverPath}
+    foreach($name in 'decoder.so','decoder-tables.bin','decoder-weights.bin','decoder-coefficients.bin','speech-text.txt','speech-pack.json'){ $stage["kokoro/generator-tail/$name"]=Join-Path $pack $name }
+    foreach($relative in 'tools/Invoke-KokoroPrecomputedDecoder.ps1','tools/Kokoro.TextEncoder.psm1','src/frontend/Kokoro.TextEncoder.ps1','src/runspace/Torch.Checkpoint.psm1','lib/manifest.json',
+        "build/inputs/kokoro/$revision/kokoro-v1_0.pth","build/inputs/kokoro/$revision/config.json","build/inputs/kokoro/$revision/voices/af_heart.pt",$compiler,"$encoderDirectory/Kokoro.TextEncoder.dll","$encoderDirectory/Kokoro.TextEncoder.dll.sha256"){
+        $local=Join-Path $Root $relative; if(-not (Test-Path -LiteralPath $local -PathType Leaf)){throw "Front-end file missing (run the host port once first): $relative"}
+        $stage["kokoro-frontend/$relative"]=$local }
+    Import-Evaluator
+    $lines=@(& (Join-Path $Root 'tools/Invoke-GeneratorTailProbe.ps1') -EmissionDirectory $generator.Emission.Directory -EmissionArtifact $generator.Emission -FixtureDirectory $pack -Soc $Soc -Runs $Runs -Package $Package -TimeoutSeconds 600 -Adb (Get-KokoroAdbClient) -Speech -StageFiles $stage 2>&1 | ForEach-Object { "$_" -split "`r?`n" })
+    $receiptText=$lines -join "`n"
+    if($receiptText -notmatch '(?m)^Passed=True\s*$' -or $receiptText -notmatch '(?m)^StartupRestored=True\s*$' -or $receiptText -notmatch '(?m)^SpeechPath=(\S+)'){ throw "Phone speech run failed: $(($lines | Select-Object -Last 4) -join ' | ')" }
+    $phoneWave=$Matches[1]
+    $speechRuns=@(foreach($line in $lines | Where-Object { $_ -like 'Speech Run=*' }){ $row=[ordered]@{}
+        foreach($field in $line.Substring(7).Split(' ')){ $pair=$field.Split('=',2); $row[$pair[0]]=if($pair[0] -ceq 'PcmSHA256'){$pair[1]}else{[double]::Parse($pair[1],[Globalization.CultureInfo]::InvariantCulture)} }
+        [pscustomobject]$row })
+    Import-Module (Join-Path $Root 'tools/Kokoro.AudioMeasurement.psm1')
+    $comparison=Compare-KokoroAudio -Reference $referenceWave -Candidate $phoneWave -ImageDirectory (Join-Path $out 'compare')
+    $result=[pscustomobject]@{PSTypeName='Kokoro.PhoneSpeech';Text=$Text;Phonemes=$phonemes.Length;Ticks=$ticks;AudioSeconds=$ticks/80.0;Runs=$speechRuns
+        LoadMs=$(if($receiptText -match '(?m)^SpeechLoadMs=(\S+)'){[double]$Matches[1]}); PhoneWave=$phoneWave;ReferenceWave=$referenceWave
+        ReferenceDecoderDspMs=$decoded.DspMs;ReferenceGeneratorDspMs=$rendering.DspMs;Comparison=$comparison
+        DecoderBase=$decoderBasePath;GeneratorBase=$generatorBasePath;GeneratorLibrarySHA256=$generator.Emission.LibrarySHA256;Lines=$lines}
+    $result | Export-Clixml -LiteralPath (Join-Path $out 'phone-speech.clixml') -Depth 6
+    $result
 }
 
 # Depth-first equivalence for the 128-channel residual section (resblocks 3-5 and their mean): the layer schedule exports
@@ -3471,6 +3541,12 @@ switch ($Command) {
         Import-Module (Join-Path $Root 'tools/Kokoro.AudioMeasurement.psm1')
         $yardstick=if ($Parameters -and $Parameters.Yardstick) { [string]$Parameters.Yardstick } else { $null }
         Compare-KokoroAudio -Reference $Reference -Candidate $Path -Yardstick $yardstick -ImageDirectory $OutputDirectory
+    }
+    'PhoneSpeech' {
+        if (-not $Parameters -or -not $Parameters.Text) { throw 'PhoneSpeech needs -Parameters @{Text=<sentence>}.' }
+        $speech = @{}; foreach ($k in $Parameters.Keys) { $speech[$k] = $Parameters[$k] }
+        if ($OutputDirectory) { $speech.OutputDirectory = $OutputDirectory }
+        Invoke-KokoroPhoneSpeech -Soc $Soc @speech
     }
     'MeasureAudio' {
         if (-not $Path) { throw 'MeasureAudio needs -Path (a WAV file or folder).' }

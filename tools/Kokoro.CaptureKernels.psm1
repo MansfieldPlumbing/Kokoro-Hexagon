@@ -604,4 +604,74 @@ function Get-SaturatedCountKernel {
     $script:Kernels.SaturatedCount = $k; $k
 }
 
-Export-ModuleMember -Function Get-ClampedErrorKernel, Get-SaturatedCountKernel, Get-CrossProductKernel, Get-MatrixApplyKernel, Get-FoldConvWeightsKernel, Get-QuantizeRowsKernel, Get-SplitPlanesKernel, Get-LowLowWindowShapedKernel, Get-Conv1dKernel, Get-PackWeightPlanesShapedKernel, Get-LowLowWindowKernel, Get-QuantizeCroutons16Kernel, Get-PackWeightPlanesKernel, Get-Mean3Kernel, Get-Croutons16ErrorKernel, Get-ChannelStatsKernel, Get-ColumnPeaksKernel, Get-DecodeCroutons16Kernel, Get-InterleavePlanesKernel, Get-Fp16CroutonsKernel, Get-PackFp16WeightsKernel, Get-GeneratorCoefficientsKernel, Get-Fp16ConversionTableKernel
+# Job inputs for the speech path, shared by the host renderer (New-KokoroSpeechRenderer) and the phone's speech mode
+# (src/runspace/KokoroGeneratorTailProbe.ps1), so both pack the same bytes.
+
+function ConvertTo-KokoroDecoderInput {
+    # One KokoroDecoder16Run job's input (runtime frames, at most Capacity): the aligned encoding [channel][frame] as
+    # 16-bit croutons at the plan's input units, f0 and N (two per frame) as int32 at their curve units, the frame count,
+    # and in Direct mode each site's K/M (-Coefficients at -CoefficientsOffset).
+    param([Parameter(Mandatory)][float[]]$Aligned, [Parameter(Mandatory)][float[]]$Pitch, [Parameter(Mandatory)][float[]]$Energy,
+        [Parameter(Mandatory)][int]$Capacity, [Parameter(Mandatory)][int]$Tiles, [Parameter(Mandatory)][long]$InputBytes, [Parameter(Mandatory)][long]$FramesOffset,
+        [Parameter(Mandatory)][double[]]$AsrScales, [Parameter(Mandatory)][double]$F0CurveScale, [Parameter(Mandatory)][double]$NCurveScale,
+        [byte[]]$Coefficients = $null, [long]$CoefficientsOffset = 0)
+    $frameCount = [int]($Aligned.Length / 512)
+    if ($frameCount -lt 2 -or $frameCount -gt $Capacity) { throw "The decoder plan holds $Capacity frames; this stream has $frameCount." }
+    if ($Pitch.Length -ne 2 * $frameCount -or $Energy.Length -ne 2 * $frameCount) { throw 'Decode needs the f0 and N curves at two values per frame.' }
+    $curveBytes = [long][math]::Ceiling(8 * $Capacity / 128) * 128
+    $activation = [byte[]]::new($InputBytes)
+    $croutons = [byte[]]::new($Tiles * 32768L); $zero = [uint16[]]::new($croutons.Length / 2); [Array]::Fill($zero, [uint16]0x8000); [Buffer]::BlockCopy($zero, 0, $croutons, 0, $croutons.Length)
+    $padded = [float[]]::new(512 * $Capacity); for ($c = 0; $c -lt 512; $c++) { [Array]::Copy($Aligned, $c * $frameCount, $padded, $c * $Capacity, $frameCount) }
+    (Get-QuantizeCroutons16Kernel).Invoke($padded, $Capacity, $AsrScales, $croutons); [Array]::Copy($croutons, $activation, $croutons.Length)
+    foreach ($pair in @(@($Pitch, ($Tiles * 32768L), $F0CurveScale), @($Energy, ($Tiles * 32768L + $curveBytes), $NCurveScale))) {
+        for ($i = 0; $i -lt 2 * $frameCount; $i++) { [Array]::Copy([BitConverter]::GetBytes([int][math]::Round([double]$pair[0][$i] / $pair[2], [MidpointRounding]::ToEven)), 0, $activation, $pair[1] + 4 * $i, 4) } }
+    [Array]::Copy([BitConverter]::GetBytes([int]$frameCount), 0, $activation, $FramesOffset, 4)
+    if ($null -ne $Coefficients) { [Array]::Copy($Coefficients, 0, $activation, $CoefficientsOffset, $Coefficients.Length) }
+    , $activation
+}
+
+function Invoke-KokoroDecoderChunks {
+    # A stream of any length decoded in chunks of -Interior frames (a multiple of 16, so chunks join on whole 32-tick
+    # tiles) with -Halo frames each side, every chunk at most -Capacity frames. -RunChunk (aligned, f0, N slices) runs one
+    # job and returns Output (its buffer), OutputOffset (where its x begins) and DspMs. Returns the stream's x croutons.
+    param([Parameter(Mandatory)][float[]]$Aligned, [Parameter(Mandatory)][float[]]$Pitch, [Parameter(Mandatory)][float[]]$Energy,
+        [Parameter(Mandatory)][int]$Capacity, [int]$Interior = 0, [int]$Halo = 16, [Parameter(Mandatory)][scriptblock]$RunChunk)
+    $frameCount = [int]($Aligned.Length / 512)
+    if ($Interior -le 0) { $Interior = $Capacity - 2 * $Halo }
+    if ($Interior % 16 -or $Interior + 2 * $Halo -gt $Capacity) { throw "Decoder chunks need an interior that is a multiple of 16 frames and fits $Capacity frames with its halo." }
+    $x = [byte[]]::new([long][math]::Ceiling(2 * $frameCount / 32) * 32768); $dspMs = 0.0; $chunks = 0
+    $slice = { param([float[]]$Values, [int]$Channels, [int]$T, [int]$A, [int]$B) $n = $B - $A; $r = [float[]]::new($Channels * $n); for ($c = 0; $c -lt $Channels; $c++) { [Array]::Copy($Values, $c * $T + $A, $r, $c * $n, $n) }; , $r }
+    for ($a = 0; $a -lt $frameCount; $a += $Interior) {
+        $b = [math]::Min($frameCount, $a + $Interior); $lo = [math]::Max(0, $a - $Halo); $hi = [math]::Min($frameCount, $b + $Halo)
+        $run = & $RunChunk (& $slice $Aligned 512 $frameCount $lo $hi) (& $slice $Pitch 1 (2 * $frameCount) (2 * $lo) (2 * $hi)) (& $slice $Energy 1 (2 * $frameCount) (2 * $lo) (2 * $hi))
+        # Interior ticks [2a, 2b) start on a tile boundary in both the chunk's output and the stream's.
+        $bytes = [long][math]::Ceiling(2 * ($b - $a) / 32) * 32768
+        [Array]::Copy([byte[]]$run.Output, [long]$run.OutputOffset + (2L * ($a - $lo) / 32) * 32768, $x, (2L * $a / 32) * 32768, [math]::Min($bytes, $x.Length - (2L * $a / 32) * 32768))
+        $dspMs += [double]$run.DspMs; $chunks++
+    }
+    [pscustomobject]@{ PSTypeName = 'Kokoro.DecodedSpeech'; Frames = $frameCount; Ticks = 2 * $frameCount; XCroutons = $x; DspMs = $dspMs; Chunks = $chunks }
+}
+
+function ConvertTo-KokoroGeneratorInput {
+    # One depth-first generator job's input: x croutons (ceil(ticks / 32) tiles of 512 channels), f0 as int32 Q16 Hz per
+    # tick ending at the seeded-noise input, then the noise seed and scale.
+    param([Parameter(Mandatory)][byte[]]$XCroutons, [Parameter(Mandatory)][float[]]$Pitch, [Parameter(Mandatory)][int]$Ticks,
+        [Parameter(Mandatory)][long]$InputBytes, [Parameter(Mandatory)][long]$NoiseOffset, [Parameter(Mandatory)][uint32]$Seed, [Parameter(Mandatory)][int]$NoiseScale)
+    $xBytes = [long][math]::Ceiling($Ticks / 32) * 32768; $f0Bytes = [long][math]::Ceiling(4 * $Ticks / 128) * 128
+    if ($Pitch.Length -ne $Ticks -or $XCroutons.Length -lt $xBytes) { throw 'The generator input needs x for every tick and one f0 per tick.' }
+    $activation = [byte[]]::new($InputBytes); [Array]::Copy($XCroutons, $activation, $xBytes)
+    $f0At = $NoiseOffset - $f0Bytes
+    for ($t = 0; $t -lt $Ticks; $t++) { [Array]::Copy([BitConverter]::GetBytes([int][math]::Round([double]$Pitch[$t] * 65536)), 0, $activation, $f0At + 4 * $t, 4) }
+    [Array]::Copy([BitConverter]::GetBytes($Seed), 0, $activation, $NoiseOffset, 4); [Array]::Copy([BitConverter]::GetBytes($NoiseScale), 0, $activation, $NoiseOffset + 4, 4)
+    , $activation
+}
+
+function ConvertFrom-KokoroPcm16 {
+    # A job's int16 PCM (at -Offset in its output buffer) as float samples in [-1, 1).
+    param([Parameter(Mandatory)][byte[]]$Output, [Parameter(Mandatory)][long]$Offset, [Parameter(Mandatory)][int]$Samples)
+    $values = [int16[]]::new($Samples); [Buffer]::BlockCopy($Output, [int]$Offset, $values, 0, 2 * $Samples)
+    $pcm = [float[]]::new($Samples); for ($i = 0; $i -lt $Samples; $i++) { $pcm[$i] = $values[$i] / 32768.0 }
+    , $pcm
+}
+
+Export-ModuleMember -Function ConvertTo-KokoroDecoderInput, Invoke-KokoroDecoderChunks, ConvertTo-KokoroGeneratorInput, ConvertFrom-KokoroPcm16, Get-ClampedErrorKernel, Get-SaturatedCountKernel, Get-CrossProductKernel, Get-MatrixApplyKernel, Get-FoldConvWeightsKernel, Get-QuantizeRowsKernel, Get-SplitPlanesKernel, Get-LowLowWindowShapedKernel, Get-Conv1dKernel, Get-PackWeightPlanesShapedKernel, Get-LowLowWindowKernel, Get-QuantizeCroutons16Kernel, Get-PackWeightPlanesKernel, Get-Mean3Kernel, Get-Croutons16ErrorKernel, Get-ChannelStatsKernel, Get-ColumnPeaksKernel, Get-DecodeCroutons16Kernel, Get-InterleavePlanesKernel, Get-Fp16CroutonsKernel, Get-PackFp16WeightsKernel, Get-GeneratorCoefficientsKernel, Get-Fp16ConversionTableKernel

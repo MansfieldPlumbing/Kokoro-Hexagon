@@ -30,11 +30,33 @@ encoder library; the size of the difference is not measured here.
 | Token ids, durations, F0, N | identical | identical |
 | Text encoding, aligned encoding | differ | differ |
 
+## Time per stage
+
+A second run recorded the port's per-stage entries (`FrontEndStage` and `TextEncoderTotal`, the same entries as
+`frontend-host-stages-20261027.md`) for the last of three runs per sentence, with the phonemizer also running on the
+phone. Its phonemes equal the host's for all three sentences; its warm median is 0.131 ms (76 phonemes) and 0.326 ms
+(193 phonemes). 193 phonemes (195 tokens, 471 frames):
+
+| Stage | ms | Share |
+| --- | ---: | ---: |
+| ALBERT | 2,954.8 | 61 % |
+| `bert_encoder` | 8.3 | 0 % |
+| DurationEncoder layers 0, 1, 2 (LSTM, AdaLayerNorm) | 187.3, 173.8, 177.6 | 11 % |
+| Duration LSTM and projection | 182.5 | 4 % |
+| Shared LSTM (alignment included) | 409.9 | 9 % |
+| F0 blocks, N blocks | 104.2, 111.2 | 4 % |
+| Text encoder (CNN and BiLSTM) | 503.9 | 10 % |
+
+ALBERT's 73 linear layers take 1,551 ms of its 2,955 ms (`ffn` 439.6, `ffn_output` 420.9, `dense` 188.1, `query`
+159.9, `key` 169.6, `value` 163.9, the embedding mapping 8.6); attention, softmax, LayerNorm, GELU and the adds take the
+rest. The five predictor LSTMs take 1,120 ms: 172 to 184 ms each over 195 token steps and 407 ms for the shared LSTM
+over 471 frame steps. The stages sum to 4,813.5 ms of the run's 4,820 ms.
+
 ## Not measured
 
 - The size of the text-encoding difference and its effect on the decoder's output.
-- Time per front-end stage on the phone (on the host, ALBERT is about 71 % at 510 phonemes:
-  `frontend-host-stages-20261027.md`).
-- `Vector256` is not hardware-accelerated on this CPU, so the 256-bit workers run in software.
+- `Vector256` is not hardware-accelerated on this CPU, so the 256-bit workers run in software; which kernels use it is
+  not broken out here.
 
-Receipt: `build/frontend-phone-*` (receipt.clixml, phonemes.txt, Run.ps1).
+Receipts: `build/frontend-phone-*` (receipt.clixml, phonemes.txt, Run.ps1), `build/frontend-profile-*` (receipt.clixml
+with the stage entries).

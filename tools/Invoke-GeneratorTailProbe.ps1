@@ -28,6 +28,11 @@ param(
     # Start the resident job listener (src/runspace/KokoroGeneratorTailProbe.ps1 Serve mode) instead of one job: wait
     # for Listening=, then restore the startup files without stopping the app, which keeps serving from memory.
     [switch] $Serve,
+    # Text to WAV in the app's runspace (src/runspace/KokoroGeneratorTailProbe.ps1 speech mode) with this job's library as the
+    # generator: -StageFiles maps each further file's path under the app's files directory to its local path
+    # (Invoke-KokoroPhoneSpeech). The WAV is fetched beside the receipt.
+    [switch] $Speech,
+    [hashtable] $StageFiles = @{},
     [pscustomobject] $WeightAssembly
 )
 $ErrorActionPreference = 'Stop'
@@ -75,6 +80,7 @@ $spec = Join-Path $emission "tail-spec-$id.txt"
 [IO.File]::WriteAllLines($spec, @("Tiles=$($layout.Tiles)", "Runs=$Runs", "OutputBytes=$($layout.OutputBytes)", "PcmOffset=$($layout.PcmOffset)", "Samples=$($layout.Samples)", "InputBytes=$($layout.InputBytes)"))
 if ($ExpectedPcmSHA256) { [IO.File]::AppendAllText($spec, "ExpectedPcmSHA256=$ExpectedPcmSHA256`n") }
 if ($Serve) { [IO.File]::AppendAllText($spec, "Serve=True`n") }
+if ($Speech) { [IO.File]::AppendAllText($spec, "Speech=True`n") }
 $ready = if ($Serve) { '(?m)^(Listening|Passed)=' } else { '(?m)^Passed=' }
 if ($AttributeBuffers) { [IO.File]::AppendAllText($spec, "AttributeBuffers=True`n") }
 if ($ResidentPayloads) {
@@ -120,6 +126,7 @@ try {
         $files += , @($WeightAssembly.AssemblyPath, "$target/Kokoro.Generator.Weights.dll")
         $files += , @($WeightAssembly.LoaderPath, "$target/Kokoro.MappedPayload.dll")
     } else { $files += , @((Join-Path $fixture 'weights.bin'), "$target/weights.bin") }
+    foreach ($staged in $StageFiles.GetEnumerator()) { $files += , @($staged.Value, "files/$($staged.Key)") }
     foreach ($file in $files) {
         $name = Split-Path $file[1] -Leaf; $destination = $file[1]
         # Unchanged staged files (same SHA-256 already at the destination) are not pushed again: variant sweeps change
@@ -176,6 +183,13 @@ try {
         [IO.File]::WriteAllBytes($outputPath, [byte[]](& $Adb exec-out -Api -Device $serial "run-as $Package cat $target/tail-output.bin"))
         if ((Get-FileHash -LiteralPath $outputPath).Hash -cne $hash.Groups[1].Value) { throw 'Retrieved device output integrity mismatch.' }
         "OutputPath=$outputPath"
+    }
+    $wav = [regex]::Match($receipt, '(?m)^SpeechWav=speech\.wav SHA256=([0-9A-F]{64})')
+    if ($wav.Success) {
+        $wavPath = Join-Path $emission "speech-$Soc-$id.wav"
+        [IO.File]::WriteAllBytes($wavPath, [byte[]](& $Adb exec-out -Api -Device $serial "run-as $Package cat $target/speech.wav"))
+        if ((Get-FileHash -LiteralPath $wavPath).Hash -cne $wav.Groups[1].Value) { throw 'Retrieved speech WAV integrity mismatch.' }
+        "SpeechPath=$wavPath"
     }
     $receipt
     "ReceiptPath=$receiptPath"

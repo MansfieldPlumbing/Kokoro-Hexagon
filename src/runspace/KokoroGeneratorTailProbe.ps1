@@ -27,6 +27,8 @@ try {
     $tiles = [int]$kv.Tiles; $runs = [int]$kv.Runs; $outputBytes = [int]$kv.OutputBytes; $pcmOffset = [int]$kv.PcmOffset; $samples = [int]$kv.Samples
     # Serve=True: the resident job listener below instead of one job; each request carries its own job fields.
     $serve = $kv.ContainsKey('Serve')
+    # Speech=True: text to WAV in this runspace (the speech mode below) with this job's generator library.
+    $speech = $kv.ContainsKey('Speech')
     if (-not $serve -and ($tiles -lt 1 -or $tiles -gt 32768 -or $runs -lt 1 -or $runs -gt 121 -or $samples -lt 1 -or $pcmOffset + 2 * $samples -gt $outputBytes)) { throw 'Spec out of range' }
     $lines.Add("Tiles=$tiles Runs=$runs Samples=$samples")
     $load = { param([string]$Name, [object[]]$Arguments)
@@ -81,6 +83,37 @@ try {
     $rc = [int]$open.DynamicInvoke($oa)
     $lines.Add("OpenRc=$rc"); if ($rc -ne 0) { throw 'Kernel library open failed' }
     $handle = [uint64]$oa[1]; $opened = $true
+    # One job on an open handle: method 2 (sc 0x02040100) with the tile count, input, weights, tables and an output
+    # buffer, JobRuns times. Every run's PCM must match run 0's; Output is run 0's whole buffer.
+    $runJob = { param([uint64]$JobHandle, [int]$JobTiles, [byte[]]$JobInput, [byte[]]$JobWeights, [byte[]]$JobTables, [int]$JobOutputBytes, [int]$JobPcmOffset, [int]$JobSamples, [int]$JobRuns)
+        $out = [byte[]]::new($JobOutputBytes)
+        $bufs = @(([BitConverter]::GetBytes([uint32]$JobTiles)), $JobInput, $JobWeights, $JobTables, $out)
+        $jobPins = [Collections.Generic.List[object]]::new(); $jobBlock = $Marshal::AllocHGlobal(16 * $bufs.Count)
+        $jobLines = [Collections.Generic.List[string]]::new(); $jobTicks = [Collections.Generic.List[long]]::new(); $jobOk = $true; $firstHash = $null; $firstOutput = $null
+        try {
+            for ($i = 0; $i -lt $bufs.Count; $i++) {
+                $g = [Runtime.InteropServices.GCHandle]::Alloc($bufs[$i], [Runtime.InteropServices.GCHandleType]::Pinned); $jobPins.Add($g)
+                $Marshal::WriteIntPtr($jobBlock, 16 * $i, $g.AddrOfPinnedObject()); $Marshal::WriteInt64($jobBlock, 16 * $i + 8, [long]$bufs[$i].Length)
+            }
+            for ($run = 0; $run -lt $JobRuns; $run++) {
+                $sw = [Diagnostics.Stopwatch]::StartNew()
+                $rc = [int]$invoke.DynamicInvoke([object[]]@($JobHandle, [uint32]0x02040100, $jobBlock))
+                $sw.Stop()
+                $stage = [BitConverter]::ToInt32($out, 36); $done = [BitConverter]::ToInt32($out, 44)
+                $dt = [long]([BitConverter]::ToUInt64($out, 8) - [BitConverter]::ToUInt64($out, 0))
+                $hash = [Convert]::ToHexString([Security.Cryptography.SHA256]::HashData([IO.MemoryStream]::new($out, $JobPcmOffset, 2 * $JobSamples, $false)))
+                if ($run -eq 0) { $firstHash = $hash; $firstOutput = [byte[]]$out.Clone() }
+                if ($rc -ne 0 -or $stage -ne 7 -or $done -ne 1 -or $hash -ne $firstHash) { $jobOk = $false }
+                if ($rc -eq 0 -and $done -eq 1) { $jobTicks.Add($dt) }
+                $jobLines.Add("Run=$run InvokeRc=$rc Stage=$stage Done=$done RegionTicks=$dt InvokeMs=$($sw.Elapsed.TotalMilliseconds.ToString('F3', $inv)) PcmSHA256=$hash")
+                if ($rc -ne 0) { break }
+            }
+        }
+        finally { foreach ($g in $jobPins) { $g.Free() }; $Marshal::FreeHGlobal($jobBlock) }
+        $medianMs = $null
+        if ($jobTicks.Count) { $sorted = $jobTicks.ToArray(); [Array]::Sort($sorted); $medianMs = $sorted[[int][math]::Floor($sorted.Count / 2)] / 19200.0 }
+        [pscustomobject]@{ Ok = $jobOk; Output = $firstOutput; MedianMs = $medianMs; Lines = $jobLines.ToArray() }
+    }
 
     if ($serve) {
         # Resident job listener: this session and handle stay open; requests arrive on the abstract socket kokoro-jobs.
@@ -137,32 +170,8 @@ try {
                         $jobTiles = [int]$request.Tiles; $jobRuns = [int]$request.Runs; $jobOutputBytes = [int]$request.OutputBytes; $jobPcmOffset = [int]$request.PcmOffset; $jobSamples = [int]$request.Samples
                         $act = $cache[$keys[1]]; $wts = $cache[$keys[2]]; $tbl = $cache[$keys[3]]
                         if ($jobTiles -lt 1 -or $jobTiles -gt 32768 -or $jobRuns -lt 1 -or $jobRuns -gt 121 -or $jobSamples -lt 1 -or $jobPcmOffset + 2 * $jobSamples -gt $jobOutputBytes -or $act.Length -ne [long]$request.InputBytes) { throw 'Job fields out of range.' }
-                        $out = [byte[]]::new($jobOutputBytes)
-                        $bufs = @(([BitConverter]::GetBytes([uint32]$jobTiles)), $act, $wts, $tbl, $out)
-                        $jobPins = [Collections.Generic.List[object]]::new(); $jobBlock = $Marshal::AllocHGlobal(16 * $bufs.Count)
-                        $jobLines = [Collections.Generic.List[string]]::new(); $jobTicks = [Collections.Generic.List[long]]::new(); $jobOk = $true; $firstHash = $null; $firstOutput = $null
-                        try {
-                            for ($i = 0; $i -lt $bufs.Count; $i++) {
-                                $g = [Runtime.InteropServices.GCHandle]::Alloc($bufs[$i], [Runtime.InteropServices.GCHandleType]::Pinned); $jobPins.Add($g)
-                                $Marshal::WriteIntPtr($jobBlock, 16 * $i, $g.AddrOfPinnedObject()); $Marshal::WriteInt64($jobBlock, 16 * $i + 8, [long]$bufs[$i].Length)
-                            }
-                            for ($run = 0; $run -lt $jobRuns; $run++) {
-                                $sw = [Diagnostics.Stopwatch]::StartNew()
-                                $rc = [int]$invoke.DynamicInvoke([object[]]@($handle, [uint32]0x02040100, $jobBlock))
-                                $sw.Stop()
-                                $stage = [BitConverter]::ToInt32($out, 36); $done = [BitConverter]::ToInt32($out, 44)
-                                $dt = [long]([BitConverter]::ToUInt64($out, 8) - [BitConverter]::ToUInt64($out, 0))
-                                $hash = [Convert]::ToHexString([Security.Cryptography.SHA256]::HashData([byte[]]$out[$jobPcmOffset..($jobPcmOffset + 2 * $jobSamples - 1)]))
-                                if ($run -eq 0) { $firstHash = $hash; $firstOutput = [byte[]]$out.Clone() }
-                                if ($rc -ne 0 -or $stage -ne 7 -or $done -ne 1 -or $hash -ne $firstHash) { $jobOk = $false }
-                                if ($rc -eq 0 -and $done -eq 1) { $jobTicks.Add($dt) }
-                                $jobLines.Add("Run=$run InvokeRc=$rc Stage=$stage Done=$done RegionTicks=$dt InvokeMs=$($sw.Elapsed.TotalMilliseconds.ToString('F3', $inv)) PcmSHA256=$hash")
-                                if ($rc -ne 0) { break }
-                            }
-                        }
-                        finally { foreach ($g in $jobPins) { $g.Free() }; $Marshal::FreeHGlobal($jobBlock) }
-                        $medianMs = $null
-                        if ($jobTicks.Count) { $sorted = $jobTicks.ToArray(); [Array]::Sort($sorted); $medianMs = $sorted[[int][math]::Floor($sorted.Count / 2)] / 19200.0 }
+                        $job = & $runJob $handle $jobTiles $act $wts $tbl $jobOutputBytes $jobPcmOffset $jobSamples $jobRuns
+                        $jobOk = $job.Ok; $jobLines = $job.Lines; $medianMs = $job.MedianMs; $firstOutput = $job.Output
                         $jobs++
                         # Only the requested ranges of run 0's buffer cross back, concatenated in request order.
                         $ranges = @(foreach ($range in @($request.Ranges)) { ,([long[]]@($range[0], $range[1])) })
@@ -172,7 +181,7 @@ try {
                             $returned.Write($firstOutput, [int]$range[0], [int]$range[1])
                         }
                         $payload = $returned.ToArray()
-                        & $respond $writer @{ Ok = $jobOk; Lines = $jobLines.ToArray(); MedianRegionMs = $medianMs; OutputBytes = $payload.Length; BufferBytes = $firstOutput.Length
+                        & $respond $writer @{ Ok = $jobOk; Lines = $jobLines; MedianRegionMs = $medianMs; OutputBytes = $payload.Length; BufferBytes = $firstOutput.Length
                             OutputSha256 = [Convert]::ToHexString([Security.Cryptography.SHA256]::HashData($payload)) } $payload
                         # Keep this job's skel, weights and tables; activations change with every job.
                         foreach ($key in @($cache.Keys)) { if ($key -cne $keys[0] -and $key -cne $keys[2] -and $key -cne $keys[3]) { [void]$cache.Remove($key) } }
@@ -187,7 +196,76 @@ try {
         finally { $listener.Dispose(); if ([IO.File]::Exists($tokenPath)) { [IO.File]::Delete($tokenPath) } }
         $passed = $true
     }
-    if (-not $serve) {
+    if ($speech) {
+        # Text to WAV in this runspace: our phonemizer, the stock front end (the host port in Library mode, its numeric
+        # kernels prebuilt on the host) on the CPU, then the decoder in chunks and this job's depth-first generator on the
+        # DSP, both packed by Kokoro.CaptureKernels.psm1 as the host renderer packs them. speech-pack.json (written by
+        # Invoke-KokoroPhoneSpeech) holds the decoder job's layout, the units and the noise seed; the text is in
+        # speech-text.txt. Every run times each stage; run 0 writes speech.wav and later runs must give the same PCM.
+        $pack = [IO.File]::ReadAllText([IO.Path]::Combine($dir, 'speech-pack.json')) | ConvertFrom-Json -AsHashtable
+        $frontRoot = [IO.Path]::Combine($hostFiles, 'kokoro-frontend')
+        $clock = [Diagnostics.Stopwatch]::StartNew()
+        Import-Module ([IO.Path]::Combine($root, 'Kokoro.CaptureKernels.psm1'))
+        $phonemize = [Reflection.Assembly]::LoadFrom([IO.Path]::Combine($frontRoot, 'build/prebuilt/Phonemizer.dll')).GetType('CoreDriver', $true).GetMethod('Run').CreateDelegate([Func[string,object]])
+        $port = New-Module -Name KokoroSpeechFrontEnd -ArgumentList ([IO.Path]::Combine($frontRoot, 'tools/Invoke-KokoroPrecomputedDecoder.ps1')), ([IO.Path]::Combine($frontRoot, 'build/speech-port')), 8, ([IO.Path]::Combine($frontRoot, 'build/prebuilt/Kokoro.OfflineRender.dll')) -ScriptBlock {
+            param([string] $Reference, [string] $Output, [int] $WorkerThreads, [string] $Prebuilt)
+            . $Reference -Mode Library -OutputDirectory $Output -Threads $WorkerThreads -CompiledAssembly $Prebuilt
+            Export-ModuleMember -Function Invoke-OfflineSpeech, Write-OfflineWave }
+        $lines.Add("SpeechLoadMs=$($clock.Elapsed.TotalMilliseconds.ToString('F1', $inv))")
+        # The decoder's library under its own name beside the generator's, on a second handle of this session.
+        [IO.File]::Copy([IO.Path]::Combine($dir, 'decoder.so'), [IO.Path]::Combine($root, 'dsp', 'libkokoro_decoder_skel.so'), $true)
+        $decoderUri = [Text.Encoding]::UTF8.GetBytes('file:///libkokoro_decoder_skel.so?kokoro_generator_tail_skel_handle_invoke&_modver=1.0&_dom=cdsp' + [char]0)
+        $decoderOpen = [object[]]@((& $pin $decoderUri), [uint64]0); $rc = [int]$open.DynamicInvoke($decoderOpen)
+        $lines.Add("DecoderOpenRc=$rc"); if ($rc -ne 0) { throw 'Decoder library open failed' }
+        $decoderHandle = [uint64]$decoderOpen[1]
+        try {
+            $read = { param([string]$Name) , [IO.File]::ReadAllBytes([IO.Path]::Combine($dir, $Name)) }
+            $decoderTables = & $read 'decoder-tables.bin'; $decoderWeights = & $read 'decoder-weights.bin'; $coefficients = & $read 'decoder-coefficients.bin'
+            $generatorTables = & $read 'tables.bin'; $generatorWeights = & $read 'weights.bin'
+            $text = [IO.File]::ReadAllText([IO.Path]::Combine($dir, 'speech-text.txt')).Trim()
+            $wave = [IO.Path]::Combine($dir, 'speech.wav'); if ([IO.File]::Exists($wave)) { [IO.File]::Delete($wave) }
+            $speechPcm = $null; $speechHash = $null; $allOk = $true
+            for ($run = 0; $run -lt $runs; $run++) {
+                $total = [Diagnostics.Stopwatch]::StartNew()
+                $clock.Restart(); $phonemes = [string]$phonemize.Invoke($text).KokoroPhones; $phonemizeMs = $clock.Elapsed.TotalMilliseconds
+                $clock.Restart(); $front = Invoke-OfflineSpeech -Phonemes $phonemes -Voice $pack.Voice -SkipDecoder; $frontMs = $clock.Elapsed.TotalMilliseconds
+                $speechTicks = 2 * [int](([int[]]$front.Durations | Measure-Object -Sum).Sum)
+                if ($speechTicks -ne [int]$pack.Ticks) { throw "The front end gave $speechTicks ticks; this generator library renders $($pack.Ticks)." }
+                $clock.Restart()
+                $decoded = Invoke-KokoroDecoderChunks -Aligned ([float[]]$front.Aligned) -Pitch ([float[]]$front.F0) -Energy ([float[]]$front.N) -Capacity $pack.DecoderCapacity -RunChunk {
+                    param([float[]]$ChunkAligned, [float[]]$ChunkPitch, [float[]]$ChunkEnergy)
+                    $chunkInput = ConvertTo-KokoroDecoderInput -Aligned $ChunkAligned -Pitch $ChunkPitch -Energy $ChunkEnergy -Capacity $pack.DecoderCapacity -Tiles $pack.DecoderTiles -InputBytes $pack.DecoderInputBytes -FramesOffset $pack.DecoderFramesOffset -AsrScales ([double[]]$pack.AsrScales) -F0CurveScale $pack.F0CurveScale -NCurveScale $pack.NCurveScale -Coefficients $coefficients -CoefficientsOffset $pack.DecoderCoefficientsOffset
+                    $chunkJob = & $runJob $decoderHandle $pack.DecoderTiles $chunkInput $decoderWeights $decoderTables $pack.DecoderOutputBytes $pack.DecoderPcmOffset $pack.DecoderSamples 1
+                    if (-not $chunkJob.Ok) { throw "Decoder job failed: $($chunkJob.Lines -join ' ')" }
+                    [pscustomobject]@{ Output = $chunkJob.Output; OutputOffset = $pack.DecoderOutputOffset; DspMs = $chunkJob.MedianMs } }
+                $decoderMs = $clock.Elapsed.TotalMilliseconds
+                $clock.Restart()
+                $generatorInput = ConvertTo-KokoroGeneratorInput -XCroutons $decoded.XCroutons -Pitch ([float[]]$front.F0) -Ticks $speechTicks -InputBytes ([long]$kv.InputBytes) -NoiseOffset $pack.NoiseOffset -Seed $pack.Seed -NoiseScale $pack.NoiseScale
+                $generatorJob = & $runJob $handle $tiles $generatorInput $generatorWeights $generatorTables $outputBytes $pcmOffset $samples 1
+                if (-not $generatorJob.Ok) { throw "Generator job failed: $($generatorJob.Lines -join ' ')" }
+                $pcm = ConvertFrom-KokoroPcm16 -Output $generatorJob.Output -Offset $pcmOffset -Samples $samples
+                $generatorMs = $clock.Elapsed.TotalMilliseconds
+                $hash = [Convert]::ToHexString([Security.Cryptography.SHA256]::HashData([IO.MemoryStream]::new($generatorJob.Output, $pcmOffset, 2 * $samples, $false)))
+                $totalMs = $total.Elapsed.TotalMilliseconds
+                if ($run -eq 0) { $speechHash = $hash; $speechPcm = $pcm; Write-OfflineWave $wave $pcm }
+                elseif ($hash -cne $speechHash) { $allOk = $false }
+                $lines.Add("Speech Run=$run Phonemes=$($phonemes.Length) Ticks=$speechTicks AudioSeconds=$(($samples / 24000.0).ToString('F3', $inv)) PhonemizeMs=$($phonemizeMs.ToString('F3', $inv)) FrontEndMs=$($frontMs.ToString('F1', $inv)) DecoderMs=$($decoderMs.ToString('F1', $inv)) DecoderDspMs=$($decoded.DspMs.ToString('F2', $inv)) DecoderChunks=$($decoded.Chunks) GeneratorMs=$($generatorMs.ToString('F1', $inv)) GeneratorDspMs=$($generatorJob.MedianMs.ToString('F2', $inv)) TotalMs=$($totalMs.ToString('F1', $inv)) PcmSHA256=$hash")
+                [IO.File]::WriteAllLines($receipt, $lines)
+            }
+            $lines.Add("SpeechWav=speech.wav SHA256=$([Convert]::ToHexString([Security.Cryptography.SHA256]::HashData([IO.File]::ReadAllBytes($wave))))")
+            if ($allOk) {
+                $audio = & $load 'Audio.AAudio.psm1' @($abi)
+                $stream = & $audio.Open 24000 1
+                $playClock = [Diagnostics.Stopwatch]::StartNew()
+                $written = & $audio.Write $stream $speechPcm $playClock
+                $drain = & $audio.Drain $stream 30000
+                $lines.Add("Played=True WrittenFrames=$written DrainResult=$drain PlaybackMs=$($playClock.Elapsed.TotalMilliseconds.ToString('F1', $inv))")
+            }
+            $passed = $allOk
+        }
+        finally { $null = $close.DynamicInvoke([object[]]@($decoderHandle)); Remove-Module -ModuleInfo $port -Force }
+    }
+    if (-not $serve -and -not $speech) {
     $act = [IO.File]::ReadAllBytes([IO.Path]::Combine($dir, 'activations.bin'))
     if ($kv.ContainsKey('WeightAssembly')) {
         if (-not $kv.ContainsKey('ResidentPayloads')) { throw 'Mapped weight assembly requires resident payload transport.' }
