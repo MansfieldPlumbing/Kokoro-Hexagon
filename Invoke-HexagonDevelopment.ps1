@@ -1244,6 +1244,8 @@ $script:Kernels=@(
             if($GeneratorResidentSourceChannels){ $harness.ResidentSourceChannels=$GeneratorResidentSourceChannels }
             if($GeneratorAsyncWeights){ $harness.AsyncWeights=$true }
             if($GeneratorWorkspaceWindows){ $harness.WorkspaceWindows=$true }
+            if($GeneratorPowerVotes){ $harness.PowerVotes=$GeneratorPowerVotes }
+            if($GeneratorPowerContext -ne 'PerVote'){ $harness.PowerContext=$GeneratorPowerContext }
             if($Stage16Channels -ne 128){ $harness.Channels=$Stage16Channels }
             if($GeneratorFront){ $harness.Front=$true }
             if($GeneratorWhole){ $harness.Whole=$true }
@@ -1475,6 +1477,10 @@ param(
     # KokoroGenerator60x16Run spans: the workspace tensors between span stages live in windows rebased to each span
     # (src/jobs/Kokoro.Generator60x16Run.ps1 -WorkspaceWindows).
     [switch] $GeneratorWorkspaceWindows,
+    # KokoroGenerator60x16Run power lifecycle: records in call order and their context (src/jobs/Kokoro.HmxConvRun.ps1
+    # -PowerVotes, -PowerContext); unset emits the default lifecycle.
+    [string[]] $GeneratorPowerVotes,
+    [ValidateSet('PerVote', 'Shared')][string] $GeneratorPowerContext = 'PerVote',
     # KokoroHarmonicSource16Run: generate the source noise on the DSP from a seed (input holds seed and scale) instead of
     # reading captured draws.
     [switch] $SourceSeededNoise,

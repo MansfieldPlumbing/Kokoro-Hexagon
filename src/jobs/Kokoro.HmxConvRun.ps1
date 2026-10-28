@@ -18,8 +18,33 @@ function New-KokoroHmxConvRunSteps {
         [ValidateSet(128, 256)][int] $Channels = 128,
         [ValidateSet(3, 7, 11)][int] $Kernel = 3,
         [ValidateSet(1, 3, 5)][int] $Dilation = 1,
-        [ValidateRange(1, 64)][int] $Tiles = 8
+        [ValidateRange(1, 64)][int] $Tiles = 8,
+        # Power records, in call order; the default is the lifecycle every job has used.
+        [string[]] $PowerVotes = @('HvxPower', 'CoreTurbo', 'HmxPower'),
+        # PerVote: each request's context is the address of its own call; Shared: one address for every request.
+        [ValidateSet('PerVote', 'Shared')][string] $PowerContext = 'PerVote'
     )
+    # Power lifecycle records: the 120-byte request (or 16-byte response) as (offset, u32) words. Types, offsets and values
+    # from SDK 6.4.0.2 HAP_power.h, offsets checked with its hexagon-clang (enums are one byte). The DCVS v3 records each
+    # set only their own field, as the header's HAP_power_set_core_corner and HAP_power_set_sleep_latency do. A query
+    # stores clkFreqHz (response offset 8) in the telemetry word at Telemetry and its return code at RcTelemetry; votes
+    # OR theirs into telemetry [16].
+    $powerRecords = [ordered]@{
+        HvxPower      = @{ Call = 'HAP_power_set'; Words = @(@(0, 2), @(8, 1)) }                               # HVX, power_up
+        CoreTurbo     = @{ Call = 'HAP_power_set'; Words = @(@(0, 7), @(8, 0x1000), @(16, 1), @(20, 0x060606)) } # DCVS v2: DCVS off, performance mode, core target/min/max TURBO
+        HmxPower      = @{ Call = 'HAP_power_set'; Words = @(@(0, 13), @(8, 1)) }                              # HMX, power_up
+        CoreTurboPlus = @{ Call = 'HAP_power_set'; Words = @(@(0, 7), @(8, 0x1000), @(16, 1), @(20, 0x070707)) } # DCVS v2: as CoreTurbo, core TURBO_PLUS
+        CoreMax       = @{ Call = 'HAP_power_set'; Words = @(@(0, 7), @(8, 0x1000), @(16, 1), @(20, 0xFFFFFF)) } # DCVS v2: as CoreTurbo, core MAX
+        CoreTurboLowLatency = @{ Call = 'HAP_power_set'; Words = @(@(0, 7), @(8, 0x011000), @(12, 10), @(16, 1), @(20, 0x060606)) } # DCVS v2: as CoreTurbo, sleep latency 10 us
+        BusTurbo      = @{ Call = 'HAP_power_set'; Words = @(@(0, 12), @(36, 1), @(40, 0x060606)) }            # DCVS v3: bus target/min/max TURBO
+        BusMax        = @{ Call = 'HAP_power_set'; Words = @(@(0, 12), @(36, 1), @(40, 0xFFFFFF)) }            # DCVS v3: bus target/min/max MAX
+        SleepDisabled = @{ Call = 'HAP_power_set'; Words = @(@(0, 12), @(84, 0x0101)) }                        # DCVS v3: sleep_disable LPM_LEVEL1 (no low-power modes)
+        HmxClockTurbo = @{ Call = 'HAP_power_set'; Words = @(@(0, 14), @(8, 0x010101), @(12, 0x02800280), @(16, 0x0280)) } # HMX v2: power up, clock target/min/max EXP TUR, perf HIGH
+        HmxClockMax   = @{ Call = 'HAP_power_set'; Words = @(@(0, 14), @(8, 0x010101), @(12, 0xFFFFFFFFL), @(16, 0xFFFF)) }          # HMX v2: power up, clock target/min/max EXP MAX, perf HIGH
+        CoreClock     = @{ Call = 'HAP_power_get'; Words = @(, @(0, 4)); Telemetry = 48; RcTelemetry = 56 }    # clk_Freq
+        HmxClock      = @{ Call = 'HAP_power_get'; Words = @(, @(0, 12)); Telemetry = 52; RcTelemetry = 60 }   # hmx_core_clk_Freq
+    }
+    foreach ($name in $PowerVotes) { if (-not $powerRecords.Contains($name)) { throw "Unknown power record '$name'. Known: $($powerRecords.Keys -join ', ')." } }
     . (Join-Path $PSScriptRoot '../kernels/Kokoro.HmxConv.ps1')
     $cb = $Channels / 32; $groups = $Channels / 64
     $pad = 1
@@ -74,18 +99,20 @@ function New-KokoroHmxConvRunSteps {
     for ($o = 0; $o -lt 64; $o += 4) { $s.Add(@{Op='store'; s=23; t=15; Offset=$o}) }
     & $stage 1
 
-    # Power votes. The client context is this code's own address: stable for the process.
+    # Power votes. The client context is this code's own address: stable for the process. Return codes are ORed into
+    # telemetry [16]; a query's clkFreqHz goes to its telemetry word.
     $zeroRequest = { for ($o = 0; $o -lt 120; $o += 4) { $s.Add(@{Op='store'; s=29; t=15; Offset=$o}) } }
-    $vote = { param([object[]]$Words)
+    if ($PowerContext -eq 'Shared') { $s.Add(@{Op='add-pc'; d=16; i=0}) }
+    foreach ($name in $PowerVotes) {
+        $record = $powerRecords[$name]
         & $zeroRequest
-        foreach ($w in $Words) { & $imm 13 $w[1]; $s.Add(@{Op='store'; s=29; t=13; Offset=$w[0]}) }
-        $s.Add(@{Op='add-pc'; d=0; i=0}); $s.Add(@{Op='addi'; d=1; s=29; i=0})
-        & $call 'HAP_power_set'
-        $s.Add(@{Op='or'; d=24; s=24; t=0})
+        foreach ($w in $record.Words) { & $imm 13 $w[1]; $s.Add(@{Op='store'; s=29; t=13; Offset=$w[0]}) }
+        if ($PowerContext -eq 'Shared') { $s.Add(@{Op='addi'; d=0; s=16; i=0}) } else { $s.Add(@{Op='add-pc'; d=0; i=0}) }
+        $s.Add(@{Op='addi'; d=1; s=29; i=0})
+        & $call $record.Call
+        if ($record.RcTelemetry) { & $tele $record.RcTelemetry 0 } else { $s.Add(@{Op='or'; d=24; s=24; t=0}) }
+        if ($record.Telemetry) { $s.Add(@{Op='load'; d=13; s=29; Offset=8}); & $tele $record.Telemetry 13 }
     }
-    & $vote @(@(0, 2), @(8, 1))                                                  # HVX power up
-    & $vote @(@(0, 7), @(8, 0x1000), @(16, 1), @(20, 0x060606))                  # DCVS v2 performance, turbo
-    & $vote @(@(0, 13), @(8, 1))                                                 # HMX power up
     & $tele 16 24
     & $stage 2
 

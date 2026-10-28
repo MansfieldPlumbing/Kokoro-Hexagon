@@ -1014,6 +1014,18 @@ function Test-KokoroDecoderDelayEquivalence {
     $result
 }
 
+# Resource lifecycle telemetry of a job built on the HMX conv lifecycle (src/jobs/Kokoro.HmxConvRun.ps1): the OR of the
+# HAP_power_set return codes, the compute-resource context, the VTCM granted and the HVX and HMX lock return codes.
+function Read-KokoroJobLifecycle {
+    param([Parameter(Mandatory)][byte[]]$Output)
+    [pscustomobject]@{PowerRc=[BitConverter]::ToInt32($Output,16);ContextId=[BitConverter]::ToUInt32($Output,20);VtcmBytes=[BitConverter]::ToUInt32($Output,24)
+        HvxLockRc=[BitConverter]::ToInt32($Output,28);HmxLockRc=[BitConverter]::ToInt32($Output,32)
+        CoreClockRc=[BitConverter]::ToInt32($Output,56);HmxClockRc=[BitConverter]::ToInt32($Output,60)
+        # A clock is reported only when its query (the CoreClock or HmxClock record) returned 0.
+        CoreClockHz=$(if([BitConverter]::ToInt32($Output,56) -eq 0){[BitConverter]::ToUInt32($Output,48)})
+        HmxClockHz=$(if([BitConverter]::ToInt32($Output,60) -eq 0){[BitConverter]::ToUInt32($Output,52)})}
+}
+
 # PMU records of a profiled generator run: per category and per Unmarked site, ticks (19.2 MHz), cycles, calls and the
 # eight event counters (event set A: HVX packets in counter 1; B: permutes in counter 1, HVX packets in counter 7).
 function Read-KokoroPmuRecords {
@@ -1724,7 +1736,8 @@ function Add-KokoroGeneratorHostCoefficients {
 # DepthFirstParameters say what was emitted. Callers append K/M/S with Add-KokoroGeneratorHostCoefficients.
 function Invoke-KokoroGeneratorDepthFirstEmission {
     param([Parameter(Mandatory)][hashtable] $Parameters, [hashtable] $Overrides = @{})
-    $kept = @{ GeneratorHostCoefficients = $true; GeneratorAsyncWeights = $true; GeneratorVectorPackets = $true }
+    $kept = @{ GeneratorHostCoefficients = $true; GeneratorAsyncWeights = $true; GeneratorVectorPackets = $true
+        GeneratorPowerVotes = [string[]]@('HvxPower', 'CoreMax', 'HmxPower') }
     $spanSizes = @(0); $residentSets = @(, [int[]]@())
     if ($Parameters.GeneratorWhole) { $spanSizes = @(60, 40, 20) }
     if ($Parameters.GeneratorSource) { $residentSets = @([int[]]@(128, 256), [int[]]@(128), [int[]]@()) }
@@ -1733,7 +1746,8 @@ function Invoke-KokoroGeneratorDepthFirstEmission {
     $rejected = [Collections.Generic.List[string]]::new()
     foreach ($residentSet in $residentSets) {
         foreach ($size in $spanSizes) {
-            $p = $Parameters.Clone(); foreach ($key in $kept.Keys) { $p[$key] = $kept[$key] }
+            # Kept settings apply; power votes the caller names replace the kept ones.
+            $p = $Parameters.Clone(); foreach ($key in $kept.Keys) { if ($key -ne 'GeneratorPowerVotes' -or -not $p.ContainsKey($key)) { $p[$key] = $kept[$key] } }
             foreach ($key in $Overrides.Keys) { $p[$key] = $Overrides[$key] }
             if ($size) { $p.GeneratorSpanTiles = $size }
             if ($residentSet.Count) { $p.GeneratorResidentSourceChannels = $residentSet } else { $p.Remove('GeneratorResidentSourceChannels') }
@@ -2152,6 +2166,9 @@ function Test-KokoroGeneratorTileEquivalence {
         # Also run the backward job with PMU event sets A and B (output must equal the unprofiled run) and record its
         # time per category: fill, convolution, combine, mean, DMA, synchronization, tile fixes.
         [switch]$PmuSplit,
+        # The depth-first job's power lifecycle records and context (src/jobs/Kokoro.HmxConvRun.ps1); the layer job is
+        # unchanged. Each run reports its lifecycle telemetry (Read-KokoroJobLifecycle).
+        [string[]]$PowerVotes,[ValidateSet('PerVote','Shared')][string]$PowerContext='PerVote',
         # Jobs with a tail: time every run one-shot (about 30 s each) instead of one one-shot proof run plus resident timing.
         [switch]$OneShotTiming,
         # The depth-first job reads each site's K/M/S finished from the host (ConvertTo-KokoroGeneratorStageCoefficients)
@@ -2199,6 +2216,8 @@ function Test-KokoroGeneratorTileEquivalence {
     if($Joint -in 'WholeSource','SpansSource' -and $SourceChunkTiles -ne 128){ $tileParameters.GeneratorSourceChunkTiles=$SourceChunkTiles }
     if($StopAfterSpanStage){ $tileParameters.GeneratorStopAfterSpanStage=$StopAfterSpanStage }
     if($PoolWait){ $tileParameters.GeneratorPoolWait=$PoolWait }
+    if($PowerVotes){ $tileParameters.GeneratorPowerVotes=$PowerVotes }
+    if($PowerContext -ne 'PerVote'){ $tileParameters.GeneratorPowerContext=$PowerContext }
     if($SourceStreams -eq 'Model'){ $tileParameters.GeneratorExportFrontTensors=$true; if($ModelInjection -eq 'Output'){ $tileParameters.GeneratorSuppliedSectionInputs=$ModelSections } }
     if($SourceStreams -eq 'LayerOutput'){ $tileParameters.GeneratorSuppliedSectionInputs=$ModelSections }
     $tile=Invoke-KokoroGeneratorDepthFirstEmission -Parameters $tileParameters -Overrides $overrides; $tileParameters=$tile.DepthFirstParameters
@@ -2335,7 +2354,8 @@ function Test-KokoroGeneratorTileEquivalence {
             $pcmAt=[long]$emission.Layout.PcmOffset; $pcmBytes=& $slice $run.Output $pcmAt (2L*[int]$emission.Layout.Samples)
             $outputs=@(foreach($section in @($emission.Layout.Sections)){ if($section.Section -in $windowedSections){ continue }; $at=128+[long]$section.FinalWorkspaceOffset; [Convert]::ToHexString([Security.Cryptography.SHA256]::HashData((& $slice $run.Output $at $section.Bytes))) })
             [pscustomobject]@{SpanTiles=$size;WorkspaceWindows=$windowed;Spans=@($emission.Layout.Spans).Count;DspMs=$run.MedianMs;LibraryBytes=$emission.Bytes;VtcmBytes=$emission.Layout.VtcmBytes;OutputBytes=$emission.Layout.OutputBytes
-                PcmSHA256=[Convert]::ToHexString([Security.Cryptography.SHA256]::HashData($pcmBytes));SectionSHA256=$outputs;LibrarySHA256=$emission.LibrarySHA256;Workspace=$emission.Layout.Workspace}
+                PcmSHA256=[Convert]::ToHexString([Security.Cryptography.SHA256]::HashData($pcmBytes));SectionSHA256=$outputs;LibrarySHA256=$emission.LibrarySHA256;Workspace=$emission.Layout.Workspace
+                Lifecycle=(Read-KokoroJobLifecycle -Output $run.Output)}
         } })
         $report=[pscustomobject]@{Soc=$Soc;Fixture=$FixtureDirectory;Joint=$Joint;Repeat=$Repeat;Frames=$longFrames;Samples=5L*($longFrames-1);AudioSeconds=5.0*($longFrames-1)/24000
             Identical=(@($spanRuns | ForEach-Object { $_.PcmSHA256 + ($_.SectionSHA256 -join '') } | Select-Object -Unique).Count -eq 1);Runs=$spanRuns}
@@ -2472,7 +2492,8 @@ function Test-KokoroGeneratorTileEquivalence {
     $report=[pscustomobject]@{Soc=$Soc;Fixture=$FixtureDirectory;Joint=$Joint;SourceStreams=$SourceStreams;Model=$modelReport;Pcm=$pcm;Sections=$sectionReport;Channels=$Channels;Schedule=$tileParameters.GeneratorSchedule;Tiles=[int]$fixture.Tiles;TileBlock=$TileBlock;WeightPlanes=$WeightPlanes;TensorBytes=$tensorBytes;ByteIdentical=($different -eq 0);DifferentBytes=$different;FirstDifference=$first;DifferingTiles=$differingTiles.ToArray()
         LayerDspMs=$layerTiming.MedianMs;TileDspMs=$tileTiming.MedianMs;TimingMode=$timingMode;TimingRuns=$Runs;LayerTimingLines=$layerTiming.Lines;TileTimingLines=$tileTiming.Lines;OneShotLayerDspMs=$layerRun.MedianMs;OneShotTileDspMs=$tileRun.MedianMs;LayerVtcmBytes=$layer.Layout.VtcmBytes;TileVtcmBytes=$tile.Layout.VtcmBytes;LayerLibraryBytes=$layer.Bytes;TileLibraryBytes=$tile.Bytes
         LayerLibrarySHA256=$layer.LibrarySHA256;TileLibrarySHA256=$tile.LibrarySHA256;LayerTensorSHA256=[Convert]::ToHexString([Security.Cryptography.SHA256]::HashData($layerTensor))
-        TileTensorSHA256=[Convert]::ToHexString([Security.Cryptography.SHA256]::HashData($tileTensor));ControllerContact=$contactProof;PmuSplit=$split}
+        TileTensorSHA256=[Convert]::ToHexString([Security.Cryptography.SHA256]::HashData($tileTensor));ControllerContact=$contactProof;PmuSplit=$split
+        LayerLifecycle=(Read-KokoroJobLifecycle -Output $layerRun.Output);TileLifecycle=(Read-KokoroJobLifecycle -Output $tileRun.Output)}
     $report | Export-Clixml -LiteralPath (Join-Path $out 'equivalence.clixml') -Depth 8
     $report
 }

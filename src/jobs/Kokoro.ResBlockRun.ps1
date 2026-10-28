@@ -6,11 +6,12 @@
 # Method 2: config {tiles}, input native croutons, six W8 tensors, six 8192-byte
 # parameter records; output telemetry + aligned five-buffer workspace + six coefficients.
 function New-KokoroResBlockRunSteps {
- param([ValidateRange(2,1048576)][int]$Frames=7801,[ValidateSet(3,7,11)][int]$Kernel=3,[switch]$ProfileBreakdown,[switch]$BypassAdaInCoefficients,[switch]$BypassStatisticsAndCoefficients,[switch]$BypassHmxCompute)
+ param([ValidateRange(2,1048576)][int]$Frames=7801,[ValidateSet(3,7,11)][int]$Kernel=3,[switch]$ProfileBreakdown,[switch]$BypassAdaInCoefficients,[switch]$BypassStatisticsAndCoefficients,[switch]$BypassHmxCompute,[string[]]$PowerVotes,[ValidateSet('PerVote','Shared')][string]$PowerContext='PerVote')
  foreach($file in '../kernels/Kokoro.HmxConv.ps1','Kokoro.HmxConvRun.ps1','../kernels/Kokoro.AdaInStatistics.ps1','../kernels/Kokoro.AdaInInteger.ps1','../kernels/Kokoro.SnakeInteger.ps1','../kernels/Kokoro.ResidualInteger.ps1') { . (Join-Path $PSScriptRoot $file) }
  $tiles=[int][math]::Ceiling($Frames/32); $bytes=$tiles*8192
  $outputBytes=192+5*$bytes+6144
- $base=New-KokoroHmxConvRunSteps -Channels 128 -Kernel $Kernel -Dilation 1 -Tiles 8
+ $power=@{PowerContext=$PowerContext}; if($PowerVotes){ $power.PowerVotes=$PowerVotes }
+ $base=New-KokoroHmxConvRunSteps -Channels 128 -Kernel $Kernel -Dilation 1 -Tiles 8 @power
  $weightBytes=16384*$Kernel; $paramOff=131072+[int]([math]::Ceiling($weightBytes/65536)*65536); $outOff=$paramOff+65536
  $s=[Collections.Generic.List[hashtable]]::new()
  $imm={param([int]$r,[long]$v) $u=[long]([uint32]($v -band 0xffffffffL));$s.Add(@{Op='lo';x=$r;i=($u -band 65535)});$s.Add(@{Op='hi';x=$r;i=($u -shr 16)})}

@@ -155,7 +155,9 @@ function New-KokoroGenerator60x16RunSteps {
         # Spans: each workspace tensor between span stages (Layout.Workspace) lives in a window of the tiles one span
         # touches, its addresses rebased to the span's origin; before each span the tiles carried from earlier spans move
         # to the window's front. The last main section's output stays whole (the job's output).
-        [switch]$WorkspaceWindows)
+        [switch]$WorkspaceWindows,
+        # Power lifecycle records and context (src/jobs/Kokoro.HmxConvRun.ps1); the defaults emit exactly as before.
+        [string[]]$PowerVotes,[ValidateSet('PerVote','Shared')][string]$PowerContext='PerVote')
 
     if($WeightPlanes -eq 1 -and $Schedule -eq 'Layer'){ throw 'One weight plane is a backward schedule option.' }
     $packets={ param([object[]]$Steps) $grouped=if($VectorPackets){ Group-HexagonPackets $Steps } else { $Steps }; $grouped }
@@ -832,7 +834,8 @@ function New-KokoroGenerator60x16RunSteps {
     # Checked resource wrapper of the frozen K=11 resblock runner (as the resident stage), with admission
     # sizes and the VTCM request changed.
     # The admitted config tile count (Kokoro.ResBlockRun.ps1) is the last section's: the harness passes the layout's Tiles.
-    $wrapperSource=New-KokoroResBlockRunSteps -Frames $sections[-1].Frames -Kernel 11
+    $power=@{PowerContext=$PowerContext}; if($PowerVotes){ $power.PowerVotes=$PowerVotes }
+    $wrapperSource=New-KokoroResBlockRunSteps -Frames $sections[-1].Frames -Kernel 11 @power
     $base=@($wrapperSource.Steps);$start=-1
     for($i=0;$i -lt $base.Count;$i++){if($base[$i].Op -eq 'label' -and $base[$i].Name -eq 'connected_job'){$start=$i;break}}
     if($start -lt 0){throw 'Connected wrapper anchor changed'}
