@@ -2,27 +2,27 @@
 # Stock generator tail at 16 bits: leaky_relu(0.01) -> conv_post -> exp / sin -> iSTFT -> PCM.
 # Kokoro dfb907a02bba8152ca444717ca5d78747ccb4bec istftnet.py Generator.forward and TorchSTFT.inverse; the integer
 # contract and every constant: tools/New-KokoroGeneratorTail16Fixture.ps1.
-#   per batch:  Kokoro.LeakyRelu16.ps1 (input -> conv_post input planes), HMX conv_post (three groups, 128 -> 64),
-#               combine -> 16-bit logits (64 channels, magnitude bins in block 0, phase bins in block 1).
-#   once:       Kokoro.TailSpectrum16.ps1 (logits -> Re/Im planes, resident with zero halo tiles).
-#   per batch:  HMX iSTFT conv (64 -> 64, taps at frame shifts -1..2), combine -> PCM int16 (biased) in lanes
+# Streamed per batch of output tiles; VTCM holds one batch with its halo, whatever the range:
+#   new spectrum tiles: DMA of their input with two tiles of halo, Kokoro.LeakyRelu16.ps1 (input -> conv_post
+#               input window), HMX conv_post (three groups, 128 -> 64), combine -> 16-bit logits (64 channels,
+#               magnitude bins in block 0, phase bins in block 1), Kokoro.TailSpectrum16.ps1 (logits -> Re/Im
+#               planes) into the spectrum window, which holds the batch and one tile each side.
+#   then:       HMX iSTFT conv (64 -> 64, taps at frame shifts -1..2), combine -> PCM int16 (biased) in lanes
 #               0..4 of each frame, scalar copy to DDR as sample 5m + r; the first and last five samples take
-#               their envelope gains.
+#               their envelope gains. The spectrum window's last two tiles move to its front for the next batch.
 # Method 2, five buffers: config (tiles), input (128-channel biased u16 croutons), weights (conv_post Wh, Wl,
 # iSTFT Wh, Wl), parameters (16384 B), output: [0] start ticks, [8] end ticks, [36] wrapper stage, [44] 1 when
 # done, PCM int16 at 256 (5 * 32 * tiles samples written; the first 5 (frames - 1) are the audio).
 
 function Get-KokoroGeneratorTail16Layout {
-    # SpanTiles > 0: VTCM for a range of at most that many output tiles (Add-KokoroGeneratorTail16JobSteps -FirstTile
-    # -EndTile): its logits and spectrum one tile each side, its input two.
-    param([ValidateRange(2,1048576)][int]$Frames=7801,[ValidateRange(1,64)][int]$BatchTiles=16,[ValidateRange(0,32768)][int]$SpanTiles=0)
+    # VTCM for one batch of BatchTiles output tiles and its halo, independent of the range.
+    param([ValidateRange(2,1048576)][int]$Frames=7801,[ValidateRange(1,64)][int]$BatchTiles=16)
     $tiles=[int][math]::Ceiling($Frames/32)
-    $local=if($SpanTiles){[math]::Min($tiles,$SpanTiles+2)}else{$tiles}; $inputTiles=if($SpanTiles){[math]::Min($tiles,$SpanTiles+4)}else{$tiles}
     $al={param([long]$v) [long]([math]::Ceiling($v/65536)*65536)}
     $regions=[ordered]@{}; $at=0L
     # HMX activation sources first, none crossing a 4 MiB VTCM page.
-    foreach($r in @(@('Window',(($BatchTiles+2)*8192)),@('WindowLow',(($BatchTiles+2)*8192)),@('Spectrum',(($local+2)*4096)),@('SpectrumLow',(($local+2)*4096)),
-        @('Planes',(6L*$BatchTiles*4096)),@('Weights',172032),@('Tables',16384),@('Logits',($local*4096)),@('Pcm',($BatchTiles*4096)),@('Input',($inputTiles*8192)))){
+    foreach($r in @(@('Window',(($BatchTiles+2)*8192)),@('WindowLow',(($BatchTiles+2)*8192)),@('Spectrum',(($BatchTiles+2)*4096)),@('SpectrumLow',(($BatchTiles+2)*4096)),
+        @('Planes',(6L*$BatchTiles*4096)),@('Weights',172032),@('Tables',16384),@('Logits',($BatchTiles*4096)),@('Pcm',($BatchTiles*4096)),@('Input',(($BatchTiles+2)*8192)))){
         $regions[$r[0]]=[ordered]@{Offset=$at;Bytes=[long]$r[1]}; $at+=& $al $r[1]
     }
     $page=4194304
@@ -42,20 +42,17 @@ function Add-KokoroGeneratorTail16JobSteps {
         [int]$PcmBase=23,[long]$PcmOffset=256,
         # The output tiles FirstTile to EndTile - 1 only (default all), from the input tensor at its full-length offsets:
         # conv_post and the spectrum run one tile past each side of the range, inside the tensor, so every output tile
-        # sees exactly what the whole run gives it; the PCM goes to its samples' place. SpanTiles sizes VTCM
-        # (Get-KokoroGeneratorTail16Layout) and bounds the range.
-        [int]$FirstTile=0,[int]$EndTile=-1,[int]$SpanTiles=0,
+        # sees exactly what the whole run gives it; the PCM goes to its samples' place.
+        [int]$FirstTile=0,[int]$EndTile=-1,
         # Prefix of this call's labels (one per call when a job runs several ranges).
         [string]$LabelPrefix='t16',
         # Diagnosis: DMA the 16-bit logits (64-channel croutons) to DumpBase + DumpOffset after conv_post, then the
         # spectrum high and low planes ((tiles + 2) * 4096 bytes each, halo tiles included) after them.
         [int]$DumpBase=-1,[long]$DumpOffset=0)
-    $layout=Get-KokoroGeneratorTail16Layout -Frames $Frames -BatchTiles $BatchTiles -SpanTiles $SpanTiles
+    $layout=Get-KokoroGeneratorTail16Layout -Frames $Frames -BatchTiles $BatchTiles
     $tiles=$layout.Tiles; $batch=$BatchTiles; $reg=$layout.Regions
     if($EndTile -lt 0){ $EndTile=$tiles }
-    if($FirstTile -lt 0 -or $EndTile -gt $tiles -or $FirstTile -ge $EndTile -or ($SpanTiles -and $EndTile-$FirstTile -gt $SpanTiles)){throw 'Tail tile range out of bounds.'}
-    # Logits and spectrum for tiles l0 .. l1 - 1, from input tiles i0 .. i1 - 1; VTCM holds each at its local index.
-    $l0=[math]::Max(0,$FirstTile-1); $l1=[math]::Min($tiles,$EndTile+1); $i0=[math]::Max(0,$l0-1); $i1=[math]::Min($tiles,$l1+1)
+    if($FirstTile -lt 0 -or $EndTile -gt $tiles -or $FirstTile -ge $EndTile){throw 'Tail tile range out of bounds.'}
     $s=$Steps; $calls=$Calls
     $imm={param([int]$r,[long]$v) $u=[long]([uint32]($v -band 0xffffffffL));$s.Add(@{Op='lo';x=$r;i=($u -band 65535)});$s.Add(@{Op='hi';x=$r;i=($u -shr 16)})}
     $ptr={param([int]$r,[int]$baseReg,[long]$offset) $offsetReg=if($r -eq $baseReg){15}else{$r}; & $imm $offsetReg $offset;$s.Add(@{Op='add';d=$r;s=$baseReg;t=$offsetReg}) }
@@ -96,38 +93,57 @@ function Add-KokoroGeneratorTail16JobSteps {
         & $ptr 5 $PcmBase ($PcmOffset+2*$sampleIndex); $s.Add(@{Op='store-h';s=5;t=10;Offset=0})
     }
     if($DumpBase -ge 0 -and ($FirstTile -ne 0 -or $EndTile -ne $tiles)){throw 'The logits dump covers the whole tail.'}
-    & $dma 18 $reg.Input.Offset $InputBase ($InputOffset+$i0*8192L) (($i1-$i0)*8192L)
     & $dma 18 $reg.Weights.Offset $WeightsBase $WeightsOffset 172032
     & $dma 18 $reg.Tables.Offset $TablesBase $TablesOffset 16384
-    # conv_post per batch.
-    for($startTile=$l0;$startTile -lt $l1;$startTile+=$batch){
-        $count=[math]::Min($batch,$l1-$startTile)
-        $first=[math]::Max(0,$startTile-1);$last=[math]::Min($tiles,$startTile+$count+1)
-        if($startTile -eq 0){ & $fill $reg.Window.Offset 64 0x80008000L; & $fill $reg.WindowLow.Offset 64 0 }
-        if($startTile+$count -eq $tiles){ & $fill ($reg.Window.Offset+($count+1)*8192) 64 0x80008000L; & $fill ($reg.WindowLow.Offset+($count+1)*8192) 64 0 }
-        & $ptr 0 18 ($reg.Input.Offset+($first-$i0)*8192); & $ptr 1 18 ($reg.Window.Offset+($first-$startTile+1)*8192); & $ptr 2 18 ($reg.WindowLow.Offset+($first-$startTile+1)*8192); & $imm 3 (64*($last-$first))
-        & $call 'body_leaky'
-        $s.Add(@{Op='syncht'})
-        & $ptr 0 18 ($reg.Window.Offset+8192); & $ptr 1 18 ($reg.WindowLow.Offset+8192); & $ptr 2 18 $reg.Weights.Offset; & $ptr 3 18 $reg.Tables.Offset; & $imm 4 $count; & $ptr 5 18 $reg.Planes.Offset
-        & $call 'body_conv_post'
-        $s.Add(@{Op='syncht'})
-        & $ptr 0 18 $reg.Planes.Offset; & $ptr 1 18 ($reg.Logits.Offset+($startTile-$l0)*4096); & $imm 3 $count
-        & $call 'body_combine'
-    }
-    if($DumpBase -ge 0){ $s.Add(@{Op='syncht'}); & $dma $DumpBase $DumpOffset 18 $reg.Logits.Offset ($tiles*4096L) }
-    # Spectrum, resident, with zero halo tiles and zero rows past the frames.
-    & $fill $reg.Spectrum.Offset 32 0x80008000L; & $fill $reg.SpectrumLow.Offset 32 0
-    & $fill ($reg.Spectrum.Offset+($l1-$l0+1)*4096) 32 0x80008000L; & $fill ($reg.SpectrumLow.Offset+($l1-$l0+1)*4096) 32 0
-    & $ptr 0 18 $reg.Logits.Offset; & $ptr 1 18 ($reg.Spectrum.Offset+4096); & $ptr 2 18 ($reg.SpectrumLow.Offset+4096); & $ptr 3 18 ($reg.Tables.Offset+8192); & $imm 4 ($l1-$l0)
-    & $call 'body_spectrum'
-    if($l1 -eq $tiles){ & $padRows ($reg.Spectrum.Offset+($tiles-$l0)*4096) 0x8000; & $padRows ($reg.SpectrumLow.Offset+($tiles-$l0)*4096) 0 }
-    $s.Add(@{Op='syncht'})
-    if($DumpBase -ge 0){ & $dma $DumpBase ($DumpOffset+$tiles*4096L) 18 $reg.Spectrum.Offset (($tiles+2)*4096L); & $dma $DumpBase ($DumpOffset+$tiles*4096L+($tiles+2)*4096L) 18 $reg.SpectrumLow.Offset (($tiles+2)*4096L) }
-    # iSTFT per batch, then PCM to DDR.
+    # VTCM vectors dest <- src in address order (safe for a destination below an overlapping source).
+    $copyVectors={param([long]$destOff,[long]$srcOff,[int]$vectors)
+        & $ptr 4 18 $srcOff; & $ptr 5 18 $destOff; & $imm 6 $vectors; $s.Add(@{Op='imm';d=7;i=0})
+        $n=& $label; $s.Add(@{Op='label';Name=$n}); $s.Add(@{Op='vload';d=0;s=4;Offset=0}); $s.Add(@{Op='vstore';s=5;t=0;Offset=0})
+        $s.Add(@{Op='addi';d=4;s=4;i=128}); $s.Add(@{Op='addi';d=5;s=5;i=128}); $s.Add(@{Op='addi';d=6;s=6;i=-1}); $s.Add(@{Op='gtu';d=0;s=6;t=7}); $s.Add(@{Op='jump-p';u=0;Label=$n}) }
+    # Spectrum window: spectrum tile t at position t - base, base one tile before the batch's first output tile;
+    # tiles -1 and Tiles are the zero halo. The dump places tile t at position t + 1 of each plane.
+    $spectrumAt={param([int]$plane,[int]$tile,[int]$base) $(if($plane){$reg.SpectrumLow.Offset}else{$reg.Spectrum.Offset})+($tile-$base)*4096L}
+    $spectrumDump={param([int]$tile,[int]$base,[int]$count) if($DumpBase -lt 0){ return }; $s.Add(@{Op='syncht'})
+        for($plane=0;$plane -lt 2;$plane++){ & $dma $DumpBase ($DumpOffset+$tiles*4096L+$plane*($tiles+2)*4096L+($tile+1)*4096L) 18 (& $spectrumAt $plane $tile $base) ($count*4096L) } }
     $lastFrame=$Frames-2; $lastTile=[int][math]::Floor($lastFrame/32)
+    # Spectrum tiles [haveFrom, haveTo) are in the window at windowBase.
+    $haveTo=[math]::Max(0,$FirstTile-1); $haveFrom=$haveTo; $windowBase=$FirstTile-1
     for($startTile=$FirstTile;$startTile -lt $EndTile;$startTile+=$batch){
-        $count=[math]::Min($batch,$EndTile-$startTile)
-        & $ptr 0 18 ($reg.Spectrum.Offset+($startTile-$l0+1)*4096); & $ptr 1 18 ($reg.SpectrumLow.Offset+($startTile-$l0+1)*4096); & $ptr 2 18 ($reg.Weights.Offset+114688); & $ptr 3 18 ($reg.Tables.Offset+4096); & $imm 4 $count; & $ptr 5 18 $reg.Planes.Offset
+        $count=[math]::Min($batch,$EndTile-$startTile); $base=$startTile-1
+        # The spectrum the previous batch left from this base on moves to the window's front.
+        $keep=[math]::Max($haveFrom,$base)
+        if($haveTo -gt $keep -and $base -ne $windowBase){ for($plane=0;$plane -lt 2;$plane++){ & $copyVectors (& $spectrumAt $plane $keep $base) (& $spectrumAt $plane $keep $windowBase) (32*($haveTo-$keep)) } }
+        $haveFrom=$keep; $windowBase=$base
+        if($base -lt 0){ & $fill (& $spectrumAt 0 -1 $base) 32 0x80008000L; & $fill (& $spectrumAt 1 -1 $base) 32 0; & $spectrumDump -1 $base 1 }
+        # New spectrum tiles up to one past the batch: conv_post per chunk from its input and two tiles of halo.
+        $need=[math]::Min($tiles,$startTile+$count+1)
+        for($chunkAt=$haveTo;$chunkAt -lt $need;$chunkAt+=$batch){
+            $chunk=[math]::Min($batch,$need-$chunkAt)
+            $first=[math]::Max(0,$chunkAt-1);$last=[math]::Min($tiles,$chunkAt+$chunk+1)
+            & $dma 18 $reg.Input.Offset $InputBase ($InputOffset+$first*8192L) (($last-$first)*8192L)
+            if($chunkAt -eq 0){ & $fill $reg.Window.Offset 64 0x80008000L; & $fill $reg.WindowLow.Offset 64 0 }
+            if($chunkAt+$chunk -eq $tiles){ & $fill ($reg.Window.Offset+($chunk+1)*8192) 64 0x80008000L; & $fill ($reg.WindowLow.Offset+($chunk+1)*8192) 64 0 }
+            & $ptr 0 18 $reg.Input.Offset; & $ptr 1 18 ($reg.Window.Offset+($first-$chunkAt+1)*8192); & $ptr 2 18 ($reg.WindowLow.Offset+($first-$chunkAt+1)*8192); & $imm 3 (64*($last-$first))
+            & $call 'body_leaky'
+            $s.Add(@{Op='syncht'})
+            & $ptr 0 18 ($reg.Window.Offset+8192); & $ptr 1 18 ($reg.WindowLow.Offset+8192); & $ptr 2 18 $reg.Weights.Offset; & $ptr 3 18 $reg.Tables.Offset; & $imm 4 $chunk; & $ptr 5 18 $reg.Planes.Offset
+            & $call 'body_conv_post'
+            $s.Add(@{Op='syncht'})
+            & $ptr 0 18 $reg.Planes.Offset; & $ptr 1 18 $reg.Logits.Offset; & $imm 3 $chunk
+            & $call 'body_combine'
+            if($DumpBase -ge 0){ $s.Add(@{Op='syncht'}); & $dma $DumpBase ($DumpOffset+$chunkAt*4096L) 18 $reg.Logits.Offset ($chunk*4096L) }
+            # Spectrum, with zero rows past the frames.
+            & $ptr 0 18 $reg.Logits.Offset; & $ptr 1 18 (& $spectrumAt 0 $chunkAt $base); & $ptr 2 18 (& $spectrumAt 1 $chunkAt $base); & $ptr 3 18 ($reg.Tables.Offset+8192); & $imm 4 $chunk
+            & $call 'body_spectrum'
+            if($chunkAt+$chunk -eq $tiles){ & $padRows (& $spectrumAt 0 ($tiles-1) $base) 0x8000; & $padRows (& $spectrumAt 1 ($tiles-1) $base) 0 }
+            $s.Add(@{Op='syncht'})
+            & $spectrumDump $chunkAt $base $chunk
+        }
+        $haveTo=$need
+        if($startTile+$count+1 -gt $tiles){ & $fill (& $spectrumAt 0 $tiles $base) 32 0x80008000L; & $fill (& $spectrumAt 1 $tiles $base) 32 0; & $spectrumDump $tiles $base 1 }
+        $s.Add(@{Op='syncht'})
+        # iSTFT, then PCM to DDR.
+        & $ptr 0 18 (& $spectrumAt 0 $startTile $base); & $ptr 1 18 (& $spectrumAt 1 $startTile $base); & $ptr 2 18 ($reg.Weights.Offset+114688); & $ptr 3 18 ($reg.Tables.Offset+4096); & $imm 4 $count; & $ptr 5 18 $reg.Planes.Offset
         & $call 'body_conv_istft'
         $s.Add(@{Op='syncht'})
         & $ptr 0 18 $reg.Planes.Offset; & $ptr 1 18 $reg.Pcm.Offset; & $imm 3 $count

@@ -489,7 +489,7 @@ function New-KokoroGenerator60x16RunSteps {
     $tailWeightOffset=$weightBytes; $tailParameterOffset=$parameterBytes
     if($Tail){
         if($StopAfterStage -ge 0){throw '-Tail runs only after the whole stage'}
-        $tailLayout=Get-KokoroGeneratorTail16Layout -Frames $Frames -SpanTiles $(if($spanMode){& $spanMax 'T0' 'T1'}else{0})
+        $tailLayout=Get-KokoroGeneratorTail16Layout -Frames $Frames
         $vtcmBytes=[math]::Max($vtcmBytes,$tailLayout.VtcmBytes); $weightBytes+=172032; $parameterBytes+=16384
         $pcmOffset=[long]([math]::Ceiling($outputBytes/256)*256); $outputBytes=$pcmOffset+$tailLayout.OutputBytes-256
     }
@@ -1532,7 +1532,7 @@ function New-KokoroGenerator60x16RunSteps {
         # The tail reads two tiles of halo each side (Add-KokoroGeneratorTail16JobSteps: conv_post and the spectrum).
         & $wsCheck 'Main128.Final' $span.Index 'Read' ([math]::Max(0,$t0-2)) ([math]::Min($tiles,$t1+2))
         & $mark 'Boundary' 'Tail'; & $sync
-        Add-KokoroGeneratorTail16JobSteps -Steps $s -Calls $calls -Frames $Frames -InputBase 25 -InputOffset $finalOffset -WeightsBase 21 -WeightsOffset $tailWeightOffset -TablesBase 22 -TablesOffset $tailParameterOffset -PcmBase 23 -PcmOffset $pcmOffset -FirstTile $t0 -EndTile $t1 -SpanTiles (& $spanMax 'T0' 'T1') -LabelPrefix "t16r$t0"
+        Add-KokoroGeneratorTail16JobSteps -Steps $s -Calls $calls -Frames $Frames -InputBase 25 -InputOffset $finalOffset -WeightsBase 21 -WeightsOffset $tailWeightOffset -TablesBase 22 -TablesOffset $tailParameterOffset -PcmBase 23 -PcmOffset $pcmOffset -FirstTile $t0 -EndTile $t1 -LabelPrefix "t16r$t0"
     }
     # Spans ($spans): per span the 256-channel front and section, then the 128-channel front, section and tail. A
     # section's first steps start from its initial state; later ones restore the state its previous steps saved.
