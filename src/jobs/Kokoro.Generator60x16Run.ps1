@@ -151,7 +151,11 @@ function New-KokoroGenerator60x16RunSteps {
         [ValidateSet(128,256)][int[]]$ResidentSourceChannels=@(),
         # Chunked sections queue each branch's weights of the next stage (no wait) as soon as that branch's convolution
         # returns, and wait for them before the next stage's convolutions.
-        [switch]$AsyncWeights)
+        [switch]$AsyncWeights,
+        # Spans: each workspace tensor between span stages (Layout.Workspace) lives in a window of the tiles one span
+        # touches, its addresses rebased to the span's origin; before each span the tiles carried from earlier spans move
+        # to the window's front. The last main section's output stays whole (the job's output).
+        [switch]$WorkspaceWindows)
 
     if($WeightPlanes -eq 1 -and $Schedule -eq 'Layer'){ throw 'One weight plane is a backward schedule option.' }
     $packets={ param([object[]]$Steps) $grouped=if($VectorPackets){ Group-HexagonPackets $Steps } else { $Steps }; $grouped }
@@ -230,6 +234,93 @@ function New-KokoroGenerator60x16RunSteps {
             if(($two -and $reached.T -eq $fastTiles) -or (-not $two -and $reached.J -eq $slowSteps)){ break }
         }
     }
+    if($WorkspaceWindows -and (-not $spanMode -or $ExportFrontTensors)){ throw 'Workspace windows are a span option without exported front tensors.' }
+    # Workspace plan (Layout.Workspace): each tensor one span stage hands to another, with every span's accesses, tiles
+    # [First, End) in the tensor's own tiles, as the stages below make them (halos included; x and har are job inputs).
+    # A span's origin is the lowest tile it touches; its carry is the tiles before it from its origin on (written, for a
+    # workspace tensor): what a consumer still needs from earlier spans. Windowed tensors are addressed at tile - origin in
+    # WindowTiles; elsewhere every origin is 0 (the whole tensor at its absolute tiles).
+    $workspace=[ordered]@{}
+    if($spanMode){
+        $wsTensor={param([string]$name,[string]$producer,[string]$consumer,[int]$tileCount,[long]$bytesPerTile,[int]$haloBefore,[int]$haloAfter,[string]$role,[int]$of)
+            $workspace[$name]=[pscustomobject]@{Tensor=$name;Producer=$producer;Consumer=$consumer;Tiles=$tileCount;TileBytes=$bytesPerTile;HaloBefore=$haloBefore;HaloAfter=$haloAfter
+                Role=$role;Of=$of;Accesses=[Collections.Generic.List[object]]::new();Origins=$null;Carries=$null;Shifts=$null;WindowTiles=$tileCount;Windowed=$false;InteriorCarries=$null;MaxCarry=0} }
+        $wsAdd={param([string]$name,[int]$wsAt,[string]$mode,[int]$first,[int]$end) if($end -gt $first){ $workspace[$name].Accesses.Add([pscustomobject]@{Span=$wsAt;Mode=$mode;First=$first;End=$end}) } }
+        $wsBatch=$BatchTiles; $wsSlow=$slowTiles; $wsFast=if($two){$fastTiles}else{0}
+        & $wsTensor 'x' 'decoder (job input)' 'front 256' $decTilesAll 32768 1 1 'Input' 0
+        & $wsTensor 'Main256.Input' 'front 256' 'resblocks 0-2' $wsSlow 16384 0 0 'Main' 0
+        & $wsTensor 'Main256.Final' 'resblocks 0-2 mean' $(if($two){'front 128'}else{'job output'}) $wsSlow 16384 1 1 'Main' 0
+        if($Source){
+            & $wsTensor 'Har256' 'harmonic source (before the spans)' 'noise_convs 0' $wsSlow 32768 1 1 'Input' 0
+            & $wsTensor 'Source256.Input' 'noise_convs 0' 'noise_res 0' $wsSlow 16384 0 0 'Source' 0
+            & $wsTensor 'Source256.Final' 'noise_res 0' 'front 256 add' $wsSlow 16384 0 0 'Source' 0
+        }
+        if($two){
+            & $wsTensor 'Main128.Input' 'front 128' 'resblocks 3-5' $wsFast 8192 0 0 'Main' 1
+            & $wsTensor 'Main128.Final' 'resblocks 3-5 mean' 'tail' $wsFast 8192 2 2 'Main' 1
+            if($Source){
+                & $wsTensor 'Har128' 'harmonic source (before the spans)' 'noise_convs 1' $wsFast 8192 1 1 'Input' 0
+                & $wsTensor 'Source128.Input' 'noise_convs 1' 'noise_res 1' $wsFast 8192 0 0 'Source' 1
+                & $wsTensor 'Source128.Final' 'noise_res 1' 'front 128 add' $wsFast 8192 0 0 'Source' 1
+            }
+        }
+        # A section's steps [j0, j1) read their blocks of its input and write their tiles three back of its output.
+        $wsSteps={param([string]$role,[int]$wsAt,[int]$j0,[int]$j1,[int]$count)
+            if($j1 -le $j0){ return }
+            & $wsAdd "$role.Input" $wsAt 'Read' ($wsBatch*$j0) ([math]::Min($count,$wsBatch*$j1))
+            & $wsAdd "$role.Final" $wsAt 'Write' ([math]::Max(0,$wsBatch*$j0-3)) ([math]::Min($count,$wsBatch*$j1-3)) }
+        foreach($wsSpan in $spans){
+            $wsAt=$wsSpan.Index
+            if($Source){
+                & $wsAdd 'Har256' $wsAt 'Read' ([math]::Max(0,$wsSpan.C0-1)) ([math]::Min($wsSlow,$wsSpan.C1+1)); & $wsAdd 'Source256.Input' $wsAt 'Write' $wsSpan.C0 $wsSpan.C1
+                & $wsSteps 'Source256' $wsAt $wsSpan.R0 $wsSpan.R1 $wsSlow
+            }
+            if($wsSpan.D1 -gt $wsSpan.D0){
+                & $wsAdd 'x' $wsAt 'Read' ([math]::Max(0,$wsSpan.D0-1)) ([math]::Min($decTilesAll,$wsSpan.D1+1))
+                if($Source){ & $wsAdd 'Source256.Final' $wsAt 'Read' (10*$wsSpan.D0) ([math]::Min($wsSlow,10*$wsSpan.D1)) }
+                & $wsAdd 'Main256.Input' $wsAt 'Write' (10*$wsSpan.D0) ([math]::Min($wsSlow,10*$wsSpan.D1))
+            }
+            & $wsSteps 'Main256' $wsAt $wsSpan.J0 $wsSpan.J1 $wsSlow
+            if(-not $two){ continue }
+            if($Source){
+                & $wsAdd 'Har128' $wsAt 'Read' ([math]::Max(0,$wsSpan.G0-1)) ([math]::Min($wsFast,$wsSpan.G1+1)); & $wsAdd 'Source128.Input' $wsAt 'Write' $wsSpan.G0 $wsSpan.G1
+                & $wsSteps 'Source128' $wsAt $wsSpan.H0 $wsSpan.H1 $wsFast
+            }
+            if($wsSpan.S1 -gt $wsSpan.S0){
+                & $wsAdd 'Main256.Final' $wsAt 'Read' ([math]::Max(0,$wsSpan.S0-1)) ([math]::Min($wsSlow,$wsSpan.S1+1))
+                if($Source){ & $wsAdd 'Source128.Final' $wsAt 'Read' (6*$wsSpan.S0) ([math]::Min($wsFast,6*$wsSpan.S1)) }
+                & $wsAdd 'Main128.Input' $wsAt 'Write' (6*$wsSpan.S0) ([math]::Min($wsFast,6*$wsSpan.S1))
+            }
+            & $wsSteps 'Main128' $wsAt $wsSpan.K0 $wsSpan.K1 $wsFast
+            if($wsSpan.T1 -gt $wsSpan.T0){ & $wsAdd 'Main128.Final' $wsAt 'Read' ([math]::Max(0,$wsSpan.T0-2)) ([math]::Min($wsFast,$wsSpan.T1+2)) }
+        }
+        $outputTensor=if($two){'Main128.Final'}else{'Main256.Final'}
+        foreach($wsT in $workspace.Values){
+            $wsN=$spans.Count; $wsO=[int[]]::new($wsN); $wsCarry=[int[]]::new($wsN); $wsShift=[int[]]::new($wsN); $wsWritten=if($wsT.Role -eq 'Input'){$wsT.Tiles}else{0}; $wsReach=0; $wsWindow=1; $wsPrev=0
+            for($wsAt=0;$wsAt -lt $wsN;$wsAt++){
+                $wsHere=@($wsT.Accesses | Where-Object Span -eq $wsAt)
+                $wsO[$wsAt]=if($wsHere.Count){[int]($wsHere | Measure-Object First -Minimum).Minimum}else{$wsPrev}
+                if($wsO[$wsAt] -lt $wsPrev){throw "Workspace tensor $($wsT.Tensor): span $wsAt starts before span $($wsAt-1)."}
+                $wsCarry[$wsAt]=[math]::Max(0,[math]::Min($wsWritten,$wsReach)-$wsO[$wsAt]); $wsShift[$wsAt]=$wsO[$wsAt]-$wsPrev
+                foreach($wsA in $wsHere){
+                    if($wsA.Mode -eq 'Write'){ $wsWritten=[math]::Max($wsWritten,$wsA.End) }
+                    elseif($wsA.End -gt $wsWritten){throw "Workspace tensor $($wsT.Tensor): span $wsAt reads tile $($wsA.End-1) before it is written."}
+                    $wsWindow=[math]::Max($wsWindow,$wsA.End-$wsO[$wsAt]); $wsReach=[math]::Max($wsReach,$wsA.End)
+                }
+                $wsPrev=$wsO[$wsAt]
+            }
+            $wsT.Origins=$wsO; $wsT.Carries=$wsCarry; $wsT.Shifts=$wsShift; $wsT.MaxCarry=[int]($wsCarry | Measure-Object -Maximum).Maximum
+            $wsT.InteriorCarries=@($(if($wsN -gt 2){$wsCarry[1..($wsN-2)]}) | Select-Object -Unique)
+            if($WorkspaceWindows -and $wsT.Role -ne 'Input' -and $wsT.Tensor -ne $outputTensor){ $wsT.Windowed=$true; $wsT.WindowTiles=$wsWindow }
+        }
+    }
+    # A bound section's tensor (Input or Final) by its window: the tile offset of span k's origin (0 unless windowed).
+    $wsOrigin={param([string]$name,[int]$k) $t=$workspace[$name]; if($t -and $t.Windowed){[long]$t.Origins[$k]}else{0L}}
+    # A span stage's own range must be the plan's, inside the tensor's window.
+    $wsCheck={param([string]$name,[int]$k,[string]$mode,[int]$first,[int]$end)
+        $t=$workspace[$name]
+        if(-not @($t.Accesses | Where-Object { $_.Span -eq $k -and $_.Mode -eq $mode -and $_.First -eq $first -and $_.End -eq $end }).Count){throw "Span $k ${name}: the stage's $mode of tiles [$first, $end) is not in the workspace plan."}
+        $o=& $wsOrigin $name $k; if($first-$o -lt 0 -or $end-$o -gt $t.WindowTiles){throw "Span $k ${name}: tiles [$first, $end) leave the window."} }
     # Largest range of each span stage (VTCM is sized by them).
     $spanMax={param([string]$a,[string]$b) [int](@($spans | ForEach-Object { $_.$b-$_.$a }) | Measure-Object -Maximum).Maximum}
     # Depth-first layout of the bound section (dot-sourced at the end of $configure). Records and K/M/S of all 18 stages
@@ -336,7 +427,11 @@ function New-KokoroGenerator60x16RunSteps {
     $branchWeights=[long[]]::new($branches); $weightBytes=$wBase
     for($b=0;$b -lt $branches;$b++){ $branchWeights[$b]=$weightBytes; $weightBytes+=6L*2*$Channels*$Channels*$sectionKernels[$b] }
     $parameterBytes=$pBase+6*$branches*$recordBytes
-    $stride=[int]([math]::Ceiling($tensorBytes/128)*128); $finalOffset=$ddrBase+$(if($spanMode){0L}else{2L*$stride}); $coefOffset=$finalOffset+$tensorBytes
+    # Workspace slots: a windowed tensor's slot holds its window (Layout.Workspace), any other the whole tensor.
+    $wsRole="$(if($sec.Source){'Source'}else{'Main'})$Channels"
+    $inputSlotBytes=if($workspace["$wsRole.Input"].Windowed){[long]$workspace["$wsRole.Input"].WindowTiles*$tileBytes}else{$tensorBytes}
+    $finalSlotBytes=if($workspace["$wsRole.Final"].Windowed){[long]$workspace["$wsRole.Final"].WindowTiles*$tileBytes}else{$tensorBytes}
+    $stride=[int]([math]::Ceiling($tensorBytes/128)*128); $finalOffset=$ddrBase+$(if($spanMode){0L}else{2L*$stride}); $coefOffset=$finalOffset+$finalSlotBytes
     $scratchOffset=[long]([math]::Ceiling(($coefOffset+18*$kmsBytes)/4096)*4096); $outputBytes=192+$scratchOffset+131072
     $vtcmBytes=$(if($spanMode){0L}else{$layout.VtcmBytes}); $inputBytes=$inBase+$tensorBytes
     $r0Base=20; $r0Offset=$inBase
@@ -360,7 +455,7 @@ function New-KokoroGenerator60x16RunSteps {
         # Spans keep only the section input in the workspace (no source slot).
         if($spanMode){ $noiseSlot=-1L; $r0Slot=[long]([math]::Ceiling(($scratchOffset+131072)/4096)*4096) }
         else { $noiseSlot=[long]([math]::Ceiling(($scratchOffset+131072)/4096)*4096); $r0Slot=$noiseSlot+[long]([math]::Ceiling($tensorBytes/4096)*4096) }
-        $outputBytes=192+$r0Slot+$tensorBytes; $r0Base=25; $r0Offset=$r0Slot
+        $outputBytes=192+$r0Slot+$inputSlotBytes; $r0Base=25; $r0Offset=$r0Slot
         # -ExportFrontTensors: U, the upsampled input of the add, also parks in the workspace.
         $upsSlot=-1L; if($ExportFrontTensors){ $upsSlot=[long]([math]::Ceiling($outputBytes/4096)*4096); $outputBytes=192+$upsSlot+$tensorBytes }
     }
@@ -382,14 +477,14 @@ function New-KokoroGenerator60x16RunSteps {
         # Spans keep only the section input in the workspace (no source slot).
         if($spanMode){ $noiseSlot=-1L; $r0Slot=[long]([math]::Ceiling(($scratchOffset+131072)/4096)*4096) }
         else { $noiseSlot=[long]([math]::Ceiling(($scratchOffset+131072)/4096)*4096); $r0Slot=$noiseSlot+[long]([math]::Ceiling($tensorBytes/4096)*4096) }
-        $outputBytes=192+$r0Slot+$tensorBytes; $r0Base=25; $r0Offset=$r0Slot
+        $outputBytes=192+$r0Slot+$inputSlotBytes; $r0Base=25; $r0Offset=$r0Slot
         # -ExportFrontTensors: U, the upsampled input of the add, also parks in the workspace.
         $upsSlot=-1L; if($ExportFrontTensors){ $upsSlot=[long]([math]::Ceiling($outputBytes/4096)*4096); $outputBytes=192+$upsSlot+$tensorBytes }
     }
     if($sec.Source){
         # A computed source (noise_res of section $sec.Of): its input is the noise_convs output its span front writes to
         # the workspace; its output (the source N the section's front adds) is its final tensor.
-        $r0Slot=[long]([math]::Ceiling(($scratchOffset+131072)/4096)*4096); $outputBytes=192+$r0Slot+$tensorBytes; $r0Base=25; $r0Offset=$r0Slot
+        $r0Slot=[long]([math]::Ceiling(($scratchOffset+131072)/4096)*4096); $outputBytes=192+$r0Slot+$inputSlotBytes; $r0Base=25; $r0Offset=$r0Slot
     }
     $tailWeightOffset=$weightBytes; $tailParameterOffset=$parameterBytes
     if($Tail){
@@ -1329,6 +1424,7 @@ function New-KokoroGenerator60x16RunSteps {
     $spanFront0={param([int]$d0,[int]$d1)
         $F=$spanFront; $n=$d1-$d0; $first=[math]::Max(0,$d0-1); $last=[math]::Min($decTiles,$d1+1)
         $t0=10*$d0; $t1=[math]::Min($tiles,10*$d1)
+        & $wsCheck 'x' $span.Index 'Read' $first $last; if($Source){ & $wsCheck 'Source256.Final' $span.Index 'Read' $t0 $t1 }; & $wsCheck 'Main256.Input' $span.Index 'Write' $t0 $t1
         $pairs=if($d1 -eq $decTiles){[int][math]::Ceiling(($decFrames-32*$d0+1)/2)}else{16*$n}
         & $dma 18 $F.Tables 22 $frontParameterOffset 163840
         & $dma 18 ($F.Input+($first-$d0+1)*32768L) 20 ($inBase+$first*32768L) (($last-$first)*32768L)
@@ -1363,6 +1459,7 @@ function New-KokoroGenerator60x16RunSteps {
     $spanFront1={param([int]$s0,[int]$s1)
         $F=$spanFront; $n=$s1-$s0; $first=[math]::Max(0,$s0-1); $last=[math]::Min($upTiles,$s1+1)
         $t0=6*$s0; $t1=[math]::Min($tiles,6*$s1)
+        & $wsCheck 'Main256.Final' $span.Index 'Read' $first $last; if($Source){ & $wsCheck 'Source128.Final' $span.Index 'Read' $t0 $t1 }; & $wsCheck 'Main128.Input' $span.Index 'Write' $t0 $t1
         $pairs=if($s1 -eq $upTiles){[int][math]::Ceiling(($upFrames-32*$s0)/2)}else{16*$n}
         & $dma 18 $F.Tables 22 $frontParameterOffset 65536
         & $dma 18 ($F.Input+($first-$s0+1)*16384L) 25 ($chainOffset+$first*16384L) (($last-$first)*16384L)
@@ -1404,6 +1501,7 @@ function New-KokoroGenerator60x16RunSteps {
     # each side (zero past either end), in batches; the sum goes to the section's input in the workspace.
     $spanNoise={param([int]$c0,[int]$c1)
         $F=$spanFront; $n=$c1-$c0; $harTile=if($Channels -eq 256){16384L}else{4096L}
+        & $wsCheck "Source$Channels.Input" $span.Index 'Write' $c0 $c1
         & $dma 18 $F.Weights 21 $sec.ConvWeights $(if($Channels -eq 256){393216L}else{49152L}); & $dma 18 $F.Tables 22 $sec.ConvTables $(if($Channels -eq 256){163840L}else{65536L})
         & $fill $F.Sum $n 0x80008000L
         for($start=$c0;$start -lt $c1;$start+=$batch){
@@ -1431,24 +1529,40 @@ function New-KokoroGenerator60x16RunSteps {
     }
     # The tail over output tiles t0 .. t1 - 1 of the bound section's final tensor.
     $tailRange={param([int]$t0,[int]$t1)
+        # The tail reads two tiles of halo each side (Add-KokoroGeneratorTail16JobSteps: conv_post and the spectrum).
+        & $wsCheck 'Main128.Final' $span.Index 'Read' ([math]::Max(0,$t0-2)) ([math]::Min($tiles,$t1+2))
         & $mark 'Boundary' 'Tail'; & $sync
         Add-KokoroGeneratorTail16JobSteps -Steps $s -Calls $calls -Frames $Frames -InputBase 25 -InputOffset $finalOffset -WeightsBase 21 -WeightsOffset $tailWeightOffset -TablesBase 22 -TablesOffset $tailParameterOffset -PcmBase 23 -PcmOffset $pcmOffset -FirstTile $t0 -EndTile $t1 -SpanTiles (& $spanMax 'T0' 'T1') -LabelPrefix "t16r$t0"
     }
     # Spans ($spans): per span the 256-channel front and section, then the 128-channel front, section and tail. A
     # section's first steps start from its initial state; later ones restore the state its previous steps saved.
     # One span. Generic: the uniform span's code for the span loop (its lockstep runs take their steps at run time).
+    # Bind section i for span k: its input and output addressed at tile - origin (no change unless windowed).
+    $bindSpan={param([int]$bindIndex,[int]$bindSpanAt)
+        . $bind $bindIndex
+        $r0Slot-=$tileBytes*(& $wsOrigin "$wsRole.Input" $bindSpanAt); $r0Offset=$r0Slot; $finalOffset-=$tileBytes*(& $wsOrigin "$wsRole.Final" $bindSpanAt) }
+    # Before span k: each windowed tensor's carry (tiles from the new origin on) moves to its window's front, through VTCM
+    # at 0 (no section state is resident between spans).
+    $windowMoves={param([int]$k)
+        foreach($t in $workspace.Values){
+            if(-not $t.Windowed -or $k -eq 0 -or $t.Carries[$k] -eq 0 -or $t.Shifts[$k] -eq 0){ continue }
+            . $bind $(if($t.Role -eq 'Main'){$t.Of}else{$sourceSectionOf[$t.Of]})
+            $slot=if($t.Tensor -like '*.Input'){$r0Slot}else{$finalOffset}; $moveBytes=[long]$t.Carries[$k]*$t.TileBytes
+            & $dma 18 0 25 ($slot+$t.Shifts[$k]*$t.TileBytes) $moveBytes; & $dma 25 $slot 18 0 $moveBytes
+        } }
     $emitSpan={param($span,[switch]$Generic)
         $runName=if($Generic){'_su'}else{"_s$($span.Index)"}
         $ledgerSpan=if($Generic){"$u0-$($u1-1)"}else{"$($span.Index)"}
         if($StopAfterSpanStage -eq 'Start'){ $spanStopped=$true }
         if($spanStopped){ return }
+        & $windowMoves $span.Index
         if($Source){
-            . $bind $sourceSectionOf[0]; $sourceAt=$finalOffset; $sourceBase=25; & $mark 'Boundary' 'Noise256'
+            . $bindSpan $sourceSectionOf[0] $span.Index; $sourceAt=$finalOffset; $sourceBase=25; & $mark 'Boundary' 'Noise256'
             if($span.C1 -gt $span.C0){ & $spanNoise $span.C0 $span.C1; if($StopAfterSpanStage -eq 'Noise256'){ $spanStopped=$true; return } }
             . $sourceSpan $span.C0 $span.C0 $span.R0 $span.R1 $slowSteps; if($span.R1 -gt $span.R0 -and $StopAfterSpanStage -eq 'Source256'){ $spanStopped=$true; return }
         }
         else { $sourceBase=20; $sourceAt=$sourceStreams[0].InputOffset }
-        . $bind 0; $slowMean=$finalOffset
+        . $bindSpan 0 $span.Index; $slowMean=$finalOffset
         & $mark 'Boundary' 'Front256'
         if($span.D1 -gt $span.D0){ & $spanFront0 $span.D0 $span.D1; if($StopAfterSpanStage -eq 'Front256'){ $spanStopped=$true; return } }
         if($span.J1 -gt $span.J0){
@@ -1459,12 +1573,12 @@ function New-KokoroGenerator60x16RunSteps {
         }
         if($sections.Count -lt 2){ return }
         if($Source){
-            . $bind $sourceSectionOf[1]; $sourceAt=$finalOffset; $sourceBase=25; & $mark 'Boundary' 'Noise128'
+            . $bindSpan $sourceSectionOf[1] $span.Index; $sourceAt=$finalOffset; $sourceBase=25; & $mark 'Boundary' 'Noise128'
             if($span.G1 -gt $span.G0){ & $spanNoise $span.G0 $span.G1; if($StopAfterSpanStage -eq 'Noise128'){ $spanStopped=$true; return } }
             . $sourceSpan $span.G0 $span.G0 $span.H0 $span.H1 $fastSteps; if($span.H1 -gt $span.H0 -and $StopAfterSpanStage -eq 'Source128'){ $spanStopped=$true; return }
         }
         else { $sourceBase=20; $sourceAt=$sourceStreams[1].InputOffset }
-        . $bind 1; $chainOffset=$slowMean
+        . $bindSpan 1 $span.Index; $chainOffset=$slowMean
         & $mark 'Boundary' 'Front128'
         if($span.S1 -gt $span.S0){ & $spanFront1 $span.S0 $span.S1; if($StopAfterSpanStage -eq 'Front128'){ $spanStopped=$true; return } }
         if($span.K1 -gt $span.K0){
@@ -1833,7 +1947,10 @@ function New-KokoroGenerator60x16RunSteps {
 $resultLayout.DmaLedger=@($dmaLedger | Group-Object Section,Span,Class | ForEach-Object { $first=$_.Group[0]; [pscustomobject]@{Section=$first.Section;Span=$first.Span;Class=$first.Class;Transfers=[long]($_.Group | Measure-Object Count -Sum).Sum;Bytes=[long]($_.Group | Measure-Object Bytes -Sum).Sum} })
     # Each section's tensors in the workspace: its input after the front (fronted sections) and its output.
     $resultLayout.Sections=@(for($i=0;$i -lt $sections.Count;$i++){ . $bind $i
-        [pscustomobject]@{Section=$i;Channels=$Channels;Tiles=$tiles;Bytes=$tensorBytes;InputWorkspaceOffset=$(if($Front){$r0Slot}else{-1L});FinalWorkspaceOffset=$finalOffset;SourceOf=$(if($sec.Source){[int]$sec.Of}else{-1});Schedule=$sectionSchedule;StateBytes=$(if($spanMode -and $sectionSchedule -ne 'Layer'){[long]$stateBytes}else{0L})} })
+        [pscustomobject]@{Section=$i;Channels=$Channels;Tiles=$tiles;Bytes=$tensorBytes;InputWorkspaceOffset=$(if($Front){$r0Slot}else{-1L});FinalWorkspaceOffset=$finalOffset;SourceOf=$(if($sec.Source){[int]$sec.Of}else{-1});Schedule=$sectionSchedule;StateBytes=$(if($spanMode -and $sectionSchedule -ne 'Layer'){[long]$stateBytes}else{0L})
+            InputWindowed=[bool]$workspace["$wsRole.Input"].Windowed;FinalWindowed=[bool]$workspace["$wsRole.Final"].Windowed} })
+    # Span stage hand-offs: per tensor its producer, consumer, halo, window and the tiles carried into each span.
+    $resultLayout.Workspace=@($workspace.Values | Select-Object Tensor,Producer,Consumer,Tiles,TileBytes,HaloBefore,HaloAfter,Windowed,WindowTiles,MaxCarry,InteriorCarries,Carries,Shifts,Origins)
     # The har tensors in the workspace: the 60x planes and the 10x front's phase-major planes.
     if($Source){ $resultLayout.Har=[pscustomobject]@{SixtyOffset=$har60At;SixtyBytes=2L*$tiles60*4096;PhaseMajorOffset=$harPmAt;PhaseMajorBytes=2L*$tiles10*16384} }
     if($Source){ $resultLayout.SourceNoise=[pscustomobject]@{InputOffset=$sourceIn+$sourceLayout.F0Bytes;Bytes=$sourceLayout.HalfwordBytes;Seeded=$SeededNoise.IsPresent} }

@@ -2161,7 +2161,10 @@ function Test-KokoroGeneratorTileEquivalence {
         # one branch) instead of chunked.
         [int[]]$ResidentSourceChannels=@(),
         # The depth-first job's chunked sections queue the next stage's weights behind the current stage's convolutions.
-        [switch]$AsyncWeights)
+        [switch]$AsyncWeights,
+        # Spans and SpansSource: each span size also runs with workspace windows; the PCM and every tensor left whole
+        # (the last section's output) must be equal across all runs.
+        [switch]$WorkspaceWindows)
     $out=[IO.Path]::GetFullPath($OutputDirectory)
     if(-not $out.StartsWith($Build+[IO.Path]::DirectorySeparatorChar,[StringComparison]::OrdinalIgnoreCase) -or (Test-Path -LiteralPath $out)){throw 'Choose a fresh equivalence directory under build/.'}
     [void][IO.Directory]::CreateDirectory($out)
@@ -2308,8 +2311,16 @@ function Test-KokoroGeneratorTileEquivalence {
         $streamLong=if($Joint -eq 'SpansSource'){ @() } else { @(for($i=0;$i -lt 2;$i++){
             $at=128+[long]$layerStreams[$i].WorkspaceOffset; $streamFrames=if($i -eq 0){$slowFrames}else{[int]$fixture.Frames}
             & $repeatFrames (& $slice $layerRun.Output $at $layerStreams[$i].Bytes) $layerStreams[$i].Channels $streamFrames $(if($i -eq 0){$slowFrames*$Repeat}else{$longFrames}) }) }
-        $spanRuns=@(foreach($size in $SpanSizes){
+        $windowSettings=if($WorkspaceWindows){@($false,$true)}else{@($false)}
+        # Sections windowed in any run are not compared (their workspace slot holds only the last span's window).
+        $windowedSections=@()
+        if($WorkspaceWindows){
+            $parameters=$tileParameters.Clone(); $parameters.ResBlockFrames=$longFrames; $parameters.GeneratorSpanTiles=$SpanSizes[0]; $parameters.GeneratorWorkspaceWindows=$true
+            $windowedSections=@((Invoke-KokoroEmission -Kernel KokoroGenerator60x16Run -Parameters $parameters).Layout.Sections | Where-Object FinalWindowed | ForEach-Object Section)
+        }
+        $spanRuns=@(foreach($size in $SpanSizes){ foreach($windowed in $windowSettings){
             $parameters=$tileParameters.Clone(); $parameters.ResBlockFrames=$longFrames; $parameters.GeneratorSpanTiles=$size
+            if($windowed){ $parameters.GeneratorWorkspaceWindows=$true }
             $emission=Invoke-KokoroEmission -Kernel KokoroGenerator60x16Run -Parameters $parameters
             $longInput=[byte[]]::new($emission.Layout.InputBytes); [Array]::Copy($xLong,$longInput,$xLong.Length)
             if($Joint -eq 'SpansSource'){
@@ -2320,10 +2331,10 @@ function Test-KokoroGeneratorTileEquivalence {
             else { $streams=@($emission.Layout.SourceStreams); for($i=0;$i -lt 2;$i++){ if($streamLong[$i].Length -ne $streams[$i].Bytes){throw "Long source stream $i has the wrong size."}; [Array]::Copy($streamLong[$i],0,$longInput,[long]$streams[$i].InputOffset,$streamLong[$i].Length) } }
             $run=Invoke-KokoroDeviceJob -EmissionDirectory $emission.Directory -EmissionArtifact $emission -InputDirectory (& $stage "spans-$size" $runTables $runWeights $longInput) -Soc $Soc -Runs $Runs -Package $Package -OneShot
             $pcmAt=[long]$emission.Layout.PcmOffset; $pcmBytes=& $slice $run.Output $pcmAt (2L*[int]$emission.Layout.Samples)
-            $outputs=@(foreach($section in @($emission.Layout.Sections)){ $at=128+[long]$section.FinalWorkspaceOffset; [Convert]::ToHexString([Security.Cryptography.SHA256]::HashData((& $slice $run.Output $at $section.Bytes))) })
-            [pscustomobject]@{SpanTiles=$size;Spans=@($emission.Layout.Spans).Count;DspMs=$run.MedianMs;LibraryBytes=$emission.Bytes;VtcmBytes=$emission.Layout.VtcmBytes
-                PcmSHA256=[Convert]::ToHexString([Security.Cryptography.SHA256]::HashData($pcmBytes));SectionSHA256=$outputs;LibrarySHA256=$emission.LibrarySHA256}
-        })
+            $outputs=@(foreach($section in @($emission.Layout.Sections)){ if($section.Section -in $windowedSections){ continue }; $at=128+[long]$section.FinalWorkspaceOffset; [Convert]::ToHexString([Security.Cryptography.SHA256]::HashData((& $slice $run.Output $at $section.Bytes))) })
+            [pscustomobject]@{SpanTiles=$size;WorkspaceWindows=$windowed;Spans=@($emission.Layout.Spans).Count;DspMs=$run.MedianMs;LibraryBytes=$emission.Bytes;VtcmBytes=$emission.Layout.VtcmBytes;OutputBytes=$emission.Layout.OutputBytes
+                PcmSHA256=[Convert]::ToHexString([Security.Cryptography.SHA256]::HashData($pcmBytes));SectionSHA256=$outputs;LibrarySHA256=$emission.LibrarySHA256;Workspace=$emission.Layout.Workspace}
+        } })
         $report=[pscustomobject]@{Soc=$Soc;Fixture=$FixtureDirectory;Joint=$Joint;Repeat=$Repeat;Frames=$longFrames;Samples=5L*($longFrames-1);AudioSeconds=5.0*($longFrames-1)/24000
             Identical=(@($spanRuns | ForEach-Object { $_.PcmSHA256 + ($_.SectionSHA256 -join '') } | Select-Object -Unique).Count -eq 1);Runs=$spanRuns}
         $report | Export-Clixml -LiteralPath (Join-Path $out 'equivalence.clixml') -Depth 8

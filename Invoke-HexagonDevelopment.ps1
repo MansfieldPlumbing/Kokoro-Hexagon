@@ -1243,6 +1243,7 @@ $script:Kernels=@(
             if($GeneratorHostCoefficients){ $harness.HostCoefficients=$true }
             if($GeneratorResidentSourceChannels){ $harness.ResidentSourceChannels=$GeneratorResidentSourceChannels }
             if($GeneratorAsyncWeights){ $harness.AsyncWeights=$true }
+            if($GeneratorWorkspaceWindows){ $harness.WorkspaceWindows=$true }
             if($Stage16Channels -ne 128){ $harness.Channels=$Stage16Channels }
             if($GeneratorFront){ $harness.Front=$true }
             if($GeneratorWhole){ $harness.Whole=$true }
@@ -1471,6 +1472,9 @@ param(
     # KokoroGenerator60x16Run: chunked sections queue the next stage's weights behind the current stage's convolutions
     # (src/jobs/Kokoro.Generator60x16Run.ps1 -AsyncWeights).
     [switch] $GeneratorAsyncWeights,
+    # KokoroGenerator60x16Run spans: the workspace tensors between span stages live in windows rebased to each span
+    # (src/jobs/Kokoro.Generator60x16Run.ps1 -WorkspaceWindows).
+    [switch] $GeneratorWorkspaceWindows,
     # KokoroHarmonicSource16Run: generate the source noise on the DSP from a seed (input holds seed and scale) instead of
     # reading captured draws.
     [switch] $SourceSeededNoise,
