@@ -115,7 +115,10 @@ function New-KokoroHmxConvPlanesLoopSteps {
         [ValidateSet(1, 2)][int] $WeightPlanes = 1,
         [Parameter(Mandatory)][ValidateRange(2048, 1073741824)][long] $PlaneStride,
         [string] $LabelPrefix = 'hmxconvloop',
-        [switch] $NoReturn
+        [switch] $NoReturn,
+        # Rows every tap reads before the centred position, as New-KokoroHmxConvPlanesSteps: output row m is the centred
+        # output at row m - TapDelay, and with TapDelay >= reach the convolution reads only rows at or before m.
+        [ValidateRange(0, 32)][int] $TapDelay = 0
     )
     if ($InputChannels % 32) { throw 'Input channels must be whole 32-channel blocks' }
     if ($OutputChannels % 64) { throw 'Output channels must be whole 64-channel groups' }
@@ -138,7 +141,7 @@ function New-KokoroHmxConvPlanesLoopSteps {
     $macs = { param([int]$act,[int]$wt)
         $s.Add(@{Op='addi'; d=12; s=$wt; i=0})
         for ($k = 0; $k -lt $Kernel; $k++) {
-            $shift = $Dilation * ($k - $half)
+            $shift = $Dilation * ($k - $half) - $TapDelay
             [int]$tile = [math]::Floor($shift / 32); [int]$row = $shift - 32 * $tile
             & $addc 8 $act (($tile * $cb) * 2048 + (($row -shr 1) -shl 7) + (($row -band 1) -shl 1))
             for ($c = 0; $c -lt $cb; $c++) {
