@@ -134,7 +134,6 @@ function Add-KokoroDecoder16JobSteps {
     if($Moments -ne 'Accumulate' -and $StopAfterBlock -ge 0){throw 'Exported or supplied moments need the whole decoder'}
     if($Delayed -and $StopAfterBlock -ge 0){throw 'Dump points read undelayed tensors'}
     if($Delayed -and $Moments -notin 'Direct','Constants'){throw 'Delayed tensors take supplied coefficients (Direct or Constants)'}
-    if($Spans -and $RuntimeFrames){throw 'Span jobs take a fixed frame count'}
     $L=Get-KokoroDecoder16Layout -Frames $Frames -Delayed:$Delayed -Spans:$Spans
     $F=$Frames; $nT=$L.Tiles; $nT2=$L.Tiles2; $reg=$L.Regions; $sm=$reg.Small.Offset; $small=$L.Small; $planes=$reg.Planes.Offset
     $s=$Steps; $callList=$Calls
@@ -142,10 +141,12 @@ function Add-KokoroDecoder16JobSteps {
     $ptr={param([int]$r,[int]$baseReg,[long]$offset) $offsetReg=if($r -eq $baseReg){15}else{$r}; & $imm $offsetReg $offset;$s.Add(@{Op='add';d=$r;s=$baseReg;t=$offsetReg}) }
     # Counts by name: F, F2 (2F), T (tiles of F), T2 (tiles of 2F); immediates, or loads from the VTCM counts at run time.
     $countValue=@{F=$F;F2=2*$F;T=$nT;T2=$nT2}; $countIndex=@{F=0;F2=1;T=2;T2=3}
-    $cnt={param([int]$r,[string]$name) if($RuntimeFrames){ & $ptr $r 18 ($sm+$small.Counts); $s.Add(@{Op='load';d=$r;s=$r;Offset=4*$countIndex[$name]}) } else { & $imm $r $countValue[$name] } }
+    # Spans: T and T2 are the tiles of one span (1, 2), immediates also with run-time frames; the span count is Counts[2].
+    $runtimeCount={param([string]$name) $RuntimeFrames -and -not ($Spans -and $name -in 'T','T2') }
+    $cnt={param([int]$r,[string]$name) if(& $runtimeCount $name){ & $ptr $r 18 ($sm+$small.Counts); $s.Add(@{Op='load';d=$r;s=$r;Offset=4*$countIndex[$name]}) } else { & $imm $r $countValue[$name] } }
     # r = VTCM + offset + count * multiple (uses r6..r9 at run time).
     $ptrN={param([int]$r,[long]$offset,[string]$name,[long]$multiple)
-        if($RuntimeFrames){ & $cnt 6 $name; & $imm 7 $multiple; $s.Add(@{Op='mpy-d';d=8;s=6;t=7}); & $imm 6 $offset; $s.Add(@{Op='add';d=8;s=8;t=6}); $s.Add(@{Op='add';d=$r;s=18;t=8}) }
+        if(& $runtimeCount $name){ & $cnt 6 $name; & $imm 7 $multiple; $s.Add(@{Op='mpy-d';d=8;s=6;t=7}); & $imm 6 $offset; $s.Add(@{Op='add';d=8;s=8;t=6}); $s.Add(@{Op='add';d=$r;s=18;t=8}) }
         else { & $ptr $r 18 ($offset+$countValue[$name]*$multiple) } }
     $call={param([string]$label) $pc=@{Op='add-pc';d=14;i=0};$lo=@{Op='lo';x=15;i=0};$hi=@{Op='hi';x=15;i=0};$s.Add($pc);$s.Add($lo);$s.Add($hi);$s.Add(@{Op='add';d=14;s=14;t=15});$s.Add(@{Op='callr';s=14});$callList.Add(@{pc=$pc;low=$lo;high=$hi;label=$label})}
     $script:__d16=0
@@ -184,7 +185,7 @@ function Add-KokoroDecoder16JobSteps {
             # Lead rows in span 0 only; rows from count + delay - 32k * span (clamped to 0 .. 32k) through the span's k tiles.
             if($delay -gt 0){ $skipLead=& $label; & $jumpIfSpan 'gtu' $skipLead; & $ptr 0 18 $off; & $call "dec_lead_${delay}_${width}_$halfword"; [void]$leadUsed.Add("$delay,$width,$halfword"); $s.Add(@{Op='label';Name=$skipLead}) }
             $k=$countValue[$tiles]
-            & $loadSpan 6; $s.Add(@{Op='asl-i';d=6;s=6;i=(4+$k)}); & $imm 5 ($countValue[$fr]+$delay); $s.Add(@{Op='sub';d=5;s=5;t=6})
+            & $loadSpan 6; $s.Add(@{Op='asl-i';d=6;s=6;i=(4+$k)}); if($RuntimeFrames){ & $cnt 5 $fr; $s.Add(@{Op='addi';d=5;s=5;i=$delay}) } else { & $imm 5 ($countValue[$fr]+$delay) }; $s.Add(@{Op='sub';d=5;s=5;t=6})
             $s.Add(@{Op='imm';d=7;i=0}); $s.Add(@{Op='max';d=5;s=5;t=7}); $s.Add(@{Op='imm';d=7;i=(32*$k)}); $s.Add(@{Op='min';d=5;s=5;t=7}); $s.Add(@{Op='imm';d=6;i=$k})
             & $ptr 0 18 $off; & $call "dec_padcap_${width}_$halfword"; [void]$capacityUsed.Add("$width,$halfword"); return
         }
@@ -274,6 +275,8 @@ function Add-KokoroDecoder16JobSteps {
         $lag=if($Delayed){10}else{0}
         $s.Add(@{Op='addi';d=4;s=1;i=(31+$lag)}); $s.Add(@{Op='lsr-i';d=4;s=4;i=5}); $s.Add(@{Op='store';s=3;t=4;Offset=8})
         $s.Add(@{Op='addi';d=4;s=2;i=(31+2*$lag)}); $s.Add(@{Op='lsr-i';d=4;s=4;i=5}); $s.Add(@{Op='store';s=3;t=4;Offset=12})
+        # Spans: the input's tiles, ceil(F/32), after the span index.
+        if($Spans){ $s.Add(@{Op='addi';d=4;s=1;i=31}); $s.Add(@{Op='lsr-i';d=4;s=4;i=5}); $s.Add(@{Op='store';s=3;t=4;Offset=20}) }
     }
     foreach($region in 'E','XA','XB'){ & $fill $reg[$region].Offset $reg[$region].Bytes 0x80008000L }
     # Runtime: the output copies capacity tiles; tiles past the runtime count hold zero.
@@ -297,13 +300,13 @@ function Add-KokoroDecoder16JobSteps {
             $first=& $label; $done=& $label; $at=$off+[long][math]::Floor($channel/32)*2048+4*($channel%32); $curveAt=$sm+$small.Curves+$curve*$L.CurveBytes
             & $jumpIfSpan 'eq' $first
             & $loadSpan 4; $s.Add(@{Op='asl-i';d=6;s=4;i=5}); $s.Add(@{Op='addi';d=6;s=6;i=-$delay})
-            & $imm 11 $F; $s.Add(@{Op='sub';d=11;s=11;t=6}); $s.Add(@{Op='imm';d=5;i=0}); $s.Add(@{Op='max';d=11;s=11;t=5}); $s.Add(@{Op='imm';d=5;i=32}); $s.Add(@{Op='min';d=11;s=11;t=5})
+            & $cnt 11 'F'; $s.Add(@{Op='sub';d=11;s=11;t=6}); $s.Add(@{Op='imm';d=5;i=0}); $s.Add(@{Op='max';d=11;s=11;t=5}); $s.Add(@{Op='imm';d=5;i=32}); $s.Add(@{Op='min';d=11;s=11;t=5})
             $s.Add(@{Op='imm';d=5;i=0}); $s.Add(@{Op='eq';d=0;s=11;t=5}); $s.Add(@{Op='jump-p';u=0;Label=$done})
             $s.Add(@{Op='asl-i';d=7;s=6;i=3}); & $ptr 0 18 $curveAt; $s.Add(@{Op='add';d=0;s=0;t=7}); $s.Add(@{Op='load';d=3;s=0;Offset=-4})
             & $ptr 1 18 $at; $s.Add(@{Op='imm';d=10;i=32}); & $ptr 2 18 ($sm+$small.Stride+32*$curve); & $call "dec_stridespan_$width"; & $jump $done
             $s.Add(@{Op='label';Name=$first})
             & $ptr 0 18 $curveAt; $s.Add(@{Op='imm';d=3;i=0}); & $ptr 1 18 ($at+128*[math]::Floor($delay/2)+2*($delay%2)); $s.Add(@{Op='imm';d=10;i=(32-$delay)})
-            $s.Add(@{Op='imm';d=11;i=[math]::Min($F,32-$delay)}); & $ptr 2 18 ($sm+$small.Stride+32*$curve); & $call "dec_stridespan_$width"
+            if($RuntimeFrames){ & $cnt 11 'F'; $s.Add(@{Op='imm';d=5;i=(32-$delay)}); $s.Add(@{Op='min';d=11;s=11;t=5}) } else { $s.Add(@{Op='imm';d=11;i=[math]::Min($F,32-$delay)}) }; & $ptr 2 18 ($sm+$small.Stride+32*$curve); & $call "dec_stridespan_$width"
             $s.Add(@{Op='label';Name=$done}); [void]$stride.Add("span,$width"); return
         }
         & $ptr 0 18 ($sm+$small.Curves+$curve*$L.CurveBytes); & $ptr 1 18 $off; & $ptr 2 18 ($sm+$small.Stride+32*$curve)
@@ -322,7 +325,9 @@ function Add-KokoroDecoder16JobSteps {
         $s.Add(@{Op='label';Name=$spanTop})
         # E <- input tile span (tiles past the input hold zero).
         $eFill=& $label; $eDone=& $label
-        & $loadSpan 6; & $imm 7 ($L.InputTiles-1); $s.Add(@{Op='gtu';d=0;s=6;t=7}); $s.Add(@{Op='jump-p';u=0;Label=$eFill})
+        & $loadSpan 6
+        if($RuntimeFrames){ & $ptr 7 18 ($sm+$small.Counts); $s.Add(@{Op='load';d=7;s=7;Offset=20}); $s.Add(@{Op='addi';d=7;s=7;i=-1}) } else { & $imm 7 ($L.InputTiles-1) }
+        $s.Add(@{Op='gtu';d=0;s=6;t=7}); $s.Add(@{Op='jump-p';u=0;Label=$eFill})
         & $dmaSpan 18 $reg.E.Offset -1 $InputBase ($InputOffset+$L.Input.Asr) 15 32768; & $jump $eDone
         $s.Add(@{Op='label';Name=$eFill}); & $fill $reg.E.Offset $reg.E.Bytes 0x80008000L
         $s.Add(@{Op='label';Name=$eDone})
@@ -423,7 +428,7 @@ function Add-KokoroDecoder16JobSteps {
     if($StopAfterBlock -lt 0 -and $siteIndex.Value -ne $L.MomentSites.Count){throw "The decoder ran $($siteIndex.Value) AdaIN sites; the layout has $($L.MomentSites.Count)"}
     if($Spans){
         & $loadSpan 6; $s.Add(@{Op='addi';d=6;s=6;i=1}); & $ptr 7 18 $spanAt; $s.Add(@{Op='store';s=7;t=6;Offset=0})
-        & $imm 8 $L.SpanCount; $s.Add(@{Op='gtu';d=0;s=8;t=6}); $s.Add(@{Op='jump-p';u=0;Label=$spanTop})
+        if($RuntimeFrames){ & $ptr 8 18 ($sm+$small.Counts); $s.Add(@{Op='load';d=8;s=8;Offset=8}) } else { & $imm 8 $L.SpanCount }; $s.Add(@{Op='gtu';d=0;s=8;t=6}); $s.Add(@{Op='jump-p';u=0;Label=$spanTop})
     }
     [pscustomobject]@{Layout=$L;Pads=@($padUsed);Combines=@($combines);Stride=@($stride);RuntimeFrames=[bool]$RuntimeFrames;Constants=($Moments -eq 'Constants')
         Delayed=[bool]$Delayed;Spans=[bool]$Spans;Convs=@($convUsed);Leads=@($leadUsed);Capacities=@($capacityUsed);Tails=@($tailUsed)}

@@ -899,13 +899,18 @@ function Test-KokoroDecoderConstants {
 }
 
 # Depth-first decoder, delayed tensors (Get-KokoroDecoder16Layout -Delayed: each convolution reads only rows at or before
-# the row it writes) against the layer job: both whole-tensor Direct jobs on the phone from the same input, tables, weights
-# and K/M (the decoder voice base). x must match byte for byte after the delayed job's output delay. Each frame count is
-# a slice of the stock decoder capture's inputs from frame 0. Schedules: Whole (every layer over whole tensors; fits VTCM
-# up to 118 frames) and Spans (one 32-frame span at a time through every layer; VTCM constant in length).
+# the row it writes) against the decoder as it runs today, on the phone, from the same input, tables, weights and K/M
+# (the decoder voice base), all Direct jobs. x must match byte for byte after the delayed job's output delay. The input
+# is the stock decoder capture's from frame 0, repeated from its start past its last frame. Schedules: Whole (every layer
+# over whole tensors; fits VTCM up to 118 frames), Spans (one 32-frame span at a time through every layer; VTCM constant
+# in length) and RuntimeSpans (Spans with the frame count read at run time: one library of Capacity frames for every
+# length). The reference is the layer job up to 128 frames (its VTCM limit), past that the layer job at 128 frames in
+# overlap-save chunks (Invoke-KokoroDecoderChunks, 16 frames of halo; with supplied coefficients the chunk boundaries do
+# not reach x).
 function Test-KokoroDecoderDelayEquivalence {
     param([Parameter(Mandatory)][string]$OutputDirectory,[string]$Soc='SM8550',[string]$Package='dev.mansfieldplumbing.kokoro',
-        [ValidateRange(2,4096)][int[]]$Frames=@(100,118),[ValidateSet('Whole','Spans')][string[]]$Schedules=@('Whole','Spans'),
+        [ValidateRange(2,4096)][int[]]$Frames=@(100,118),[ValidateSet('Whole','Spans','RuntimeSpans')][string[]]$Schedules=@('Whole','Spans'),
+        [ValidateRange(2,4096)][int]$Capacity=512,
         [string]$Capture=(Join-Path $Build 'stock-decoder-capture-cal-af_heart-20261008'),
         [string]$DecoderPlan=(Join-Path $Build 'decoder16-plan-af_heart-f128'),
         # A decoder constants table (DecoderVoiceBase); by default the newest under build/streaming-decoder-*.
@@ -919,33 +924,56 @@ function Test-KokoroDecoderDelayEquivalence {
     $constants=[IO.File]::ReadAllBytes($DecoderBase)
     $cap=Read-KokoroCapture -Directory $Capture
     $aligned=Read-KokoroCaptureTensor -Capture $cap -Name 'decoder.input.0'; $pitch=Read-KokoroCaptureTensor -Capture $cap -Name 'decoder.input.1'; $energy=Read-KokoroCaptureTensor -Capture $cap -Name 'decoder.input.2'
-    $total=[int]($aligned.Length/512)
-    $rows=foreach($f in $Frames){
-        if($f -gt $total){throw "The capture holds $total frames."}
-        $a=[float[]]::new(512*$f); for($c=0;$c -lt 512;$c++){ [Array]::Copy($aligned,$c*$total,$a,$c*$f,$f) }
-        $p=[float[]]::new(2*$f); [Array]::Copy($pitch,$p,2*$f); $e=[float[]]::new(2*$f); [Array]::Copy($energy,$e,2*$f)
-        $layout=Get-KokoroDecoder16Layout -Frames $f
-        $activation=ConvertTo-KokoroDecoderInput -Aligned $a -Pitch $p -Energy $e -Capacity $f -Tiles $layout.InputTiles -InputBytes $layout.CorrectedInputBytes -FramesOffset $layout.Input.Frames `
+    $total=[int]($aligned.Length/512); $layerLimit=128
+    # One job's input: the aligned encoding and curves packed for a layout of Capacity frames (the job's own frame count
+    # for a fixed job), with the voice base's K/M.
+    $pack={param([float[]]$A,[float[]]$P,[float[]]$E,[int]$JobCapacity,$Layout)
+        ConvertTo-KokoroDecoderInput -Aligned $A -Pitch $P -Energy $E -Capacity $JobCapacity -Tiles $Layout.InputTiles -InputBytes $Layout.CorrectedInputBytes -FramesOffset $Layout.Input.Frames `
             -AsrScales ([double[]]$plan.AsrScales) -F0CurveScale ([double]$plan.F0CurveScale) -NCurveScale ([double]$plan.NCurveScale) `
-            -Coefficients (ConvertTo-KokoroDecoderCoefficients -Tables $constants -Layout $layout) -CoefficientsOffset $layout.Input.KmDeltas
+            -Coefficients (ConvertTo-KokoroDecoderCoefficients -Tables $constants -Layout $Layout) -CoefficientsOffset $Layout.Input.KmDeltas }
+    $runJob={param([hashtable]$Parameters,[byte[]]$Activation,[string]$Directory)
+        [IO.File]::WriteAllBytes((Join-Path $Directory 'activations.bin'),$Activation)
+        $emission=Invoke-KokoroEmission -Kernel KokoroDecoder16Run -Parameters $Parameters
+        $run=Invoke-KokoroDeviceJob -EmissionDirectory $emission.Directory -EmissionArtifact $emission -InputDirectory $Directory -Soc $Soc -Runs 1 -Package $Package
+        [pscustomobject]@{Emission=$emission;Output=[byte[]]$run.Output;OutputOffset=[long]$emission.Layout.OutputOffset;DspMs=$run.MedianMs;OutputPath=$run.OutputPath} }
+    $rows=foreach($f in $Frames){
+        $a=[float[]]::new(512*$f); for($c=0;$c -lt 512;$c++){ for($t0=0;$t0 -lt $f;$t0+=$total){ [Array]::Copy($aligned,$c*$total,$a,$c*$f+$t0,[math]::Min($total,$f-$t0)) } }
+        $p=[float[]]::new(2*$f); $e=[float[]]::new(2*$f)
+        for($t0=0;$t0 -lt 2*$f;$t0+=2*$total){ $n=[math]::Min(2*$total,2*$f-$t0); [Array]::Copy($pitch,0,$p,$t0,$n); [Array]::Copy($energy,0,$e,$t0,$n) }
         $directory=Join-Path $out "frames-$f"; [void][IO.Directory]::CreateDirectory($directory)
-        [IO.File]::WriteAllBytes((Join-Path $directory 'activations.bin'),$activation)
         foreach($name in 'tables.bin','weights.bin'){ [IO.File]::Copy((Join-Path $DecoderPlan $name),(Join-Path $directory $name)) }
-        $jobs=foreach($schedule in @('Layer')+$Schedules){
-            $parameters=@{DecoderFrames=$f;DecoderMoments='Direct'}; if($schedule -ne 'Layer'){ $parameters.DecoderDelayed=$true }; if($schedule -eq 'Spans'){ $parameters.DecoderSpans=$true }
-            $emission=Invoke-KokoroEmission -Kernel KokoroDecoder16Run -Parameters $parameters
-            $run=Invoke-KokoroDeviceJob -EmissionDirectory $emission.Directory -EmissionArtifact $emission -InputDirectory $directory -Soc $Soc -Runs 1 -Package $Package
-            [pscustomobject]@{Schedule=$schedule;Emission=$emission;Run=$run} }
+        $fixedInput=if($f -le $layerLimit -or @($Schedules | Where-Object { $_ -ne 'RuntimeSpans' }).Count){ & $pack $a $p $e $f (Get-KokoroDecoder16Layout -Frames $f) }
+        # The reference: the layer job, or past its limit the layer job at its limit in chunks.
+        if($f -le $layerLimit){
+            $reference=& $runJob @{DecoderFrames=$f;DecoderMoments='Direct'} $fixedInput $directory; $reference | Add-Member Kind 'Layer'
+        } else {
+            $chunkLayout=Get-KokoroDecoder16Layout -Frames $layerLimit; $libraries=[Collections.Generic.HashSet[string]]::new(); $paths=[Collections.Generic.List[string]]::new()
+            $chunk={ param([float[]]$ChunkAligned,[float[]]$ChunkPitch,[float[]]$ChunkEnergy)
+                $job=& $runJob @{DecoderFrames=$layerLimit;DecoderRuntimeFrames=$true;DecoderMoments='Direct'} (& $pack $ChunkAligned $ChunkPitch $ChunkEnergy $layerLimit $chunkLayout) $directory
+                [void]$libraries.Add($job.Emission.LibrarySHA256); $paths.Add($job.OutputPath); $job }
+            $decoded=Invoke-KokoroDecoderChunks -Aligned $a -Pitch $p -Energy $e -Capacity $layerLimit -RunChunk $chunk
+            $reference=[pscustomobject]@{Kind="Chunks of $layerLimit frames ($($decoded.Chunks))";Output=[byte[]]$decoded.XCroutons;OutputOffset=0L;DspMs=$decoded.DspMs
+                Emission=[pscustomobject]@{LibrarySHA256=(@($libraries) -join ';')};OutputPath=($paths -join ';')}
+        }
+        $jobs=foreach($schedule in $Schedules){
+            if($schedule -eq 'RuntimeSpans'){
+                $rl=Get-KokoroDecoder16Layout -Frames $Capacity -Delayed -Spans
+                $job=& $runJob @{DecoderFrames=$Capacity;DecoderRuntimeFrames=$true;DecoderMoments='Direct';DecoderDelayed=$true;DecoderSpans=$true} (& $pack $a $p $e $Capacity $rl) $directory
+            } else {
+                $parameters=@{DecoderFrames=$f;DecoderMoments='Direct';DecoderDelayed=$true}; if($schedule -eq 'Spans'){ $parameters.DecoderSpans=$true }
+                $job=& $runJob $parameters $fixedInput $directory
+            }
+            $job | Add-Member Schedule $schedule; $job }
         [IO.File]::Delete((Join-Path $directory 'weights.bin'))
         # x croutons: tile stride 32768, 32-channel blocks of 2048 bytes, a row pair per 128-byte vector; the delay is even.
-        $layer=[byte[]]$jobs[0].Run.Output; $at=[long]$jobs[0].Emission.Layout.OutputOffset
-        foreach($job in $jobs[1..($jobs.Count-1)]){
-        $delayedOutput=[byte[]]$job.Run.Output; $delayTicks=[int]$job.Emission.Layout.OutputDelayTicks
-        # Different bytes of layer x against delayed x read Shift row pairs later, and the first one.
+        $layer=$reference.Output; $refAt=$reference.OutputOffset
+        foreach($job in $jobs){
+        $delayedOutput=$job.Output; $at=$job.OutputOffset; $delayTicks=[int]$job.Emission.Layout.OutputDelayTicks
+        # Different bytes of reference x against delayed x read Shift row pairs later, and the first one.
         $compare={param([int]$shift) $different=0L; $first=$null
             for($pair=0;$pair -lt $f;$pair++){ $q=$pair+$shift
                 for($block=0;$block -lt 16;$block++){
-                    $ra=$at+32768L*($pair -shr 4)+2048L*$block+128L*($pair -band 15); $ca=$at+32768L*($q -shr 4)+2048L*$block+128L*($q -band 15)
+                    $ra=$refAt+32768L*($pair -shr 4)+2048L*$block+128L*($pair -band 15); $ca=$at+32768L*($q -shr 4)+2048L*$block+128L*($q -band 15)
                     if([Linq.Enumerable]::SequenceEqual([ArraySegment[byte]]::new($layer,$ra,128),[ArraySegment[byte]]::new($delayedOutput,$ca,128))){ continue }
                     for($k=0;$k -lt 128;$k++){ if($layer[$ra+$k] -ne $delayedOutput[$ca+$k]){ $different++
                         if($null -eq $first){ $first=[pscustomobject]@{Tick=(2*$pair+(($k -shr 1) -band 1));Channel=(32*$block+($k -shr 2))} } } } } }
@@ -953,11 +981,11 @@ function Test-KokoroDecoderDelayEquivalence {
         $shifted=& $compare ($delayTicks/2); $unshifted=& $compare 0
         # Controls: x is not the zero fill, and the comparison without the delay finds differences.
         $zeroVector=[byte[]]::new(128); for($k=0;$k -lt 128;$k+=2){ $zeroVector[$k+1]=0x80 }; $live=0
-        for($v=0;$v -lt 16*$f;$v++){ if(-not [Linq.Enumerable]::SequenceEqual([ArraySegment[byte]]::new($layer,$at+128L*$v,128),$zeroVector)){ $live++ } }
-        [pscustomobject]@{Frames=$f;Schedule=$job.Schedule;Ticks=2*$f;OutputDelayTicks=$delayTicks;ComparedBytes=2048L*$f;DifferentBytes=$shifted.Different;FirstDifference=$shifted.First
+        for($v=0;$v -lt 16*$f;$v++){ if(-not [Linq.Enumerable]::SequenceEqual([ArraySegment[byte]]::new($layer,$refAt+128L*$v,128),$zeroVector)){ $live++ } }
+        [pscustomobject]@{Frames=$f;Schedule=$job.Schedule;Reference=$reference.Kind;Ticks=2*$f;OutputDelayTicks=$delayTicks;ComparedBytes=2048L*$f;DifferentBytes=$shifted.Different;FirstDifference=$shifted.First
             UnshiftedDifferentBytes=$unshifted.Different;NonZeroVectors=$live;Vectors=16*$f;DelayedVtcmBytes=$job.Emission.Layout.VtcmBytes
-            LayerLibrarySHA256=$jobs[0].Emission.LibrarySHA256;DelayedLibrarySHA256=$job.Emission.LibrarySHA256;LayerDspMs=$jobs[0].Run.MedianMs;DelayedDspMs=$job.Run.MedianMs
-            LayerOutputPath=$jobs[0].Run.OutputPath;DelayedOutputPath=$job.Run.OutputPath}
+            LayerLibrarySHA256=$reference.Emission.LibrarySHA256;DelayedLibrarySHA256=$job.Emission.LibrarySHA256;LayerDspMs=$reference.DspMs;DelayedDspMs=$job.DspMs
+            LayerOutputPath=$reference.OutputPath;DelayedOutputPath=$job.OutputPath}
         }
     }
     $result=[pscustomobject]@{PSTypeName='Kokoro.DecoderDelayEquivalence';Status=$(if(@($rows | Where-Object { $_.DifferentBytes -ne 0 -or $_.UnshiftedDifferentBytes -eq 0 -or $_.NonZeroVectors -eq 0 }).Count){'Failed'}else{'Passed'});Soc=$Soc
