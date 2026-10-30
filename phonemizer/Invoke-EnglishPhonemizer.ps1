@@ -1261,6 +1261,371 @@ function Invoke-EnglishPhonemizer {
 
 function Get-EnglishCoreTemplate {
     @'
+# Phonics: words are built from pieces. A piece is a letter group with the phones it makes in one place (th θ, ough
+# ɔ, gh silent). Learning takes every lexicon word apart into pieces; reading builds an unknown word from the pieces
+# other words taught, chosen by their neighbouring letters, and places primary stress from words of the same shape.
+# Authored phonics types (digraphs, trigraphs, vowel teams, r-controlled vowels, doubled consonants) seed the pieces
+# and the lexicon's evidence calibrates them. Each word's teardown is kept, so one word's contribution to every
+# reading statistic can be withdrawn exactly (SoundOut with a withheld lexical id).
+class CorePhonics {
+    static [bool]$Trained
+    static [string[]]$Words
+    static [string[]]$Readings
+    static [int[]]$Ids
+    static [Collections.Generic.Dictionary[int,int]]$IndexOfId
+    static [Collections.Generic.List[int][]]$Teardowns
+    static [Collections.Generic.Dictionary[string,int]]$Units
+    static [Collections.Generic.Dictionary[string,int]]$Occurrences
+    static [Collections.Generic.Dictionary[string,System.Collections.Generic.Dictionary[string,int]]]$Contexts
+    static [Collections.Generic.Dictionary[string,int]]$Stress
+    static [string] Seeds() {return 'th;sh;ch;ph;wh;ck;ng;gh;wr;kn;qu;tch;dge;ai;ay;ee;ea;oa;oe;oo;ou;ow;oi;oy;au;aw;ew;ie;ei;ue;ui;igh;eigh;augh;ough;ar;er;ir;or;ur;bb;dd;ff;gg;ll;mm;nn;pp;rr;ss;tt;zz'}
+    static [string[]] Keys([System.Collections.Generic.Dictionary[string,int]]$table) {
+        [string[]]$keys=[string[]]::new($table.Count);$table.Keys.CopyTo($keys,0);return $keys
+    }
+    static [bool] IsSeed([string]$letters) {return (';'+[CorePhonics]::Seeds()+';').IndexOf(';'+$letters+';',[StringComparison]::Ordinal) -ge 0}
+    static [int] MaxLetters([string]$word,[int]$start) {
+        [int]$most=[Math]::Min(3,$word.Length-$start)
+        if($word.Length-$start -ge 4 -and [CorePhonics]::IsSeed($word.Substring($start,4))){$most=4}
+        return $most
+    }
+    static [string] Segments([string]$phones) {
+        [Text.StringBuilder]$b=[Text.StringBuilder]::new()
+        [char]$c=[Convert]::ToChar(0)
+        foreach($c in $phones.ToCharArray()){if($c -cne [Convert]::ToChar(712) -and $c -cne [Convert]::ToChar(716) -and -not [char]::IsWhiteSpace($c)){$b.Append($c)}}
+        return $b.ToString()
+    }
+    static [bool] IsAlphabetic([string]$word) {
+        if($word.Length -eq 0){return $false}
+        [char]$c=[Convert]::ToChar(0)
+        foreach($c in $word.ToCharArray()){if($c -lt [Convert]::ToChar(97) -or $c -gt [Convert]::ToChar(122)){return $false}}
+        return $true
+    }
+    static [void] Count([Collections.Generic.Dictionary[string,int]]$table,[string]$key,[int]$sign) {
+        if($table.ContainsKey($key)){$table.set_Item($key,$table.get_Item($key)+$sign)}else{$table.Add($key,$sign)}
+    }
+    static [void] CountContext([string]$context,[string]$phones,[int]$sign) {
+        if(-not [CorePhonics]::Contexts.ContainsKey($context)){[CorePhonics]::Contexts.Add($context,[Collections.Generic.Dictionary[string,int]]::new([StringComparer]::Ordinal))}
+        [CorePhonics]::Count([CorePhonics]::Contexts.get_Item($context),$phones,$sign)
+    }
+    # Position of the primary stress counted from the last vowel nucleus; -1 when the reading marks none.
+    static [int] StressFromEnd([string]$reading) {
+        [int]$nuclei=0;[int]$stressed=-1;[bool]$pending=$false
+        [char]$c=[Convert]::ToChar(0)
+        foreach($c in $reading.ToCharArray()){
+            if($c -ceq [Convert]::ToChar(712)){$pending=$true;continue}
+            if([CorePolish]::IsVowel($c)){if($pending){$stressed=$nuclei;$pending=$false};$nuclei++}
+        }
+        if($stressed -lt 0){return -1}
+        return $nuclei-1-$stressed
+    }
+    static [int] Nuclei([string]$segments) {
+        [int]$n=0;[char]$c=[Convert]::ToChar(0)
+        foreach($c in $segments.ToCharArray()){if([CorePolish]::IsVowel($c)){$n++}}
+        return $n
+    }
+    static [string] Ending([string]$word,[int]$length) {return $word.Substring([Math]::Max(0,$word.Length-$length))}
+    # Every reading statistic of one training word, added (sign 1) or withdrawn (sign -1).
+    static [void] Apply([int]$index,[int]$sign) {
+        [string]$word=[CorePhonics]::Words[$index]
+        for([int]$start=0;$start -lt $word.Length;$start++){
+            for([int]$length=1;$length -le [CorePhonics]::MaxLetters($word,$start);$length++){[CorePhonics]::Count([CorePhonics]::Occurrences,$word.Substring($start,$length),$sign)}
+        }
+        [Collections.Generic.List[int]]$pieces=[CorePhonics]::Teardowns[$index]
+        if([object]::ReferenceEquals($null,$pieces)){return}
+        [string]$segments=[CorePhonics]::Segments([CorePhonics]::Readings[$index]);[int]$phone=0
+        for([int]$k=0;$k -lt $pieces.Count;$k+=3){
+            [int]$start=$pieces.get_Item($k);[int]$length=$pieces.get_Item($k+1);[int]$phones=$pieces.get_Item($k+2)
+            [string]$letters=$word.Substring($start,$length);[string]$sound=$segments.Substring($phone,$phones);$phone+=$phones
+            [string]$before='#';if($start -gt 0){$before=$word.Substring($start-1,1)}
+            [string]$after='#';if($start+$length -lt $word.Length){$after=$word.Substring($start+$length,1)}
+            [CorePhonics]::Count([CorePhonics]::Units,$letters,$sign)
+            [CorePhonics]::CountContext('F'+$letters+'|'+$before+$after,$sound,$sign)
+            [CorePhonics]::CountContext('L'+$letters+'|'+$before,$sound,$sign)
+            [CorePhonics]::CountContext('R'+$letters+'|'+$after,$sound,$sign)
+            [CorePhonics]::CountContext('U'+$letters,$sound,$sign)
+        }
+        [int]$fromEnd=[CorePhonics]::StressFromEnd([CorePhonics]::Readings[$index])
+        if($fromEnd -ge 0){
+            [string]$shape=[Convert]::ToString([CorePhonics]::Nuclei($segments))
+            for([int]$length=3;$length -ge 0;$length--){[CorePhonics]::Count([CorePhonics]::Stress,$shape+'|'+[CorePhonics]::Ending($word,$length)+'|'+[Convert]::ToString($fromEnd),$sign)}
+        }
+    }
+    static [void] Train() {
+        if([CorePhonics]::Trained){return}
+        [Collections.Generic.List[string]]$forms=[Collections.Generic.List[string]]::new()
+        [Collections.Generic.List[string]]$found=[Collections.Generic.List[string]]::new()
+        [Collections.Generic.List[int]]$lexicalIds=[Collections.Generic.List[int]]::new()
+        [CorePhonics]::IndexOfId=[Collections.Generic.Dictionary[int,int]]::new()
+        for([int]$id=0;$id -lt [Lexicon]::Count();$id++){
+            [string]$form=[Lexicon]::Form($id)
+            if(-not [CorePhonics]::IsAlphabetic($form)){continue}
+            [string]$reading=''
+            for([int]$role=0;$role -lt 5 -and $reading.Length -eq 0;$role++){
+                [string]$all=[Lexicon]::Phones($id,$role)
+                if($all.Length -gt 0){$reading=$all.Split([Convert]::ToChar(124),[StringSplitOptions]::None)[0]}
+            }
+            [string]$segments=[CorePhonics]::Segments($reading)
+            if($segments.Length -eq 0 -or $segments.Length -gt 2*$form.Length){continue}
+            [CorePhonics]::IndexOfId.Add($id,$forms.Count);$forms.Add($form);$found.Add($reading);$lexicalIds.Add($id)
+        }
+        [CorePhonics]::Words=$forms.ToArray();[CorePhonics]::Readings=$found.ToArray();[CorePhonics]::Ids=$lexicalIds.ToArray()
+        [int]$count=$forms.Count
+        # Interned letter groups and phone symbols; a piece key is letter group * 4096 + phone pair.
+        [Collections.Generic.Dictionary[string,int]]$groups=[Collections.Generic.Dictionary[string,int]]::new([StringComparer]::Ordinal)
+        [int[]]$symbols=[int[]]::new(65536);[int]$symbolCount=0
+        [int[][]]$groupIds=[int[][]]::new($count);[int[][]]$phoneIds=[int[][]]::new($count)
+        for([int]$w=0;$w -lt $count;$w++){
+            [string]$word=[CorePhonics]::Words[$w];[string]$segments=[CorePhonics]::Segments([CorePhonics]::Readings[$w])
+            [int[]]$g=[int[]]::new($word.Length*4)
+            for([int]$start=0;$start -lt $word.Length;$start++){
+                for([int]$length=1;$length -le 4;$length++){
+                    [int]$slot=$start*4+$length-1;$g[$slot]=-1
+                    if($length -gt [CorePhonics]::MaxLetters($word,$start)){continue}
+                    [string]$letters=$word.Substring($start,$length)
+                    if(-not $groups.ContainsKey($letters)){$groups.Add($letters,$groups.Count)}
+                    $g[$slot]=$groups.get_Item($letters)
+                }
+            }
+            [int[]]$p=[int[]]::new($segments.Length)
+            for([int]$k=0;$k -lt $segments.Length;$k++){
+                [int]$code=[Convert]::ToInt32($segments.get_Chars($k))
+                if($symbols[$code] -eq 0){$symbolCount++;$symbols[$code]=$symbolCount}
+                $p[$k]=$symbols[$code]
+            }
+            $groupIds[$w]=$g;$phoneIds[$w]=$p
+        }
+        if($symbolCount -ge 63){throw [InvalidOperationException]::new('Phone inventory exceeds the piece key width.')}
+        [Collections.Generic.Dictionary[int,int]]$pieceIds=[Collections.Generic.Dictionary[int,int]]::new()
+        [Collections.Generic.List[double]]$seedWeights=[Collections.Generic.List[double]]::new()
+        [string[]]$groupNames=[string[]]::new($groups.Count)
+        foreach($letters in [CorePhonics]::Keys($groups)){$groupNames[$groups.get_Item($letters)]=$letters}
+        # Every admissible piece of every word starts with one count per word; authored types start at ten.
+        for([int]$w=0;$w -lt $count;$w++){
+            [CorePhonics]::Lattice($groupIds[$w],$phoneIds[$w],$pieceIds,$seedWeights,$groupNames,[double[]]::new(0),[double[]]::new(0),[Collections.Generic.List[int]]::new(),0)
+        }
+        [double[]]$probability=[double[]]::new($seedWeights.Count)
+        [double]$total=0.0
+        for([int]$k=0;$k -lt $seedWeights.Count;$k++){$total+=$seedWeights.get_Item($k)}
+        for([int]$k=0;$k -lt $seedWeights.Count;$k++){$probability[$k]=$seedWeights.get_Item($k)/$total}
+        # Expected piece counts over every teardown of every word, then joint piece probabilities: a piece that many
+        # words reuse gains, one that only fits a few loses.
+        for([int]$iteration=0;$iteration -lt 6;$iteration++){
+            [double[]]$expected=[double[]]::new($probability.Length)
+            for([int]$w=0;$w -lt $count;$w++){
+                [CorePhonics]::Lattice($groupIds[$w],$phoneIds[$w],$pieceIds,[Collections.Generic.List[double]]::new(),$groupNames,$probability,$expected,[Collections.Generic.List[int]]::new(),1)
+            }
+            $total=0.0
+            for([int]$k=0;$k -lt $expected.Length;$k++){$total+=$expected[$k]}
+            for([int]$k=0;$k -lt $expected.Length;$k++){$probability[$k]=$expected[$k]/$total}
+        }
+        [CorePhonics]::Teardowns=[Collections.Generic.List[int][]]::new($count)
+        for([int]$w=0;$w -lt $count;$w++){
+            [Collections.Generic.List[int]]$best=[Collections.Generic.List[int]]::new()
+            [CorePhonics]::Lattice($groupIds[$w],$phoneIds[$w],$pieceIds,[Collections.Generic.List[double]]::new(),$groupNames,$probability,[double[]]::new(0),$best,2)
+            if($best.Count -gt 0){[CorePhonics]::Teardowns[$w]=$best}
+        }
+        [CorePhonics]::Units=[Collections.Generic.Dictionary[string,int]]::new([StringComparer]::Ordinal)
+        [CorePhonics]::Occurrences=[Collections.Generic.Dictionary[string,int]]::new([StringComparer]::Ordinal)
+        [CorePhonics]::Contexts=[Collections.Generic.Dictionary[string,System.Collections.Generic.Dictionary[string,int]]]::new([StringComparer]::Ordinal)
+        [CorePhonics]::Stress=[Collections.Generic.Dictionary[string,int]]::new([StringComparer]::Ordinal)
+        for([int]$w=0;$w -lt $count;$w++){[CorePhonics]::Apply($w,1)}
+        [CorePhonics]::Trained=$true
+    }
+    # One word's lattice of teardowns. Mode 0 seeds counts, mode 1 adds expected counts (forward-backward), mode 2
+    # writes the most probable teardown as (start, letters, phones) triples.
+    static [void] Lattice([int[]]$groups,[int[]]$phones,[Collections.Generic.Dictionary[int,int]]$pieceIds,[Collections.Generic.List[double]]$seedWeights,[string[]]$groupNames,[double[]]$probability,[double[]]$expected,[Collections.Generic.List[int]]$best,[int]$mode) {
+        [int]$letters=[int]($groups.Length/4);[int]$width=$phones.Length+1;[int]$nodes=($letters+1)*$width
+        [double[]]$alpha=[double[]]::new($nodes);[double[]]$beta=[double[]]::new($nodes)
+        [int[]]$backPiece=[int[]]::new($nodes);[int[]]$backFrom=[int[]]::new($nodes)
+        $alpha[0]=1.0
+        if($mode -eq 2){for([int]$n=1;$n -lt $nodes;$n++){$alpha[$n]=-1.0E300}; $alpha[0]=0.0}
+        for([int]$xl=1;$xl -le $letters;$xl++){
+            for([int]$yl=0;$yl -le $phones.Length;$yl++){
+                [int]$node=$xl*$width+$yl
+                for([int]$a=1;$a -le 4 -and $a -le $xl;$a++){
+                    [int]$group=$groups[($xl-$a)*4+$a-1]
+                    if($group -lt 0){continue}
+                    for([int]$b=0;$b -le 2 -and $b -le $yl;$b++){
+                        [int]$phoneCode=0
+                        if($b -ge 1){$phoneCode=$phones[$yl-$b]}
+                        if($b -eq 2){$phoneCode=$phones[$yl-2]*64+$phones[$yl-1]}
+                        [int]$key=$group*4096+$phoneCode
+                        [int]$from=($xl-$a)*$width+$yl-$b
+                        if($mode -eq 0){
+                            [double]$weight=1.0
+                            if($a -ge 2 -and [CorePhonics]::IsSeed($groupNames[$group])){$weight=10.0}
+                            if($pieceIds.ContainsKey($key)){[int]$at=$pieceIds.get_Item($key);$seedWeights.set_Item($at,$seedWeights.get_Item($at)+$weight)}
+                            else{$pieceIds.Add($key,$seedWeights.Count);$seedWeights.Add($weight)}
+                            continue
+                        }
+                        if(-not $pieceIds.ContainsKey($key)){continue}
+                        [int]$piece=$pieceIds.get_Item($key)
+                        if($mode -eq 1){$alpha[$node]+=$probability[$piece]*$alpha[$from]}
+                        elseif($probability[$piece] -gt 0.0){
+                            [double]$score=$alpha[$from]+[Math]::Log($probability[$piece])
+                            if($score -gt $alpha[$node]){$alpha[$node]=$score;$backPiece[$node]=$a*3+$b;$backFrom[$node]=$from}
+                        }
+                    }
+                }
+            }
+        }
+        if($mode -eq 0){return}
+        [int]$last=$nodes-1
+        if($mode -eq 2){
+            if($alpha[$last] -lt -1.0E299){return}
+            [Collections.Generic.List[int]]$reverse=[Collections.Generic.List[int]]::new()
+            [int]$node=$last
+            while($node -gt 0){
+                [int]$a=[int][Math]::Floor([double]$backPiece[$node]/3.0);[int]$b=$backPiece[$node]-$a*3
+                [int]$xl=[int][Math]::Floor([double]$node/[double]$width)
+                $reverse.Add($b);$reverse.Add($a);$reverse.Add($xl-$a)
+                $node=$backFrom[$node]
+            }
+            for([int]$k=$reverse.Count-1;$k -ge 0;$k--){$best.Add($reverse.get_Item($k))}
+            return
+        }
+        if($alpha[$last] -le 0.0){return}
+        $beta[$last]=1.0
+        for([int]$node=$last;$node -ge 1;$node--){
+            if($beta[$node] -eq 0.0){continue}
+            [int]$xl=[int][Math]::Floor([double]$node/[double]$width);[int]$yl=$node-$xl*$width
+            for([int]$a=1;$a -le 4 -and $a -le $xl;$a++){
+                [int]$group=$groups[($xl-$a)*4+$a-1]
+                if($group -lt 0){continue}
+                for([int]$b=0;$b -le 2 -and $b -le $yl;$b++){
+                    [int]$phoneCode=0
+                    if($b -ge 1){$phoneCode=$phones[$yl-$b]}
+                    if($b -eq 2){$phoneCode=$phones[$yl-2]*64+$phones[$yl-1]}
+                    [int]$key=$group*4096+$phoneCode
+                    if(-not $pieceIds.ContainsKey($key)){continue}
+                    [int]$piece=$pieceIds.get_Item($key)
+                    [int]$from=($xl-$a)*$width+$yl-$b
+                    $beta[$from]+=$probability[$piece]*$beta[$node]
+                    $expected[$piece]+=$alpha[$from]*$probability[$piece]*$beta[$node]/$alpha[$last]
+                }
+            }
+        }
+    }
+    # The phones a letter group makes here, from the most specific context with evidence: both neighbours, the left,
+    # the right, then the group alone.
+    static [Collections.Generic.Dictionary[string,int]] Choices([string]$letters,[string]$before,[string]$after) {
+        [string[]]$order=[string[]]::new(4);$order[0]='F'+$letters+'|'+$before+$after;$order[1]='L'+$letters+'|'+$before;$order[2]='R'+$letters+'|'+$after;$order[3]='U'+$letters
+        foreach($context in $order){
+            if(-not [CorePhonics]::Contexts.ContainsKey($context)){continue}
+            [Collections.Generic.Dictionary[string,int]]$table=[CorePhonics]::Contexts.get_Item($context)
+            [int]$total=0
+            foreach($sound in [CorePhonics]::Keys($table)){$total+=$table.get_Item($sound)}
+            if($total -ge 2){return $table}
+        }
+        return $null
+    }
+    static [string] PlaceStress([string]$word,[string]$segments) {
+        [int]$nuclei=[CorePhonics]::Nuclei($segments)
+        if($nuclei -eq 0){return $segments}
+        [int]$fromEnd=-1
+        for([int]$length=3;$length -ge 0 -and $fromEnd -lt 0;$length--){
+            [string]$prefix=[Convert]::ToString($nuclei)+'|'+[CorePhonics]::Ending($word,$length)+'|'
+            [int]$top=0
+            for([int]$k=0;$k -lt $nuclei;$k++){
+                if(-not [CorePhonics]::Stress.ContainsKey($prefix+[Convert]::ToString($k))){continue}
+                [int]$seen=[CorePhonics]::Stress.get_Item($prefix+[Convert]::ToString($k))
+                if($seen -gt $top){$top=$seen;$fromEnd=$k}
+            }
+        }
+        if($fromEnd -lt 0){$fromEnd=$nuclei-1}
+        [int]$target=$nuclei-1-$fromEnd;[int]$seenNuclei=0
+        [Text.StringBuilder]$b=[Text.StringBuilder]::new()
+        [char]$c=[Convert]::ToChar(0)
+        foreach($c in $segments.ToCharArray()){
+            if([CorePolish]::IsVowel($c)){if($seenNuclei -eq $target){$b.Append([Convert]::ToChar(712))};$seenNuclei++}
+            $b.Append($c)
+        }
+        return $b.ToString()
+    }
+    # Readings of a word built from pieces, best first. A withheld lexical id's own contribution is withdrawn for the
+    # duration of the call.
+    static [string[]] SoundOut([string]$word,[int]$withheldLexicalId) {
+        [CorePhonics]::Train()
+        [string]$lower=$word.ToLowerInvariant()
+        if(-not [CorePhonics]::IsAlphabetic($lower)){return [string[]]::new(0)}
+        [int]$withheld=-1
+        if($withheldLexicalId -ge 0 -and [CorePhonics]::IndexOfId.ContainsKey($withheldLexicalId)){$withheld=[CorePhonics]::IndexOfId.get_Item($withheldLexicalId);[CorePhonics]::Apply($withheld,-1)}
+        [string[]]$found=[CorePhonics]::Build($lower)
+        if($withheld -ge 0){[CorePhonics]::Apply($withheld,1)}
+        return $found
+    }
+    static [string[]] Build([string]$word) {
+        # Hypotheses as parallel lists: position reached, score, previous hypothesis, phones of the last piece.
+        [Collections.Generic.List[int]]$at=[Collections.Generic.List[int]]::new()
+        [Collections.Generic.List[double]]$score=[Collections.Generic.List[double]]::new()
+        [Collections.Generic.List[int]]$back=[Collections.Generic.List[int]]::new()
+        [Collections.Generic.List[string]]$sound=[Collections.Generic.List[string]]::new()
+        $at.Add(0);$score.Add(0.0);$back.Add(-1);$sound.Add('')
+        [int]$beam=8
+        for([int]$start=0;$start -lt $word.Length;$start++){
+            [Collections.Generic.List[int]]$here=[CorePhonics]::Top($at,$score,$start,$beam)
+            foreach($h in $here.ToArray()){
+                for([int]$length=1;$length -le [CorePhonics]::MaxLetters($word,$start);$length++){
+                    [string]$letters=$word.Substring($start,$length)
+                    if(-not [CorePhonics]::Units.ContainsKey($letters) -or -not [CorePhonics]::Occurrences.ContainsKey($letters)){continue}
+                    [int]$unitCount=[CorePhonics]::Units.get_Item($letters);[int]$occurrenceCount=[CorePhonics]::Occurrences.get_Item($letters)
+                    if($unitCount -le 0 -or $occurrenceCount -le 0){continue}
+                    [string]$before='#';if($start -gt 0){$before=$word.Substring($start-1,1)}
+                    [string]$after='#';if($start+$length -lt $word.Length){$after=$word.Substring($start+$length,1)}
+                    [Collections.Generic.Dictionary[string,int]]$choices=[CorePhonics]::Choices($letters,$before,$after)
+                    if([object]::ReferenceEquals($null,$choices)){continue}
+                    [int]$total=0
+                    foreach($option in [CorePhonics]::Keys($choices)){$total+=$choices.get_Item($option)}
+                    [double]$unit=[Math]::Log([double]$unitCount/[double]$occurrenceCount)
+                    foreach($option in [CorePhonics]::Keys($choices)){
+                        [int]$seen=$choices.get_Item($option)
+                        if($seen -le 0){continue}
+                        $at.Add($start+$length);$score.Add($score.get_Item($h)+$unit+[Math]::Log([double]$seen/[double]$total));$back.Add($h);$sound.Add($option)
+                    }
+                }
+            }
+        }
+        [Collections.Generic.List[int]]$ends=[CorePhonics]::Top($at,$score,$word.Length,$beam)
+        [Collections.Generic.List[string]]$found=[Collections.Generic.List[string]]::new()
+        foreach($h in $ends.ToArray()){
+            [string]$segments='';[int]$k=$h
+            while($k -gt 0){$segments=$sound.get_Item($k)+$segments;$k=$back.get_Item($k)}
+            [string]$reading=[CorePhonics]::PlaceStress($word,$segments)
+            if($segments.Length -gt 0 -and -not $found.Contains($reading) -and $found.Count -lt 3){$found.Add($reading)}
+        }
+        return $found.ToArray()
+    }
+    static [Collections.Generic.List[int]] Top([Collections.Generic.List[int]]$at,[Collections.Generic.List[double]]$score,[int]$position,[int]$beam) {
+        [Collections.Generic.List[int]]$chosen=[Collections.Generic.List[int]]::new()
+        while($chosen.Count -lt $beam){
+            [int]$best=-1
+            for([int]$k=0;$k -lt $at.Count;$k++){
+                if($at.get_Item($k) -ne $position -or $chosen.Contains($k)){continue}
+                if($best -lt 0 -or $score.get_Item($k) -gt $score.get_Item($best)){$best=$k}
+            }
+            if($best -lt 0){break}
+            $chosen.Add($best)
+        }
+        return $chosen
+    }
+    # The learned teardown of a lexicon word as letters:phones pieces, for inspection.
+    static [string] Teardown([string]$word) {
+        [CorePhonics]::Train()
+        [int]$id=[Lexicon]::Find($word.ToLowerInvariant())
+        if($id -lt 0 -or -not [CorePhonics]::IndexOfId.ContainsKey($id)){return ''}
+        [int]$index=[CorePhonics]::IndexOfId.get_Item($id)
+        [Collections.Generic.List[int]]$pieces=[CorePhonics]::Teardowns[$index]
+        if([object]::ReferenceEquals($null,$pieces)){return ''}
+        [string]$segments=[CorePhonics]::Segments([CorePhonics]::Readings[$index]);[int]$phone=0
+        [Text.StringBuilder]$b=[Text.StringBuilder]::new()
+        for([int]$k=0;$k -lt $pieces.Count;$k+=3){
+            if($k -gt 0){$b.Append('|')}
+            $b.Append([CorePhonics]::Words[$index].Substring($pieces.get_Item($k),$pieces.get_Item($k+1)));$b.Append(':')
+            $b.Append($segments.Substring($phone,$pieces.get_Item($k+2)));$phone+=$pieces.get_Item($k+2)
+        }
+        return $b.ToString()
+    }
+}
 class CoreMorphologyRule {
     CoreMorphologyRule() {}
     [string]$Name
@@ -2490,6 +2855,11 @@ class CoreDriver {
     # Product entry: lexicon, grammar roles and Zira choices, then the polish pass.
     static [object] WordCompositions([string]$word) {
         return [CoreMorphology]::Candidates($word.ToLowerInvariant(),-1)
+    }
+    # Readings of a word sounded out from phonics pieces, best first; withheldLexicalId withdraws that word's own
+    # evidence for the call (-1 withdraws nothing).
+    static [string[]] SoundOut([string]$word,[int]$withheldLexicalId) {
+        return [CorePhonics]::SoundOut($word,$withheldLexicalId)
     }
     static [CoreResult] Run([string]$text) {
         [CoreEngine]$engine=[CoreEngine]::new();$engine.Polish=$true;$engine.Scan($text);return $engine.Result($text)
