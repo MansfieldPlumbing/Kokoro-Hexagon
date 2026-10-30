@@ -62,6 +62,9 @@ twice, or written as a scratch script, is a missing command: add it here.
                               Manufacture and gate the compact prosody bank on the laptop; no phone access.
   Student -Parameters @{ Step = 'Console' }
     Host text-to-speech console (student/Invoke-Student.ps1): our phonemizer and the lowered syllabus; plays and saves WAVs under build/.
+  StudentJudges [-Parameters @{ Step = 'All'|'Composition'|'CompositionRecall'|'RoleCoverage' }]
+                              Independent judges of the Student's front end (student/Invoke-StudentJudges.ps1), owned apart
+                              from the Student; typed scores and receipts under build/. No phone access.
   AlbertLinear -Linear name[,name...] [-Path] [-Soc] [-Runs]
                               One ALBERT linear (mapping_in, query.0 .. ffn_output.11, bert_encoder) on the phone: job input
                               from the capture, emit, run, decode, SNR against stock. Default capture stock-albert-capture-hello.
@@ -115,7 +118,7 @@ pwsh -NoProfile -File ./Invoke-KokoroDevelopment.ps1 Run -Case timing-passage-0-
 [CmdletBinding()]
 param(
     [Parameter(Position = 0)]
-    [ValidateSet('Status', 'Verify', 'LineEndings', 'BuildHost','Ratchet', 'Run', 'Emit', 'Check', 'Compare', 'JobInput', 'Capture', 'MeasureAudio', 'CompareAudio', 'PhoneSpeech', 'StockCapture', 'Speak', 'FrontEnd', 'PrecomputedDecoder', 'Student', 'Zira', 'Albert', 'AlbertError', 'AlbertLinear', 'AlbertLayerNorm', 'AlbertGelu', 'AlbertAttention', 'AlbertEmbed', 'AlbertJob', 'Api', 'Find', 'Tools', 'StageResidency', 'CopySynthesis', 'WeightAssembly')]
+    [ValidateSet('Status', 'Verify', 'LineEndings', 'BuildHost','Ratchet', 'Run', 'Emit', 'Check', 'Compare', 'JobInput', 'Capture', 'MeasureAudio', 'CompareAudio', 'PhoneSpeech', 'StockCapture', 'Speak', 'FrontEnd', 'PrecomputedDecoder', 'Student', 'StudentJudges', 'Zira', 'Albert', 'AlbertError', 'AlbertLinear', 'AlbertLayerNorm', 'AlbertGelu', 'AlbertAttention', 'AlbertEmbed', 'AlbertJob', 'Api', 'Find', 'Tools', 'StageResidency', 'CopySynthesis', 'WeightAssembly')]
     [string] $Command = 'Status',
     [string] $Case,
     [string] $Kernel,
@@ -3737,6 +3740,11 @@ switch ($Command) {
         if($Parameters){foreach($key in $Parameters.Keys){$studentArguments[$key]=$Parameters[$key]}}
         & (Join-Path $Root 'student/Invoke-Student.ps1') @studentArguments
     }
+    'StudentJudges' {
+        $judgeArguments = @{}
+        if ($Parameters) { foreach ($key in $Parameters.Keys) { $judgeArguments[$key] = $Parameters[$key] } }
+        & (Join-Path $Root 'student/Invoke-StudentJudges.ps1') @judgeArguments
+    }
     'CompareAudio' {
         if (-not $Reference -or -not $Path) { throw 'CompareAudio needs -Reference and -Path (mono WAVs at one rate).' }
         Import-Module (Join-Path $Root 'tools/Kokoro.AudioMeasurement.psm1')
@@ -3787,7 +3795,7 @@ switch ($Command) {
         }
         ''
         'Commands (Get-Help ./Invoke-KokoroDevelopment.ps1 -Full):'
-        '  Status Verify BuildHost Ratchet Run Emit Check Compare JobInput Capture MeasureAudio StockCapture Speak FrontEnd PrecomputedDecoder Student Zira Albert Find Tools'
+        '  Status Verify BuildHost Ratchet Run Emit Check Compare JobInput Capture MeasureAudio StockCapture Speak FrontEnd PrecomputedDecoder Student StudentJudges Zira Albert Find Tools'
         'Contract: AGENTS.md. Reference manuals: Find-Reference (Pwsh-Development/tools/SharedLibrary.psm1).'
     }
     'BuildHost' {
