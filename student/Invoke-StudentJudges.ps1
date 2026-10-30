@@ -367,8 +367,8 @@ $script:JudgeBaseline = @(
     [pscustomobject]@{ Judge = 'Composition'; Measure = 'RepeatedRuleWords'; Better = 'Lower'; Value = 61 }
     [pscustomobject]@{ Judge = 'CompositionRecall'; Measure = 'ParsedWords'; Better = 'Higher'; Value = 7027 }
     [pscustomobject]@{ Judge = 'CompositionRecall'; Measure = 'ParsedPercent'; Better = 'Higher'; Value = 34.0 }
-    [pscustomobject]@{ Judge = 'CorpusCoverage'; Measure = 'SpokenPercent'; Better = 'Higher'; Value = 96.4 }
-    [pscustomobject]@{ Judge = 'CorpusCoverage'; Measure = 'CompletePercent'; Better = 'Higher'; Value = 10.8 }
+    [pscustomobject]@{ Judge = 'CorpusCoverage'; Measure = 'SpokenPercent'; Better = 'Higher'; Value = 100.0 }
+    [pscustomobject]@{ Judge = 'CorpusCoverage'; Measure = 'CompletePercent'; Better = 'Higher'; Value = 23.4 }
     [pscustomobject]@{ Judge = 'CorpusCoverage'; Measure = 'ExceptionParagraphs'; Better = 'Lower'; Value = 1 }
     [pscustomobject]@{ Judge = 'CorpusCoverage'; Measure = 'RoleWords'; Better = 'Higher'; Value = 12 }
     [pscustomobject]@{ Judge = 'Phonics'; Measure = 'FirstExactPercent'; Better = 'Higher'; Value = 15.9 }
