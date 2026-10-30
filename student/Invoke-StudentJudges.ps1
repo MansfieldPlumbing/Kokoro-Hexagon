@@ -11,12 +11,15 @@
                         root, scored against the lexicon's pronunciation of the whole form.
       CompositionRecall Lexicon forms that are a standard English affix on a lexicon stem (with standard spelling
                         restoration): the share the authored morphology parses at all.
-      RoleCoverage      Corpus paragraphs at a fixed stride through the phonemizer: completeness, grammar status
-                        and the share of word tokens that carry a grammatical role clause composition can consume.
+      CorpusCoverage    Corpus paragraphs at a fixed stride through the phonemizer, best effort: the share of word
+                        tokens spoken and from which source, complete paragraphs, grammar status, and the word tokens
+                        that carry a grammatical role clause composition can consume.
+      Phonics           Lexicon forms at a fixed stride sounded out with their own entry withheld, scored against it.
       All               Every judge above.
+      Ratchet           Every judge, compared with the declared baseline; throws if any measure regresses.
 #>
 param(
-    [ValidateSet('Composition', 'CompositionRecall', 'RoleCoverage', 'All')][string] $Step = 'All',
+    [ValidateSet('Composition', 'CompositionRecall', 'CorpusCoverage', 'Phonics', 'All', 'Ratchet')][string] $Step = 'All',
     [ValidateRange(1, [int]::MaxValue)][int] $ParagraphStride = 97
 )
 Set-StrictMode -Version Latest
@@ -34,7 +37,7 @@ $script:JudgeAffixes = [ordered]@{
     Prefix = @('re', 'un', 'dis', 'pre', 'mis', 'non', 'over', 'under', 'out', 'sub', 'inter', 'anti', 'semi', 'co', 'de', 'in', 'im', 'post')
 }
 $script:JudgeLimits = [ordered]@{ MinimumWord = 3; MinimumRecallWord = 5; MinimumStem = 3; LexiconRoles = 4
-    ParagraphMinimum = 40; ParagraphMaximum = 2000; Examples = 3 }
+    ParagraphMinimum = 40; ParagraphMaximum = 2000; Examples = 3; PhonicsStride = 23 }
 
 function Get-JudgeStudentPin {
     # The phonemizer the Student pins, read from its declared inputs record without running the Student.
@@ -136,7 +139,7 @@ function Measure-JudgeComposition {
             AmbiguousPercent = Get-JudgeShare @($group | Where-Object Ambiguous).Count $group.Count
             Mismatches = @($group | Where-Object { -not $_.Exact } | Select-Object -First $script:JudgeLimits.Examples | ForEach-Object { "$($_.Word): $($_.Readings) / $($_.Reference)" }) }
     })
-    $totals = [pscustomobject]@{ Words = $rows.Count
+    $totals = [pscustomobject]@{ Words = $rows.Count; ExactWords = @($rows | Where-Object Exact).Count
         ExactPercent = Get-JudgeShare @($rows | Where-Object Exact).Count $rows.Count
         SegmentsPercent = Get-JudgeShare @($rows | Where-Object Segments).Count $rows.Count
         AmbiguousPercent = Get-JudgeShare @($rows | Where-Object Ambiguous).Count $rows.Count
@@ -182,51 +185,132 @@ function Measure-JudgeCompositionRecall {
             Unparsed = @($group | Where-Object { -not $_.Parsed } | Select-Object -First $script:JudgeLimits.Examples | ForEach-Object Word) }
     })
     $restoredAll = @($rows | Where-Object Restored)
-    $totals = [pscustomobject]@{ Words = $rows.Count; ParsedPercent = Get-JudgeShare @($rows | Where-Object Parsed).Count $rows.Count
+    $totals = [pscustomobject]@{ Words = $rows.Count; ParsedWords = @($rows | Where-Object Parsed).Count; ParsedPercent = Get-JudgeShare @($rows | Where-Object Parsed).Count $rows.Count
         RestoredWords = $restoredAll.Count; RestoredParsedPercent = Get-JudgeShare @($restoredAll | Where-Object Parsed).Count $restoredAll.Count }
     New-JudgeScore 'CompositionRecall' $strata $totals 'Whether a parse exists, not whether it is correct; an affix-shaped spelling on a lexicon stem is not always a derivation.'
 }
 
-function Measure-JudgeRoleCoverage {
+function Measure-JudgeCorpusCoverage {
+    # Best effort: every word token should be spoken. Scored per token (a pronunciation, its source) and per paragraph
+    # (complete), with grammatical roles as the reachability of clause composition.
     Import-JudgePhonemizer
     $files = @(Get-ChildItem -LiteralPath $script:JudgeContext.Text -Filter '*.txt' -File | Sort-Object Name)
     if (-not $files.Count) { throw "No corpus text under $($script:JudgeContext.Text)." }
-    $rows = [Collections.Generic.List[object]]::new()
+    $rows = [Collections.Generic.List[object]]::new(); $sources = [Collections.Generic.Dictionary[string,int]]::new([StringComparer]::Ordinal)
+    $silent = [Collections.Generic.Dictionary[string,int]]::new([StringComparer]::Ordinal); $silentWords = [Collections.Generic.Dictionary[string,int]]::new([StringComparer]::Ordinal)
     foreach ($file in $files) {
         $paragraphs = [IO.File]::ReadAllText($file.FullName).Replace("`r`n", "`n").Split([string[]]@("`n`n"), [StringSplitOptions]::None)
         for ($index = 0; $index -lt $paragraphs.Length; $index += $ParagraphStride) {
             $paragraph = $paragraphs[$index].Replace("`n", ' ').Trim()
             if ($paragraph.Length -lt $script:JudgeLimits.ParagraphMinimum -or $paragraph.Length -gt $script:JudgeLimits.ParagraphMaximum) { continue }
-            # A paragraph the phonemizer throws on is scored as incomplete with status Exception, never skipped.
+            # A paragraph the phonemizer throws on is scored as incomplete and unspoken with status Exception, never skipped.
             try { $result = $script:JudgeContext.Run.Invoke($paragraph) }
             catch {
                 $failure = $_.Exception; while ($null -ne $failure.InnerException) { $failure = $failure.InnerException }
                 $rows.Add([pscustomobject]@{ Source = $file.Name; Paragraph = $index; Complete = $false
-                    GrammarStatus = "Exception:$($failure.GetType().Name)"; Words = 0; RoleWords = 0 })
+                    GrammarStatus = "Exception:$($failure.GetType().Name)"; Words = 0; SpokenWords = 0; RoleWords = 0 })
                 continue
             }
-            $words = @($result.Tokens | Where-Object { $_.Word -and [char]::IsLetter($_.Word[0]) })
+            $words = @($result.Tokens | Where-Object { $_.Word -and [char]::IsLetter($_.Word[0]) }); $spoken = 0
+            foreach ($word in $words) {
+                if ($word.Pron) { $spoken++; $source = [string]$word.PronunciationSource; $sources[$source] = 1 + $(if ($sources.ContainsKey($source)) { $sources[$source] } else { 0 }) }
+                else { $status = [string]$word.Status; $silent[$status] = 1 + $(if ($silent.ContainsKey($status)) { $silent[$status] } else { 0 }); $silentWords[$word.Word] = 1 + $(if ($silentWords.ContainsKey($word.Word)) { $silentWords[$word.Word] } else { 0 }) }
+            }
             $rows.Add([pscustomobject]@{ Source = $file.Name; Paragraph = $index; Complete = [bool]$result.Complete
-                GrammarStatus = [string]$result.GrammarStatus; Words = $words.Count; RoleWords = @($words | Where-Object { @($_.Roles).Count }).Count })
+                GrammarStatus = [string]$result.GrammarStatus; Words = $words.Count; SpokenWords = $spoken
+                RoleWords = @($words | Where-Object { @($_.Roles).Count }).Count })
         }
     }
-    $wordCount = [int]($rows | Measure-Object Words -Sum).Sum; $roleCount = [int]($rows | Measure-Object RoleWords -Sum).Sum
+    $sum = { param($Rows, $Name) [int]($Rows | Measure-Object $Name -Sum).Sum }
     $strata = @($rows | Group-Object Source | ForEach-Object {
-        $group = $_.Group; $words = [int]($group | Measure-Object Words -Sum).Sum
+        $group = $_.Group; $words = & $sum $group 'Words'
         [pscustomobject]@{ Source = $_.Name; Paragraphs = $group.Count; CompletePercent = Get-JudgeShare @($group | Where-Object Complete).Count $group.Count
-            Words = $words; RolePercent = Get-JudgeShare ([int]($group | Measure-Object RoleWords -Sum).Sum) $words
+            Words = $words; SpokenPercent = Get-JudgeShare (& $sum $group 'SpokenWords') $words; RolePercent = Get-JudgeShare (& $sum $group 'RoleWords') $words
             GrammarStatus = @($group | Group-Object GrammarStatus | Sort-Object Name | ForEach-Object { "$($_.Name)=$($_.Count)" }) }
     })
-    $totals = [pscustomobject]@{ Paragraphs = $rows.Count; Stride = $ParagraphStride; CompletePercent = Get-JudgeShare @($rows | Where-Object Complete).Count $rows.Count
-        Words = $wordCount; RoleWords = $roleCount; RolePercent = Get-JudgeShare $roleCount $wordCount
+    $wordCount = & $sum $rows 'Words'; $spokenCount = & $sum $rows 'SpokenWords'; $roleCount = & $sum $rows 'RoleWords'
+    $completeCount = @($rows | Where-Object Complete).Count
+    $totals = [pscustomobject]@{ Paragraphs = $rows.Count; Stride = $ParagraphStride
+        CompleteParagraphs = $completeCount; CompletePercent = Get-JudgeShare $completeCount $rows.Count
+        ExceptionParagraphs = @($rows | Where-Object { $_.GrammarStatus.StartsWith('Exception:') }).Count
+        Words = $wordCount; SpokenWords = $spokenCount; SpokenPercent = Get-JudgeShare $spokenCount $wordCount
+        RoleWords = $roleCount; RolePercent = Get-JudgeShare $roleCount $wordCount
+        PronunciationSources = @($sources.Keys | Sort-Object | ForEach-Object { "$_=$($sources[$_])" })
+        SilentStatus = @($silent.Keys | Sort-Object | ForEach-Object { "$_=$($silent[$_])" })
+        SilentWords = @($silentWords.GetEnumerator() | Sort-Object { -$_.Value }, Key | ForEach-Object { "$($_.Key)=$($_.Value)" })
         GrammarStatus = @($rows | Group-Object GrammarStatus | Sort-Object Name | ForEach-Object { "$($_.Name)=$($_.Count)" }) }
-    New-JudgeScore 'RoleCoverage' $strata $totals 'Reachability of clause composition from text through phonemizer roles; role correctness is not measured.'
+    New-JudgeScore 'CorpusCoverage' $strata $totals 'Whether each word token is spoken and from which source; pronunciation and role correctness are not measured here.'
+}
+
+function Measure-JudgePhonics {
+    # Sounding out with the word's own lexicon entry withheld, scored against that entry. The reader is the driver's
+    # CoreDriver.SoundOut(string word, int withheldLexicalId) returning its readings (string[], best first); until the
+    # driver has it, every probe is scored as not read.
+    Import-JudgePhonemizer
+    $lexicon = $script:JudgeContext.Lexicon
+    $method = $script:JudgeContext.Run.Method.DeclaringType.GetMethod('SoundOut', [Type[]]@([string], [int]))
+    $reader = if ($null -ne $method) { $method.CreateDelegate([Func[string,int,string[]]]) } else { $null }
+    $rows = [Collections.Generic.List[object]]::new()
+    for ($id = 0; $id -lt $lexicon::Count(); $id += $script:JudgeLimits.PhonicsStride) {
+        $word = $lexicon::Form($id)
+        if ($word.Length -lt $script:JudgeLimits.MinimumWord -or $word -cnotmatch '^[a-z]+$') { continue }
+        $reference = Get-JudgeLexiconReadings $id
+        if (-not $reference.Count) { continue }
+        [string[]] $readings = @(if ($null -ne $reader) { $reader.Invoke($word, $id) | Where-Object { $_ } })
+        $segments = [Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
+        foreach ($phones in $reference) { [void]$segments.Add((Get-JudgeSegments $phones)) }
+        $first = if ($readings.Count) { $readings[0] } else { '' }
+        $rows.Add([pscustomobject]@{ Word = $word; Length = $word.Length; Read = $readings.Count -gt 0
+            FirstExact = $reference.Contains($first); AnyExact = @($readings | Where-Object { $reference.Contains($_) }).Count -gt 0
+            FirstSegments = $first -and $segments.Contains((Get-JudgeSegments $first)); Readings = $readings.Count })
+    }
+    $score = { param($Rows) [ordered]@{ Words = $Rows.Count; ReadPercent = Get-JudgeShare @($Rows | Where-Object Read).Count $Rows.Count
+        FirstExactPercent = Get-JudgeShare @($Rows | Where-Object FirstExact).Count $Rows.Count
+        AnyExactPercent = Get-JudgeShare @($Rows | Where-Object AnyExact).Count $Rows.Count
+        FirstSegmentsPercent = Get-JudgeShare @($Rows | Where-Object FirstSegments).Count $Rows.Count } }
+    $strata = @($rows | Group-Object { if ($_.Length -le 4) { 'letters 3-4' } elseif ($_.Length -le 7) { 'letters 5-7' } else { 'letters 8+' } } | Sort-Object Name | ForEach-Object {
+        $values = & $score $_.Group; $values.Insert(0, 'Stratum', $_.Name); [pscustomobject]$values })
+    $totals = & $score $rows; $totals.Reader = if ($null -ne $reader) { 'CoreDriver.SoundOut' } else { 'Absent' }
+    New-JudgeScore 'Phonics' $strata ([pscustomobject]$totals) 'Lexicon forms at a fixed stride with their own entry withheld from the reader; the lexicon is the reference notation.'
+}
+
+# The ratchet: each measure may improve but never regress. Raised by the judges' owner when a change improves it.
+$script:JudgeBaseline = @(
+    [pscustomobject]@{ Judge = 'Composition'; Measure = 'ExactWords'; Better = 'Higher'; Value = 3601 }
+    [pscustomobject]@{ Judge = 'Composition'; Measure = 'ExactPercent'; Better = 'Higher'; Value = 50.0 }
+    [pscustomobject]@{ Judge = 'Composition'; Measure = 'RepeatedRuleWords'; Better = 'Lower'; Value = 61 }
+    [pscustomobject]@{ Judge = 'CompositionRecall'; Measure = 'ParsedWords'; Better = 'Higher'; Value = 7027 }
+    [pscustomobject]@{ Judge = 'CompositionRecall'; Measure = 'ParsedPercent'; Better = 'Higher'; Value = 34.0 }
+    [pscustomobject]@{ Judge = 'CorpusCoverage'; Measure = 'SpokenPercent'; Better = 'Higher'; Value = 96.4 }
+    [pscustomobject]@{ Judge = 'CorpusCoverage'; Measure = 'CompletePercent'; Better = 'Higher'; Value = 10.8 }
+    [pscustomobject]@{ Judge = 'CorpusCoverage'; Measure = 'ExceptionParagraphs'; Better = 'Lower'; Value = 1 }
+    [pscustomobject]@{ Judge = 'CorpusCoverage'; Measure = 'RoleWords'; Better = 'Higher'; Value = 12 }
+    [pscustomobject]@{ Judge = 'Phonics'; Measure = 'FirstExactPercent'; Better = 'Higher'; Value = 0 }
+    [pscustomobject]@{ Judge = 'Phonics'; Measure = 'FirstSegmentsPercent'; Better = 'Higher'; Value = 0 }
+)
+
+function Test-JudgeRatchet([object[]] $Scores) {
+    $byJudge = @{}; foreach ($score in $Scores) { $byJudge[$score.Judge] = $score }
+    $rows = @(foreach ($record in $script:JudgeBaseline) {
+        $current = [double]$byJudge[$record.Judge].Totals.($record.Measure)
+        $delta = if ($record.Better -ceq 'Higher') { $current - $record.Value } else { $record.Value - $current }
+        [pscustomobject]@{ PSTypeName = 'Kokoro.StudentJudgeRatchet'; Judge = $record.Judge; Measure = $record.Measure
+            Baseline = $record.Value; Current = $current
+            Verdict = if ([Math]::Round($delta, 1) -lt 0) { 'Regressed' } elseif ([Math]::Round($delta, 1) -gt 0) { 'Improved' } else { 'Held' } }
+    })
+    $line = ($rows | ForEach-Object { '{0}.{1} {2}' -f $_.Judge, $_.Measure, $_.Current }) -join ', '
+    $regressed = @($rows | Where-Object Verdict -CEQ 'Regressed')
+    if ($regressed.Count) { throw ('Student judge ratchet regressed: ' + (($regressed | ForEach-Object { "$($_.Judge).$($_.Measure) $($_.Current) (baseline $($_.Baseline))" }) -join '; ')) }
+    [pscustomobject]@{ PSTypeName = 'Kokoro.StudentJudgeRatchetResult'; Passed = $true; Measures = $rows; Score = $line
+        Improved = @($rows | Where-Object Verdict -CEQ 'Improved').Count }
 }
 
 $script:JudgeSteps = [ordered]@{
     Composition = { Measure-JudgeComposition }
     CompositionRecall = { Measure-JudgeCompositionRecall }
-    RoleCoverage = { Measure-JudgeRoleCoverage }
+    CorpusCoverage = { Measure-JudgeCorpusCoverage }
+    Phonics = { Measure-JudgePhonics }
 }
 if ($Step -ceq 'All') { foreach ($name in $script:JudgeSteps.Keys) { & $script:JudgeSteps[$name] } }
+elseif ($Step -ceq 'Ratchet') { Test-JudgeRatchet @(foreach ($name in $script:JudgeSteps.Keys) { & $script:JudgeSteps[$name] }) }
 else { & $script:JudgeSteps[$Step] }

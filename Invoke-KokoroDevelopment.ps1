@@ -62,9 +62,10 @@ twice, or written as a scratch script, is a missing command: add it here.
                               Manufacture and gate the compact prosody bank on the laptop; no phone access.
   Student -Parameters @{ Step = 'Console' }
     Host text-to-speech console (student/Invoke-Student.ps1): our phonemizer and the lowered syllabus; plays and saves WAVs under build/.
-  StudentJudges [-Parameters @{ Step = 'All'|'Composition'|'CompositionRecall'|'RoleCoverage' }]
+  StudentJudges [-Parameters @{ Step = 'All'|'Ratchet'|'Composition'|'CompositionRecall'|'CorpusCoverage'|'Phonics' }]
                               Independent judges of the Student's front end (student/Invoke-StudentJudges.ps1), owned apart
-                              from the Student; typed scores and receipts under build/. No phone access.
+                              from the Student; typed scores and receipts under build/. Ratchet throws if any measure falls
+                              below its declared baseline and runs in Verify. No phone access.
   AlbertLinear -Linear name[,name...] [-Path] [-Soc] [-Runs]
                               One ALBERT linear (mapping_in, query.0 .. ffn_output.11, bert_encoder) on the phone: job input
                               from the capture, emit, run, decode, SNR against stock. Default capture stock-albert-capture-hello.
@@ -3881,6 +3882,11 @@ switch ($Command) {
             'student-composition' = {
                 $verification = & (Join-Path $Root 'student/Invoke-Student.ps1') -Step VerifyComposition
                 if ($verification.PSObject.TypeNames -notcontains 'Kokoro.StudentCompositionVerification' -or -not $verification.Passed) { throw 'Student composition mechanics did not pass.' }
+            }
+            'student-judges' = {
+                $ratchet = & (Join-Path $Root 'student/Invoke-StudentJudges.ps1') -Step Ratchet | Select-Object -Last 1
+                if (-not $ratchet.Passed) { throw 'Student judge ratchet did not pass.' }
+                $ratchet.Score
             }
             'audio-measurement' = {
                 Import-Module (Join-Path $Root 'tools/Kokoro.AudioMeasurement.psm1')
