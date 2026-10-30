@@ -42,6 +42,8 @@ Steps:
   VerifyComposition  Check chart deductions, interruption, resumption and source-identity invariants.
   Morphology  Inspect every root-and-affix analysis for -Text, with readings and rule provenance.
   VerifyMorphology  Check the requested composition proofs and preservation of alternatives.
+  Sources   Retain original corpus snapshots, whitespace transformations and original token spans.
+  VerifySources  Check source-coordinate mapping and punctuation retention with the lowered tokenizer.
 .PARAMETER Corpus
 Corpus directory for Pronunciation; defaults to the latest build/corpus-* with corpus.clixml.
 .PARAMETER ParagraphLimit
@@ -78,7 +80,7 @@ Run from a PowerShell prompt: pwsh -File passes every argument as a string, so a
 #requires -Version 7.7
 [CmdletBinding()]
 param(
-    [ValidateSet('Console', 'Render', 'Corpus', 'Pronunciation', 'Normalize', 'Compose', 'VerifyComposition', 'Morphology', 'VerifyMorphology', 'Syllabus', 'Recordings', 'Listen', 'Stems', 'Alignment', 'Percepts', 'Describe', 'Learn', 'Audit', 'Discriminate', 'Reconsider', 'Inventory', 'Speak', 'Ablate', 'PitchGate', 'Trace', 'Normalization', 'Score', 'Residuals', 'Retune')][string] $Step = 'Console',
+    [ValidateSet('Console', 'Render', 'Corpus', 'Sources', 'VerifySources', 'Pronunciation', 'Normalize', 'Compose', 'VerifyComposition', 'Morphology', 'VerifyMorphology', 'Syllabus', 'Recordings', 'Listen', 'Stems', 'Alignment', 'Percepts', 'Describe', 'Learn', 'Audit', 'Discriminate', 'Reconsider', 'Inventory', 'Speak', 'Ablate', 'PitchGate', 'Trace', 'Normalization', 'Score', 'Residuals', 'Retune')][string] $Step = 'Console',
     [ValidateRange(2, 64)][int] $Threads = [Math]::Max(2, [Environment]::ProcessorCount),
     [string] $Text = '',
     [string] $Voice = 'af_heart',
@@ -690,6 +692,32 @@ function Show-StudentConsole {
 }
 
 class StudentTextKernels {
+    static [int] AddToken([int[]] $target, [int] $count, [int] $kind, [int] $start, [int] $length, [int] $flags) {
+        if ($count -lt 0 -or $count -ge ($target.Length -shr 2)) { throw [ArgumentOutOfRangeException]::new('count') }
+        $target[4 * $count] = $kind; $target[4 * $count + 1] = $start
+        $target[4 * $count + 2] = $length; $target[4 * $count + 3] = $flags
+        return $count + 1
+    }
+    static [int[]] OriginalSpans([int[]] $tokens, [int[]] $projection) {
+        if (($tokens.Length -band 3) -ne 0 -or ($projection.Length -band 3) -ne 0) { throw [ArgumentException]::new('Packed source records require four fields.') }
+        $result = [int[]]::new($tokens.Length -shr 1); $segment = 0; $segments = $projection.Length -shr 2
+        for ($token = 0; $token -lt ($tokens.Length -shr 2); $token++) {
+            $start = $tokens[4 * $token + 1]; $end = $start + $tokens[4 * $token + 2]
+            if ($start -lt 0 -or $end -le $start) { throw [ArgumentOutOfRangeException]::new('tokens') }
+            while ($segment -lt $segments -and $projection[4 * $segment] + $projection[4 * $segment + 1] -le $start) { $segment++ }
+            if ($segment -ge $segments -or $start -lt $projection[4 * $segment]) { throw [ArgumentException]::new('Token start has no source mapping.') }
+            $originalStart = $projection[4 * $segment + 2]
+            if ($projection[4 * $segment + 1] -eq $projection[4 * $segment + 3]) { $originalStart += $start - $projection[4 * $segment] }
+            $last = $segment
+            while ($last -lt $segments -and $projection[4 * $last] + $projection[4 * $last + 1] -lt $end) { $last++ }
+            if ($last -ge $segments -or $end -le $projection[4 * $last]) { throw [ArgumentException]::new('Token end has no source mapping.') }
+            $originalEnd = $projection[4 * $last + 2] + $projection[4 * $last + 3]
+            if ($projection[4 * $last + 1] -eq $projection[4 * $last + 3]) { $originalEnd = $projection[4 * $last + 2] + $end - $projection[4 * $last] }
+            if ($originalEnd -le $originalStart) { throw [ArgumentException]::new('Token source extent is empty or reversed.') }
+            $result[2 * $token] = $originalStart; $result[2 * $token + 1] = $originalEnd - $originalStart
+        }
+        return $result
+    }
     # Text kernels compiled through PSLowering. A token is four integers: kind, start, length,
     # flags. Kinds: 1 word, 2 number, 3 ordinal or format word (2d, 12mo), 4 punctuation,
     # 5 quotation mark, 6 symbol, 7 transcriber note; kinds 1 to 5 are spoken. Flags: 1 emphasis
@@ -722,17 +750,29 @@ class StudentTextKernels {
         while ($i -lt $n) {
             $code = [int]$c[$i]
             if ([char]::IsWhiteSpace($c[$i])) { $i++; continue }
-            if ($code -eq 95) { $flags = $flags -bxor 1; $i++; continue }
+            if ($code -eq 95) {
+                $flags = $flags -bxor 1
+                $count = [StudentTextKernels]::AddToken($out, $count, 8, $i + $offset, 1, $flags)
+                $i++; continue
+            }
             if ($code -eq 91) {
                 $close = -1
                 for ($j = $i + 1; $j -lt $n -and $j -le $i + 80; $j++) { if ($close -lt 0 -and [int]$c[$j] -eq 93) { $close = $j } }
                 if ($close -gt 0 -and [StudentTextKernels]::NoteAt($c, $i + 1)) {
-                    $out[4 * $count] = 7; $out[4 * $count + 1] = $i + $offset; $out[4 * $count + 2] = $close - $i + 1; $out[4 * $count + 3] = $flags; $count++
+                    $count = [StudentTextKernels]::AddToken($out, $count, 7, $i + $offset, $close - $i + 1, $flags)
                     $i = $close + 1; continue
                 }
-                if ($close -gt 0) { $flags = $flags -bor 2; $i++; continue }
+                if ($close -gt 0) {
+                    $flags = $flags -bor 2
+                    $count = [StudentTextKernels]::AddToken($out, $count, 8, $i + $offset, 1, $flags)
+                    $i++; continue
+                }
             }
-            if ($code -eq 93) { $flags = $flags -band 1; $i++; continue }
+            if ($code -eq 93) {
+                $flags = $flags -band 1
+                $count = [StudentTextKernels]::AddToken($out, $count, 8, $i + $offset, 1, $flags)
+                $i++; continue
+            }
             $kind = 6; $j = $i + 1
             if ([char]::IsLetter($c[$i])) {
                 $kind = 1
@@ -752,7 +792,7 @@ class StudentTextKernels {
             elseif ($code -eq 45 -and $i + 1 -lt $n -and [int]$c[$i + 1] -eq 45) { $kind = 4; while ($j -lt $n -and [int]$c[$j] -eq 45) { $j++ } }
             elseif ($code -eq 34 -or $code -eq 39 -or $code -eq 8216 -or $code -eq 8217 -or $code -eq 8220 -or $code -eq 8221) { $kind = 5 }
             elseif ($code -eq 46 -or $code -eq 44 -or $code -eq 59 -or $code -eq 58 -or $code -eq 33 -or $code -eq 63 -or $code -eq 40 -or $code -eq 41 -or $code -eq 8212 -or $code -eq 8211 -or $code -eq 45 -or $code -eq 8230) { $kind = 4 }
-            $out[4 * $count] = $kind; $out[4 * $count + 1] = $i + $offset; $out[4 * $count + 2] = $j - $i; $out[4 * $count + 3] = $flags; $count++
+            $count = [StudentTextKernels]::AddToken($out, $count, $kind, $i + $offset, $j - $i, $flags)
             $i = $j
         }
         $result = [int[]]::new(4 * $count)
@@ -1202,7 +1242,7 @@ class StudentTextKernels {
     }
 }
 
-$script:StudentTokenKinds = @{ 1 = 'Word'; 2 = 'Number'; 3 = 'Ordinal'; 4 = 'Punctuation'; 5 = 'Quote'; 6 = 'Symbol'; 7 = 'Note' }
+$script:StudentTokenKinds = @{ 1 = 'Word'; 2 = 'Number'; 3 = 'Ordinal'; 4 = 'Punctuation'; 5 = 'Quote'; 6 = 'Symbol'; 7 = 'Note'; 8 = 'Markup' }
 $script:StudentPronunciationSources = @{ 0 = 'None'; 1 = 'Phonemizer'; 2 = 'Zira' }
 Update-TypeData -TypeName 'Kokoro.StudentNormalizationDecision' -MemberType ScriptMethod -MemberName Realize -Value {
     if ($null -eq $this.RuntimeType) { throw 'Import the pinned Student phonemizer before replaying normalization.' }
@@ -1452,6 +1492,7 @@ function Import-StudentKernels {
     $type = [Reflection.Assembly]::LoadFrom($dll).GetType('StudentTextKernels', $true)
     $script:StudentContext.Kernels = [pscustomobject]@{ SHA256 = $admission.SHA256
         Tokenize = $type.GetMethod('Tokenize').CreateDelegate([Func[string,int,int[]]])
+        OriginalSpans = $type.GetMethod('OriginalSpans').CreateDelegate([Func[int[],int[],int[]]])
         Sentences = $type.GetMethod('Sentences').CreateDelegate([Func[int[],char[],int,int,int[]]])
         Project = $type.GetMethod('Project').CreateDelegate([Func[int[],char[],int,int,int[],string]])
         Cover = $type.GetMethod('Cover').CreateDelegate([Func[int[],int[],int[]]])
@@ -1506,8 +1547,63 @@ function Invoke-StudentPhonemize([Func[string,object]] $Phonemize, [string] $Tex
     try { $Phonemize.Invoke($Text) } catch { $null }
 }
 
+function Read-StudentSource([IO.FileInfo] $File) {
+    $bookId = $File.BaseName
+    if (-not $bookId.StartsWith('pg', [StringComparison]::Ordinal) -or $bookId.Length -le 2) { throw 'Corpus source names must be pg followed by the Gutenberg numeric identity.' }
+    foreach ($symbol in $bookId.Substring(2).ToCharArray()) { if (-not [char]::IsAsciiDigit($symbol)) { throw 'Corpus source has a nonnumeric Gutenberg identity.' } }
+    $bytes = [IO.File]::ReadAllBytes($File.FullName)
+    $encoding = [Text.UTF8Encoding]::new($false, $true); $encodingEvidence = 'StrictUtf8Default'
+    $header = [IO.StringReader]::new([Text.Encoding]::ASCII.GetString($bytes, 0, [Math]::Min(8192, $bytes.Length)))
+    try {
+        while ($null -ne ($headerLine = $header.ReadLine())) {
+            if ($headerLine.StartsWith('Character set encoding:', [StringComparison]::OrdinalIgnoreCase)) {
+                $encodingName = $headerLine.Substring('Character set encoding:'.Length).Trim()
+                $encoding = [Text.Encoding]::GetEncoding($encodingName, [Text.EncoderFallback]::ExceptionFallback, [Text.DecoderFallback]::ExceptionFallback)
+                $encodingEvidence = 'SourceDeclaration'; break
+            }
+        }
+    } finally { $header.Dispose() }
+    $stream = [IO.MemoryStream]::new($bytes, $false); $reader = [IO.StreamReader]::new($stream, $encoding, $true)
+    try { $original = $reader.ReadToEnd(); $observedEncoding = $reader.CurrentEncoding } finally { $reader.Dispose(); $stream.Dispose() }
+    if ($encodingEvidence -ceq 'SourceDeclaration' -and $encoding.CodePage -ne $observedEncoding.CodePage) { throw 'Corpus source encoding declaration conflicts with its byte-order mark.' }
+    $strictEncoding = [Text.Encoding]::GetEncoding($observedEncoding.CodePage, [Text.EncoderFallback]::ExceptionFallback, [Text.DecoderFallback]::ExceptionFallback)
+    $strictText = $strictEncoding.GetString($bytes)
+    if ($strictText.Length -and [int]$strictText[0] -eq 65279) { $strictText = $strictText.Substring(1) }
+    if ($strictText -cne $original) { throw 'Corpus source decoding did not preserve the original characters.' }
+    $lines = [Collections.Generic.List[string]]::new(); $starts = [Collections.Generic.List[int]]::new(); $at = 0
+    $textReader = [IO.StringReader]::new($original)
+    try {
+        while ($null -ne ($line = $textReader.ReadLine())) {
+            $starts.Add($at); $lines.Add($line); $at += $line.Length
+            if ($at -lt $original.Length -and [int]$original[$at] -eq 13) { $at++ }
+            if ($at -lt $original.Length -and [int]$original[$at] -eq 10) { $at++ }
+        }
+    } finally { $textReader.Dispose() }
+    if ($at -ne $original.Length) { throw 'Corpus line coordinates do not cover the decoded source.' }
+    $rawHash = [Convert]::ToHexString([Security.Cryptography.SHA256]::HashData($bytes))
+    $source = [pscustomobject]@{ PSTypeName = 'Kokoro.StudentTextSource'; Identity = "gutenberg:$($bookId.Substring(2))@$rawHash"
+        URI = "https://www.gutenberg.org/ebooks/$($bookId.Substring(2))"; RawSHA256 = $rawHash
+        TextSHA256 = [Convert]::ToHexString([Security.Cryptography.SHA256]::HashData([Text.Encoding]::UTF8.GetBytes($original)))
+        OriginalText = $original; Encoding = $observedEncoding.WebName; EncodingEvidence = $encodingEvidence
+        Coordinates = 'UTF-16 code units in decoded original text, excluding the byte-order mark'
+        Integrity = 'ObservedSnapshot'; LicenseReview = 'Pending'; NoticeSHA256 = ''; BodyStart = 0; BodyEnd = 0
+        LicenseNoticePresent = $original.IndexOf('Project Gutenberg License', [StringComparison]::OrdinalIgnoreCase) -ge 0 }
+    [pscustomobject]@{ Source = $source; Lines = $lines.ToArray(); Starts = $starts.ToArray() }
+}
+
+function Add-StudentSourceProjection($Records, $Source, [int] $ProjectedStart, [int] $ProjectedLength, [int] $OriginalStart, [int] $OriginalLength, [string] $Operation) {
+    if ($ProjectedStart -lt 0 -or $ProjectedLength -lt 0 -or $OriginalStart -lt 0 -or $OriginalLength -lt 0 -or $OriginalStart -gt $Source.OriginalText.Length - $OriginalLength) { throw 'Source projection is outside the original text.' }
+    if ($Operation -ceq 'WhitespaceNormalization') {
+        for ($character = $OriginalStart; $character -lt $OriginalStart + $OriginalLength; $character++) {
+            if (-not [char]::IsWhiteSpace($Source.OriginalText[$character])) { throw 'Whitespace normalization would discard a non-whitespace source character.' }
+        }
+    } elseif ($Operation -cne 'Literal' -or $ProjectedLength -ne $OriginalLength) { throw 'Literal source projection must preserve character count.' }
+    $Records.Add([pscustomobject]@{ PSTypeName = 'Kokoro.StudentSourceMutation'; Operation = $Operation
+        ProjectedStart = $ProjectedStart; ProjectedLength = $ProjectedLength; OriginalStart = $OriginalStart; OriginalLength = $OriginalLength })
+}
+
 function Get-StudentBooks([string] $Name = '') {
-    # Each pinned Project Gutenberg book without its header and footer, as one packed record: its
+    # Each observed Project Gutenberg snapshot with its original text and source-coordinate map: its
     # paragraphs joined by line feeds, its tokens (starts index that text), the first token of each
     # paragraph, per-paragraph heading and counter-example flags, and its sentence token ranges.
     $kernels = Import-StudentKernels
@@ -1523,40 +1619,67 @@ function Get-StudentBooks([string] $Name = '') {
     # Append the added source so existing corpus book ordinals retain their identities.
     foreach ($file in @($sources.Values | Sort-Object @{ Expression = { $_.Name -ceq $humanTextFile.Name } }, Name)) {
         if ($Name -and $file.BaseName -cne $Name) { $index++; continue }
-        $lines = [IO.File]::ReadAllLines($file.FullName)
+        $snapshot = Read-StudentSource $file; $lines = $snapshot.Lines; $lineStarts = $snapshot.Starts; $source = $snapshot.Source
         $first = -1; $last = $lines.Length
         for ($i = 0; $i -lt $lines.Length; $i++) {
             if ($first -lt 0 -and $lines[$i].StartsWith('*** START OF', [StringComparison]::Ordinal)) { $first = $i + 1 }
             elseif ($lines[$i].StartsWith('*** END OF', [StringComparison]::Ordinal)) { $last = $i; break }
         }
         if ($first -lt 0) { throw "No Project Gutenberg start marker in $($file.Name)." }
+        if ($last -eq $lines.Length) { throw "No Project Gutenberg end marker in $($file.Name)." }
+        $source.BodyStart = $lineStarts[$first]; $source.BodyEnd = $lineStarts[$last]
+        $notice = $source.OriginalText.Substring(0, $source.BodyStart) + $source.OriginalText.Substring($source.BodyEnd)
+        $source.NoticeSHA256 = [Convert]::ToHexString([Security.Cryptography.SHA256]::HashData([Text.Encoding]::UTF8.GetBytes($notice)))
         $text = [Text.StringBuilder]::new(); $tokens = [Collections.Generic.List[int]]::new()
         $paragraphs = [Collections.Generic.List[int]]::new(); $headings = [Collections.Generic.List[bool]]::new(); $counterExamples = [Collections.Generic.List[bool]]::new()
         $paragraph = [Collections.Generic.List[string]]::new(); $counterExample = $false
+        $parts = [Collections.Generic.List[object]]::new(); $projection = [Collections.Generic.List[object]]::new()
+        $originalEnd = $source.BodyStart; $collectionComplete = $true
         for ($i = $first; $i -le $last; $i++) {
             $line = if ($i -lt $last) { $lines[$i].Trim() } else { '' }
-            if ($line) { $paragraph.Add($line); continue }
+            if ($line) {
+                $leading = 0; while ($leading -lt $lines[$i].Length -and [char]::IsWhiteSpace($lines[$i][$leading])) { $leading++ }
+                $parts.Add([pscustomobject]@{ Text = $line; Start = $lineStarts[$i] + $leading })
+                $paragraph.Add($line); continue
+            }
             if ($paragraph.Count -eq 0) { continue }
-            if ($ParagraphLimit -gt 0 -and $paragraphs.Count -ge $ParagraphLimit) { break }
+            if ($ParagraphLimit -gt 0 -and $paragraphs.Count -ge $ParagraphLimit) { $collectionComplete = $false; break }
             $value = $paragraph -join ' '; $paragraph.Clear()
             $offset = if ($text.Length) { $text.Length + 1 } else { 0 }
             $packed = $kernels.Tokenize.Invoke($value, $offset)
             $hasWord = $false
             for ($k = 0; $k -lt $packed.Length -and -not $hasWord; $k += 4) { if ($packed[$k] -eq 1) { $hasWord = $true } }
-            if (-not $hasWord) { continue }
             $heading = $false
-            if ($value.Length -le 120) {
+            if ($hasWord -and $value.Length -le 120) {
                 $words = @(for ($k = 0; $k -lt $packed.Length; $k += 4) { if ($packed[$k] -eq 1) { $value.Substring($packed[$k + 1] - $offset, $packed[$k + 2]) } })
                 $heading = -not @($words | Where-Object { $_ -cne $_.ToUpperInvariant() }).Count
                 if ($heading) { $counterExample = Test-StudentCounterExampleHeading $words }
             }
+            $projectedAt = $text.Length; $partIndex = 0
+            foreach ($part in $parts) {
+                $separator = if ($partIndex -eq 0) { [int]($text.Length -gt 0) } else { 1 }
+                Add-StudentSourceProjection $projection $source $projectedAt $separator $originalEnd ($part.Start - $originalEnd) 'WhitespaceNormalization'
+                $projectedAt += $separator
+                Add-StudentSourceProjection $projection $source $projectedAt $part.Text.Length $part.Start $part.Text.Length 'Literal'
+                $projectedAt += $part.Text.Length; $originalEnd = $part.Start + $part.Text.Length; $partIndex++
+            }
+            $parts.Clear()
             if ($text.Length) { [void]$text.Append("`n") }
             [void]$text.Append($value)
+            if ($text.Length -ne $projectedAt) { throw 'Source projection differs from the collected paragraph text.' }
             $paragraphs.Add($tokens.Count -shr 2); $tokens.AddRange($packed); $headings.Add($heading); $counterExamples.Add($counterExample)
         }
+        if ($collectionComplete) { Add-StudentSourceProjection $projection $source $text.Length 0 $originalEnd ($source.BodyEnd - $originalEnd) 'WhitespaceNormalization' }
         $paragraphs.Add($tokens.Count -shr 2)
+        $packedProjection = [Collections.Generic.List[int]]::new()
+        foreach ($mutation in $projection) {
+            $packedProjection.Add($mutation.ProjectedStart); $packedProjection.Add($mutation.ProjectedLength)
+            $packedProjection.Add($mutation.OriginalStart); $packedProjection.Add($mutation.OriginalLength)
+        }
         $book = [pscustomobject]@{ PSTypeName = 'Kokoro.StudentBook'; Index = $index; Name = $file.BaseName; Text = $text.ToString(); Tokens = $tokens.ToArray()
-            Paragraphs = $paragraphs.ToArray(); Headings = $headings.ToArray(); CounterExample = $counterExamples.ToArray(); Sentences = $null; SentenceParagraphs = $null }
+            Paragraphs = $paragraphs.ToArray(); Headings = $headings.ToArray(); CounterExample = $counterExamples.ToArray(); Sentences = $null; SentenceParagraphs = $null
+            Source = $source; SourceProjection = $projection.ToArray(); OriginalSpans = $kernels.OriginalSpans.Invoke($tokens.ToArray(), $packedProjection.ToArray())
+            CollectionComplete = $collectionComplete; ProjectionProducerSHA256 = $script:StudentMachineSHA256 }
         $chars = $book.Text.ToCharArray()
         $sentences = [Collections.Generic.List[int]]::new(); $owners = [Collections.Generic.List[int]]::new()
         for ($p = 0; $p + 1 -lt $book.Paragraphs.Length; $p++) {
@@ -1567,6 +1690,72 @@ function Get-StudentBooks([string] $Name = '') {
         $book
         $index++
     }
+}
+
+function Invoke-StudentSources {
+    $books = @(Get-StudentBooks)
+    $coverage = @(foreach ($book in $books) {
+        $counts = [ordered]@{}
+        for ($token = 0; $token -lt ($book.Tokens.Length -shr 2); $token++) {
+            $kind = $script:StudentTokenKinds[$book.Tokens[4 * $token]]
+            if (-not $counts.Contains($kind)) { $counts[$kind] = 0 }
+            $counts[$kind]++
+        }
+        [pscustomobject]@{ PSTypeName = 'Kokoro.StudentSourceCoverage'; Name = $book.Name; Identity = $book.Source.Identity
+            URI = $book.Source.URI; RawSHA256 = $book.Source.RawSHA256; TextSHA256 = $book.Source.TextSHA256
+            Encoding = $book.Source.Encoding; LicenseReview = $book.Source.LicenseReview; CollectionComplete = $book.CollectionComplete
+            Tokens = $book.Tokens.Length -shr 2; MappedTokens = $book.OriginalSpans.Length -shr 1
+            Types = @(foreach ($kind in $counts.Keys) { [pscustomobject]@{ Type = $kind; Occurrences = $counts[$kind] } }) }
+    })
+    $collection = [pscustomobject]@{ PSTypeName = 'Kokoro.StudentSourceCollection'; Books = $books; Coverage = $coverage
+        SourceCount = $books.Count; Tokens = ($coverage | Measure-Object Tokens -Sum).Sum
+        ProducerSHA256 = $script:StudentMachineSHA256 }
+    if ($OutputPath) {
+        $directory = Get-StudentOutputPath 'Sources'; $receiptPath = Join-Path $directory 'sources.clixml'
+        if (Test-Path -LiteralPath $receiptPath) { throw 'Source collection receipt already exists; choose a new OutputPath.' }
+        Export-Clixml -LiteralPath $receiptPath -InputObject (ConvertTo-StudentStored $collection) -Depth 8
+        Export-Clixml -LiteralPath (Join-Path $directory 'coverage.clixml') -InputObject ([pscustomobject]@{ SourceCount = $collection.SourceCount; Tokens = $collection.Tokens; Coverage = $coverage; ProducerSHA256 = $script:StudentMachineSHA256 }) -Depth 6
+    }
+    $collection
+}
+
+function Test-StudentSources {
+    $kernels = Import-StudentKernels
+    $projection = [int[]]@(0, 3, 2, 3, 3, 1, 5, 4, 4, 3, 9, 3)
+    $tokens = $kernels.Tokenize.Invoke('12, 34!', 0)
+    $spans = $kernels.OriginalSpans.Invoke($tokens, $projection)
+    $expected = [int[]]@(2, 2, 4, 1, 9, 2, 11, 1)
+    if ($spans.Length -ne $expected.Length) { throw 'Source mapping lost a typed occurrence.' }
+    for ($index = 0; $index -lt $expected.Length; $index++) { if ($spans[$index] -ne $expected[$index]) { throw 'Original source-coordinate mapping failed.' } }
+    $markup = '_12_ [34].'; $marked = $kernels.Tokenize.Invoke($markup, 0); $covered = [bool[]]::new($markup.Length)
+    $markupCount = 0
+    for ($token = 0; $token -lt ($marked.Length -shr 2); $token++) {
+        if ($marked[4 * $token] -eq 8) { $markupCount++ }
+        for ($index = $marked[4 * $token + 1]; $index -lt $marked[4 * $token + 1] + $marked[4 * $token + 2]; $index++) { $covered[$index] = $true }
+    }
+    if ($markupCount -ne 4) { throw 'Source markup markers were not retained as typed occurrences.' }
+    if ($marked[7] -ne 1 -or $marked[19] -ne 2) { throw 'Retained markup did not preserve emphasis and editorial flags.' }
+    $withoutMarkup = [Collections.Generic.List[int]]::new()
+    for ($token = 0; $token -lt ($marked.Length -shr 2); $token++) {
+        if ($marked[4 * $token] -eq 8) { continue }
+        for ($field = 0; $field -lt 4; $field++) { $withoutMarkup.Add($marked[4 * $token + $field]) }
+    }
+    $fullSpans = [int[]]::new($marked.Length -shr 1); $filteredSpans = [int[]]::new($withoutMarkup.Count -shr 1)
+    $fullProjection = $kernels.Project.Invoke($marked, $markup.ToCharArray(), 0, ($marked.Length -shr 2) - 1, $fullSpans)
+    $filteredProjection = $kernels.Project.Invoke($withoutMarkup.ToArray(), $markup.ToCharArray(), 0, ($withoutMarkup.Count -shr 2) - 1, $filteredSpans)
+    if ($fullProjection -cne $filteredProjection) { throw 'Retaining source markup changed its spoken-text projection.' }
+    for ($index = 0; $index -lt $markup.Length; $index++) {
+        if (-not [char]::IsWhiteSpace($markup[$index]) -and -not $covered[$index]) { throw 'Tokenizer discarded a non-whitespace source character.' }
+    }
+    $records = [Collections.Generic.List[object]]::new(); $source = [pscustomobject]@{ OriginalText = ',' }; $rejected = $false
+    try { Add-StudentSourceProjection $records $source 0 0 0 1 'WhitespaceNormalization' } catch { $rejected = $true }
+    if (-not $rejected -or $records.Count) { throw 'Source normalization admitted punctuation deletion.' }
+    $rejected = $false
+    try { $null = $kernels.OriginalSpans.Invoke([int[]]@(1, 9, 2, 0), $projection) } catch { $rejected = $true }
+    if (-not $rejected) { throw 'Source mapping admitted an uncovered token span.' }
+    [pscustomobject]@{ PSTypeName = 'Kokoro.StudentSourceVerification'; Passed = $true
+        Checks = @('original-coordinate-mapping', 'typed-markup-retention', 'markup-flags-and-spoken-projection', 'non-whitespace-coverage', 'punctuation-deletion-rejection', 'uncovered-span-rejection')
+        KernelsSHA256 = $kernels.SHA256; ProducerSHA256 = $script:StudentMachineSHA256 }
 }
 
 function New-StudentPronunciationTable([int] $Count) {
@@ -1894,8 +2083,14 @@ function Get-StudentTokens([object] $Book, [int] $First, [int] $Last) {
     $kernels = $script:StudentContext.Kernels; $correspondences = $script:StudentContext.Correspondences
     for ($k = $First; $k -le $Last; $k++) {
         $flags = $Book.Tokens[4 * $k + 3]; $zira = $Book.Zira.Phones[$k]
+        $mapped = $null -ne $Book.PSObject.Properties['Source'] -and $null -ne $Book.PSObject.Properties['OriginalSpans']
         [pscustomobject]@{ PSTypeName = 'Kokoro.StudentToken'; Book = $Book.Name; Index = $k; Kind = $script:StudentTokenKinds[$Book.Tokens[4 * $k]]
             Text = $Book.Text.Substring($Book.Tokens[4 * $k + 1], $Book.Tokens[4 * $k + 2]); Start = $Book.Tokens[4 * $k + 1]; Length = $Book.Tokens[4 * $k + 2]
+            SourceIdentity = if ($mapped) { $Book.Source.Identity } else { $null }
+            SourceSHA256 = if ($mapped) { $Book.Source.RawSHA256 } else { $null }
+            OriginalStart = if ($mapped) { $Book.OriginalSpans[2 * $k] } else { $null }
+            OriginalLength = if ($mapped) { $Book.OriginalSpans[2 * $k + 1] } else { $null }
+            SourceMapping = if ($mapped) { 'OriginalMapped' } else { 'LegacyUnmapped' }
             Emphasis = ($flags -band 1) -ne 0; Editorial = ($flags -band 2) -ne 0
             Phonemizer = $Book.Phonemizer.Phones[$k]; Last = $Book.Phonemizer.Last[$k]; Zira = $zira; ZiraLast = $Book.Zira.Last[$k]
             ZiraComparable = if ($null -ne $zira) { $kernels.Substitute.Invoke($zira, $correspondences.From, $correspondences.To) } else { $null }; ZiraSeconds = $Book.Zira.Durations[$k] / 1e7
@@ -5195,6 +5390,8 @@ $script:StudentSteps = [ordered]@{
     Console = { Show-StudentConsole }
     Render = { Invoke-StudentRender }
     Corpus = { Invoke-StudentCorpus }
+    Sources = { Invoke-StudentSources }
+    VerifySources = { Test-StudentSources }
     Pronunciation = { Invoke-StudentPronunciation }
     Normalize = { Invoke-StudentNormalization }
     Compose = { Invoke-StudentComposition }
