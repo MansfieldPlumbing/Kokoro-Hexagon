@@ -1542,10 +1542,89 @@ class CorePhonics {
         }
         return $b.ToString()
     }
+    # Reading statistics learned at build time and embedded by the driver build; empty in the build stage that learns
+    # them. Run-time reading loads these instead of training; withholding a word needs the full teardowns (Train).
+    static [bool]$Loaded
+    static [string] EmbeddedStatistics() {return '@PHONICS_STATISTICS@'}
+    static [string[]] ContextKeys() {
+        [string[]]$keys=[string[]]::new([CorePhonics]::Contexts.Count);[CorePhonics]::Contexts.Keys.CopyTo($keys,0);return $keys
+    }
+    static [string] Reserved() {return '~;=,:'''}
+    static [void] Field([Text.StringBuilder]$b,[string]$value) {
+        [char]$c=[Convert]::ToChar(0)
+        foreach($c in $value.ToCharArray()){if([CorePhonics]::Reserved().IndexOf($c) -ge 0){throw [InvalidOperationException]::new('Phonics statistic contains a reserved serialization character.')}}
+        $b.Append($value)
+    }
+    static [void] ExportTable([Text.StringBuilder]$b,[System.Collections.Generic.Dictionary[string,int]]$table) {
+        [bool]$first=$true
+        foreach($key in [CorePhonics]::Keys($table)){
+            [int]$seen=$table.get_Item($key)
+            if($seen -le 0){continue}
+            if(-not $first){$b.Append(';')}
+            [CorePhonics]::Field($b,$key);$b.Append('=');$b.Append([Convert]::ToString($seen));$first=$false
+        }
+    }
+    # Units, occurrences, stress and contexts as key=count lists; contexts carry sound:count pairs.
+    static [string] ExportStatistics() {
+        if(-not [CorePhonics]::Trained -and -not [CorePhonics]::Loaded){[CorePhonics]::Train()}
+        [Text.StringBuilder]$b=[Text.StringBuilder]::new()
+        [CorePhonics]::ExportTable($b,[CorePhonics]::Units);$b.Append('~')
+        [CorePhonics]::ExportTable($b,[CorePhonics]::Occurrences);$b.Append('~')
+        [CorePhonics]::ExportTable($b,[CorePhonics]::Stress);$b.Append('~')
+        [bool]$first=$true
+        foreach($context in [CorePhonics]::ContextKeys()){
+            [System.Collections.Generic.Dictionary[string,int]]$table=[CorePhonics]::Contexts.get_Item($context)
+            [Text.StringBuilder]$sounds=[Text.StringBuilder]::new();[bool]$any=$false
+            foreach($sound in [CorePhonics]::Keys($table)){
+                [int]$seen=$table.get_Item($sound)
+                if($seen -le 0){continue}
+                if($any){$sounds.Append(',')}
+                [CorePhonics]::Field($sounds,$sound);$sounds.Append(':');$sounds.Append([Convert]::ToString($seen));$any=$true
+            }
+            if(-not $any){continue}
+            if(-not $first){$b.Append(';')}
+            [CorePhonics]::Field($b,$context);$b.Append('=');$b.Append($sounds.ToString());$first=$false
+        }
+        return $b.ToString()
+    }
+    static [System.Collections.Generic.Dictionary[string,int]] ImportTable([string]$text) {
+        [System.Collections.Generic.Dictionary[string,int]]$table=[System.Collections.Generic.Dictionary[string,int]]::new([StringComparer]::Ordinal)
+        if($text.Length -eq 0){return $table}
+        foreach($entry in $text.Split([Convert]::ToChar(59),[StringSplitOptions]::None)){
+            [int]$at=$entry.LastIndexOf([Convert]::ToChar(61))
+            $table.Add($entry.Substring(0,$at),[int]::Parse($entry.Substring($at+1)))
+        }
+        return $table
+    }
+    static [void] LoadStatistics([string]$data) {
+        [string[]]$parts=$data.Split([Convert]::ToChar(126),[StringSplitOptions]::None)
+        if($parts.Length -ne 4){throw [InvalidOperationException]::new('Embedded phonics statistics are malformed.')}
+        [CorePhonics]::Units=[CorePhonics]::ImportTable($parts[0])
+        [CorePhonics]::Occurrences=[CorePhonics]::ImportTable($parts[1])
+        [CorePhonics]::Stress=[CorePhonics]::ImportTable($parts[2])
+        [CorePhonics]::Contexts=[System.Collections.Generic.Dictionary[string,System.Collections.Generic.Dictionary[string,int]]]::new([StringComparer]::Ordinal)
+        if($parts[3].Length -gt 0){
+            foreach($entry in $parts[3].Split([Convert]::ToChar(59),[StringSplitOptions]::None)){
+                [int]$at=$entry.IndexOf([Convert]::ToChar(61))
+                [System.Collections.Generic.Dictionary[string,int]]$table=[System.Collections.Generic.Dictionary[string,int]]::new([StringComparer]::Ordinal)
+                foreach($pair in $entry.Substring($at+1).Split([Convert]::ToChar(44),[StringSplitOptions]::None)){
+                    [int]$split=$pair.LastIndexOf([Convert]::ToChar(58))
+                    $table.Add($pair.Substring(0,$split),[int]::Parse($pair.Substring($split+1)))
+                }
+                [CorePhonics]::Contexts.Add($entry.Substring(0,$at),$table)
+            }
+        }
+        [CorePhonics]::Loaded=$true
+    }
+    static [void] Ready() {
+        if([CorePhonics]::Trained -or [CorePhonics]::Loaded){return}
+        [string]$data=[CorePhonics]::EmbeddedStatistics()
+        if($data.Length -gt 0){[CorePhonics]::LoadStatistics($data)}else{[CorePhonics]::Train()}
+    }
     # Readings of a word built from pieces, best first. A withheld lexical id's own contribution is withdrawn for the
     # duration of the call.
     static [string[]] SoundOut([string]$word,[int]$withheldLexicalId) {
-        [CorePhonics]::Train()
+        if($withheldLexicalId -ge 0){[CorePhonics]::Train()}else{[CorePhonics]::Ready()}
         [string]$lower=$word.ToLowerInvariant()
         if(-not [CorePhonics]::IsAlphabetic($lower)){return [string[]]::new(0)}
         [int]$withheld=-1
@@ -2755,6 +2834,29 @@ class CorePolish {
             # An ambiguous composition never falls through to a first-reading selection.
             if($t.Morphology.Length -eq 0){$source='Morphology';$normalizationRole=[CorePolish]::Role($engine,$tokens,$i,0);$phone=[CorePolish]::Inflect($lower,$normalizationRole)}
         }
+        # Best effort: a word is never left silent. An ambiguous composition is spoken with the reading of the role
+        # its context gives (else its first reading with lexical stress) and keeps every reading as an alternative;
+        # then the regular inflections, then phonics, then the letters spelled. Each records its source.
+        if([CorePolish]::IsNone($phone) -and $source -ceq 'Composition' -and $t.Morphology.Length -gt 0){
+            [int]$contextRole=[CorePolish]::Role($engine,$tokens,$i,0)
+            [Collections.Generic.List[string]]$readings=[Collections.Generic.List[string]]::new()
+            foreach($candidate in $t.Morphology){if(-not $readings.Contains($candidate.Phones)){$readings.Add($candidate.Phones)}}
+            foreach($candidate in $t.Morphology){if([CorePolish]::IsNone($phone) -and $candidate.Role -eq $contextRole -and $candidate.StressEvidence -cne 'Unknown'){$phone=$candidate.Phones}}
+            foreach($candidate in $t.Morphology){if([CorePolish]::IsNone($phone) -and $candidate.StressEvidence -cne 'Unknown'){$phone=$candidate.Phones}}
+            if([CorePolish]::IsNone($phone)){$phone=$t.Morphology[0].Phones}
+            $source='CompositionChoice';$t.Alternatives=$readings.ToArray()
+        }
+        if([CorePolish]::IsNone($phone) -and $source -ceq 'Composition'){$phone=[CorePolish]::Inflect($lower,[CorePolish]::Role($engine,$tokens,$i,0));$source='Morphology'}
+        if([CorePolish]::IsNone($phone) -and $source -cne 'Number'){
+            [string[]]$sounded=[CorePhonics]::SoundOut($lower,-1)
+            if($sounded.Length -gt 0){$phone=$sounded[0];$source='Phonics';$t.Alternatives=$sounded}
+        }
+        if([CorePolish]::IsNone($phone)){
+            [Text.StringBuilder]$spelled=[Text.StringBuilder]::new()
+            [char]$letter=[Convert]::ToChar(0)
+            foreach($letter in $text.ToUpperInvariant().ToCharArray()){if($letter -ge [Convert]::ToChar(65) -and $letter -le [Convert]::ToChar(90)){$spelled.Append($letter)}}
+            if($spelled.Length -gt 0){$phone=[CorePolish]::Spell($spelled.ToString());$source='Spelled'}
+        }
         if(-not [CorePolish]::IsNone($phone)){
             $t.Resolve($phone);$t.PronunciationSource=$source
             if($source -ceq 'Number' -or $source -ceq 'Morphology' -or $source -ceq 'Composition'){
@@ -2933,8 +3035,21 @@ class CoreDriver {
 
 function Import-EnglishCoreDriver {
     [CmdletBinding()]
-    param([string]$ReferencePath=$AssemblyPath,[switch]$LibraryOnly)
-    $cacheKey=$ReferencePath;if($LibraryOnly){$cacheKey+='|LibraryOnly'}
+    # PhonicsStatistics: the learned reading statistics to embed. Omitted, the build first compiles a learning stage
+    # with none embedded, learns them there (cached by that stage's source hash) and embeds them in the driver.
+    param([string]$ReferencePath=$AssemblyPath,[switch]$LibraryOnly,[AllowEmptyString()][string]$PhonicsStatistics)
+    if(-not $PSBoundParameters.ContainsKey('PhonicsStatistics')){
+        $stage=Import-EnglishCoreDriver -ReferencePath $ReferencePath -LibraryOnly -PhonicsStatistics ''
+        $statisticsDirectory=Join-Path $script:EnglishBuildRoot 'english\phonics'
+        $statisticsPath=Join-Path $statisticsDirectory ($stage.SourceSha256+'.txt')
+        if(-not(Test-Path -LiteralPath $statisticsPath)){
+            [void][IO.Directory]::CreateDirectory($statisticsDirectory)
+            $learned=[string]$stage.Assembly.GetType('CorePhonics',$true).GetMethod('ExportStatistics').Invoke($null,@())
+            [IO.File]::WriteAllText($statisticsPath,$learned,[Text.UTF8Encoding]::new($false))
+        }
+        return Import-EnglishCoreDriver -ReferencePath $ReferencePath -LibraryOnly:$LibraryOnly -PhonicsStatistics ([IO.File]::ReadAllText($statisticsPath))
+    }
+    $cacheKey=$ReferencePath;if($LibraryOnly){$cacheKey+='|LibraryOnly'};if($PhonicsStatistics.Length -eq 0){$cacheKey+='|LearningStage'}
     if($script:EnglishCoreCache.ContainsKey($cacheKey)){return $script:EnglishCoreCache[$cacheKey]}
     $reference=Import-EnglishReference $ReferencePath;$lex=$reference.Assembly.GetType('Lexicon',$true)
     $literal=@((Get-Command Build-EnglishReference).ScriptBlock.Ast.FindAll({param($node) $node -is [Management.Automation.Language.StringConstantExpressionAst] -and $node.Value.StartsWith('class Lexicon {')},$true))
@@ -2961,7 +3076,7 @@ function Import-EnglishCoreDriver {
         $morphologyRows.Add([string]::Join('|',$fields))
     }
     $morphologyData=[string]::Join(';',$morphologyRows)
-    $source+="`n"+$knowledge+"`n"+(Get-EnglishCoreTemplate).Replace('[Collections.Generic.','[System.Collections.Generic.').Replace('[void]','').Replace('@REFERENCE@',$reference.Assembly.GetName().Name).Replace('@MORPHOLOGY_RULES@',$morphologyData)
+    $source+="`n"+$knowledge+"`n"+(Get-EnglishCoreTemplate).Replace('[Collections.Generic.','[System.Collections.Generic.').Replace('[void]','').Replace('@REFERENCE@',$reference.Assembly.GetName().Name).Replace('@MORPHOLOGY_RULES@',$morphologyData).Replace('@PHONICS_STATISTICS@',$PhonicsStatistics.Replace("'","''"))
     $identity=[Convert]::ToHexString([Security.Cryptography.SHA256]::HashData([Text.Encoding]::UTF8.GetBytes($source)))
     $directoryIdentity=$identity;if($LibraryOnly){$directoryIdentity+='-library-dll'}
     $directory=Join-Path $script:EnglishBuildRoot ('english\driver\'+$directoryIdentity)
@@ -2989,6 +3104,7 @@ function Import-EnglishCoreDriver {
     if($receipt.SourceSha256 -cne $identity -or (Get-FileHash -LiteralPath $output).Hash -cne $receipt.AssemblySha256){throw 'Standalone driver integrity failure.'}
     $assembly=[Reflection.Assembly]::LoadFrom($output);$dependencies=@($assembly.GetReferencedAssemblies())
     if($dependencies.Count -ne 1 -or $dependencies[0].Name -cne 'System.Private.CoreLib'){throw 'Unexpected standalone dependency.'}
+    if($PhonicsStatistics.Length -gt 0 -and [string]$assembly.GetType('CorePhonics',$true).GetMethod('ExportStatistics').Invoke($null,@()) -cne $PhonicsStatistics){throw 'Embedded phonics statistics do not round-trip.'}
     $type=$assembly.GetType('CoreDriver',$true)
     $driver=[pscustomobject]@{Assembly=$assembly;Run=[Func[string,object]]$type.GetMethod('Run').CreateDelegate([Func[string,object]]);RunLexical=[Func[string,object]]$type.GetMethod('RunLexical').CreateDelegate([Func[string,object]]);Batch=[Func[string,int,int]]$type.GetMethod('Batch').CreateDelegate([Func[string,int,int]]);NormalizeZira=[Func[string,string]]$type.GetMethod('NormalizeZira').CreateDelegate([Func[string,string]]);ZiraTokenIds=[Func[string,int[]]]$type.GetMethod('ZiraTokenIds').CreateDelegate([Func[string,int[]]]);ZiraBatch=[Func[string,int,int]]$type.GetMethod('ZiraBatch').CreateDelegate([Func[string,int,int]]);Output=$output;Receipt=$receiptPath;SourceSha256=$identity;Corrections=$table.Count}
     $script:EnglishCoreCache[$cacheKey]=$driver;$driver
