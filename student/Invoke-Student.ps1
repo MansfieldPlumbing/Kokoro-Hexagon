@@ -40,6 +40,8 @@ Steps:
   Compose   Apply authored grammar records to typed occurrences. Retains ambiguous derivations and pending
             expectations in a live per-speaker state; -Analysis supplies typed input without lexical lookup.
   VerifyComposition  Check chart deductions, interruption, resumption and source-identity invariants.
+  Morphology  Inspect every root-and-affix analysis for -Text, with readings and rule provenance.
+  VerifyMorphology  Check the requested composition proofs and preservation of alternatives.
 .PARAMETER Corpus
 Corpus directory for Pronunciation; defaults to the latest build/corpus-* with corpus.clixml.
 .PARAMETER ParagraphLimit
@@ -76,7 +78,7 @@ Run from a PowerShell prompt: pwsh -File passes every argument as a string, so a
 #requires -Version 7.7
 [CmdletBinding()]
 param(
-    [ValidateSet('Console', 'Render', 'Corpus', 'Pronunciation', 'Normalize', 'Compose', 'VerifyComposition', 'Syllabus', 'Recordings', 'Listen', 'Stems', 'Alignment', 'Percepts', 'Describe', 'Learn', 'Audit', 'Discriminate', 'Reconsider', 'Inventory', 'Speak', 'Ablate', 'PitchGate', 'Trace', 'Normalization', 'Score', 'Residuals', 'Retune')][string] $Step = 'Console',
+    [ValidateSet('Console', 'Render', 'Corpus', 'Pronunciation', 'Normalize', 'Compose', 'VerifyComposition', 'Morphology', 'VerifyMorphology', 'Syllabus', 'Recordings', 'Listen', 'Stems', 'Alignment', 'Percepts', 'Describe', 'Learn', 'Audit', 'Discriminate', 'Reconsider', 'Inventory', 'Speak', 'Ablate', 'PitchGate', 'Trace', 'Normalization', 'Score', 'Residuals', 'Retune')][string] $Step = 'Console',
     [ValidateRange(2, 64)][int] $Threads = [Math]::Max(2, [Environment]::ProcessorCount),
     [string] $Text = '',
     [string] $Voice = 'af_heart',
@@ -122,14 +124,15 @@ $script:StudentContext = [ordered]@{
     Correspondences = $null  # learned Zira-to-Kokoro symbol mappings
     NormalizationType = $null # admitted managed normalization program type
     InterpretationType = $null # persistent compiled grammar engine
+    WordCompositions = $null # compiled authored morphology, retaining every parse and reading
 }
 
 # Pinned inputs. The phonemizer is the compiled English driver built by
 # phonemizer/Invoke-EnglishPhonemizer.ps1; the syllabus is tools/Invoke-KokoroPrecomputedDecoder.ps1.
 $script:StudentInputs = [ordered]@{
     Phonemizer = [ordered]@{
-        Directory = 'build/phonemizer/english/driver/340D763896245937C41417BF7D3D197B6FE407AC750130B9299062E4D3152348-library-dll'
-        SHA256 = '541F546A921950CB9D913634328EA3C888D6C826E39D89EFFE16FE31766C0D3D'
+        Directory = 'build/phonemizer/english/driver/2CBCAE16E89705D7E912C8209FE3DAD5705B9661342FAC05E28B308A7A7D1A51-library-dll'
+        SHA256 = '666E90BE455D31AC25010FDD2C033238FB708653CBAA87588DBCE5507BAD50CE'
     }
     Syllabus = 'tools/Invoke-KokoroPrecomputedDecoder.ps1'
     Manifest = 'lib/manifest.json'
@@ -540,6 +543,8 @@ function Import-StudentPhonemizer($Candidate = $null) {
     if ($null -eq $Candidate) {
         $script:StudentContext.NormalizationType = $assembly.GetType('CoreNormalizationDecision', $true)
         $script:StudentContext.InterpretationType = $assembly.GetType('CoreEngine', $true)
+        $compositionMethod = $assembly.GetType('CoreDriver', $true).GetMethod('WordCompositions')
+        $script:StudentContext.WordCompositions = if ($null -ne $compositionMethod) { $compositionMethod.CreateDelegate([Func[string,object]]) } else { $null }
     }
     $assembly.GetType('CoreDriver', $true).GetMethod('Run').CreateDelegate([Func[string,object]])
 }
@@ -1274,9 +1279,97 @@ function Add-StudentInterpretationText([object] $Interpretation, [string] $Fragm
     Get-StudentNormalizationResult $Interpretation
 }
 
+function ConvertTo-StudentMorphologyRecord($Parse) {
+    # Flatten the derivation so stored provenance has no recursive serialization-depth horizon.
+    $steps = [Collections.Generic.List[object]]::new(); $cursor = $Parse; $rootStart = 0
+    while ($null -ne $cursor.Rule) {
+        $rule = $cursor.Rule
+        $affixStart = if ($rule.Position -ceq 'Prefix') { $rootStart } else { $rootStart + $cursor.Word.Length - $rule.Spelling.Length }
+        $steps.Add([pscustomobject]@{ PSTypeName = 'Kokoro.StudentMorphemeApplication'; Word = $cursor.Word
+            Rule = $rule.Name; Spelling = $rule.Spelling; Position = $rule.Position
+            Start = $affixStart; Length = $rule.Spelling.Length
+            InputRole = $rule.InputRole; OutputRole = $rule.OutputRole; Phones = $rule.Phones
+            Realization = $rule.Realization; Stress = $rule.Stress })
+        if ($rule.Position -ceq 'Prefix') { $rootStart += $rule.Spelling.Length }
+        $cursor = $cursor.Inner
+    }
+    [pscustomobject]@{ PSTypeName = 'Kokoro.StudentMorphologyAnalysis'; Word = $Parse.Word
+        Root = $Parse.Root; RootLexicalId = $Parse.RootLexicalId; RootRole = $Parse.RootRole; Role = $Parse.Role
+        RootStart = $rootStart; RootLength = $Parse.Root.Length; Notation = 'Kokoro'
+        RootSourcePhones = $Parse.RootSourcePhones; RootPhones = $cursor.Phones; Phones = $Parse.Phones; StressEvidence = $Parse.StressEvidence
+        Applications = $steps.ToArray(); ApplicationOrder = 'SurfaceToRoot'; DriverSHA256 = $script:StudentInputs.Phonemizer.SHA256
+        Provenance = 'AuthoredComposition'; IndependentAgreement = 'NotMeasured' }
+}
+
+function Invoke-StudentMorphology {
+    if (-not $Text -or $Text.Trim() -cne $Text) { throw 'Morphology requires -Text containing one word without surrounding whitespace.' }
+    foreach ($symbol in $Text.ToCharArray()) { if ([char]::IsWhiteSpace($symbol)) { throw 'Morphology consumes one word type; occurrence context is retained by its caller.' } }
+    $null = Import-StudentPhonemizer
+    if ($null -eq $script:StudentContext.WordCompositions) { throw 'The pinned phonemizer has no compiled morphology inventory; build and admit the owning phonemizer first.' }
+    $analyses = @(foreach ($parse in @($script:StudentContext.WordCompositions.Invoke($Text))) { ConvertTo-StudentMorphologyRecord $parse })
+    $readings = [Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal); $unknownStress = $false
+    foreach ($analysis in $analyses) { [void]$readings.Add($analysis.Phones); if ($analysis.StressEvidence -ceq 'Unknown') { $unknownStress = $true } }
+    [pscustomobject]@{ PSTypeName = 'Kokoro.StudentWordMorphology'; Word = $Text; Analyses = $analyses
+        Readings = [string[]]@($readings | Sort-Object)
+        Status = if (-not $analyses.Count) { 'Unresolved' } elseif ($unknownStress) { 'UnverifiedStress' } elseif ($readings.Count -gt 1) { 'AmbiguousReadings' } else { 'AuthoredUnambiguous' }
+        DriverSHA256 = $script:StudentInputs.Phonemizer.SHA256; IndependentAgreement = 'NotMeasured' }
+}
+
+function Test-StudentMorphology {
+    $phonemize = Import-StudentPhonemizer
+    if ($null -eq $script:StudentContext.WordCompositions) { throw 'Morphology verification needs the admitted compiled morphology driver.' }
+    # Explicitly requested composition proofs. These are development cases, not held-out probes.
+    $proofs = @(
+        [pscustomobject]@{ Word = 'reuses'; Root = 'use'; Rules = @('RepetitionPrefix', 'ThirdPersonPresent'); Phones = 'ɹijˈuzɪz' }
+        [pscustomobject]@{ Word = 'slower'; Root = 'slow'; Rules = @('AdjectiveComparative'); Phones = 'slˈOəɹ' }
+        [pscustomobject]@{ Word = 'obviously'; Root = 'obvious'; Rules = @('AdjectiveAdverb'); Phones = 'ˈɑbviəsli' }
+        [pscustomobject]@{ Word = 'caller'; Root = 'call'; Rules = @('VerbAgent'); Phones = 'kˈɔləɹ' }
+    )
+    $records = @(foreach ($proof in $proofs) {
+        $result = $phonemize.Invoke($proof.Word)
+        if (-not $result.Complete -or $result.KokoroPhones -cne $proof.Phones -or $result.Tokens[0].PronunciationSource -cne 'Composition') { throw "Composition proof failed for $($proof.Word)." }
+        $analyses = @(foreach ($parse in @($script:StudentContext.WordCompositions.Invoke($proof.Word))) { ConvertTo-StudentMorphologyRecord $parse })
+        $matched = @(foreach ($analysis in $analyses) {
+            if ($analysis.Root -ceq $proof.Root -and @($proof.Rules | Where-Object { $_ -cnotin $analysis.Applications.Rule }).Count -eq 0) { $analysis }
+        })
+        if (-not $matched.Count -or @($analyses | Where-Object { $_.Root -ceq $proof.Word }).Count) { throw "Composition proof used stored whole-word output for $($proof.Word)." }
+        foreach ($analysis in $analyses) {
+            if ($proof.Word.Substring($analysis.RootStart, $analysis.RootLength) -cne $analysis.Root) { throw 'Morphology root does not map to its word span.' }
+            foreach ($application in $analysis.Applications) {
+                if ($proof.Word.Substring($application.Start, $application.Length) -cne $application.Spelling) { throw 'Morphology boundary does not map to its affix span.' }
+            }
+        }
+        if ($result.Tokens[0].Normalization.Realize() -cne $proof.Phones) { throw 'Compiled composition normalization does not replay its pronunciation.' }
+        [pscustomobject]@{ PSTypeName = 'Kokoro.StudentMorphologyProof'; Word = $proof.Word; Root = $proof.Root
+            Phones = $proof.Phones; Analyses = $analyses; Replayed = $true }
+    })
+    $slower = @($records | Where-Object Word -CEQ 'slower')[0]
+    if ($slower.Analyses.Role -cnotcontains 0 -or $slower.Analyses.Role -cnotcontains 2) { throw 'Agent and comparative analyses were silently collapsed.' }
+    $slowParses = @($script:StudentContext.WordCompositions.Invoke($proofs[1].Word))
+    $callParses = @($script:StudentContext.WordCompositions.Invoke($proofs[3].Word))
+    $parseType = $slowParses[0].GetType(); $morphologyType = $parseType.Assembly.GetType('CoreMorphology', $true)
+    $polishType = $parseType.Assembly.GetType('CorePolish', $true)
+    $mixed = [Array]::CreateInstance($parseType, 2); $mixed.SetValue($slowParses[0], 0); $mixed.SetValue($callParses[0], 1)
+    if (-not $polishType::IsNone($morphologyType::UniquePhones($mixed))) { throw 'Conflicting composition readings were silently selected.' }
+    $uncertain = $parseType::new(); $uncertain.Phones = $slowParses[0].Phones; $uncertain.StressEvidence = 'Unknown'
+    $mixed.SetValue($uncertain, 1)
+    if (-not $polishType::IsNone($morphologyType::UniquePhones($mixed))) { throw 'Unknown stress was silently established.' }
+    $verification = [pscustomobject]@{ PSTypeName = 'Kokoro.StudentMorphologyVerification'; Passed = $true; Proofs = $records
+        DriverSHA256 = $script:StudentInputs.Phonemizer.SHA256
+        StudentSHA256 = $script:StudentMachineSHA256; PowerShell = $PSVersionTable.PSVersion.ToString()
+        Runtime = [Runtime.InteropServices.RuntimeInformation]::FrameworkDescription
+        Boundary = 'Requested authored composition proofs and replay; independent pronunciation votes and held-out generalization are not measured.' }
+    if ($OutputPath) {
+        $directory = Get-StudentOutputPath 'Morphology'; $receiptPath = Join-Path $directory 'verification.clixml'
+        if (Test-Path -LiteralPath $receiptPath) { throw 'Morphology verification receipt already exists; choose a new OutputPath.' }
+        Export-Clixml -LiteralPath $receiptPath -InputObject $verification -Depth 10
+    }
+    $verification
+}
+
 function New-StudentNormalizationDecision([object] $Program, [object] $Occurrence, [object] $Context) {
     $value = $null; $kind = 'Unclassified'
-    if ($Program.Operation -ceq 'Morphology') { $value = $Program.Operand; $kind = 'WordForm' }
+    if ($Program.Operation -cin @('Morphology', 'Composition')) { $value = $Program.Operand; $kind = 'WordForm' }
     elseif ($Program.Operation -ceq 'Number') {
         $number = [decimal]0
         if ([decimal]::TryParse($Program.Operand, [Globalization.NumberStyles]::Number, [Globalization.CultureInfo]::InvariantCulture, [ref]$number)) {
@@ -1287,7 +1380,8 @@ function New-StudentNormalizationDecision([object] $Program, [object] $Occurrenc
         Operand = $Program.Operand; PreviousWord = $Program.PreviousWord; Role = $Program.Role
         Stress = $Program.Stress; Flap = $Program.Flap; ValueKind = $kind; Value = $value
         Occurrence = $Occurrence; Context = $Context; Provenance = 'AuthoredReuse'
-        RuntimeType = $script:StudentContext.NormalizationType }
+        RuntimeType = $script:StudentContext.NormalizationType
+        Morphology = if ($Program.Operation -ceq 'Composition') { @(foreach ($parse in $Program.Morphology) { ConvertTo-StudentMorphologyRecord $parse }) } else { @() } }
 }
 
 function Invoke-StudentNormalization {
@@ -5105,6 +5199,8 @@ $script:StudentSteps = [ordered]@{
     Normalize = { Invoke-StudentNormalization }
     Compose = { Invoke-StudentComposition }
     VerifyComposition = { Test-StudentComposition }
+    Morphology = { Invoke-StudentMorphology }
+    VerifyMorphology = { Test-StudentMorphology }
     Syllabus = { Invoke-StudentSyllabus }
     Recordings = { Invoke-StudentRecordings }
     Listen = { Invoke-StudentListen }

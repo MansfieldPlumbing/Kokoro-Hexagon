@@ -37,6 +37,21 @@ $ErrorActionPreference='Stop'
 $script:EnglishReferenceCache=@{}
 $script:EnglishCorrectionCache=@{}
 $script:EnglishCoreCache=@{}
+# Productive, root-preserving readings. These are authored candidates, not dictionary votes.
+# Selectional restrictions and productive prefixing: https://en.wikipedia.org/wiki/English_prefix
+# Inflection and derivation: https://en.wikipedia.org/wiki/English_grammar
+$script:EnglishMorphologyRules=@(
+    [pscustomobject]@{Name='RepetitionPrefix';Spelling='re';Position='Prefix';InputRole=1;OutputRole=1;Phones='ɹi';Realization='Concatenate';Stress='PreserveRoot'}
+    [pscustomobject]@{Name='NominalPlural';Spelling='s';Position='Suffix';InputRole=0;OutputRole=0;Phones='';Realization='SuffixS';Stress='PreserveRoot'}
+    [pscustomobject]@{Name='ThirdPersonPresent';Spelling='s';Position='Suffix';InputRole=1;OutputRole=1;Phones='';Realization='SuffixS';Stress='PreserveRoot'}
+    [pscustomobject]@{Name='AdjectiveComparative';Spelling='er';Position='Suffix';InputRole=2;OutputRole=2;Phones='əɹ';Realization='Concatenate';Stress='PreserveRoot'}
+    [pscustomobject]@{Name='VerbAgent';Spelling='er';Position='Suffix';InputRole=1;OutputRole=0;Phones='əɹ';Realization='Concatenate';Stress='PreserveRoot'}
+    [pscustomobject]@{Name='AdjectiveAdverb';Spelling='ly';Position='Suffix';InputRole=2;OutputRole=4;Phones='li';Realization='Concatenate';Stress='PreserveRoot'}
+    [pscustomobject]@{Name='AdjectiveNegation';Spelling='un';Position='Prefix';InputRole=2;OutputRole=2;Phones='ʌn';Realization='Concatenate';Stress='PreserveRoot'}
+    [pscustomobject]@{Name='AdjectiveNominalization';Spelling='ness';Position='Suffix';InputRole=2;OutputRole=0;Phones='nəs';Realization='Concatenate';Stress='PreserveRoot'}
+    [pscustomobject]@{Name='NominalAbsence';Spelling='less';Position='Suffix';InputRole=0;OutputRole=2;Phones='ləs';Realization='Concatenate';Stress='PreserveRoot'}
+    [pscustomobject]@{Name='NominalProperty';Spelling='ful';Position='Suffix';InputRole=0;OutputRole=2;Phones='fəl';Realization='Concatenate';Stress='PreserveRoot'}
+)
 # Generated files stay under this repository's ignored build/ (AGENTS.md, Repository).
 $script:EnglishBuildRoot=[IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..\build\phonemizer'))
 $script:EnglishModelRoot=[IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..\build\inputs\kokoro\f3ff3571791e39611d31c381e3a41a3af07b4987'))
@@ -1246,6 +1261,101 @@ function Invoke-EnglishPhonemizer {
 
 function Get-EnglishCoreTemplate {
     @'
+class CoreMorphologyRule {
+    CoreMorphologyRule() {}
+    [string]$Name
+    [string]$Spelling
+    [string]$Position
+    [int]$InputRole
+    [int]$OutputRole
+    [string]$Phones
+    [string]$Realization
+    [string]$Stress
+}
+class CoreMorphologyParse {
+    CoreMorphologyParse() {}
+    [string]$Word
+    [string]$Root
+    [int]$RootLexicalId
+    [int]$RootRole
+    [int]$Role
+    [string]$Phones
+    [string]$RootSourcePhones
+    [string]$StressEvidence
+    [CoreMorphologyRule]$Rule
+    [CoreMorphologyParse]$Inner
+}
+class CoreMorphology {
+    static [CoreMorphologyRule[]] Rules() {
+        [string]$data='@MORPHOLOGY_RULES@'
+        [Collections.Generic.List[CoreMorphologyRule]]$rules=[Collections.Generic.List[CoreMorphologyRule]]::new()
+        foreach($row in $data.Split([Convert]::ToChar(59),[StringSplitOptions]::None)){
+            [string[]]$fields=$row.Split([Convert]::ToChar(124),[StringSplitOptions]::None)
+            if($fields.Length -ne 8){throw [InvalidOperationException]::new('Invalid authored morphology record.')}
+            [CoreMorphologyRule]$rule=[CoreMorphologyRule]::new()
+            $rule.Name=$fields[0];$rule.Spelling=$fields[1];$rule.Position=$fields[2]
+            $rule.InputRole=[int]::Parse($fields[3]);$rule.OutputRole=[int]::Parse($fields[4])
+            $rule.Phones=$fields[5];$rule.Realization=$fields[6];$rule.Stress=$fields[7];$rules.Add($rule)
+        }
+        return $rules.ToArray()
+    }
+    static [CoreMorphologyParse[]] Candidates([string]$word,[int]$role) {
+        if([object]::ReferenceEquals($null,$word) -or $word.Length -eq 0 -or $role -lt -1 -or $role -gt 4){throw [ArgumentException]::new('Morphology requires a word and a lexical role from -1 to 4.')}
+        [Collections.Generic.List[CoreMorphologyParse]]$results=[Collections.Generic.List[CoreMorphologyParse]]::new()
+        if($role -eq -1){
+            for([int]$readingRole=0;$readingRole -lt 5;$readingRole++){
+                foreach($roleCandidate in [CoreMorphology]::Candidates($word,$readingRole)){$results.Add($roleCandidate)}
+            }
+            return $results.ToArray()
+        }
+        [int]$id=[Lexicon]::Find($word)
+        if($id -ge 0){
+            [int]$required=1 -shl $role
+            if(([Lexicon]::Capabilities($id) -band $required) -ne 0){
+                foreach($rootReading in [Lexicon]::Phones($id,$role).Split([Convert]::ToChar(124),[StringSplitOptions]::RemoveEmptyEntries)){
+                    [CoreMorphologyParse]$root=[CoreMorphologyParse]::new()
+                    $root.Word=$word;$root.Root=$word;$root.RootLexicalId=$id;$root.RootRole=$role;$root.Role=$role;$root.Phones=$rootReading;$root.RootSourcePhones=$rootReading
+                    $root.StressEvidence='Unknown'
+                    if($rootReading.IndexOf('ˈ',[StringComparison]::Ordinal) -ge 0){$root.StressEvidence='LexicalSource'}
+                    else{
+                        [int]$rootNuclei=0
+                        foreach($rootSymbol in $rootReading.ToCharArray()){if([CorePolish]::IsVowel($rootSymbol)){$rootNuclei++}}
+                        if($rootNuclei -eq 1){$root.Phones=[CorePolish]::Stress($rootReading);$root.StressEvidence='AuthoredSingleNucleusRule'}
+                    }
+                    $results.Add($root)
+                }
+            }
+        }
+        foreach($rule in [CoreMorphology]::Rules()){
+            if($rule.OutputRole -ne $role -or $word.Length -le $rule.Spelling.Length){continue}
+            [string]$stem=''
+            if($rule.Position -ceq 'Prefix' -and $word.StartsWith($rule.Spelling,[StringComparison]::Ordinal)){$stem=$word.Substring($rule.Spelling.Length)}
+            elseif($rule.Position -ceq 'Suffix' -and $word.EndsWith($rule.Spelling,[StringComparison]::Ordinal)){$stem=$word.Substring(0,$word.Length-$rule.Spelling.Length)}
+            if($stem.Length -eq 0){continue}
+            foreach($inner in [CoreMorphology]::Candidates($stem,$rule.InputRole)){
+                [CoreMorphologyParse]$candidate=[CoreMorphologyParse]::new()
+                $candidate.Word=$word;$candidate.Root=$inner.Root;$candidate.RootLexicalId=$inner.RootLexicalId
+                $candidate.RootRole=$inner.RootRole;$candidate.Role=$role;$candidate.StressEvidence=$inner.StressEvidence
+                $candidate.RootSourcePhones=$inner.RootSourcePhones
+                $candidate.Rule=$rule;$candidate.Inner=$inner
+                if($rule.Realization -ceq 'SuffixS'){$candidate.Phones=[CorePolish]::SuffixS($inner.Phones)}
+                elseif($rule.Position -ceq 'Prefix'){$candidate.Phones=$rule.Phones+$inner.Phones}
+                else{$candidate.Phones=$inner.Phones+$rule.Phones}
+                $results.Add($candidate)
+            }
+        }
+        return $results.ToArray()
+    }
+    static [string] UniquePhones([CoreMorphologyParse[]]$candidates) {
+        [string]$phones=[CorePolish]::None()
+        foreach($candidate in $candidates){
+            if($candidate.StressEvidence -ceq 'Unknown'){return [CorePolish]::None()}
+            if([CorePolish]::IsNone($phones)){$phones=$candidate.Phones}
+            elseif($phones -cne $candidate.Phones){return [CorePolish]::None()}
+        }
+        return $phones
+    }
+}
 class CoreOccurrence {
     CoreOccurrence() {}
     [int]$Identity
@@ -1359,10 +1469,12 @@ class CoreNormalizationDecision {
     [int]$ContextEnd
     [bool]$Stress
     [bool]$Flap
+    [CoreMorphologyParse[]]$Morphology
     [string] Realize() {
         [string]$phone=[CorePolish]::None()
         if($this.Operation -ceq 'Number'){$phone=[CorePolish]::Number($this.Operand,$this.PreviousWord)}
         elseif($this.Operation -ceq 'Morphology'){$phone=[CorePolish]::Inflect($this.Operand,$this.Role)}
+        elseif($this.Operation -ceq 'Composition'){$phone=[CoreMorphology]::UniquePhones([CoreMorphology]::Candidates($this.Operand,$this.Role))}
         else{throw [InvalidOperationException]::new('Unsupported normalization operation.')}
         if([CorePolish]::IsNone($phone)){throw [InvalidOperationException]::new('Normalization operands are unresolved.')}
         if($this.Stress){$phone=[CorePolish]::Stress($phone)}
@@ -1384,6 +1496,7 @@ class CoreToken {
     [string]$PronunciationSource='CompiledLexicon'
     [string]$Polish=''
     [CoreNormalizationDecision]$Normalization
+    [CoreMorphologyParse[]]$Morphology
     [int[]]$SymbolIds
     [int[]]$Roles
     [string[]]$Alternatives
@@ -2254,8 +2367,7 @@ class CorePolish {
         if(-not $t.IsUnresolved()){return}
         if($o.LexicalId -ge 0){
             [string]$chosen=[CorePolish]::Heteronym($engine,$tokens,$i)
-            if(-not [CorePolish]::IsNone($chosen)){$t.Resolve($chosen);$t.PronunciationSource='HeteronymDefault'}
-            return
+            if(-not [CorePolish]::IsNone($chosen)){$t.Resolve($chosen);$t.PronunciationSource='HeteronymDefault';return}
         }
         [string]$phone=[CorePolish]::None();[string]$source='Number';[int]$normalizationRole=0
         if([CorePolish]::IsNumber($text)){$phone=[CorePolish]::Number($text,$previous)}
@@ -2270,13 +2382,21 @@ class CorePolish {
             $phone=[CorePolish]::Lexical2($lower)
             if([CorePolish]::IsNone($phone)){$phone=[CorePolish]::Contract($lower,[CorePolish]::Role($engine,$tokens,$i,0))}
         }
-        else{$source='Morphology';$normalizationRole=[CorePolish]::Role($engine,$tokens,$i,0);$phone=[CorePolish]::Inflect($lower,$normalizationRole)}
+        else{
+            $source='Composition';$normalizationRole=-1
+            $t.Morphology=[CoreMorphology]::Candidates($lower,-1)
+            $phone=[CoreMorphology]::UniquePhones($t.Morphology)
+            # Existing inflections remain available when this inventory has no analysis.
+            # An ambiguous composition never falls through to a first-reading selection.
+            if($t.Morphology.Length -eq 0){$source='Morphology';$normalizationRole=[CorePolish]::Role($engine,$tokens,$i,0);$phone=[CorePolish]::Inflect($lower,$normalizationRole)}
+        }
         if(-not [CorePolish]::IsNone($phone)){
             $t.Resolve($phone);$t.PronunciationSource=$source
-            if($source -ceq 'Number' -or $source -ceq 'Morphology'){
+            if($source -ceq 'Number' -or $source -ceq 'Morphology' -or $source -ceq 'Composition'){
                 [CoreNormalizationDecision]$decision=[CoreNormalizationDecision]::new()
                 $decision.Operation=$source;$decision.Operand=$text
-                if($source -ceq 'Morphology'){$decision.Operand=$lower}
+                if($source -ceq 'Morphology' -or $source -ceq 'Composition'){$decision.Operand=$lower}
+                $decision.Morphology=$t.Morphology
                 $decision.PreviousWord=$previous;$decision.Role=$normalizationRole
                 $decision.ContextStart=[Math]::Max(0,$i-2);$decision.ContextEnd=[Math]::Min($tokens.Length-1,$i+1)
                 $t.Normalization=$decision
@@ -2368,6 +2488,9 @@ class CoreDriver {
         return $sum
     }
     # Product entry: lexicon, grammar roles and Zira choices, then the polish pass.
+    static [object] WordCompositions([string]$word) {
+        return [CoreMorphology]::Candidates($word.ToLowerInvariant(),-1)
+    }
     static [CoreResult] Run([string]$text) {
         [CoreEngine]$engine=[CoreEngine]::new();$engine.Polish=$true;$engine.Scan($text);return $engine.Result($text)
     }
@@ -2455,7 +2578,20 @@ function Import-EnglishCoreDriver {
     $table=@{};$knowledge=New-EnglishZiraDataSource
     if(Test-Path -LiteralPath $CorrectionPath){$table=Import-EnglishCorrections $CorrectionPath;$corpus=Import-EnglishZiraCorpus $CorrectionPath;$knowledge=[IO.File]::ReadAllText($corpus.Source)}
     foreach($key in $table.Keys){foreach($ch in $table[$key].ToCharArray()){if($reference.SymbolId.Invoke($ch) -lt 0){throw 'Correction outside Kokoro vocabulary.'}}}
-    $source+="`n"+$knowledge+"`n"+(Get-EnglishCoreTemplate).Replace('[Collections.Generic.','[System.Collections.Generic.').Replace('[void]','').Replace('@REFERENCE@',$reference.Assembly.GetName().Name)
+    $morphologyRows=[Collections.Generic.List[string]]::new()
+    $morphologyNames=[Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
+    foreach($rule in $script:EnglishMorphologyRules){
+        if(-not $rule.Name -or -not $morphologyNames.Add($rule.Name)){throw 'Morphology rule names must be nonempty and unique.'}
+        if(-not $rule.Spelling -or $rule.Position -cnotin @('Prefix','Suffix') -or $rule.InputRole -lt 0 -or $rule.InputRole -gt 4 -or $rule.OutputRole -lt 0 -or $rule.OutputRole -gt 4){throw 'Morphology rule has an invalid spelling, position or lexical role.'}
+        if($rule.Stress -cne 'PreserveRoot' -or $rule.Realization -cnotin @('Concatenate','SuffixS')){throw 'Morphology rule requires an explicitly implemented stress and boundary realization.'}
+        if($rule.Realization -ceq 'SuffixS' -and ($rule.Position -cne 'Suffix' -or $rule.Phones)){throw 'SuffixS takes its reading from the final root sound and cannot supply fixed phones.'}
+        foreach($symbol in $rule.Phones.ToCharArray()){if($reference.SymbolId.Invoke($symbol) -lt 0){throw 'Morphology rule emits a symbol outside the pinned phoneme inventory.'}}
+        $fields=[string[]]@($rule.Name,$rule.Spelling,$rule.Position,$rule.InputRole,$rule.OutputRole,$rule.Phones,$rule.Realization,$rule.Stress)
+        foreach($field in $fields){if($field.Contains('|') -or $field.Contains(';') -or $field.Contains("'")){throw 'Morphology record contains a reserved serialization character.'}}
+        $morphologyRows.Add([string]::Join('|',$fields))
+    }
+    $morphologyData=[string]::Join(';',$morphologyRows)
+    $source+="`n"+$knowledge+"`n"+(Get-EnglishCoreTemplate).Replace('[Collections.Generic.','[System.Collections.Generic.').Replace('[void]','').Replace('@REFERENCE@',$reference.Assembly.GetName().Name).Replace('@MORPHOLOGY_RULES@',$morphologyData)
     $identity=[Convert]::ToHexString([Security.Cryptography.SHA256]::HashData([Text.Encoding]::UTF8.GetBytes($source)))
     $directoryIdentity=$identity;if($LibraryOnly){$directoryIdentity+='-library-dll'}
     $directory=Join-Path $script:EnglishBuildRoot ('english\driver\'+$directoryIdentity)
