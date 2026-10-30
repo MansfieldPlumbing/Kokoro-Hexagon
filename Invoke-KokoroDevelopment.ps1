@@ -3838,6 +3838,38 @@ function Test-KokoroCRuntime {
     }
 }
 
+# No JSON that we provide (Pwsh-Development docs/SOURCE-DATA-CONTRACT.md): we read JSON others provide and never
+# store, write or exchange it ourselves. Census of 2026-10-30, a list that only shrinks: a file not listed that uses or
+# is JSON fails Verify, and a listed file that no longer does fails until its entry is removed with the change.
+# lib/kokoro-v1_0.config.json is the upstream model's own file (a third-party boundary) and stays readable.
+$script:KokoroJsonFiles = @('lib/kokoro-v1_0.config.json', 'lib/manifest.json', 'lib/pwsh-build-manifest.json')
+$script:KokoroJsonUses = @(
+    'Invoke-HexagonDevelopment.ps1', 'Invoke-KokoroDevelopment.ps1', 'phonemizer/Invoke-EnglishPhonemizer.ps1'
+    'src/build/Import-PwshBuildFunction.ps1', 'src/jobs/Kokoro.Albert16Run.ps1', 'src/runspace/KokoroGeneratorTailProbe.ps1'
+    'student/Invoke-Student.ps1', 'tools/Build-KokoroApk.ps1', 'tools/Get-KokoroModelInput.ps1', 'tools/Get-PhonemizerInput.ps1'
+    'tools/Invoke-GeneratorTailProbe.ps1', 'tools/Invoke-KokoroPrecomputedDecoder.ps1', 'tools/Kokoro.CaptureMath.psm1'
+    'tools/Kokoro.Evaluator.psm1', 'tools/Measure-KokoroDecoderWeightError.ps1', 'tools/Measure-KokoroPcmSnr.ps1'
+    'tools/New-KokoroDecoderFixture.ps1', 'tools/New-KokoroGenerator60x16Fixture.ps1', 'tools/New-KokoroGeneratorFront10x16Fixture.ps1'
+    'tools/New-KokoroGeneratorFront16Fixture.ps1', 'tools/New-KokoroGeneratorStageTailFixture.ps1', 'tools/New-KokoroGeneratorTail16Fixture.ps1'
+    'tools/New-KokoroGeneratorTailFixture.ps1', 'tools/New-KokoroGeneratorWholeFixture.ps1', 'tools/New-KokoroHarmonicSource16Fixture.ps1'
+    'tools/New-KokoroHarmonicStft16Fixture.ps1', 'tools/New-KokoroHmxCaptureFixture.ps1', 'tools/Test-HexagonEmission.ps1'
+    'tools/Test-KokoroGeneratorTailOutput.ps1'
+)
+
+function Test-KokoroJsonCensus {
+    # The pattern is assembled at run time so this check's own text is not counted as a use.
+    $pattern = 'ConvertFrom-' + 'Json|ConvertTo-' + 'Json|Json' + 'Serializer|Json' + 'Document|Utf8Json' + 'Reader|\.' + 'json\b'
+    $stored = @(git -C $Root -c core.quotepath=false ls-files | Where-Object { $_.EndsWith('.json', [StringComparison]::OrdinalIgnoreCase) })
+    $uses = @(git -C $Root -c core.quotepath=false ls-files '*.ps1' '*.psm1' | Where-Object { Select-String -LiteralPath (Join-Path $Root $_) -Pattern $pattern -Quiet })
+    $failures = [Collections.Generic.List[string]]::new()
+    foreach ($file in $stored) { if ($script:KokoroJsonFiles -cnotcontains $file) { $failures.Add("$file is JSON and is not in the census") } }
+    foreach ($file in $script:KokoroJsonFiles) { if ($stored -cnotcontains $file) { $failures.Add("$file is gone: remove it from the census") } }
+    foreach ($file in $uses) { if ($script:KokoroJsonUses -cnotcontains $file) { $failures.Add("$file uses JSON and is not in the census") } }
+    foreach ($file in $script:KokoroJsonUses) { if ($uses -cnotcontains $file) { $failures.Add("$file no longer uses JSON: remove it from the census") } }
+    if ($failures.Count) { throw ('JSON census: ' + ($failures -join '; ')) }
+    "PASS no-json: census holds at $($stored.Count) JSON files and $($uses.Count) scripts that use JSON; each is to be converted (SOURCE-DATA-CONTRACT.md)"
+}
+
 # Dot-sourced (. ./Invoke-KokoroDevelopment.ps1): the functions above are the API; no command runs.
 if ($MyInvocation.InvocationName -eq '.') { return }
 
@@ -3999,12 +4031,13 @@ switch ($Command) {
                 Test-KokoroAudioMeasurement
             }
             'no-c-runtime' = { Test-KokoroCRuntime }
+            'no-json' = { Test-KokoroJsonCensus }
         }
         $failed = $false
         foreach ($name in $checks.Keys) {
             try {
                 $result = & $checks[$name]
-                if ($name -cin @('case-pairs', 'no-c-runtime')) { $result } else { "PASS $name" }
+                if ($name -cin @('case-pairs', 'no-c-runtime', 'no-json')) { $result } else { "PASS $name" }
             }
             catch {
                 $failed = $true
