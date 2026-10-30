@@ -116,6 +116,8 @@ function Get-JudgeRuleChain($Parse) {
 function Get-JudgeShare([int] $Count, [int] $Total) { if ($Total) { [Math]::Round(100.0 * $Count / $Total, 1) } else { [double]::NaN } }
 
 function Measure-JudgeComposition {
+    # Odd lexical ids are held out: anything that tunes composition from lexicon evidence learns from even ids only,
+    # and HeldOutExactPercent scores the odd ids.
     Import-JudgePhonemizer
     $lexicon = $script:JudgeContext.Lexicon; $rows = [Collections.Generic.List[object]]::new()
     for ($id = 0; $id -lt $lexicon::Count(); $id++) {
@@ -129,7 +131,7 @@ function Measure-JudgeComposition {
         $readings = @($parses | ForEach-Object Phones | Sort-Object -Unique)
         $exact = @($readings | Where-Object { $reference.Contains($_) }).Count
         $chains = @($parses | ForEach-Object { Get-JudgeRuleChain $_ } | Sort-Object -Unique)
-        $rows.Add([pscustomobject]@{ Word = $word; Chain = $chains[0]; Readings = $readings -join '|'; Reference = @($reference) -join '|'
+        $rows.Add([pscustomobject]@{ Id = $id; Word = $word; Chain = $chains[0]; Readings = $readings -join '|'; Reference = @($reference) -join '|'
             Exact = $exact -gt 0; Segments = @($readings | Where-Object { $segments.Contains((Get-JudgeSegments $_)) }).Count -gt 0
             Ambiguous = $readings.Count -gt 1; RepeatedRule = @($chains | Where-Object { $names = $_ -split '\+'; @($names | Sort-Object -Unique).Count -lt $names.Count }).Count -gt 0 })
     }
@@ -145,7 +147,9 @@ function Measure-JudgeComposition {
         ExactPercent = Get-JudgeShare @($rows | Where-Object Exact).Count $rows.Count
         SegmentsPercent = Get-JudgeShare @($rows | Where-Object Segments).Count $rows.Count
         AmbiguousPercent = Get-JudgeShare @($rows | Where-Object Ambiguous).Count $rows.Count
-        RepeatedRuleWords = @($rows | Where-Object RepeatedRule).Count }
+        RepeatedRuleWords = @($rows | Where-Object RepeatedRule).Count
+        HeldOutWords = @($rows | Where-Object { $_.Id % 2 -eq 1 }).Count
+        HeldOutExactPercent = Get-JudgeShare @($rows | Where-Object { $_.Id % 2 -eq 1 -and $_.Exact }).Count @($rows | Where-Object { $_.Id % 2 -eq 1 }).Count }
     New-JudgeScore 'Composition' $strata $totals 'Agreement with the lexicon pronunciation of the whole form, which composition did not consult; the lexicon is the reference notation, not independent evidence.'
 }
 
@@ -365,6 +369,7 @@ $script:JudgeBaseline = @(
     [pscustomobject]@{ Judge = 'Composition'; Measure = 'ExactWords'; Better = 'Higher'; Value = 3601 }
     [pscustomobject]@{ Judge = 'Composition'; Measure = 'ExactPercent'; Better = 'Higher'; Value = 50.0 }
     [pscustomobject]@{ Judge = 'Composition'; Measure = 'RepeatedRuleWords'; Better = 'Lower'; Value = 61 }
+    [pscustomobject]@{ Judge = 'Composition'; Measure = 'HeldOutExactPercent'; Better = 'Higher'; Value = 51.4 }
     [pscustomobject]@{ Judge = 'CompositionRecall'; Measure = 'ParsedWords'; Better = 'Higher'; Value = 7027 }
     [pscustomobject]@{ Judge = 'CompositionRecall'; Measure = 'ParsedPercent'; Better = 'Higher'; Value = 34.0 }
     [pscustomobject]@{ Judge = 'CorpusCoverage'; Measure = 'SpokenPercent'; Better = 'Higher'; Value = 100.0 }
