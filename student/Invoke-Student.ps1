@@ -37,6 +37,9 @@ Steps:
             Word types are split before fitting; Zira-warped phone labels remain provisional, never gold labels.
   Reconsider Re-evaluate only remembered decisions whose percept dependencies changed. Missing knowledge stays
             unresolved; prior interpretations and evidence survive. No audio or source capture is rebuilt.
+  Compose   Apply authored grammar records to typed occurrences. Retains ambiguous derivations and pending
+            expectations in a live per-speaker state; -Analysis supplies typed input without lexical lookup.
+  VerifyComposition  Check chart deductions, interruption, resumption and source-identity invariants.
 .PARAMETER Corpus
 Corpus directory for Pronunciation; defaults to the latest build/corpus-* with corpus.clixml.
 .PARAMETER ParagraphLimit
@@ -73,7 +76,7 @@ Run from a PowerShell prompt: pwsh -File passes every argument as a string, so a
 #requires -Version 7.7
 [CmdletBinding()]
 param(
-    [ValidateSet('Console', 'Render', 'Corpus', 'Pronunciation', 'Normalize', 'Syllabus', 'Recordings', 'Listen', 'Stems', 'Alignment', 'Percepts', 'Describe', 'Learn', 'Audit', 'Discriminate', 'Reconsider', 'Inventory', 'Speak', 'Ablate', 'PitchGate', 'Trace', 'Normalization', 'Score', 'Residuals', 'Retune')][string] $Step = 'Console',
+    [ValidateSet('Console', 'Render', 'Corpus', 'Pronunciation', 'Normalize', 'Compose', 'VerifyComposition', 'Syllabus', 'Recordings', 'Listen', 'Stems', 'Alignment', 'Percepts', 'Describe', 'Learn', 'Audit', 'Discriminate', 'Reconsider', 'Inventory', 'Speak', 'Ablate', 'PitchGate', 'Trace', 'Normalization', 'Score', 'Residuals', 'Retune')][string] $Step = 'Console',
     [ValidateRange(2, 64)][int] $Threads = [Math]::Max(2, [Environment]::ProcessorCount),
     [string] $Text = '',
     [string] $Voice = 'af_heart',
@@ -146,6 +149,347 @@ $script:StudentText = [ordered]@{
     ZiraBatchChunks = 128         # completed batches survive an interrupted corpus build
     CorrespondenceShare = 0.5     # minimum share for a learned Zira-to-Kokoro symbol mapping
     KokoroVowels = 'AIOWYaæɐɑɒeəɛɚɜɤiɪɨᵻoøœɔuʊʌɯyᵊ'
+}
+
+# Authored structural knowledge. These are production programs, not learned word preferences.
+# Predictor/scanner/completer deduction: https://aclanthology.org/2023.acl-long.204/
+# English structures: https://en.wikipedia.org/wiki/English_grammar
+# Lexical roles come from the admitted front end or explicitly supplied typed evidence.
+$script:StudentCompositionRules = @(
+    [pscustomobject]@{ Head = 'Proposition'; Body = @('Clause'); ClosureType = 'Proposition' }
+    [pscustomobject]@{ Head = 'Clause'; Body = @('Nominal', 'Predicate'); ClosureType = 'TopicPredication' }
+    [pscustomobject]@{ Head = 'Clause'; Body = @('Clause', 'Conjunction', 'Clause'); ClosureType = 'ClauseCoordination' }
+    [pscustomobject]@{ Head = 'Nominal'; Body = @('Noun'); ClosureType = 'NominalHead' }
+    [pscustomobject]@{ Head = 'Nominal'; Body = @('Pronoun'); ClosureType = 'NominalHead' }
+    [pscustomobject]@{ Head = 'Nominal'; Body = @('Determiner', 'NominalBody'); ClosureType = 'DeterminerHead' }
+    [pscustomobject]@{ Head = 'NominalBody'; Body = @('Noun'); ClosureType = 'NominalHead' }
+    [pscustomobject]@{ Head = 'NominalBody'; Body = @('Adjective', 'NominalBody'); ClosureType = 'NominalModification' }
+    [pscustomobject]@{ Head = 'Nominal'; Body = @('Nominal', 'Attachment'); ClosureType = 'NominalAttachment' }
+    [pscustomobject]@{ Head = 'Nominal'; Body = @('Nominal', 'Conjunction', 'Nominal'); ClosureType = 'NominalCoordination' }
+    [pscustomobject]@{ Head = 'Predicate'; Body = @('VerbIntransitive'); ClosureType = 'IntransitivePredicate' }
+    [pscustomobject]@{ Head = 'Predicate'; Body = @('VerbTransitive', 'Nominal'); ClosureType = 'TransitiveObject' }
+    [pscustomobject]@{ Head = 'Predicate'; Body = @('Modal', 'BasePredicate'); ClosureType = 'ModalVerb' }
+    [pscustomobject]@{ Head = 'BasePredicate'; Body = @('BaseIntransitive'); ClosureType = 'IntransitivePredicate' }
+    [pscustomobject]@{ Head = 'BasePredicate'; Body = @('BaseTransitive', 'Nominal'); ClosureType = 'TransitiveObject' }
+    [pscustomobject]@{ Head = 'Predicate'; Body = @('Copula', 'Adjective'); ClosureType = 'CopularComplement' }
+    [pscustomobject]@{ Head = 'Predicate'; Body = @('Copula', 'Nominal'); ClosureType = 'CopularComplement' }
+    [pscustomobject]@{ Head = 'Predicate'; Body = @('Predicate', 'Attachment'); ClosureType = 'PredicateAttachment' }
+    [pscustomobject]@{ Head = 'BasePredicate'; Body = @('BasePredicate', 'Attachment'); ClosureType = 'PredicateAttachment' }
+    [pscustomobject]@{ Head = 'Predicate'; Body = @('Adverb', 'Predicate'); ClosureType = 'PredicateModification' }
+    [pscustomobject]@{ Head = 'Attachment'; Body = @('Preposition', 'Nominal'); ClosureType = 'AttachmentComplement' }
+)
+
+function New-StudentCompositionGrammar {
+    $rules = [Collections.Generic.List[object]]::new()
+    $heads = [Collections.Generic.Dictionary[string,object]]::new([StringComparer]::Ordinal)
+    foreach ($declaration in $script:StudentCompositionRules) {
+        $rule = [pscustomobject]@{ PSTypeName = 'Kokoro.StudentCompositionRule'; Id = $rules.Count
+            Head = $declaration.Head; Body = [string[]]$declaration.Body; ClosureType = $declaration.ClosureType
+            Provenance = 'AuthoredComposition'; Evidence = 'student/Invoke-Student.ps1#StudentCompositionRules'
+            ProducerSHA256 = $script:StudentMachineSHA256 }
+        if (-not $rule.Body.Length) { throw 'Composition grammar requires nonempty productions; express optional constituents as alternatives.' }
+        $rules.Add($rule)
+        if (-not $heads.ContainsKey($rule.Head)) { $heads.Add($rule.Head, [Collections.Generic.List[object]]::new()) }
+        $heads[$rule.Head].Add($rule)
+    }
+    [pscustomobject]@{ PSTypeName = 'Kokoro.StudentCompositionGrammar'; Rules = $rules.ToArray(); Heads = $heads }
+}
+
+function New-StudentCompositionChart {
+    [pscustomobject]@{ PSTypeName = 'Kokoro.StudentCompositionChart'
+        Items = [Collections.Generic.List[object]]::new()
+        Index = [Collections.Generic.Dictionary[ValueTuple[int,int,int],object]]::new() }
+}
+
+function Add-StudentCompositionItem($Chart, $Rule, [int] $Dot, [int] $Start, $Derivation) {
+    $key = [ValueTuple[int,int,int]]::new($Rule.Id, $Dot, $Start)
+    $item = $null
+    if (-not $Chart.Index.TryGetValue($key, [ref]$item)) {
+        $item = [pscustomobject]@{ PSTypeName = 'Kokoro.StudentCompositionItem'; Rule = $Rule
+            Dot = $Dot; Start = $Start; Derivations = [Collections.Generic.List[object]]::new() }
+        $Chart.Index.Add($key, $item); $Chart.Items.Add($item)
+    }
+    if ($null -ne $Derivation) { $item.Derivations.Add($Derivation) }
+    $item
+}
+
+function Complete-StudentCompositionChart($Proposition, $Grammar) {
+    $end = $Proposition.Tokens.Count; $chart = $Proposition.Charts[$end]
+    for ($itemIndex = 0; $itemIndex -lt $chart.Items.Count; $itemIndex++) {
+        $item = $chart.Items[$itemIndex]; $rule = $item.Rule
+        if ($item.Dot -lt $rule.Body.Length) {
+            $symbol = $rule.Body[$item.Dot]
+            if ($Grammar.Heads.ContainsKey($symbol)) {
+                foreach ($predicted in $Grammar.Heads[$symbol]) { $null = Add-StudentCompositionItem $chart $predicted 0 $end $null }
+            }
+        } else {
+            # Productions are nonempty, so completion refers to an earlier chart.
+            foreach ($parent in $Proposition.Charts[$item.Start].Items) {
+                if ($parent.Dot -ge $parent.Rule.Body.Length -or $parent.Rule.Body[$parent.Dot] -cne $rule.Head) { continue }
+                $edge = [pscustomobject]@{ PSTypeName = 'Kokoro.StudentCompositionEdge'; Kind = 'Completion'
+                    Parent = $parent; Child = $item; First = $item.Start; Last = $end }
+                $null = Add-StudentCompositionItem $chart $parent.Rule ($parent.Dot + 1) $parent.Start $edge
+            }
+        }
+    }
+}
+
+function New-StudentCompositionState {
+    [pscustomobject]@{ PSTypeName = 'Kokoro.StudentCompositionState'; Owner = $ExecutionContext.SessionState.Module
+        Grammar = New-StudentCompositionGrammar
+        Speakers = [Collections.Generic.Dictionary[string,object]]::new([StringComparer]::Ordinal)
+        Propositions = [Collections.Generic.List[object]]::new()
+        Sources = [Collections.Generic.Dictionary[string,object]]::new([StringComparer]::Ordinal)
+        Occurrences = [Collections.Generic.Dictionary[string,object]]::new([StringComparer]::Ordinal)
+        Events = [Collections.Generic.List[object]]::new() }
+}
+
+function New-StudentProposition($Composition, [string] $SpeakerIdentity) {
+    $proposition = [pscustomobject]@{ PSTypeName = 'Kokoro.StudentProposition'; Identity = $Composition.Propositions.Count
+        Speaker = $SpeakerIdentity; Tokens = [Collections.Generic.List[object]]::new()
+        Occurrences = [Collections.Generic.List[object]]::new(); Charts = [Collections.Generic.List[object]]::new()
+        Closed = $false; Revision = 0 }
+    $proposition.Charts.Add((New-StudentCompositionChart))
+    foreach ($rule in $Composition.Grammar.Heads['Proposition']) { $null = Add-StudentCompositionItem $proposition.Charts[0] $rule 0 0 $null }
+    Complete-StudentCompositionChart $proposition $Composition.Grammar
+    $Composition.Propositions.Add($proposition); $Composition.Speakers[$SpeakerIdentity] = $proposition
+    $proposition
+}
+
+function Get-StudentCompositionSummary($Proposition, $Grammar) {
+    $end = $Proposition.Tokens.Count; $chart = $Proposition.Charts[$end]
+    $expected = [Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
+    $closures = [Collections.Generic.List[object]]::new(); $satisfied = $false
+    foreach ($item in $chart.Items) {
+        if ($item.Dot -eq $item.Rule.Body.Length) {
+            if ($item.Start -eq 0 -and $item.Rule.Head -ceq 'Proposition') { $satisfied = $true }
+            continue
+        }
+        $awaited = $item.Rule.Body[$item.Dot]
+        if (-not $Grammar.Heads.ContainsKey($awaited)) { [void]$expected.Add($awaited) }
+        if ($item.Dot -gt 0) {
+            $closures.Add([pscustomobject]@{ PSTypeName = 'Kokoro.StudentClosure'; Type = $item.Rule.ClosureType
+                Rule = $item.Rule.Id; First = $item.Start; Last = $end; Awaited = $awaited
+                Provenance = $item.Rule.Provenance; Evidence = $item.Rule.Evidence })
+        }
+    }
+    [pscustomobject]@{ PSTypeName = 'Kokoro.StudentCompositionSummary'; Proposition = $Proposition.Identity
+        Speaker = $Proposition.Speaker; Tokens = $end; Occurrences = $Proposition.Occurrences.Count
+        Status = if (-not $chart.Items.Count) { 'Unresolved' } elseif ($Proposition.Closed -and -not $satisfied) { 'ClosedIncomplete' } elseif ($Proposition.Closed) { 'Closed' } elseif ($satisfied) { 'SatisfiedReopenable' } else { 'Open' }
+        Expected = [string[]]@($expected | Sort-Object); Closures = $closures.ToArray(); Revision = $Proposition.Revision }
+}
+
+function Add-StudentComposition($Composition, $Batch) {
+    if ($Composition.PSObject.TypeNames -notcontains 'Kokoro.StudentCompositionState') { throw 'Compose requires a live Student composition state.' }
+    if ($Batch.PSObject.TypeNames -notcontains 'Kokoro.StudentCompositionInput') { throw 'Compose requires typed composition input with Speaker, Mode, Proposition and Occurrences.' }
+    foreach ($field in 'Speaker', 'Mode', 'Proposition', 'Sources', 'Occurrences') {
+        if ($null -eq $Batch.PSObject.Properties[$field]) { throw "Composition input is missing $field." }
+    }
+    if ($Batch.Speaker -isnot [string] -or -not $Batch.Speaker -or $Batch.Mode -cnotin 'New', 'Append', 'Resume', 'Close') { throw 'Composition input requires a speaker and New, Append, Resume or Close mode.' }
+    $proposition = $null
+    if ($Batch.Mode -ceq 'Resume') {
+        if ($Batch.Proposition -lt 0 -or $Batch.Proposition -ge $Composition.Propositions.Count) { throw 'Resumption requires an existing proposition identity.' }
+        $proposition = $Composition.Propositions[$Batch.Proposition]
+        if ($proposition.Speaker -cne $Batch.Speaker) { throw 'A speaker cannot silently resume another speaker''s proposition.' }
+    } elseif ($Batch.Mode -cne 'New' -and -not $Composition.Speakers.TryGetValue($Batch.Speaker, [ref]$proposition)) { throw 'Append or Close requires an existing proposition for this speaker.' }
+    $occurrences = @($Batch.Occurrences)
+    if ($Batch.Mode -ceq 'Close' -and $occurrences.Count) { throw 'Close is a state message and does not consume occurrences.' }
+    $prefix = 0; $scanned = 0
+    # Validate the entire input before mutating the proposition or admitting evidence.
+    $sources = [Collections.Generic.Dictionary[string,object]]::new([StringComparer]::Ordinal)
+    foreach ($source in @($Batch.Sources)) {
+        foreach ($field in 'Identity', 'Text', 'TextSHA256') {
+            if ($null -eq $source.PSObject.Properties[$field]) { throw "Composition source is missing $field." }
+        }
+        if ($source.PSObject.TypeNames -notcontains 'Kokoro.StudentCompositionSource' -or $source.Identity -isnot [string] -or -not $source.Identity -or $source.Text -isnot [string]) { throw 'Composition source requires a typed identity, text and TextSHA256.' }
+        $digest = [Convert]::ToHexString([Security.Cryptography.SHA256]::HashData([Text.Encoding]::UTF8.GetBytes($source.Text)))
+        if ($source.TextSHA256 -cne $digest) { throw 'Composition source UTF-8 text hash differs from its evidence.' }
+        if ($sources.ContainsKey($source.Identity)) { throw 'Composition input repeats a source identity.' }
+        if ($Composition.Sources.ContainsKey($source.Identity) -and $Composition.Sources[$source.Identity].TextSHA256 -cne $digest) { throw 'An admitted source identity cannot change its text.' }
+        $sources.Add($source.Identity, $source)
+    }
+    $identities = [Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
+    foreach ($occurrence in $occurrences) {
+        foreach ($field in 'Identity', 'Source', 'SourceSHA256', 'Start', 'Length', 'Kind', 'Text', 'Lexeme', 'Roles', 'RoleEvidence') {
+            if ($null -eq $occurrence.PSObject.Properties[$field]) { throw "Composition occurrence is missing $field." }
+        }
+        if ($occurrence.PSObject.TypeNames -notcontains 'Kokoro.StudentCompositionOccurrence' -or
+            $occurrence.Identity -isnot [string] -or -not $occurrence.Identity -or $occurrence.Source -isnot [string] -or -not $occurrence.Source -or -not $occurrence.SourceSHA256 -or
+            $occurrence.Start -isnot [int] -or $occurrence.Length -isnot [int] -or $occurrence.Text -isnot [string] -or
+            $occurrence.Start -lt 0 -or $occurrence.Length -le 0 -or $occurrence.Kind -cnotin 'Word', 'Punctuation' -or
+            -not $occurrence.Text -or $occurrence.Length -ne $occurrence.Text.Length) { throw 'Composition occurrence requires identity, source hash, exact source span, text and kind.' }
+        if (-not $identities.Add($occurrence.Identity) -or $Composition.Occurrences.ContainsKey($occurrence.Identity)) { throw 'Composition occurrence identity is already present; replay must supply a new source occurrence.' }
+        if ($occurrence.Kind -ceq 'Word' -and (-not $occurrence.Lexeme -or -not $occurrence.RoleEvidence)) { throw 'Word occurrences require lexical identity and role provenance; unknown roles may remain empty.' }
+        $source = $null
+        if (-not $sources.TryGetValue($occurrence.Source, [ref]$source) -and -not $Composition.Sources.TryGetValue($occurrence.Source, [ref]$source)) { throw 'Composition occurrence has no admitted source text.' }
+        if ($source.TextSHA256 -cne $occurrence.SourceSHA256 -or $occurrence.Start -gt $source.Text.Length - $occurrence.Length -or
+            $source.Text.Substring($occurrence.Start, $occurrence.Length) -cne $occurrence.Text) { throw 'Composition occurrence differs from its source span or source hash.' }
+    }
+    if ($Batch.Mode -ceq 'Resume') {
+        foreach ($occurrence in $occurrences) {
+            if ($occurrence.Kind -ceq 'Punctuation') { continue }
+            if ($prefix -ge $proposition.Tokens.Count) { break }
+            $canonical = $proposition.Tokens[$prefix]
+            $roles = [Collections.Generic.HashSet[string]]::new([string[]]$occurrence.Roles, [StringComparer]::Ordinal)
+            if ($occurrence.Lexeme -cne $canonical.Lexeme -or -not $roles.SetEquals([string[]]$canonical.Roles)) { throw 'Resumption diverges from the stored lexical prefix; submit a separate proposition or explicit repair.' }
+            $prefix++
+        }
+    }
+    if ($Batch.Mode -ceq 'New') { $proposition = New-StudentProposition $Composition $Batch.Speaker }
+    foreach ($source in $sources.Values) {
+        if (-not $Composition.Sources.ContainsKey($source.Identity)) {
+            $Composition.Sources.Add($source.Identity, [pscustomobject]@{ PSTypeName = 'Kokoro.StudentCompositionSource'
+                Identity = $source.Identity; Text = $source.Text; TextSHA256 = $source.TextSHA256 })
+        }
+    }
+    $wasClosed = $proposition.Closed
+    if ($Batch.Mode -ceq 'Close') { $proposition.Closed = $true }
+    else {
+        $proposition.Closed = $false; $Composition.Speakers[$Batch.Speaker] = $proposition
+        foreach ($occurrence in $occurrences) {
+            # Admission snapshots prevent later caller mutations from rewriting evidence.
+            $occurrence = [pscustomobject]@{ PSTypeName = 'Kokoro.StudentCompositionOccurrence'
+                Identity = $occurrence.Identity; Source = $occurrence.Source; SourceSHA256 = $occurrence.SourceSHA256
+                Start = $occurrence.Start; Length = $occurrence.Length; Text = $occurrence.Text; Kind = $occurrence.Kind
+                Lexeme = $occurrence.Lexeme; Roles = [string[]]@($occurrence.Roles); RoleEvidence = $occurrence.RoleEvidence }
+            $Composition.Occurrences.Add($occurrence.Identity, $occurrence); $proposition.Occurrences.Add($occurrence)
+            if ($occurrence.Kind -ceq 'Punctuation') { continue }
+            if ($scanned -lt $prefix) { $scanned++; continue }
+            $end = $proposition.Tokens.Count; $next = New-StudentCompositionChart
+            foreach ($item in $proposition.Charts[$end].Items) {
+                if ($item.Dot -ge $item.Rule.Body.Length) { continue }
+                $symbol = $item.Rule.Body[$item.Dot]
+                if ($Composition.Grammar.Heads.ContainsKey($symbol) -or $symbol -cnotin $occurrence.Roles) { continue }
+                $edge = [pscustomobject]@{ PSTypeName = 'Kokoro.StudentCompositionEdge'; Kind = 'Occurrence'
+                    Parent = $item; Occurrence = $occurrence.Identity; Role = $symbol; First = $end; Last = $end + 1 }
+                $null = Add-StudentCompositionItem $next $item.Rule ($item.Dot + 1) $item.Start $edge
+            }
+            $proposition.Tokens.Add($occurrence); $proposition.Charts.Add($next)
+            Complete-StudentCompositionChart $proposition $Composition.Grammar
+            $scanned++
+        }
+    }
+    $proposition.Revision++
+    $summary = Get-StudentCompositionSummary $proposition $Composition.Grammar
+    $event = [pscustomobject]@{ PSTypeName = 'Kokoro.StudentCompositionTransition'; Proposition = $proposition.Identity
+        Speaker = $Batch.Speaker; Mode = $Batch.Mode; MatchedPrefix = $prefix; Reopened = $wasClosed -and -not $proposition.Closed
+        Revision = $proposition.Revision; Status = $summary.Status; Occurrences = [string[]]@($occurrences | ForEach-Object Identity) }
+    $Composition.Events.Add($event)
+    [pscustomobject]@{ PSTypeName = 'Kokoro.StudentCompositionResult'; State = $Composition; Summary = $summary; Transition = $event }
+}
+
+Update-TypeData -TypeName 'Kokoro.StudentCompositionState' -MemberType ScriptMethod -MemberName Apply -Value {
+    param($Batch)
+    & $this.Owner { param($Composition, $InputBatch); Add-StudentComposition $Composition $InputBatch } $this $Batch
+} -Force
+Update-TypeData -TypeName 'Kokoro.StudentCompositionState' -MemberType ScriptMethod -MemberName Describe -Value {
+    & $this.Owner { param($Composition)
+        [pscustomobject]@{ PSTypeName = 'Kokoro.StudentCompositionDescription'; Rules = $Composition.Grammar.Rules
+            Propositions = @($Composition.Propositions | ForEach-Object { Get-StudentCompositionSummary $_ $Composition.Grammar })
+            Sources = @($Composition.Sources.Values | Select-Object Identity, TextSHA256)
+            Occurrences = $Composition.Occurrences.Count; Transitions = $Composition.Events.Count
+            InputType = 'Kokoro.StudentCompositionInput'; Modes = @('New', 'Append', 'Resume', 'Close')
+            OccurrenceType = 'Kokoro.StudentCompositionOccurrence'; SourceType = 'Kokoro.StudentCompositionSource'
+            SourceHash = 'SHA-256 of UTF-8 source text'; SourceCoordinates = 'UTF-16 code units in the original source text'
+            Generalization = 'NotEvaluated' }
+    } $this
+} -Force
+
+function Invoke-StudentComposition {
+    $composition = if ($null -ne $State) { $State } else { New-StudentCompositionState }
+    if ($null -eq $Analysis) {
+        if ($Text) { throw 'Compose consumes typed occurrences; supply -Analysis with source spans, lexical roles and provenance.' }
+        return $composition
+    }
+    $composition.Apply($Analysis)
+}
+
+function Test-StudentComposition {
+    # Structural deductions over typed roles, not language examples or held-out probes.
+    function New-CompositionCheckInput([string[]] $Roles, [string] $Who, [string] $Mode, [int] $Proposition = -1, [string[]] $Lexemes = @()) {
+        $sourceId = [Guid]::NewGuid().ToString('N'); $parts = [Collections.Generic.List[string]]::new()
+        for ($index = 0; $index -lt $Roles.Length; $index++) {
+            $parts.Add($(if ($Roles[$index] -ceq 'Punctuation') { '.' } else { "token$index" }))
+        }
+        $sourceText = [string]::Join(' ', $parts)
+        $hash = [Convert]::ToHexString([Security.Cryptography.SHA256]::HashData([Text.Encoding]::UTF8.GetBytes($sourceText)))
+        $source = [pscustomobject]@{ PSTypeName = 'Kokoro.StudentCompositionSource'; Identity = $sourceId; Text = $sourceText; TextSHA256 = $hash }
+        $offset = 0
+        $occurrences = @(for ($index = 0; $index -lt $Roles.Length; $index++) {
+            $surface = $parts[$index]
+            [pscustomobject]@{ PSTypeName = 'Kokoro.StudentCompositionOccurrence'; Identity = "$sourceId/$index"; Source = $sourceId
+                SourceSHA256 = $hash; Start = $offset; Length = $surface.Length; Text = $surface
+                Kind = if ($Roles[$index] -ceq 'Punctuation') { 'Punctuation' } else { 'Word' }
+                Lexeme = if ($Lexemes.Count) { $Lexemes[$index] } else { [Guid]::NewGuid().ToString('N') }
+                Roles = [string[]]@($Roles[$index]); RoleEvidence = 'AuthoredStructuralCheck' }
+            $offset += $surface.Length + 1
+        })
+        [pscustomobject]@{ PSTypeName = 'Kokoro.StudentCompositionInput'; Speaker = $Who; Mode = $Mode
+            Proposition = $Proposition; Occurrences = $occurrences; Sources = @($source) }
+    }
+    $composition = New-StudentCompositionState; $checks = [Collections.Generic.List[string]]::new()
+    $topic = New-CompositionCheckInput @('Noun', 'Punctuation') 'first' 'New'
+    $result = $composition.Apply($topic); $identity = $result.Summary.Proposition
+    if ($result.Summary.Status -cne 'Open' -or $result.Summary.Expected -cnotcontains 'Modal' -or $result.Summary.Occurrences -ne 2) { throw 'Composition lost a topic expectation or punctuation occurrence.' }
+    $modal = New-CompositionCheckInput @('Modal') 'first' 'Append'
+    $result = $composition.Apply($modal)
+    if ($result.Summary.Expected -cnotcontains 'BaseTransitive') { throw 'Modal did not open a base-predicate expectation.' }
+    $other = $composition.Apply((New-CompositionCheckInput @('Noun', 'VerbIntransitive') 'second' 'New'))
+    if ($other.Summary.Status -cne 'SatisfiedReopenable' -or $composition.Speakers['first'].Identity -ne $identity) { throw 'Speaker interruption changed another proposition.' }
+    $resume = New-CompositionCheckInput @('Noun', 'Modal', 'BaseTransitive') 'first' 'Resume' $identity @($topic.Occurrences[0].Lexeme, $modal.Occurrences[0].Lexeme, 'operation')
+    $result = $composition.Apply($resume)
+    if ($result.Transition.MatchedPrefix -ne 2 -or $result.Summary.Tokens -ne 3 -or $result.Summary.Expected -cnotcontains 'Noun') { throw 'Repeated-prefix resumption did not extend the same proposition.' }
+    $result = $composition.Apply((New-CompositionCheckInput @('Determiner', 'Noun') 'first' 'Append'))
+    if ($result.Summary.Status -cne 'SatisfiedReopenable') { throw 'Transitive object did not satisfy a proposition.' }
+    $result = $composition.Apply((New-CompositionCheckInput @() 'first' 'Close'))
+    $result = $composition.Apply((New-CompositionCheckInput @('Preposition', 'Noun') 'first' 'Append'))
+    if (-not $result.Transition.Reopened -or $result.Summary.Status -cne 'SatisfiedReopenable') { throw 'A late qualifier did not reopen and extend its proposition.' }
+    $checks.Add('topic-modal-object-interruption-resumption-reopening')
+    $result = $composition.Apply((New-CompositionCheckInput @('Noun', 'VerbIntransitive', 'Conjunction', 'Noun', 'VerbIntransitive') 'coordination' 'New'))
+    if ($result.Summary.Status -cne 'SatisfiedReopenable') { throw 'Clause coordination failed.' }
+    $checks.Add('coordination')
+    $ambiguous = New-CompositionCheckInput @('Noun', 'VerbIntransitive') 'ambiguity' 'New'
+    $ambiguous.Occurrences[1].Roles = [string[]]@('VerbTransitive', 'VerbIntransitive')
+    $result = $composition.Apply($ambiguous)
+    if ($result.Summary.Status -cne 'SatisfiedReopenable' -or $result.Summary.Closures.Type -cnotcontains 'TransitiveObject') { throw 'Composition silently discarded a valency alternative.' }
+    $checks.Add('valency-alternatives')
+    $result = $composition.Apply((New-CompositionCheckInput @('Noun', 'VerbTransitive', 'Noun', 'Preposition', 'Noun') 'attachment' 'New'))
+    $complete = @($composition.Speakers['attachment'].Charts[5].Items | Where-Object { $_.Start -eq 0 -and $_.Rule.Head -ceq 'Clause' -and $_.Dot -eq $_.Rule.Body.Length })
+    if ($complete.Count -ne 1 -or $complete[0].Derivations.Count -lt 2) { throw 'Nominal and predicate attachment alternatives were not retained in the shared derivation graph.' }
+    $checks.Add('attachment-alternatives')
+    $longRoles = [Collections.Generic.List[string]]::new(); $longRoles.Add('Determiner')
+    for ($index = 0; $index -lt 270; $index++) { $longRoles.Add('Adjective') }
+    $longRoles.Add('Noun'); $longRoles.Add('VerbIntransitive')
+    $result = $composition.Apply((New-CompositionCheckInput $longRoles.ToArray() 'long' 'New'))
+    if ($result.Summary.Status -cne 'SatisfiedReopenable' -or $result.Summary.Tokens -ne $longRoles.Count) { throw 'Composition retained a bounded grammar horizon.' }
+    $checks.Add('long-lived-expectation')
+    $before = @($composition.Propositions.Count, $composition.Occurrences.Count, $composition.Events.Count)
+    $invalid = New-CompositionCheckInput @('Noun') 'invalid' 'New'; $invalid.Occurrences[0].Text = 'bad'
+    $rejected = $false
+    try { $null = $composition.Apply($invalid) } catch { $rejected = $true }
+    if (-not $rejected -or $composition.Propositions.Count -ne $before[0] -or $composition.Occurrences.Count -ne $before[1] -or $composition.Events.Count -ne $before[2]) { throw 'Invalid source evidence mutated composition state.' }
+    $checks.Add('source-admission-atomicity')
+    $invalid = New-CompositionCheckInput @('Noun') 'fractional' 'New'; $invalid.Occurrences[0].Start = 0.5
+    $rejected = $false
+    try { $null = $composition.Apply($invalid) } catch { $rejected = $true }
+    if (-not $rejected -or $composition.Propositions.Count -ne $before[0]) { throw 'Fractional source coordinates were rounded into admission.' }
+    $checks.Add('integral-source-coordinates')
+    $invalid = New-CompositionCheckInput @('Noun') 'first' 'Resume' $identity
+    $rejected = $false
+    try { $null = $composition.Apply($invalid) } catch { $rejected = $true }
+    if (-not $rejected -or $composition.Occurrences.Count -ne $before[1] -or $composition.Events.Count -ne $before[2]) { throw 'Divergent prefix resumption mutated composition state.' }
+    $checks.Add('divergent-resumption-rejection')
+    $retained = $composition.Occurrences[$topic.Occurrences[0].Identity]
+    $originalText = $retained.Text; $originalRole = $retained.Roles[0]
+    $topic.Occurrences[0].Text = 'changed'; $topic.Occurrences[0].Roles[0] = 'Adjective'; $topic.Sources[0].Text = 'changed'
+    if ($retained.Text -cne $originalText -or $retained.Roles[0] -cne $originalRole -or $composition.Sources[$retained.Source].Text -ceq 'changed') { throw 'Caller mutation rewrote admitted source evidence.' }
+    $checks.Add('admitted-evidence-snapshot')
+    $unknown = New-CompositionCheckInput @('Noun') 'unknown' 'New'; $unknown.Occurrences[0].Roles = [string[]]@()
+    $result = $composition.Apply($unknown)
+    if ($result.Summary.Status -cne 'Unresolved' -or $result.Summary.Occurrences -ne 1) { throw 'Unknown roles were guessed or their occurrence was lost.' }
+    $checks.Add('unknown-role-abstention')
+    [pscustomobject]@{ PSTypeName = 'Kokoro.StudentCompositionVerification'; Checks = $checks.ToArray()
+        Passed = $true; Boundary = 'Authored structural mechanics; lexical accuracy and held-out generalization are not measured.' }
 }
 
 $script:StudentProsodyRules = @(
@@ -4759,13 +5103,18 @@ $script:StudentSteps = [ordered]@{
     Corpus = { Invoke-StudentCorpus }
     Pronunciation = { Invoke-StudentPronunciation }
     Normalize = { Invoke-StudentNormalization }
+    Compose = { Invoke-StudentComposition }
+    VerifyComposition = { Test-StudentComposition }
     Syllabus = { Invoke-StudentSyllabus }
     Recordings = { Invoke-StudentRecordings }
     Listen = { Invoke-StudentListen }
     Stems = { Invoke-StudentStems }
     Alignment = { Invoke-StudentAlignment }
     Percepts = { Invoke-StudentPercepts }
-    Describe = { $image = Invoke-StudentPercepts; $image.Describe() }
+    Describe = {
+        if ($null -ne $State -and $State.PSObject.TypeNames -contains 'Kokoro.StudentCompositionState') { $State.Describe() }
+        else { $image = Invoke-StudentPercepts; $image.Describe() }
+    }
     Learn = { Invoke-StudentLearning }
     Audit = { Invoke-StudentAlignmentAudit }
     Discriminate = { Invoke-StudentDiscrimination }

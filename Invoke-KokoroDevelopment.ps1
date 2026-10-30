@@ -3870,6 +3870,10 @@ switch ($Command) {
                 if ($LASTEXITCODE -ne 0) { throw "Test-SplitBreathGroups exited ${LASTEXITCODE}: $output" }
             }
             'case-pairs' = { Test-KokoroCasePairs }
+            'student-composition' = {
+                $verification = & (Join-Path $Root 'student/Invoke-Student.ps1') -Step VerifyComposition
+                if ($verification.PSObject.TypeNames -notcontains 'Kokoro.StudentCompositionVerification' -or -not $verification.Passed) { throw 'Student composition mechanics did not pass.' }
+            }
             'audio-measurement' = {
                 Import-Module (Join-Path $Root 'tools/Kokoro.AudioMeasurement.psm1')
                 Test-KokoroAudioMeasurement
