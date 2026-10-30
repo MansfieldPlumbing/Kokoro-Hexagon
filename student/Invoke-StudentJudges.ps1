@@ -15,11 +15,13 @@
                         tokens spoken and from which source, complete paragraphs, grammar status, and the word tokens
                         that carry a grammatical role clause composition can consume.
       Phonics           Lexicon forms at a fixed stride sounded out with their own entry withheld, scored against it.
+      Phrasing          Corpus paragraphs with the author's punctuation removed; the breaks the reader restores between
+                        words, scored for place and strength (komma, kolon, periodos) against the author's marks.
       All               Every judge above.
       Ratchet           Every judge, compared with the declared baseline; throws if any measure regresses.
 #>
 param(
-    [ValidateSet('Composition', 'CompositionRecall', 'CorpusCoverage', 'Phonics', 'All', 'Ratchet')][string] $Step = 'All',
+    [ValidateSet('Composition', 'CompositionRecall', 'CorpusCoverage', 'Phonics', 'Phrasing', 'All', 'Ratchet')][string] $Step = 'All',
     [ValidateRange(1, [int]::MaxValue)][int] $ParagraphStride = 97
 )
 Set-StrictMode -Version Latest
@@ -190,24 +192,33 @@ function Measure-JudgeCompositionRecall {
     New-JudgeScore 'CompositionRecall' $strata $totals 'Whether a parse exists, not whether it is correct; an affix-shaped spelling on a lexicon stem is not always a derivation.'
 }
 
-function Measure-JudgeCorpusCoverage {
-    # Best effort: every word token should be spoken. Scored per token (a pronunciation, its source) and per paragraph
-    # (complete), with grammatical roles as the reachability of clause composition.
-    Import-JudgePhonemizer
+function Get-JudgeParagraphs {
+    # Blank-line paragraphs at a fixed stride through each corpus text, in name order, joined onto one line.
     $files = @(Get-ChildItem -LiteralPath $script:JudgeContext.Text -Filter '*.txt' -File | Sort-Object Name)
     if (-not $files.Count) { throw "No corpus text under $($script:JudgeContext.Text)." }
-    $rows = [Collections.Generic.List[object]]::new(); $sources = [Collections.Generic.Dictionary[string,int]]::new([StringComparer]::Ordinal)
-    $silent = [Collections.Generic.Dictionary[string,int]]::new([StringComparer]::Ordinal); $silentWords = [Collections.Generic.Dictionary[string,int]]::new([StringComparer]::Ordinal)
     foreach ($file in $files) {
         $paragraphs = [IO.File]::ReadAllText($file.FullName).Replace("`r`n", "`n").Split([string[]]@("`n`n"), [StringSplitOptions]::None)
         for ($index = 0; $index -lt $paragraphs.Length; $index += $ParagraphStride) {
             $paragraph = $paragraphs[$index].Replace("`n", ' ').Trim()
             if ($paragraph.Length -lt $script:JudgeLimits.ParagraphMinimum -or $paragraph.Length -gt $script:JudgeLimits.ParagraphMaximum) { continue }
+            [pscustomobject]@{ Source = $file.Name; Paragraph = $index; Text = $paragraph }
+        }
+    }
+}
+
+function Measure-JudgeCorpusCoverage {
+    # Best effort: every word token should be spoken. Scored per token (a pronunciation, its source) and per paragraph
+    # (complete), with grammatical roles as the reachability of clause composition.
+    Import-JudgePhonemizer
+    $rows = [Collections.Generic.List[object]]::new(); $sources = [Collections.Generic.Dictionary[string,int]]::new([StringComparer]::Ordinal)
+    $silent = [Collections.Generic.Dictionary[string,int]]::new([StringComparer]::Ordinal); $silentWords = [Collections.Generic.Dictionary[string,int]]::new([StringComparer]::Ordinal)
+    foreach ($item in Get-JudgeParagraphs) {
+        $index = $item.Paragraph; $paragraph = $item.Text
             # A paragraph the phonemizer throws on is scored as incomplete and unspoken with status Exception, never skipped.
             try { $result = $script:JudgeContext.Run.Invoke($paragraph) }
             catch {
                 $failure = $_.Exception; while ($null -ne $failure.InnerException) { $failure = $failure.InnerException }
-                $rows.Add([pscustomobject]@{ Source = $file.Name; Paragraph = $index; Complete = $false
+                $rows.Add([pscustomobject]@{ Source = $item.Source; Paragraph = $index; Complete = $false
                     GrammarStatus = "Exception:$($failure.GetType().Name)"; Words = 0; SpokenWords = 0; RoleWords = 0 })
                 continue
             }
@@ -216,10 +227,9 @@ function Measure-JudgeCorpusCoverage {
                 if ($word.Pron) { $spoken++; $source = [string]$word.PronunciationSource; $sources[$source] = 1 + $(if ($sources.ContainsKey($source)) { $sources[$source] } else { 0 }) }
                 else { $status = [string]$word.Status; $silent[$status] = 1 + $(if ($silent.ContainsKey($status)) { $silent[$status] } else { 0 }); $silentWords[$word.Word] = 1 + $(if ($silentWords.ContainsKey($word.Word)) { $silentWords[$word.Word] } else { 0 }) }
             }
-            $rows.Add([pscustomobject]@{ Source = $file.Name; Paragraph = $index; Complete = [bool]$result.Complete
+            $rows.Add([pscustomobject]@{ Source = $item.Source; Paragraph = $index; Complete = [bool]$result.Complete
                 GrammarStatus = [string]$result.GrammarStatus; Words = $words.Count; SpokenWords = $spoken
                 RoleWords = @($words | Where-Object { @($_.Roles).Count }).Count })
-        }
     }
     $sum = { param($Rows, $Name) [int]($Rows | Measure-Object $Name -Sum).Sum }
     $strata = @($rows | Group-Object Source | ForEach-Object {
@@ -274,6 +284,82 @@ function Measure-JudgePhonics {
     New-JudgeScore 'Phonics' $strata ([pscustomobject]$totals) 'Lexicon forms at a fixed stride with their own entry withheld from the reader; the lexicon is the reference notation.'
 }
 
+# Break levels between words, after the three pause units of classical rhetoric: komma (a short unit), kolon (a
+# longer unit) and periodos (a complete thought). The author's marks are the reference: comma is komma; semicolon,
+# colon, dash, parenthesis and an inner ellipsis are kolon; a sentence stop or a paragraph end is periodos.
+$script:JudgeBreakMarks = [ordered]@{ ',' = 1; ';' = 2; ':' = 2; '—' = 2; '–' = 2; '(' = 2; ')' = 2; '[' = 2; ']' = 2; '…' = 2; '.' = 3; '?' = 3; '!' = 3 }
+$script:JudgeBreakNames = @('None', 'Komma', 'Kolon', 'Periodos')
+# A period after these words abbreviates them and is not a break.
+$script:JudgeAbbreviations = @('mr', 'mrs', 'ms', 'dr', 'st', 'prof', 'rev', 'gen', 'col', 'capt', 'lt', 'sr', 'jr', 'vol', 'no', 'vs', 'viz', 'etc', 'ib', 'ibid', 'cf', 'pp', 'ch', 'sect', 'fig', 'ed', 'i', 'e', 'g')
+
+function Split-JudgeBreaks([string] $Text) {
+    # Words (letters, digits and word-internal apostrophes, hyphens and digit-group separators) and the strongest
+    # author break after each word. Typed character traversal; no regular expressions.
+    $words = [Collections.Generic.List[string]]::new(); $levels = [Collections.Generic.List[int]]::new(); $at = 0
+    while ($at -lt $Text.Length) {
+        $c = $Text[$at]
+        if ([char]::IsLetterOrDigit($c)) {
+            $start = $at
+            while ($at -lt $Text.Length) {
+                $d = $Text[$at]
+                $inner = $at + 1 -lt $Text.Length -and $at -gt $start
+                if ([char]::IsLetterOrDigit($d)) { $at++; continue }
+                if ($inner -and ($d -eq "'" -or $d -eq [char]8217 -or $d -eq '-') -and [char]::IsLetter($Text[$at - 1]) -and [char]::IsLetter($Text[$at + 1])) { $at++; continue }
+                if ($inner -and ($d -eq ',' -or $d -eq '.') -and [char]::IsDigit($Text[$at - 1]) -and [char]::IsDigit($Text[$at + 1])) { $at++; continue }
+                break
+            }
+            $words.Add($Text.Substring($start, $at - $start)); $levels.Add(0); continue
+        }
+        $level = 0
+        if ($c -eq '-' -and $at + 1 -lt $Text.Length -and $Text[$at + 1] -eq '-') { $level = 2; $at++ }
+        elseif ($c -eq '.' -and $at + 2 -lt $Text.Length -and $Text[$at + 1] -eq '.' -and $Text[$at + 2] -eq '.') { $level = 2; $at += 2 }
+        elseif ($c -eq '.' -and $words.Count -and $script:JudgeAbbreviations -contains $words[$words.Count - 1].ToLowerInvariant()) { $level = 0 }
+        elseif ($script:JudgeBreakMarks.Contains([string]$c)) { $level = $script:JudgeBreakMarks[[string]$c] }
+        if ($level -and $words.Count) { $levels[$levels.Count - 1] = [Math]::Max($levels[$levels.Count - 1], $level) }
+        $at++
+    }
+    if ($words.Count) { $levels[$levels.Count - 1] = 3 }
+    [pscustomobject]@{ Words = $words.ToArray(); Levels = $levels.ToArray() }
+}
+
+function Measure-JudgePhrasing {
+    # The author's punctuation is removed and the reader restores breaks between the bare words. The reader is the
+    # driver's CoreDriver.Phrase(string[] words) returning one level (0 to 3) after each word; until the driver has
+    # it, the only break placed is the paragraph end, which is known from the input.
+    Import-JudgePhonemizer
+    $method = $script:JudgeContext.Run.Method.DeclaringType.GetMethod('Phrase', [Type[]]@([string[]]))
+    $reader = if ($null -ne $method) { $method.CreateDelegate([Func[string[],int[]]]) } else { $null }
+    $reference = [int[]]::new(4); $predicted = [int[]]::new(4); $found = [int[]]::new(4); $levelExact = [int[]]::new(4)
+    $gaps = 0; $paragraphs = 0; $truePositive = 0; $predictedBreaks = 0
+    foreach ($item in Get-JudgeParagraphs) {
+        $split = Split-JudgeBreaks $item.Text
+        if ($split.Words.Length -lt 2) { continue }
+        $paragraphs++
+        [int[]] $guess = if ($null -ne $reader) { $reader.Invoke([string[]]$split.Words) } else { $null }
+        if ($null -eq $guess) { $guess = [int[]]::new($split.Words.Length); $guess[$guess.Length - 1] = 3 }
+        if ($guess.Length -ne $split.Words.Length) { throw 'The phrasing reader returned a level count different from its word count.' }
+        for ($i = 0; $i -lt $split.Words.Length; $i++) {
+            $want = $split.Levels[$i]; $got = [Math]::Max(0, [Math]::Min(3, $guess[$i])); $gaps++
+            $reference[$want]++; $predicted[$got]++
+            if ($got -gt 0) { $predictedBreaks++ }
+            if ($want -gt 0 -and $got -gt 0) { $truePositive++; $found[$want]++ }
+            if ($want -gt 0 -and $got -eq $want) { $levelExact[$want]++ }
+        }
+    }
+    $referenceBreaks = $reference[1] + $reference[2] + $reference[3]
+    $precision = Get-JudgeShare $truePositive $predictedBreaks; $recall = Get-JudgeShare $truePositive $referenceBreaks
+    $strata = @(foreach ($level in 1..3) {
+        [pscustomobject]@{ Level = $script:JudgeBreakNames[$level]; Reference = $reference[$level]; Predicted = $predicted[$level]
+            RecallPercent = Get-JudgeShare $found[$level] $reference[$level]; LevelExactPercent = Get-JudgeShare $levelExact[$level] $reference[$level] }
+    })
+    $totals = [pscustomobject]@{ Paragraphs = $paragraphs; Gaps = $gaps; ReferenceBreaks = $referenceBreaks; PredictedBreaks = $predictedBreaks
+        BreakPrecisionPercent = $precision; BreakRecallPercent = $recall
+        BreakF1Percent = if ($precision + $recall) { [Math]::Round(2 * $precision * $recall / ($precision + $recall), 1) } else { 0.0 }
+        LevelExactPercent = Get-JudgeShare ($levelExact[1] + $levelExact[2] + $levelExact[3]) $referenceBreaks
+        Reader = if ($null -ne $reader) { 'CoreDriver.Phrase' } else { 'Absent' } }
+    New-JudgeScore 'Phrasing' $strata $totals 'Author punctuation as the reference for where a reader breaks and how strongly; breaks a speaker makes where the author wrote none count against precision here and are checked against audio separately.'
+}
+
 # The ratchet: each measure may improve but never regress. Raised by the judges' owner when a change improves it.
 $script:JudgeBaseline = @(
     [pscustomobject]@{ Judge = 'Composition'; Measure = 'ExactWords'; Better = 'Higher'; Value = 3601 }
@@ -287,6 +373,8 @@ $script:JudgeBaseline = @(
     [pscustomobject]@{ Judge = 'CorpusCoverage'; Measure = 'RoleWords'; Better = 'Higher'; Value = 12 }
     [pscustomobject]@{ Judge = 'Phonics'; Measure = 'FirstExactPercent'; Better = 'Higher'; Value = 0 }
     [pscustomobject]@{ Judge = 'Phonics'; Measure = 'FirstSegmentsPercent'; Better = 'Higher'; Value = 0 }
+    [pscustomobject]@{ Judge = 'Phrasing'; Measure = 'BreakF1Percent'; Better = 'Higher'; Value = 13.3 }
+    [pscustomobject]@{ Judge = 'Phrasing'; Measure = 'LevelExactPercent'; Better = 'Higher'; Value = 7.1 }
 )
 
 function Test-JudgeRatchet([object[]] $Scores) {
@@ -310,6 +398,7 @@ $script:JudgeSteps = [ordered]@{
     CompositionRecall = { Measure-JudgeCompositionRecall }
     CorpusCoverage = { Measure-JudgeCorpusCoverage }
     Phonics = { Measure-JudgePhonics }
+    Phrasing = { Measure-JudgePhrasing }
 }
 if ($Step -ceq 'All') { foreach ($name in $script:JudgeSteps.Keys) { & $script:JudgeSteps[$name] } }
 elseif ($Step -ceq 'Ratchet') { Test-JudgeRatchet @(foreach ($name in $script:JudgeSteps.Keys) { & $script:JudgeSteps[$name] }) }

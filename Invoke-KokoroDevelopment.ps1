@@ -62,7 +62,7 @@ twice, or written as a scratch script, is a missing command: add it here.
                               Manufacture and gate the compact prosody bank on the laptop; no phone access.
   Student -Parameters @{ Step = 'Console' }
     Host text-to-speech console (student/Invoke-Student.ps1): our phonemizer and the lowered syllabus; plays and saves WAVs under build/.
-  StudentJudges [-Parameters @{ Step = 'All'|'Ratchet'|'Composition'|'CompositionRecall'|'CorpusCoverage'|'Phonics' }]
+  StudentJudges [-Parameters @{ Step = 'All'|'Ratchet'|'Composition'|'CompositionRecall'|'CorpusCoverage'|'Phonics'|'Phrasing' }]
                               Independent judges of the Student's front end (student/Invoke-StudentJudges.ps1), owned apart
                               from the Student; typed scores and receipts under build/. Ratchet throws if any measure falls
                               below its declared baseline and runs in Verify. No phone access.
