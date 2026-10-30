@@ -44,6 +44,8 @@ Steps:
   VerifyMorphology  Check the requested composition proofs and preservation of alternatives.
   Sources   Retain original corpus snapshots, whitespace transformations and original token spans.
   VerifySources  Check source-coordinate mapping and punctuation retention with the lowered tokenizer.
+  Votes     Report source-aligned pronunciation agreements, disagreements and missing provenance from -Corpus.
+  VerifyVotes  Check disagreement, missing evidence and correlated-source admission decisions.
 .PARAMETER Corpus
 Corpus directory for Pronunciation; defaults to the latest build/corpus-* with corpus.clixml.
 .PARAMETER ParagraphLimit
@@ -80,7 +82,7 @@ Run from a PowerShell prompt: pwsh -File passes every argument as a string, so a
 #requires -Version 7.7
 [CmdletBinding()]
 param(
-    [ValidateSet('Console', 'Render', 'Corpus', 'Sources', 'VerifySources', 'Pronunciation', 'Normalize', 'Compose', 'VerifyComposition', 'Morphology', 'VerifyMorphology', 'Syllabus', 'Recordings', 'Listen', 'Stems', 'Alignment', 'Percepts', 'Describe', 'Learn', 'Audit', 'Discriminate', 'Reconsider', 'Inventory', 'Speak', 'Ablate', 'PitchGate', 'Trace', 'Normalization', 'Score', 'Residuals', 'Retune')][string] $Step = 'Console',
+    [ValidateSet('Console', 'Render', 'Corpus', 'Sources', 'VerifySources', 'Votes', 'VerifyVotes', 'Pronunciation', 'Normalize', 'Compose', 'VerifyComposition', 'Morphology', 'VerifyMorphology', 'Syllabus', 'Recordings', 'Listen', 'Stems', 'Alignment', 'Percepts', 'Describe', 'Learn', 'Audit', 'Discriminate', 'Reconsider', 'Inventory', 'Speak', 'Ablate', 'PitchGate', 'Trace', 'Normalization', 'Score', 'Residuals', 'Retune')][string] $Step = 'Console',
     [ValidateRange(2, 64)][int] $Threads = [Math]::Max(2, [Environment]::ProcessorCount),
     [string] $Text = '',
     [string] $Voice = 'af_heart',
@@ -1470,6 +1472,7 @@ function Get-StudentNormalizationResult([object] $Interpretation) {
 }
 Update-TypeData -TypeName 'Kokoro.StudentToken' -MemberType ScriptProperty -MemberName Spoken -Value { $this.Kind -in 'Word', 'Number', 'Ordinal', 'Punctuation', 'Quote' } -Force
 Update-TypeData -TypeName 'Kokoro.StudentToken' -MemberType ScriptProperty -MemberName CounterExample -Value {
+    if ($null -ne $this.PSObject.Properties['PronunciationDecision'] -and $null -ne $this.PronunciationDecision) { return $this.PronunciationDecision.Status -ceq 'Disagreement' }
     # Zira's pronunciation of the same span differs from the one used: kept as a counter-example.
     $null -ne $this.Zira -and $null -ne $this.Phonemizer -and $this.ZiraLast -eq $this.Last -and $this.ZiraComparable -cne $script:StudentContext.Kernels.Unstressed.Invoke($this.Phonemizer)
 } -Force
@@ -1765,6 +1768,131 @@ function New-StudentPronunciationTable([int] $Count) {
     [pscustomobject]@{ Last = $last; Phones = [string[]]::new($Count) }
 }
 
+function New-StudentPronunciationDecision($Occurrence, [object[]] $Votes) {
+    $kernel = Import-StudentKernels
+    $available = @($Votes | Where-Object { $null -ne $_.Phones -and $_.Phones.Length -gt 0 })
+    $readings = [Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
+    $stressReadings = [Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
+    $families = [Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
+    $aligned = $true; $known = 0
+    foreach ($vote in $available) {
+        if ($vote.Last -ne $Occurrence.Last) { $aligned = $false }
+        [void]$readings.Add($kernel.Unstressed.Invoke($vote.Phones))
+        if ($vote.StressAvailable) { [void]$stressReadings.Add($vote.Phones) }
+        if ($vote.OriginKnown -and $vote.Family) { [void]$families.Add($vote.Family); $known++ }
+    }
+    $status = if (-not $available.Count) { 'MissingVotes' }
+        elseif (-not $aligned) { 'UnalignedSpans' }
+        elseif ($readings.Count -gt 1 -or $stressReadings.Count -gt 1) { 'Disagreement' }
+        elseif ($families.Count -ge 2 -and $known -eq $available.Count) { 'SegmentAgreement' }
+        else { 'SingleLineageOrUnverifiedAgreement' }
+    [pscustomobject]@{ PSTypeName = 'Kokoro.StudentPronunciationDecision'; Occurrence = $Occurrence; Votes = $Votes
+        Status = $status; SegmentReadings = [string[]]@($readings | Sort-Object)
+        IndependentFamilies = [string[]]@($families | Sort-Object)
+        StressStatus = if ($stressReadings.Count -gt 1) { 'Disagreement' } elseif ($stressReadings.Count) { 'SuppliedSingleSourceOrUnverified' } else { 'Unavailable' }
+        TimingUse = 'ComparatorOnly'; TimingAdmission = 'Unvalidated'; Canonicalization = 'Fixed symbol adapters; stress is a separate feature; no learned substitutions' }
+}
+
+function Get-StudentBookVote($Book, [int] $Token) {
+    $ours = $Book.Phonemizer; $zira = $Book.Zira
+    $hasProducer = $null -ne $ours.PSObject.Properties['Producers'] -and $null -ne $ours.Producers[$Token]
+    $producer = if ($hasProducer) { $ours.Producers[$Token] } else { 'LegacyProducerNotRetained' }
+    $family = if ($producer -cin @('ZiraCorrection', 'ZiraEvents')) { 'Zira' } else { 'Moby' }
+    $evidence = if ($null -ne $zira.PSObject.Properties['CaptureEvidence'] -and $null -ne $zira.PSObject.Properties['CaptureIndex'] -and $zira.CaptureIndex[$Token] -ge 0) { $zira.CaptureEvidence[$zira.CaptureIndex[$Token]] } else { $null }
+    $mapped = $null -ne $Book.PSObject.Properties['Source'] -and $null -ne $Book.PSObject.Properties['OriginalSpans']
+    $last = if ($null -ne $ours.Phones[$Token]) { $ours.Last[$Token] } elseif ($null -ne $zira.Phones[$Token]) { $zira.Last[$Token] } else { $Token }
+    if ($last -lt $Token -or $last -ge ($Book.Tokens.Length -shr 2)) { throw 'Pronunciation vote has an invalid token span.' }
+    $occurrence = [pscustomobject]@{ PSTypeName = 'Kokoro.StudentOccurrenceReference'; Book = $Book.Name; First = $Token; Last = $last
+        ProjectedStart = $Book.Tokens[4 * $Token + 1]; ProjectedLength = $Book.Tokens[4 * $Token + 2]
+        SourceIdentity = if ($mapped) { $Book.Source.Identity } else { $null }
+        OriginalStart = if ($mapped) { $Book.OriginalSpans[2 * $Token] } else { $null }
+        OriginalLength = if ($mapped) { $Book.OriginalSpans[2 * $last] + $Book.OriginalSpans[2 * $last + 1] - $Book.OriginalSpans[2 * $Token] } else { $null }
+        SourceMapping = if ($mapped) { 'OriginalMapped' } else { 'LegacyUnmapped' } }
+    $votes = @(
+        [pscustomobject]@{ PSTypeName = 'Kokoro.StudentPronunciationVote'; Source = 'Phonemizer'; Family = $family
+            Producer = $producer; ProducerSHA256 = $ours.DriverSHA256; OriginKnown = $hasProducer; Phones = $ours.Phones[$Token]
+            Notation = 'Kokoro'; Last = $ours.Last[$Token]; StressAvailable = $true; TimingUse = 'None' }
+        [pscustomobject]@{ PSTypeName = 'Kokoro.StudentPronunciationVote'; Source = 'Zira'; Family = 'Zira'
+            Producer = if ($null -ne $evidence) { $evidence.Voice } else { 'LegacyProducerNotRetained' }
+            ProducerSHA256 = if ($null -ne $evidence) { $evidence.EngineSHA256 } else { $null }
+            OriginKnown = $null -ne $evidence -and $evidence.OriginKnown; Phones = $zira.Phones[$Token]
+            RawPhones = if ($null -ne $zira.PSObject.Properties['RawPhones']) { $zira.RawPhones[$Token] } else { $null }
+            CaptureIdentity = if ($null -ne $evidence) { $evidence.Identity } else { $null }
+            WaveSHA256 = if ($null -ne $evidence) { $evidence.WaveSHA256 } else { $null }
+            Notation = 'Kokoro after fixed SAPI adapter'; Last = $zira.Last[$Token]; StressAvailable = $false; TimingUse = 'ComparatorOnly' }
+    )
+    New-StudentPronunciationDecision $occurrence $votes
+}
+
+function Invoke-StudentVotes {
+    $path = Join-Path (Get-StudentCorpusPath) 'corpus.clixml'
+    $corpusHash = (Get-FileHash -LiteralPath $path).Hash
+    $data = ConvertFrom-StudentStored (Import-Clixml -LiteralPath $path)
+    $decisions = [Collections.Generic.List[object]]::new(); $sources = [Collections.Generic.List[object]]::new()
+    $types = [Collections.Generic.Dictionary[string,object]]::new([StringComparer]::Ordinal)
+    foreach ($book in $data.Books) {
+        $counts = [ordered]@{ Eligible = 0; Phonemizer = 0; Zira = 0; BothAligned = 0; Disagreement = 0; SegmentAgreement = 0; MissingOriginalMapping = 0 }
+        for ($token = 0; $token -lt ($book.Tokens.Length -shr 2); $token++) {
+            $kind = $book.Tokens[4 * $token]
+            if ($kind -gt 3) { continue }
+            $decision = Get-StudentBookVote $book $token; $decisions.Add($decision); $counts.Eligible++
+            $ours = $decision.Votes[0]; $zira = $decision.Votes[1]
+            if ($ours.Phones) { $counts.Phonemizer++ }; if ($zira.Phones) { $counts.Zira++ }
+            $aligned = $ours.Phones -and $zira.Phones -and $ours.Last -eq $zira.Last
+            if ($aligned) { $counts.BothAligned++; if ($decision.Status -ceq 'Disagreement') { $counts.Disagreement++ } }
+            if ($decision.Status -ceq 'SegmentAgreement') { $counts.SegmentAgreement++ }
+            if ($decision.Occurrence.SourceMapping -ceq 'LegacyUnmapped') { $counts.MissingOriginalMapping++ }
+            $text = $book.Text.Substring($book.Tokens[4 * $token + 1], $book.Tokens[4 * $token + 2])
+            $typeKey = "$kind`n$text"; $type = $null
+            if (-not $types.TryGetValue($typeKey, [ref]$type)) {
+                $type = [pscustomobject]@{ PSTypeName = 'Kokoro.StudentPronunciationTypeCoverage'; Kind = $script:StudentTokenKinds[$kind]
+                    Text = $text; Occurrences = 0; BothAligned = 0; Disagreements = 0; SegmentAgreements = 0 }
+                $types.Add($typeKey, $type)
+            }
+            $type.Occurrences++; if ($aligned) { $type.BothAligned++ }; if ($decision.Status -ceq 'Disagreement') { $type.Disagreements++ }
+            if ($decision.Status -ceq 'SegmentAgreement') { $type.SegmentAgreements++ }
+        }
+        $sources.Add([pscustomobject]@{ PSTypeName = 'Kokoro.StudentPronunciationSourceCoverage'; Book = $book.Name
+            Counts = [pscustomobject]$counts; RawSegmentAgreements = $counts.BothAligned - $counts.Disagreement
+            DisagreementRate = if ($counts.BothAligned) { $counts.Disagreement / $counts.BothAligned } else { $null }
+            RateDenominator = 'Occurrences with both pronunciations on the same token span' })
+    }
+    $report = [pscustomobject]@{ PSTypeName = 'Kokoro.StudentPronunciationVotes'; CorpusSHA256 = $corpusHash
+        Sources = $sources.ToArray(); Types = @($types.Values); Decisions = $decisions.ToArray()
+        NotCollected = @('CMUdict raw votes', 'Moby raw votes separate from its derived phonemizer')
+        TimingUse = 'ComparatorOnly'; TimingValidation = 'NotEstablished'; ProducerSHA256 = $script:StudentMachineSHA256 }
+    if ($OutputPath) {
+        $directory = Get-StudentOutputPath 'Votes'; $receiptPath = Join-Path $directory 'votes.clixml'
+        if (Test-Path -LiteralPath $receiptPath) { throw 'Pronunciation vote receipt already exists; choose a new OutputPath.' }
+        Export-Clixml -LiteralPath $receiptPath -InputObject (ConvertTo-StudentStored $report) -Depth 9
+    }
+    $report
+}
+
+function Test-StudentVotes {
+    # Source-admission logic over synthetic metadata; no lexical or held-out probe items.
+    function New-VoteCheck([string] $Name, [string] $Family, [string] $Phones, [bool] $Known = $true, [int] $Last = 0) {
+        [pscustomobject]@{ PSTypeName = 'Kokoro.StudentPronunciationVote'; Source = $Name; Family = $Family
+            Phones = $Phones; Last = $Last; OriginKnown = $Known; StressAvailable = $false; Purpose = 'StructuralFixture' }
+    }
+    $occurrence = [pscustomobject]@{ Last = 0 }
+    $first = New-VoteCheck 'first' 'lexicon' 'a'; $second = New-VoteCheck 'second' 'speech' 'a'
+    $agreement = New-StudentPronunciationDecision $occurrence @($first, $second)
+    if ($agreement.Status -cne 'SegmentAgreement' -or $agreement.StressStatus -cne 'Unavailable') { throw 'Independent segment agreement invented stress or was not established.' }
+    $second.Phones = 'b'
+    if ((New-StudentPronunciationDecision $occurrence @($first, $second)).Status -cne 'Disagreement') { throw 'Disagreeing votes were silently selected.' }
+    $second.Phones = 'a'; $second.Family = 'lexicon'
+    if ((New-StudentPronunciationDecision $occurrence @($first, $second)).Status -cne 'SingleLineageOrUnverifiedAgreement') { throw 'Correlated sources counted as independent votes.' }
+    $second.Family = 'speech'; $second.OriginKnown = $false
+    if ((New-StudentPronunciationDecision $occurrence @($first, $second)).Status -cne 'SingleLineageOrUnverifiedAgreement') { throw 'Missing producer provenance was admitted as independent evidence.' }
+    $second.OriginKnown = $true; $second.Last = 1
+    if ((New-StudentPronunciationDecision $occurrence @($first, $second)).Status -cne 'UnalignedSpans') { throw 'Different source spans were treated as pronunciation disagreement.' }
+    if ((New-StudentPronunciationDecision $occurrence @()).Status -cne 'MissingVotes') { throw 'Missing votes were treated as agreement.' }
+    [pscustomobject]@{ PSTypeName = 'Kokoro.StudentVoteVerification'; Passed = $true
+        Checks = @('independent-agreement', 'disagreement-retention', 'lineage-deduplication', 'producer-provenance', 'span-alignment', 'missing-evidence')
+        Boundary = 'Admission mechanics only; source accuracy and held-out generalization are not measured.' }
+}
+
 function Add-StudentPhonemizerPronunciations([object] $Book, [Func[string,object]] $Phonemize) {
     # Our phonemizer over each sentence's projected text. Every token it pronounces (status Valid)
     # is kept, including tokens of sentences it rejects; the whole-sentence result is kept for the
@@ -1772,6 +1900,7 @@ function Add-StudentPhonemizerPronunciations([object] $Book, [Func[string,object
     $kernels = $script:StudentContext.Kernels
     $chars = $Book.Text.ToCharArray(); $count = $Book.Tokens.Length -shr 2
     $table = New-StudentPronunciationTable $count
+    $table | Add-Member -NotePropertyName Producers -NotePropertyValue ([string[]]::new($count))
     $normalizations = [Collections.Generic.List[object]]::new()
     $sentenceCount = $Book.Sentences.Length -shr 1
     $complete = [string[]]::new($sentenceCount)
@@ -1791,6 +1920,7 @@ function Add-StudentPhonemizerPronunciations([object] $Book, [Func[string,object
             if ($cover[2 * $t] -lt 0 -or $driverTokens[$t].Status -cne 'Valid' -or -not $driverTokens[$t].Pron) { continue }
             $at = $first + $cover[2 * $t]
             $table.Phones[$at] = $driverTokens[$t].Pron; $table.Last[$at] = $first + $cover[2 * $t + 1]
+            $table.Producers[$at] = $driverTokens[$t].PronunciationSource
             $program = $driverTokens[$t].Normalization
             if ($null -ne $program) {
                 $occurrence = [pscustomobject]@{ PSTypeName = 'Kokoro.StudentOccurrenceReference'; Book = $Book.Index
@@ -1845,13 +1975,17 @@ function Invoke-StudentZiraCapture([string[]] $Texts) {
     # Zira's word events for each text on Threads parallel synthesizers: for each word event its
     # source start and length, audio position and duration (100 ns ticks) and raw phones.
     $reference = Join-Path $script:StudentRoot $script:StudentInputs.Pronunciation
+    $waveRoot = Join-Path $script:StudentBuild 'student/zira/waves'; [void][IO.Directory]::CreateDirectory($waveRoot)
+    $sourceRoot = $script:StudentRoot
     $results = [object[]]::new($Texts.Count)
     $batches = @(for ($t = 0; $t -lt $Threads; $t++) { , @(for ($i = $t; $i -lt $Texts.Count; $i += $Threads) { $i }) })
     $captured = $batches | Where-Object { $_.Count } | ForEach-Object -ThrottleLimit $Threads -Parallel {
         $captureTexts = $using:Texts
+        $captureWaveRoot = $using:waveRoot; $captureRoot = $using:sourceRoot
         $null = New-Module -Name StudentZira -ArgumentList $using:reference -ScriptBlock { param([string] $Reference); . $Reference -Import; Export-ModuleMember -Function Get-EnglishZiraReference }
         foreach ($i in $_) {
-            $capture = try { Get-EnglishZiraReference -Text $captureTexts[$i] -NoSave } catch { $null }
+            $wavePath = Join-Path $captureWaveRoot ([Guid]::NewGuid().ToString('N') + '.wav')
+            $capture = try { Get-EnglishZiraReference -Text $captureTexts[$i] -NoSave -WavePath $wavePath } catch { $null }
             if ($null -eq $capture) { [pscustomobject]@{ Index = $i; Starts = $null }; continue }
             $audible = @($capture.Phones | Where-Object { $_.Phone.Length -gt 0 -and -not [char]::IsControl($_.Phone[0]) })
             $words = @($capture.Words); $count = $words.Count
@@ -1864,7 +1998,13 @@ function Invoke-StudentZiraCapture([string[]] $Texts) {
                 while ($p -lt $audible.Count -and $audible[$p].Ticks -lt $limit) { [void]$builder.Append($audible[$p].Phone); $end = $audible[$p].Ticks + $audible[$p].DurationTicks; $p++ }
                 $starts[$w] = $words[$w].Start; $lengths[$w] = $words[$w].Length; $ticks[$w] = $words[$w].Ticks; $durations[$w] = $end - $words[$w].Ticks; $phones[$w] = $builder.ToString()
             }
-            [pscustomobject]@{ Index = $i; Starts = $starts; Lengths = $lengths; Ticks = $ticks; Durations = $durations; Phones = $phones }
+            [pscustomobject]@{ Index = $i; Starts = $starts; Lengths = $lengths; Ticks = $ticks; Durations = $durations; Phones = $phones
+                Identity = $capture.Identity; Voice = $capture.Voice; EngineSHA256 = $capture.EngineSha256; AssemblySHA256 = $capture.AssemblySha256
+                TextSHA256 = [Convert]::ToHexString([Security.Cryptography.SHA256]::HashData([Text.Encoding]::UTF8.GetBytes($captureTexts[$i])))
+                WaveRelativePath = [IO.Path]::GetRelativePath($captureRoot, $wavePath); WaveSHA256 = $capture.WaveSHA256
+                PhoneEvents = [pscustomobject]@{ Phones = [string[]]@($capture.Phones.Phone); Next = [string[]]@($capture.Phones.Next)
+                    Ticks = [long[]]@($capture.Phones.Ticks); DurationTicks = [long[]]@($capture.Phones.DurationTicks); Emphasis = [int[]]@($capture.Phones.Emphasis) }
+                TimingUse = 'ComparatorOnly'; TimingValidation = 'PendingWaveValidation' }
         }
     }
     foreach ($item in $captured) { $results[$item.Index] = $item }
@@ -1881,6 +2021,8 @@ function Get-StudentZiraCaptures([string[]] $Texts) {
     $directory = Join-Path $script:StudentBuild 'student/zira/batches'
     [void][IO.Directory]::CreateDirectory($directory)
     $referenceHash = (Get-FileHash -LiteralPath (Join-Path $script:StudentRoot $script:StudentInputs.Pronunciation)).Hash
+    $captureSource = (Get-Command Invoke-StudentZiraCapture).ScriptBlock.ToString().Replace("`r`n", "`n")
+    $captureSpecHash = [Convert]::ToHexString([Security.Cryptography.SHA256]::HashData([Text.Encoding]::UTF8.GetBytes($captureSource)))
     $results = [object[]]::new($Texts.Count)
     $reused = 0; $imported = 0; $captured = 0
     for ($first = 0; $first -lt $Texts.Count; $first += $script:StudentText.ZiraBatchChunks) {
@@ -1888,7 +2030,7 @@ function Get-StudentZiraCaptures([string[]] $Texts) {
         $batchTexts = [string[]]$Texts[$first..($first + $count - 1)]
         $hash = [Security.Cryptography.IncrementalHash]::CreateHash([Security.Cryptography.HashAlgorithmName]::SHA256)
         try {
-            $hash.AppendData([Text.Encoding]::UTF8.GetBytes($referenceHash + '|Microsoft Zira Desktop'))
+            $hash.AppendData([Text.Encoding]::UTF8.GetBytes($referenceHash + '|' + $captureSpecHash + '|Microsoft Zira Desktop'))
             foreach ($item in $batchTexts) {
                 $bytes = [Text.Encoding]::UTF8.GetBytes($item)
                 $hash.AppendData([BitConverter]::GetBytes([int]$bytes.Length)); $hash.AppendData($bytes)
@@ -1901,7 +2043,7 @@ function Get-StudentZiraCaptures([string[]] $Texts) {
         if ($cached) { $batch = [object[]](Import-Clixml -LiteralPath $path); $reused++ }
         elseif ($legacy.Count) {
             $batch = [object[]]$legacy[$first..($first + $count - 1)]
-            if (@($batch | Where-Object { $null -eq $_ -or $null -eq $_.Starts }).Count) {
+            if (@($batch | Where-Object { $null -eq $_ -or $null -eq $_.Starts -or $null -eq $_.PSObject.Properties['EngineSHA256'] -or $null -eq $_.PSObject.Properties['WaveSHA256'] }).Count) {
                 $batch = @(Invoke-StudentZiraCapture $batchTexts); $captured += $count
             } else { $imported += $count }
         }
@@ -1923,7 +2065,7 @@ function Get-StudentZiraCaptures([string[]] $Texts) {
         }
         if (-not $cached -and $complete) {
             $pending = $path + '.partial'
-            Export-Clixml -InputObject $batch -LiteralPath $pending -Depth 3
+            Export-Clixml -InputObject $batch -LiteralPath $pending -Depth 6
             [IO.File]::Move($pending, $path)
         }
         for ($i = 0; $i -lt $count; $i++) { $results[$first + $i] = $batch[$i] }
@@ -1945,19 +2087,36 @@ function Add-StudentZiraPronunciations([object] $Book, [object] $Zira) {
     $table = New-StudentPronunciationTable $count
     $table | Add-Member -NotePropertyName Ticks -NotePropertyValue ([long[]]::new($count))
     $table | Add-Member -NotePropertyName Durations -NotePropertyValue ([long[]]::new($count))
+    $table | Add-Member -NotePropertyName RawPhones -NotePropertyValue ([string[]]::new($count))
+    $captureIndices = [int[]]::new($count); [Array]::Fill($captureIndices, -1)
+    $table | Add-Member -NotePropertyName CaptureIndex -NotePropertyValue $captureIndices
+    $captureEvidence = [Collections.Generic.List[object]]::new()
     $failed = 0; $outside = 0
     for ($c = 0; $c -lt $chunks.Count; $c++) {
         $capture = $captures[$c]
         if ($null -eq $capture -or $null -eq $capture.Starts) { $failed++; continue }
+        $originKnown = $null -ne $capture.PSObject.Properties['Identity'] -and $null -ne $capture.PSObject.Properties['EngineSHA256'] -and $null -ne $capture.PSObject.Properties['AssemblySHA256'] -and
+            $capture.Identity -and $capture.EngineSHA256 -and $capture.AssemblySHA256
+        $evidenceIndex = $captureEvidence.Count
+        $captureEvidence.Add([pscustomobject]@{ PSTypeName = 'Kokoro.StudentZiraCaptureEvidence'; OriginKnown = $originKnown
+            Identity = if ($originKnown) { $capture.Identity } else { $null }
+            Voice = if ($originKnown) { $capture.Voice } else { 'LegacyProducerNotRetained' }
+            EngineSHA256 = if ($originKnown) { $capture.EngineSHA256 } else { $null }
+            AssemblySHA256 = if ($originKnown) { $capture.AssemblySHA256 } else { $null }
+            WaveRelativePath = if ($null -ne $capture.PSObject.Properties['WaveRelativePath']) { $capture.WaveRelativePath } else { $null }
+            WaveSHA256 = if ($null -ne $capture.PSObject.Properties['WaveSHA256']) { $capture.WaveSHA256 } else { $null }
+            PhoneEvents = if ($null -ne $capture.PSObject.Properties['PhoneEvents']) { $capture.PhoneEvents } else { $null }
+            TimingUse = 'ComparatorOnly'; TimingValidation = 'PendingWaveValidation' })
         $events = [Collections.Generic.List[int]]::new(); $phones = [Collections.Generic.List[string]]::new(); $ticks = [Collections.Generic.List[long]]::new(); $durations = [Collections.Generic.List[long]]::new()
+        $rawReadings = [Collections.Generic.List[string]]::new()
         $starts = [int[]]$capture.Starts; $lengths = [int[]]$capture.Lengths; $starting = [long[]]$capture.Ticks; $lasting = [long[]]$capture.Durations; $raw = [string[]]$capture.Phones
         for ($w = 0; $w -lt $starts.Length; $w++) {
             $mapped = ConvertTo-EnglishKokoroPhones $raw[$w]
             $n = $events.Count
             if ($n -and $events[$n - 2] -eq $starts[$w] -and $events[$n - 1] -eq $lengths[$w]) {
-                $phones[$phones.Count - 1] += ' ' + $mapped; $durations[$durations.Count - 1] = $starting[$w] + $lasting[$w] - $ticks[$ticks.Count - 1]; continue
+                $phones[$phones.Count - 1] += ' ' + $mapped; $rawReadings[$rawReadings.Count - 1] += ' ' + $raw[$w]; $durations[$durations.Count - 1] = $starting[$w] + $lasting[$w] - $ticks[$ticks.Count - 1]; continue
             }
-            $events.Add($starts[$w]); $events.Add($lengths[$w]); $phones.Add($mapped); $ticks.Add($starting[$w]); $durations.Add($lasting[$w])
+            $events.Add($starts[$w]); $events.Add($lengths[$w]); $phones.Add($mapped); $rawReadings.Add($raw[$w]); $ticks.Add($starting[$w]); $durations.Add($lasting[$w])
         }
         $cover = $kernels.Cover.Invoke($chunks[$c].Spans, $events.ToArray())
         for ($e = 0; $e -lt $phones.Count; $e++) {
@@ -1967,8 +2126,10 @@ function Add-StudentZiraPronunciations([object] $Book, [object] $Zira) {
             if (-not $valid) { $outside++; continue }
             $at = $chunks[$c].First + $cover[2 * $e]
             $table.Phones[$at] = $phones[$e]; $table.Last[$at] = $chunks[$c].First + $cover[2 * $e + 1]; $table.Ticks[$at] = $ticks[$e]; $table.Durations[$at] = $durations[$e]
+            $table.RawPhones[$at] = $rawReadings[$e]; $table.CaptureIndex[$at] = $evidenceIndex
         }
     }
+    $table | Add-Member -NotePropertyName CaptureEvidence -NotePropertyValue $captureEvidence.ToArray()
     $Book | Add-Member -NotePropertyName Zira -NotePropertyValue $table -Force
     [pscustomobject]@{ Chunks = $chunks.Count; FailedChunks = $failed; OutsideVocabulary = $outside; Cache = $captureResult.Cache
         ReusedBatches = $captureResult.ReusedBatches; ImportedChunks = $captureResult.ImportedChunks; CapturedChunks = $captureResult.CapturedChunks }
@@ -2010,23 +2171,30 @@ function Get-StudentCorrespondences([object[]] $Books) {
     [pscustomobject]@{ Records = @($records | Sort-Object Occurrences -Descending); From = [char[]]@($mapped | ForEach-Object { $_.Zira[0] }); To = [string[]]@($mapped | ForEach-Object Kokoro); SpanPairs = $pairs.Count }
 }
 
-function Resolve-StudentPronunciations([object] $Book, [object] $Correspondences) {
-    # The pronunciation used for each span: ours where our phonemizer pronounces the token; else
-    # Zira's, with the learned correspondences applied and primary stress before the first vowel.
-    # Where both pronounce the same span and differ, ours is used and Zira's form stays on the
-    # token as a counter-example.
-    $kernels = $script:StudentContext.Kernels
+function Resolve-StudentPronunciations([object] $Book) {
+    # Admit agreement from independently identified producers. Learned substitutions remain
+    # correspondence candidates and never erase disagreements in the source votes.
     $count = $Book.Tokens.Length -shr 2
     $table = New-StudentPronunciationTable $count
     $table | Add-Member -NotePropertyName Source -NotePropertyValue ([byte[]]::new($count))
-    $ours = $Book.Phonemizer; $zira = $Book.Zira
+    $decisions = [object[]]::new($count)
     for ($a = 0; $a -lt $count; $a++) {
-        if ($null -ne $ours.Phones[$a]) { $table.Phones[$a] = $ours.Phones[$a]; $table.Last[$a] = $ours.Last[$a]; $table.Source[$a] = 1 }
-        elseif ($null -ne $zira.Phones[$a]) {
-            $learned = $kernels.Substitute.Invoke($zira.Phones[$a], $Correspondences.From, $Correspondences.To)
-            $table.Phones[$a] = $kernels.StressFirstVowel.Invoke($learned, $script:StudentText.KokoroVowels); $table.Last[$a] = $zira.Last[$a]; $table.Source[$a] = 2
+        $kind = $Book.Tokens[4 * $a]
+        if ($kind -gt 3) {
+            if ($kind -le 5 -and $null -ne $Book.Phonemizer.Phones[$a]) {
+                $table.Phones[$a] = $Book.Phonemizer.Phones[$a]; $table.Last[$a] = $Book.Phonemizer.Last[$a]; $table.Source[$a] = 1
+                $decisions[$a] = [pscustomobject]@{ PSTypeName = 'Kokoro.StudentStructuralPronunciationInstruction'
+                    Status = 'StructuralInstruction'; Source = 'Phonemizer'; ProducerSHA256 = $Book.Phonemizer.DriverSHA256
+                    First = $a; Last = $table.Last[$a]; Phones = $table.Phones[$a]; StressStatus = 'NotApplicable' }
+            }
+            continue
+        }
+        $decision = Get-StudentBookVote $Book $a; $decisions[$a] = $decision
+        if ($decision.Status -ceq 'SegmentAgreement' -and $null -ne $Book.Phonemizer.Phones[$a]) {
+            $table.Phones[$a] = $Book.Phonemizer.Phones[$a]; $table.Last[$a] = $Book.Phonemizer.Last[$a]; $table.Source[$a] = 1
         }
     }
+    $table | Add-Member -NotePropertyName Decisions -NotePropertyValue $decisions
     $Book | Add-Member -NotePropertyName Resolved -NotePropertyValue $table -Force
 }
 
@@ -2093,7 +2261,10 @@ function Get-StudentTokens([object] $Book, [int] $First, [int] $Last) {
             SourceMapping = if ($mapped) { 'OriginalMapped' } else { 'LegacyUnmapped' }
             Emphasis = ($flags -band 1) -ne 0; Editorial = ($flags -band 2) -ne 0
             Phonemizer = $Book.Phonemizer.Phones[$k]; Last = $Book.Phonemizer.Last[$k]; Zira = $zira; ZiraLast = $Book.Zira.Last[$k]
-            ZiraComparable = if ($null -ne $zira) { $kernels.Substitute.Invoke($zira, $correspondences.From, $correspondences.To) } else { $null }; ZiraSeconds = $Book.Zira.Durations[$k] / 1e7
+            ZiraComparable = $zira
+            ProposedZiraCorrespondence = if ($null -ne $zira) { $kernels.Substitute.Invoke($zira, $correspondences.From, $correspondences.To) } else { $null }
+            PronunciationDecision = if ($null -ne $Book.Resolved.PSObject.Properties['Decisions']) { $Book.Resolved.Decisions[$k] } else { $null }
+            ZiraSeconds = $Book.Zira.Durations[$k] / 1e7; ZiraTimingUse = 'ComparatorOnly'; ZiraTimingValidation = 'NotEstablished'
             Resolved = $Book.Resolved.Phones[$k]; Source = $script:StudentPronunciationSources[[int]$Book.Resolved.Source[$k]] }
     }
 }
@@ -2115,18 +2286,19 @@ function Invoke-StudentCorpus {
     finally { Remove-Module -ModuleInfo $zira -Force }
     $correspondences = Get-StudentCorrespondences $books
     $script:StudentContext.Correspondences = $correspondences
-    foreach ($book in $books) { Resolve-StudentPronunciations $book $correspondences }
+    foreach ($book in $books) { Resolve-StudentPronunciations $book }
     $result = New-StudentWindows $books
     $phases.Windows = $watch.Elapsed.TotalSeconds
-    $words = 0; $both = 0; $agree = 0; $phonemizerOnly = 0; $ziraOnly = 0; $neither = 0
+    $words = 0; $both = 0; $agree = 0; $phonemizerOnly = 0; $ziraOnly = 0; $neither = 0; $unaligned = 0
     foreach ($book in $books) {
         for ($a = 0; $a -lt ($book.Tokens.Length -shr 2); $a++) {
             if ($book.Tokens[4 * $a] -ne 1) { continue }
             $words++
             $ours = $book.Phonemizer.Phones[$a]; $theirs = $book.Zira.Phones[$a]
             if ($null -ne $ours -and $null -ne $theirs -and $book.Phonemizer.Last[$a] -eq $book.Zira.Last[$a]) {
-                $both++; if ($script:StudentContext.Kernels.Unstressed.Invoke($ours) -ceq $script:StudentContext.Kernels.Substitute.Invoke($theirs, $correspondences.From, $correspondences.To)) { $agree++ }
+                $both++; if ($script:StudentContext.Kernels.Unstressed.Invoke($ours) -ceq $theirs) { $agree++ }
             }
+            elseif ($null -ne $ours -and $null -ne $theirs) { $unaligned++ }
             elseif ($null -ne $ours) { $phonemizerOnly++ } elseif ($null -ne $theirs) { $ziraOnly++ } else { $neither++ }
         }
     }
@@ -2137,7 +2309,7 @@ function Invoke-StudentCorpus {
         WindowsWithZira = @($result.Windows | Where-Object ZiraSpans).Count; CounterExampleWindows = @($result.Windows | Where-Object CounterExampleSentences).Count
         Sentences = ($books | ForEach-Object { $_.Sentences.Length -shr 1 } | Measure-Object -Sum).Sum; UnresolvedSentences = $result.UnresolvedSentences
         CheckedSentences = $result.CheckedSentences; ProjectionMismatches = $result.ProjectionMismatches
-        Words = $words; BothPronounce = $both; Agree = $agree; CounterExamples = $both - $agree; PhonemizerOnly = $phonemizerOnly; ZiraOnly = $ziraOnly; Neither = $neither
+        Words = $words; BothPronounce = $both; Agree = $agree; CounterExamples = $both - $agree; UnalignedSpans = $unaligned; PhonemizerOnly = $phonemizerOnly; ZiraOnly = $ziraOnly; Neither = $neither
         MappedCorrespondences = @($correspondences.Records | Where-Object Mapped); ZiraCapture = $capture; Phases = [pscustomobject]$phases }
 }
 
@@ -5392,6 +5564,8 @@ $script:StudentSteps = [ordered]@{
     Corpus = { Invoke-StudentCorpus }
     Sources = { Invoke-StudentSources }
     VerifySources = { Test-StudentSources }
+    Votes = { Invoke-StudentVotes }
+    VerifyVotes = { Test-StudentVotes }
     Pronunciation = { Invoke-StudentPronunciation }
     Normalize = { Invoke-StudentNormalization }
     Compose = { Invoke-StudentComposition }
