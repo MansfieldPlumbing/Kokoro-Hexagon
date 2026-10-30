@@ -351,22 +351,40 @@ function Get-KokoroReferencePath {
     $path
 }
 
+function Read-HandoffSteps([string[]] $Lines) {
+    $start = -1; $kind = ''; $heading = ''
+    for ($lineIndex = 0; $lineIndex -lt $Lines.Length; $lineIndex++) {
+        $line = $Lines[$lineIndex].TrimEnd()
+        if ($line.StartsWith('## Next', [StringComparison]::Ordinal)) {
+            $start = $lineIndex + 1; $kind = 'Commands'; $heading = $line; break
+        }
+        if ($start -lt 0 -and $line -ceq '### Work, in order') {
+            $start = $lineIndex + 1; $kind = 'Work'; $heading = $line
+        }
+    }
+    $steps = [Collections.Generic.List[string]]::new()
+    if ($start -ge 0) {
+        for ($lineIndex = $start; $lineIndex -lt $Lines.Length; $lineIndex++) {
+            $line = $Lines[$lineIndex]; $text = $line.Trim()
+            if ($text.StartsWith('#', [StringComparison]::Ordinal)) { break }
+            if (-not $text) { continue }
+            $numberEnd = 0
+            while ($numberEnd -lt $text.Length -and [char]::IsAsciiDigit($text[$numberEnd])) { $numberEnd++ }
+            $numbered = $numberEnd -gt 0 -and $numberEnd + 1 -lt $text.Length -and
+                $text[$numberEnd] -ceq '.' -and [char]::IsWhiteSpace($text[$numberEnd + 1])
+            if ($numbered) { $steps.Add($text) }
+            elseif ($steps.Count) { $steps[$steps.Count - 1] += ' ' + $text }
+        }
+    }
+    [pscustomobject]@{ Kind = $kind; Heading = $heading; Steps = $steps.ToArray() }
+}
+
 function Get-NextStep {
     $handoff = if (Test-Path $script:NotesRoot) { Get-ChildItem $script:NotesRoot -Filter 'handoff-*.md' | Sort-Object Name | Select-Object -Last 1 }
     if (-not $handoff) { return [pscustomobject]@{ Handoff = $null; Steps = @() } }
 
-    $lines = Get-Content $handoff.FullName
-    $start = ($lines | Select-String -Pattern '^## Next' | Select-Object -First 1).LineNumber
-    # A numbered item runs on over indented continuation lines; join them so no step is cut mid-sentence.
-    $steps = [Collections.Generic.List[string]]::new()
-    if ($start) {
-        foreach ($line in $lines[$start..($lines.Count - 1)]) {
-            if ($line -match '^\d+\.\s') { $steps.Add($line.Trim()) }
-            elseif ($steps.Count -and $line -match '^\s+\S') { $steps[-1] += ' ' + $line.Trim() }
-            elseif ($steps.Count -and $line -notmatch '^\s*$') { break }
-        }
-    }
-    [pscustomobject]@{ Handoff = $handoff.Name; Steps = @($steps | Select-Object -First 3) }
+    $plan = Read-HandoffSteps ([string[]](Get-Content -LiteralPath $handoff.FullName))
+    [pscustomobject]@{ Handoff = $handoff.Name; Kind = $plan.Kind; Heading = $plan.Heading; Steps = @($plan.Steps | Select-Object -First 3) }
 }
 
 # Word-wraps text to the console width (120 when redirected) with a hanging indent; never truncates.
@@ -3811,6 +3829,13 @@ switch ($Command) {
                 if ($oversized) { throw ($oversized -join '; ') }
             }
             'handoff' = {
+                $commands = Read-HandoffSteps @('## Next steps', '1. Run `Status`.', '   Retain the result.', '## Evidence', '2. Excluded.')
+                $work = Read-HandoffSteps @('### Work, in order', '1. **Composition.** Retain alternatives;', 'continue the same item.', '2. **Phonics.** Retain context.', '## Evidence', '3. Excluded.')
+                $unrelated = Read-HandoffSteps @('## Evidence', '1. A historical observation.')
+                $empty = Read-HandoffSteps @('### Work, in order', 'No numbered work.')
+                if ($commands.Kind -cne 'Commands' -or $commands.Steps.Count -ne 1 -or $commands.Steps[0] -cne '1. Run `Status`. Retain the result.') { throw 'Command handoff parsing failed.' }
+                if ($work.Kind -cne 'Work' -or $work.Steps.Count -ne 2 -or $work.Steps[0] -cne '1. **Composition.** Retain alternatives; continue the same item.') { throw 'Ordered-work handoff parsing failed.' }
+                if ($unrelated.Steps.Count -or $empty.Steps.Count) { throw 'Handoff parser admitted absent or unnumbered work.' }
                 # A clone without the project notes has no handoff to check.
                 if (-not (Test-Path $script:NotesRoot)) { return }
                 $next = Get-NextStep
@@ -3821,6 +3846,8 @@ switch ($Command) {
                 if (-not $next.Steps.Count) { throw "$($next.Handoff) has no next steps." }
                 foreach ($step in $next.Steps) {
                     if ($step -notmatch '^\d+\. ') { throw "Unnumbered step: $step" }
+                    # An ordered research/design section need not name an existing command.
+                    if ($next.Kind -ceq 'Work') { continue }
                     $namedCommand = $false
                     foreach ($name in [regex]::Matches($step, '`([^`]+)`')) {
                         if ($commandValues -ccontains $name.Groups[1].Value) { $namedCommand = $true }

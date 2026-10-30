@@ -210,6 +210,32 @@ action. Syllabus evidence calibrates the realization and supports contextual
 exceptions; acoustic similarity alone does not establish a semantic or
 structural correction.
 
+### Authored language knowledge and parsing
+
+Supply phonics, productive morphology and clause composition as authored typed
+knowledge before inducing preferences from sparse evidence. Language-model
+knowledge can supply explicit candidate rules and pronunciations. Wikipedia
+can supply inventories and contexts with revision, section, attribution and
+license retained. Keep authored knowledge, independent pronunciation votes and
+learned acoustic realization distinct. Loanword records carry explicit readings
+and origin evidence only where composition and phonics do not produce them.
+
+Use SMA and CoreCLR directly for typed values, ETS behaviours, persistent
+closures and inspectable programs. Inspect CS2PS and JS2PS for existing semantic
+analysis and source-coordinate transformations before building replacements.
+Prefer typed token traversal, parser records and AST transformations to regex.
+SMA parsing and runtime adaptation are permitted implementation mechanisms;
+stock PowerShell syntax is not a design boundary. Alternative authoring forms,
+including `//` comments, require an explicit parsing or transformation contract
+and verified behaviour in the executing host.
+
+Whitespace may be inserted or expanded to expose boundaries. Retain every
+punctuation mark as a typed occurrence; never discard it as normalization.
+Preserve the original text and map transformed coordinates back to source spans,
+with source anchors for inserted characters and provenance for each mutation.
+Pronunciation votes, composition decisions and acoustic evidence reference
+those identities through every transformation.
+
 ### Normalization transfer from the front end
 
 The existing compiled PC front end supplies text normalization and
@@ -424,22 +450,19 @@ on Hexagon. Its purpose is that this project never needs Python again.
   `[...]`), never deletions. Numbers, dates, times and currency become typed
   values through .NET conversions, and their spoken forms come from the value.
 - Zira (Windows speech API, `Microsoft Zira Desktop`) reads the whole text,
-  including sentences our phonemizer rejects. Every word token carries both
-  pronunciations as typed members, joined by source span: ours and Zira's
-  (mapped to Kokoro symbols, with her word timing). Our phonemizer's
-  pronunciation is used wherever it has one (it carries stress marks). Where
-  Zira's differs, hers stays on the token as a counter-example. Systematic
-  differences between her symbols and Kokoro's are learned from the spans both
-  pronounce, not written by hand (for example her `o`, which aligns with
-  Kokoro's `O`). These correspondences
-  are applied to Zira's pronunciations of words our phonemizer does not know.
-  Zira's events carry no stress, so those words get primary stress before the
-  first vowel until stress is learned. Context-dependent differences (Kokoro's
-  flap `ɾ` for Zira's `t` and `d` between vowels) need correspondences
-  conditioned on neighbouring symbols. Windows are token ranges, assembled
-  from the tokens' resolved phonemes and passed to the syllabus as phonemes;
-  for sentences our phonemizer accepts whole, the assembled phonemes equal
-  its output.
+  including material our phonemizer rejects. Every token retains each source's
+  pronunciation as a typed vote joined by source span, with raw notation,
+  dialect, stress evidence, source identity and source dependencies. Admit
+  additional dictionaries only after checking their licenses and provenance.
+  Our phonemizer's use of a dictionary does not create another independent vote
+  for that dictionary's reading. Agreement across independent evidence
+  establishes a reading; disagreement remains a rule or exception candidate,
+  never a silent choice. Missing stress remains unknown, not first-vowel stress.
+  Symbol correspondences retain their evidence, context and alternatives;
+  normalization must not erase pronunciation disagreements. Windows reference
+  token ranges and use admitted phonemes as syllabus inputs. Zira word and phone
+  timing is separate comparator evidence, validated against its WAV, never an
+  acoustic target.
 - Syllabus evidence passes validity gates before the Student learns from it:
   complete, aligned with Zira by source span, and agreeing with the resolved
   pronunciation. Where the resolved pronunciation differs from what stock
