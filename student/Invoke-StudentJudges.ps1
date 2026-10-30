@@ -181,7 +181,8 @@ function Measure-JudgeCompositionRecall {
             if ($null -ne $hit) { break }
         }
         if ($null -eq $hit) { continue }
-        $parsed = @($script:JudgeContext.Compose.Invoke($word) | Where-Object { $_.Root -cne $word }).Count -gt 0
+        # A parse that applies one rule twice (brass as bra + s + s) is an error the Composition judge counts, not a parse.
+        $parsed = @($script:JudgeContext.Compose.Invoke($word) | Where-Object { $_.Root -cne $word } | Where-Object { $names = (Get-JudgeRuleChain $_) -split '\+'; @($names | Sort-Object -Unique).Count -eq $names.Count }).Count -gt 0
         $rows.Add([pscustomobject]@{ Word = $word; Affix = $hit.Affix; Stem = $hit.Stem; Restored = $hit.Restored; Parsed = $parsed })
     }
     $strata = @($rows | Group-Object Affix | Sort-Object Count -Descending | ForEach-Object {
@@ -370,7 +371,7 @@ $script:JudgeBaseline = @(
     [pscustomobject]@{ Judge = 'Composition'; Measure = 'ExactPercent'; Better = 'Higher'; Value = 50.0 }
     [pscustomobject]@{ Judge = 'Composition'; Measure = 'RepeatedRuleWords'; Better = 'Lower'; Value = 61 }
     [pscustomobject]@{ Judge = 'Composition'; Measure = 'HeldOutExactPercent'; Better = 'Higher'; Value = 51.4 }
-    [pscustomobject]@{ Judge = 'CompositionRecall'; Measure = 'ParsedWords'; Better = 'Higher'; Value = 7027 }
+    [pscustomobject]@{ Judge = 'CompositionRecall'; Measure = 'ParsedWords'; Better = 'Higher'; Value = 7025 }
     [pscustomobject]@{ Judge = 'CompositionRecall'; Measure = 'ParsedPercent'; Better = 'Higher'; Value = 34.0 }
     [pscustomobject]@{ Judge = 'CorpusCoverage'; Measure = 'SpokenPercent'; Better = 'Higher'; Value = 100.0 }
     [pscustomobject]@{ Judge = 'CorpusCoverage'; Measure = 'CompletePercent'; Better = 'Higher'; Value = 23.4 }
