@@ -3732,6 +3732,112 @@ $script:KokoroMeasurementCases = [ordered]@{
     'generator-score' = 'Invoke-KokoroGeneratorScore'
 }
 
+# No C runtime in anything this repository emits or binds (skill no-c-runtime). Banned library names, matched on the
+# name without directory, version suffix or extension.
+$script:KokoroCRuntimeLibraries = @('libc', 'libm', 'libdl', 'libc++', 'libc++_shared', 'libstdc++', 'libgcc', 'libgcc_s',
+    'libunwind', 'msvcrt', 'msvcr', 'ucrtbase', 'vcruntime', 'api-ms-win-crt')
+# Open C runtime defects: bindings that exist today and must be replaced. Approved by the team lead on 2026-10-30.
+# Verify prints every entry. The list only shrinks: a binding not listed fails Verify, and an entry whose binding is
+# gone fails Verify until the entry is removed with the fix.
+$script:KokoroCRuntimeOpenDefects = @(
+    [pscustomobject]@{ Path = 'src/runspace/Native.Binding.psm1'; Library = 'libc.so'; Export = 'memcpy'
+        Use = 'startup copy of a mapped payload into FastRPC shared memory'; Replacement = 'managed copy (chunked Marshal.Copy or an emitted cpblk method), proven on the phone' }
+    [pscustomobject]@{ Path = 'src/runspace/KokoroGeneratorTailProbe.ps1'; Library = 'libc.so'; Export = 'setenv'
+        Use = 'ADSP_LIBRARY_PATH and DSP_LIBRARY_PATH for FastRPC library search'; Replacement = 'not identified; FastRPC reads the process environment' }
+)
+
+function Test-KokoroCRuntimeName([string]$Name) {
+    $leaf = [IO.Path]::GetFileName($Name).ToLowerInvariant()
+    $cut = $leaf.IndexOf('.so'); if ($cut -lt 0) { $cut = $leaf.IndexOf('.dll') }; if ($cut -ge 0) { $leaf = $leaf.Substring(0, $cut) }
+    foreach ($banned in $script:KokoroCRuntimeLibraries) { if ($leaf -ceq $banned -or $leaf.StartsWith($banned + '-') -or ($banned -cin @('msvcr', 'vcruntime', 'api-ms-win-crt') -and $leaf.StartsWith($banned))) { return $true } }
+    $false
+}
+
+function Get-KokoroElfImports([string]$Path) {
+    # DT_NEEDED names and undefined dynamic symbols of a 32-bit little-endian ELF (the Hexagon libraries we emit).
+    $bytes = [IO.File]::ReadAllBytes($Path)
+    if ($bytes.Length -lt 52 -or $bytes[0] -ne 0x7f -or $bytes[1] -ne 0x45 -or $bytes[2] -ne 0x4c -or $bytes[3] -ne 0x46) { throw "Not an ELF file: $Path" }
+    if ($bytes[4] -ne 1 -or $bytes[5] -ne 1) { throw "Only 32-bit little-endian ELF is read here: $Path" }
+    $sectionOffset = [BitConverter]::ToUInt32($bytes, 32); $entrySize = [BitConverter]::ToUInt16($bytes, 46); $sectionCount = [BitConverter]::ToUInt16($bytes, 48)
+    $sections = @(for ($i = 0; $i -lt $sectionCount; $i++) {
+        $at = $sectionOffset + $i * $entrySize
+        [pscustomobject]@{ Type = [BitConverter]::ToUInt32($bytes, $at + 4); Offset = [BitConverter]::ToUInt32($bytes, $at + 16)
+            Size = [BitConverter]::ToUInt32($bytes, $at + 20); Link = [BitConverter]::ToUInt32($bytes, $at + 24) }
+    })
+    $readString = { param($Table, $Index) $start = $Table.Offset + $Index; $end = $start; while ($bytes[$end] -ne 0) { $end++ }; [Text.Encoding]::ASCII.GetString($bytes, $start, $end - $start) }
+    $needed = [Collections.Generic.List[string]]::new(); $undefined = [Collections.Generic.List[string]]::new()
+    foreach ($section in $sections) {
+        if ($section.Type -eq 6) {
+            for ($at = $section.Offset; $at -lt $section.Offset + $section.Size; $at += 8) {
+                if ([BitConverter]::ToInt32($bytes, $at) -eq 1) { $needed.Add((& $readString $sections[$section.Link] ([BitConverter]::ToUInt32($bytes, $at + 4)))) }
+            }
+        }
+        if ($section.Type -eq 11) {
+            for ($at = $section.Offset + 16; $at -lt $section.Offset + $section.Size; $at += 16) {
+                $name = & $readString $sections[$section.Link] ([BitConverter]::ToUInt32($bytes, $at))
+                if ($name -and [BitConverter]::ToUInt16($bytes, $at + 14) -eq 0) { $undefined.Add($name) }
+            }
+        }
+    }
+    [pscustomobject]@{ Needed = $needed.ToArray(); Undefined = $undefined.ToArray() }
+}
+
+function Test-KokoroCRuntime {
+    # Emitted DSP libraries, emitted managed assemblies and tracked PowerShell source, against the banned libraries.
+    $failures = [Collections.Generic.List[string]]::new()
+    $libraries = @(Get-ChildItem -LiteralPath (Join-Path $Root 'build') -Recurse -File -Filter '*.so' -ErrorAction SilentlyContinue |
+        Where-Object { $_.Name.StartsWith('libkokoro', [StringComparison]::Ordinal) -or $_.Name.StartsWith('libkqnn', [StringComparison]::Ordinal) })
+    foreach ($library in $libraries) {
+        foreach ($name in (Get-KokoroElfImports $library.FullName).Needed) { if (Test-KokoroCRuntimeName $name) { $failures.Add("$($library.Name) needs $name") } }
+    }
+    $assemblies = @(Get-ChildItem -LiteralPath (Join-Path $Root 'build/phonemizer/english/driver') -Recurse -File -Filter '*.dll' -ErrorAction SilentlyContinue)
+    foreach ($assembly in $assemblies) {
+        $stream = [IO.File]::OpenRead($assembly.FullName)
+        try {
+            $pe = [Reflection.PortableExecutable.PEReader]::new($stream)
+            if (-not $pe.HasMetadata) { continue }
+            $metadata = [Reflection.Metadata.PEReaderExtensions]::GetMetadataReader($pe)
+            foreach ($handle in $metadata.ModuleReferences) {
+                $name = $metadata.GetString($metadata.GetModuleReference($handle).Name)
+                if (Test-KokoroCRuntimeName $name) { $failures.Add("$($assembly.Name) imports $name") }
+            }
+        }
+        finally { $stream.Dispose() }
+    }
+    # Source bindings: NativeLibrary.Load and DllImport of a banned library, found by the SMA parser.
+    $found = [Collections.Generic.List[object]]::new()
+    $files = @(git -C $Root -c core.quotepath=false ls-files '*.ps1' '*.psm1')
+    foreach ($file in $files) {
+        $ast = [Management.Automation.Language.Parser]::ParseFile((Join-Path $Root $file), [ref]$null, [ref]$null)
+        $loads = $ast.FindAll({ param($node)
+            ($node -is [Management.Automation.Language.InvokeMemberExpressionAst] -and $node.Static -and $node.Member.Extent.Text -ceq 'Load' -and $node.Expression.Extent.Text -match 'NativeLibrary\]$') -or
+            ($node -is [Management.Automation.Language.AttributeAst] -and $node.TypeName.Name -match '^DllImport(Attribute)?$') }, $true)
+        foreach ($load in $loads) {
+            $arguments = if ($load -is [Management.Automation.Language.AttributeAst]) { $load.PositionalArguments } else { $load.Arguments }
+            foreach ($argument in @($arguments)) {
+                if ($argument -is [Management.Automation.Language.StringConstantExpressionAst] -and (Test-KokoroCRuntimeName $argument.Value)) {
+                    $found.Add([pscustomobject]@{ Path = $file.Replace('\', '/'); Line = $load.Extent.StartLineNumber; Library = $argument.Value })
+                }
+            }
+        }
+    }
+    foreach ($binding in $found) {
+        if (-not @($script:KokoroCRuntimeOpenDefects | Where-Object { $_.Path -ceq $binding.Path -and $_.Library -ceq $binding.Library }).Count) {
+            $failures.Add("$($binding.Path):$($binding.Line) binds $($binding.Library) and is not a recorded open defect")
+        }
+    }
+    foreach ($defect in $script:KokoroCRuntimeOpenDefects) {
+        if (-not @($found | Where-Object { $_.Path -ceq $defect.Path -and $_.Library -ceq $defect.Library }).Count) {
+            $failures.Add("$($defect.Path) no longer binds $($defect.Library): remove its open-defect entry with the fix")
+        }
+    }
+    if ($failures.Count) { throw ('C runtime found: ' + ($failures -join '; ')) }
+    "PASS no-c-runtime: $($libraries.Count) emitted DSP libraries and $($assemblies.Count) emitted assemblies import no C runtime"
+    foreach ($defect in $script:KokoroCRuntimeOpenDefects) {
+        "  OPEN C RUNTIME DEFECT: $($defect.Path) binds $($defect.Export) from $($defect.Library) ($($defect.Use)). Replace with: $($defect.Replacement)."
+    }
+}
+
 # Dot-sourced (. ./Invoke-KokoroDevelopment.ps1): the functions above are the API; no command runs.
 if ($MyInvocation.InvocationName -eq '.') { return }
 
@@ -3892,12 +3998,13 @@ switch ($Command) {
                 Import-Module (Join-Path $Root 'tools/Kokoro.AudioMeasurement.psm1')
                 Test-KokoroAudioMeasurement
             }
+            'no-c-runtime' = { Test-KokoroCRuntime }
         }
         $failed = $false
         foreach ($name in $checks.Keys) {
             try {
                 $result = & $checks[$name]
-                if ($name -eq 'case-pairs') { $result } else { "PASS $name" }
+                if ($name -cin @('case-pairs', 'no-c-runtime')) { $result } else { "PASS $name" }
             }
             catch {
                 $failed = $true
