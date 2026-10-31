@@ -367,10 +367,10 @@ function Measure-JudgePhrasing {
 
 # The ratchet: each measure may improve but never regress. Raised by the judges' owner when a change improves it.
 $script:JudgeBaseline = @(
-    [pscustomobject]@{ Judge = 'Composition'; Measure = 'ExactWords'; Better = 'Higher'; Value = 3601 }
-    [pscustomobject]@{ Judge = 'Composition'; Measure = 'ExactPercent'; Better = 'Higher'; Value = 50.0 }
-    [pscustomobject]@{ Judge = 'Composition'; Measure = 'RepeatedRuleWords'; Better = 'Lower'; Value = 61 }
-    [pscustomobject]@{ Judge = 'Composition'; Measure = 'HeldOutExactPercent'; Better = 'Higher'; Value = 51.4 }
+    [pscustomobject]@{ Judge = 'Composition'; Measure = 'ExactWords'; Better = 'Higher'; Value = 5497 }
+    [pscustomobject]@{ Judge = 'Composition'; Measure = 'ExactPercent'; Better = 'Higher'; Value = 76.8 }
+    [pscustomobject]@{ Judge = 'Composition'; Measure = 'RepeatedRuleWords'; Better = 'Lower'; Value = 1 }
+    [pscustomobject]@{ Judge = 'Composition'; Measure = 'HeldOutExactPercent'; Better = 'Higher'; Value = 77.7 }
     [pscustomobject]@{ Judge = 'CompositionRecall'; Measure = 'ParsedWords'; Better = 'Higher'; Value = 7025 }
     [pscustomobject]@{ Judge = 'CompositionRecall'; Measure = 'ParsedPercent'; Better = 'Higher'; Value = 34.0 }
     [pscustomobject]@{ Judge = 'CorpusCoverage'; Measure = 'SpokenPercent'; Better = 'Higher'; Value = 100.0 }
