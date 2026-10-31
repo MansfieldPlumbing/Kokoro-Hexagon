@@ -1676,11 +1676,11 @@ $loweringHash = '6900FC735D5F463ECFDB0241B326D959CF7A8B8A252B56B1A7734F20D3BD9BD
 $loweringCache = Join-Path $script:HexagonToolsRoot "../build/lowered-hexagon/compiler/$loweringHash/Export-LoweredAssembly.ps1"
 if ([IO.File]::Exists($loweringCache)) { $loweringBytes = [IO.File]::ReadAllBytes($loweringCache) }
 else {
-    $siblingCompiler = Join-Path $script:HexagonToolsRoot '../../PSLowering/Export-LoweredAssembly.ps1'
+    $siblingCompiler = Join-Path $script:HexagonToolsRoot '../../PSC/Export-LoweredAssembly.ps1'
     if ([IO.File]::Exists($siblingCompiler) -and (Get-FileHash $siblingCompiler).Hash -ceq $loweringHash) {
         $loweringBytes = [IO.File]::ReadAllBytes($siblingCompiler)
     } else {
-        $loweringBytes = (Invoke-WebRequest -Uri "https://raw.githubusercontent.com/MansfieldPlumbing/PSLowering/$loweringCommit/Export-LoweredAssembly.ps1" -UseBasicParsing).RawContentStream.ToArray()
+        $loweringBytes = (Invoke-WebRequest -Uri "https://raw.githubusercontent.com/MansfieldPlumbing/PSC/$loweringCommit/Export-LoweredAssembly.ps1" -UseBasicParsing).RawContentStream.ToArray()
     }
 }
 if ([Convert]::ToHexString([Security.Cryptography.SHA256]::HashData($loweringBytes)) -cne $loweringHash) { throw 'Pinned PSLowering compiler hash mismatch.' }
