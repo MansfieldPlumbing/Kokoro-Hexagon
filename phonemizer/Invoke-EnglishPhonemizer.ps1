@@ -1777,6 +1777,8 @@ class CoreMorphology {
             elseif($rule.Position -ceq 'Suffix' -and $word.EndsWith($rule.Spelling,[StringComparison]::Ordinal)){$stem=$word.Substring(0,$word.Length-$rule.Spelling.Length)}
             if($stem.Length -eq 0){continue}
             foreach($inner in [CoreMorphology]::Candidates($stem,$rule.InputRole)){
+                # An affix does not apply to its own output (plural of a plural, re- of re-).
+                if(-not [object]::ReferenceEquals($null,$inner.Rule) -and $inner.Rule.Name -ceq $rule.Name){continue}
                 [CoreMorphologyParse]$candidate=[CoreMorphologyParse]::new()
                 $candidate.Word=$word;$candidate.Root=$inner.Root;$candidate.RootLexicalId=$inner.RootLexicalId
                 $candidate.RootRole=$inner.RootRole;$candidate.Role=$role;$candidate.StressEvidence=$inner.StressEvidence
@@ -3033,11 +3035,54 @@ class CoreDriver {
 '@
 }
 
+function Get-EnglishMorphologyEvidence([Reflection.Assembly]$Assembly) {
+    # Work order on the authored affix sounds: re-derive each concatenating affix's sound from the lexicon words it
+    # composes (even lexical ids only; the Composition judge holds out odd ids) and adopt the evidence where it has at
+    # least 20 words and outnumbers the authored seed. Phone strings are compared ordinally: Kokoro phones are
+    # case-sensitive (I and i are different phones).
+    $lexicon=$Assembly.GetType('Lexicon',$true);$morphology=$Assembly.GetType('CoreMorphology',$true)
+    $strip={param([string]$Phones) $Phones.Replace([string][char]712,'').Replace([string][char]716,'').Replace(' ','')}
+    $counts=[Collections.Generic.Dictionary[string,Collections.Generic.Dictionary[string,int]]]::new([StringComparer]::Ordinal)
+    for($id=0;$id -lt $lexicon::Count();$id+=2){
+        $word=$lexicon::Form($id)
+        if($word.Length -lt 3 -or $word -cnotmatch '^[a-z]+$'){continue}
+        $readings=[Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
+        foreach($role in 0..4){foreach($reading in $lexicon::Phones($id,$role).Split('|')){if($reading){[void]$readings.Add((& $strip $reading))}}}
+        if(-not $readings.Count){continue}
+        foreach($parse in $morphology::Candidates($word,-1)){
+            if($null -eq $parse.Rule -or $parse.Root -ceq $word -or $parse.Rule.Realization -cne 'Concatenate'){continue}
+            $inner=& $strip $parse.Inner.Phones
+            foreach($reading in $readings){
+                $residual=''
+                if($parse.Rule.Position -ceq 'Suffix' -and $reading.StartsWith($inner,[StringComparison]::Ordinal)){$residual=$reading.Substring($inner.Length)}
+                elseif($parse.Rule.Position -ceq 'Prefix' -and $reading.EndsWith($inner,[StringComparison]::Ordinal)){$residual=$reading.Substring(0,$reading.Length-$inner.Length)}
+                if(-not $residual){continue}
+                if(-not $counts.ContainsKey($parse.Rule.Name)){$counts[$parse.Rule.Name]=[Collections.Generic.Dictionary[string,int]]::new([StringComparer]::Ordinal)}
+                $table=$counts[$parse.Rule.Name]
+                if($table.ContainsKey($residual)){$table[$residual]++}else{$table.Add($residual,1)}
+            }
+        }
+    }
+    foreach($rule in $script:EnglishMorphologyRules){
+        if($rule.Realization -cne 'Concatenate'){continue}
+        $seed=& $strip $rule.Phones
+        if(-not $counts.ContainsKey($rule.Name)){
+            [pscustomobject]@{Rule=$rule.Name;Authored=$rule.Phones;Learned='';LearnedWords=0;AuthoredWords=0;Observations=0;Adopted=$false};continue
+        }
+        $table=$counts[$rule.Name]
+        $top=$table.GetEnumerator() | Sort-Object {-$_.Value},{$_.Key} | Select-Object -First 1
+        $seedWords=if($table.ContainsKey($seed)){$table[$seed]}else{0}
+        $observations=($table.Values | Measure-Object -Sum).Sum
+        [pscustomobject]@{Rule=$rule.Name;Authored=$rule.Phones;Learned=$top.Key;LearnedWords=$top.Value;AuthoredWords=$seedWords;Observations=$observations
+            Adopted=($top.Key -cne $seed -and $top.Value -ge 20 -and $top.Value -gt $seedWords)}
+    }
+}
+
 function Import-EnglishCoreDriver {
     [CmdletBinding()]
     # PhonicsStatistics: the learned reading statistics to embed. Omitted, the build first compiles a learning stage
     # with none embedded, learns them there (cached by that stage's source hash) and embeds them in the driver.
-    param([string]$ReferencePath=$AssemblyPath,[switch]$LibraryOnly,[AllowEmptyString()][string]$PhonicsStatistics)
+    param([string]$ReferencePath=$AssemblyPath,[switch]$LibraryOnly,[AllowEmptyString()][string]$PhonicsStatistics,[object[]]$MorphologyEvidence=@())
     if(-not $PSBoundParameters.ContainsKey('PhonicsStatistics')){
         $stage=Import-EnglishCoreDriver -ReferencePath $ReferencePath -LibraryOnly -PhonicsStatistics ''
         $statisticsDirectory=Join-Path $script:EnglishBuildRoot 'english\phonics'
@@ -3047,7 +3092,8 @@ function Import-EnglishCoreDriver {
             $learned=[string]$stage.Assembly.GetType('CorePhonics',$true).GetMethod('ExportStatistics').Invoke($null,@())
             [IO.File]::WriteAllText($statisticsPath,$learned,[Text.UTF8Encoding]::new($false))
         }
-        return Import-EnglishCoreDriver -ReferencePath $ReferencePath -LibraryOnly:$LibraryOnly -PhonicsStatistics ([IO.File]::ReadAllText($statisticsPath))
+        $evidence=@(Get-EnglishMorphologyEvidence $stage.Assembly)
+        return Import-EnglishCoreDriver -ReferencePath $ReferencePath -LibraryOnly:$LibraryOnly -PhonicsStatistics ([IO.File]::ReadAllText($statisticsPath)) -MorphologyEvidence $evidence
     }
     $cacheKey=$ReferencePath;if($LibraryOnly){$cacheKey+='|LibraryOnly'};if($PhonicsStatistics.Length -eq 0){$cacheKey+='|LearningStage'}
     if($script:EnglishCoreCache.ContainsKey($cacheKey)){return $script:EnglishCoreCache[$cacheKey]}
@@ -3067,11 +3113,14 @@ function Import-EnglishCoreDriver {
     $morphologyNames=[Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
     foreach($rule in $script:EnglishMorphologyRules){
         if(-not $rule.Name -or -not $morphologyNames.Add($rule.Name)){throw 'Morphology rule names must be nonempty and unique.'}
+        $phones=$rule.Phones
+        $adopted=$MorphologyEvidence | Where-Object { $_.Rule -ceq $rule.Name -and $_.Adopted } | Select-Object -First 1
+        if($null -ne $adopted){$phones=$adopted.Learned}
         if(-not $rule.Spelling -or $rule.Position -cnotin @('Prefix','Suffix') -or $rule.InputRole -lt 0 -or $rule.InputRole -gt 4 -or $rule.OutputRole -lt 0 -or $rule.OutputRole -gt 4){throw 'Morphology rule has an invalid spelling, position or lexical role.'}
         if($rule.Stress -cne 'PreserveRoot' -or $rule.Realization -cnotin @('Concatenate','SuffixS')){throw 'Morphology rule requires an explicitly implemented stress and boundary realization.'}
         if($rule.Realization -ceq 'SuffixS' -and ($rule.Position -cne 'Suffix' -or $rule.Phones)){throw 'SuffixS takes its reading from the final root sound and cannot supply fixed phones.'}
-        foreach($symbol in $rule.Phones.ToCharArray()){if($reference.SymbolId.Invoke($symbol) -lt 0){throw 'Morphology rule emits a symbol outside the pinned phoneme inventory.'}}
-        $fields=[string[]]@($rule.Name,$rule.Spelling,$rule.Position,$rule.InputRole,$rule.OutputRole,$rule.Phones,$rule.Realization,$rule.Stress)
+        foreach($symbol in $phones.ToCharArray()){if($reference.SymbolId.Invoke($symbol) -lt 0){throw 'Morphology rule emits a symbol outside the pinned phoneme inventory.'}}
+        $fields=[string[]]@($rule.Name,$rule.Spelling,$rule.Position,$rule.InputRole,$rule.OutputRole,$phones,$rule.Realization,$rule.Stress)
         foreach($field in $fields){if($field.Contains('|') -or $field.Contains(';') -or $field.Contains("'")){throw 'Morphology record contains a reserved serialization character.'}}
         $morphologyRows.Add([string]::Join('|',$fields))
     }
@@ -3098,7 +3147,7 @@ function Import-EnglishCoreDriver {
         $hostConfig='{"runtimeOptions":{"tfm":"net'+[Environment]::Version.Major+'.0","framework":{"name":"Microsoft.NETCore.App","version":"'+$versions[-1]+'"},"rollForward":"Disable"}}'
         [IO.File]::WriteAllText([IO.Path]::ChangeExtension($output,'.runtimeconfig.json'),$hostConfig,[Text.UTF8Encoding]::new($false))
         }
-        Write-EnglishBuildReceipt $receiptPath ([ordered]@{SourceSha256=$identity;AssemblySha256=(Get-FileHash $output).Hash;ReferenceSha256=(Get-FileHash $ReferencePath).Hash;CompilerCommit='1afabe056235a570da29e268824784557d4f6cdd';AssemblyReferences=$inspection.AssemblyReferences;EntryPoint=$(if($LibraryOnly){''}else{'CoreDriver.Main'});Output=$output;Corrections=$table.Count})
+        Write-EnglishBuildReceipt $receiptPath ([ordered]@{SourceSha256=$identity;AssemblySha256=(Get-FileHash $output).Hash;ReferenceSha256=(Get-FileHash $ReferencePath).Hash;CompilerCommit='1afabe056235a570da29e268824784557d4f6cdd';AssemblyReferences=$inspection.AssemblyReferences;EntryPoint=$(if($LibraryOnly){''}else{'CoreDriver.Main'});Output=$output;Corrections=$table.Count;MorphologyEvidence=[string[]]@($MorphologyEvidence | ForEach-Object { '{0} authored {1} learned {2} ({3} words, authored {4}, of {5}) adopted {6}' -f $_.Rule,$_.Authored,$_.Learned,$_.LearnedWords,$_.AuthoredWords,$_.Observations,$_.Adopted })})
     }
     $receipt=Import-PowerShellDataFile -LiteralPath $receiptPath
     if($receipt.SourceSha256 -cne $identity -or (Get-FileHash -LiteralPath $output).Hash -cne $receipt.AssemblySha256){throw 'Standalone driver integrity failure.'}
