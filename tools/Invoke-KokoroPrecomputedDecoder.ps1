@@ -70,7 +70,7 @@ using namespace System.Runtime.Intrinsics
 [CmdletBinding()]
 param(
     [ValidateSet('Admit','Nodes','Levels','Gate','Seeded','Join','Library','Speech','Kernels','FrontEnd')][string] $Mode = 'Gate',
-    [ValidateRange(2,64)][int] $Threads = 4,
+    [ValidateRange(2,64)][int] $Threads = [Environment]::ProcessorCount,
     [ValidateRange(1,10)][int] $Runs = 10,
     [ValidateSet('','dog','peach')][string] $CaseName = '',
     [string] $InputRepository = (Split-Path $PSScriptRoot -Parent),
@@ -349,10 +349,10 @@ class OfflineConvolutionWorker {
 
 class OfflineDirectConvolutionWorker {
     # Stride-1, ungrouped Conv1d: out[oc, t] = bias[oc] + sum over ic, tap of w[oc, ic, tap] * x[ic, t + tap * dilation - padding].
-    # Weights are packed once as 8-output-channel 256-bit vectors; the input is a zero-padded copy, so
+    # Weights are packed once as 16-output-channel 512-bit vectors; the input is a zero-padded copy, so
     # every read is in bounds. Each step loads one weight vector and updates eight time positions.
     [float[]] $Padded
-    [System.Runtime.Intrinsics.Vector256[float][]] $Packed
+    [System.Runtime.Intrinsics.Vector512[float][]] $Packed
     [float[]] $Bias
     [float[]] $Output
     [int] $InputChannels
@@ -369,19 +369,19 @@ class OfflineDirectConvolutionWorker {
     [int] $FirstBlock
     [int] $LastBlock
 
-    [void] Store([System.Runtime.Intrinsics.Vector256[float]] $sum, [int] $block, [int] $frame) {
+    [void] Store([System.Runtime.Intrinsics.Vector512[float]] $sum, [int] $block, [int] $frame) {
         if ($frame -ge $this.WorkFrames) { return }
         $destinationFrame = $this.OutputOffset + $frame * $this.OutputStep
-        for ($lane = 0; $lane -lt 8; $lane++) {
-            $oc = $block * 8 + $lane
+        for ($lane = 0; $lane -lt 16; $lane++) {
+            $oc = $block * 16 + $lane
             if ($oc -ge $this.OutputChannels) { return }
-            $value = [System.Runtime.Intrinsics.Vector256]::GetElement($sum, $lane)
+            $value = [System.Runtime.Intrinsics.Vector512]::GetElement($sum, $lane)
             $this.Output[$oc * $this.OutputFrames + $destinationFrame] = [float]($value + $this.Bias[$oc])
         }
     }
 
     [void] Run() {
-      # Two output-channel blocks share each input broadcast (16 accumulators). Each output's
+      # Two output-channel blocks share each input broadcast (32 accumulators). Each output's
       # summation order (input channel, then tap) is unchanged, so results stay bit-identical.
       $source = $this.Padded; $weights = $this.Packed
       $inputs = $this.InputChannels; $kernelTaps = $this.Kernel; $tapStride = $this.Dilation
@@ -391,7 +391,7 @@ class OfflineDirectConvolutionWorker {
         $pairEnd = $this.LastBlock - ($this.LastBlock - $this.FirstBlock) % 2
         for ($block = $this.FirstBlock; $block -lt $pairEnd; $block += 2) {
             for ($t = $tile; $t -lt $tileEnd; $t += 8) {
-                $a0 = [System.Runtime.Intrinsics.Vector256[float]]::Zero; $a1 = $a0; $a2 = $a0; $a3 = $a0; $a4 = $a0; $a5 = $a0; $a6 = $a0; $a7 = $a0
+                $a0 = [System.Runtime.Intrinsics.Vector512[float]]::Zero; $a1 = $a0; $a2 = $a0; $a3 = $a0; $a4 = $a0; $a5 = $a0; $a6 = $a0; $a7 = $a0
                 $b0 = $a0; $b1 = $a0; $b2 = $a0; $b3 = $a0; $b4 = $a0; $b5 = $a0; $b6 = $a0; $b7 = $a0
                 for ($ic = 0; $ic -lt $inputs; $ic++) {
                     $row = $ic * $rowFrames + $t + $shift
@@ -400,22 +400,22 @@ class OfflineDirectConvolutionWorker {
                     for ($tap = 0; $tap -lt $kernelTaps; $tap++) {
                         $wa = $weights[$firstAt + $tap]; $wb = $weights[$secondAt + $tap]
                         $at = $row + $tap * $tapStride
-                        $x = [System.Runtime.Intrinsics.Vector256]::Create($source[$at])
-                        $a0 = [System.Runtime.Intrinsics.Vector256]::Add($a0, [System.Runtime.Intrinsics.Vector256]::Multiply($wa, $x)); $b0 = [System.Runtime.Intrinsics.Vector256]::Add($b0, [System.Runtime.Intrinsics.Vector256]::Multiply($wb, $x))
-                        $x = [System.Runtime.Intrinsics.Vector256]::Create($source[$at + 1])
-                        $a1 = [System.Runtime.Intrinsics.Vector256]::Add($a1, [System.Runtime.Intrinsics.Vector256]::Multiply($wa, $x)); $b1 = [System.Runtime.Intrinsics.Vector256]::Add($b1, [System.Runtime.Intrinsics.Vector256]::Multiply($wb, $x))
-                        $x = [System.Runtime.Intrinsics.Vector256]::Create($source[$at + 2])
-                        $a2 = [System.Runtime.Intrinsics.Vector256]::Add($a2, [System.Runtime.Intrinsics.Vector256]::Multiply($wa, $x)); $b2 = [System.Runtime.Intrinsics.Vector256]::Add($b2, [System.Runtime.Intrinsics.Vector256]::Multiply($wb, $x))
-                        $x = [System.Runtime.Intrinsics.Vector256]::Create($source[$at + 3])
-                        $a3 = [System.Runtime.Intrinsics.Vector256]::Add($a3, [System.Runtime.Intrinsics.Vector256]::Multiply($wa, $x)); $b3 = [System.Runtime.Intrinsics.Vector256]::Add($b3, [System.Runtime.Intrinsics.Vector256]::Multiply($wb, $x))
-                        $x = [System.Runtime.Intrinsics.Vector256]::Create($source[$at + 4])
-                        $a4 = [System.Runtime.Intrinsics.Vector256]::Add($a4, [System.Runtime.Intrinsics.Vector256]::Multiply($wa, $x)); $b4 = [System.Runtime.Intrinsics.Vector256]::Add($b4, [System.Runtime.Intrinsics.Vector256]::Multiply($wb, $x))
-                        $x = [System.Runtime.Intrinsics.Vector256]::Create($source[$at + 5])
-                        $a5 = [System.Runtime.Intrinsics.Vector256]::Add($a5, [System.Runtime.Intrinsics.Vector256]::Multiply($wa, $x)); $b5 = [System.Runtime.Intrinsics.Vector256]::Add($b5, [System.Runtime.Intrinsics.Vector256]::Multiply($wb, $x))
-                        $x = [System.Runtime.Intrinsics.Vector256]::Create($source[$at + 6])
-                        $a6 = [System.Runtime.Intrinsics.Vector256]::Add($a6, [System.Runtime.Intrinsics.Vector256]::Multiply($wa, $x)); $b6 = [System.Runtime.Intrinsics.Vector256]::Add($b6, [System.Runtime.Intrinsics.Vector256]::Multiply($wb, $x))
-                        $x = [System.Runtime.Intrinsics.Vector256]::Create($source[$at + 7])
-                        $a7 = [System.Runtime.Intrinsics.Vector256]::Add($a7, [System.Runtime.Intrinsics.Vector256]::Multiply($wa, $x)); $b7 = [System.Runtime.Intrinsics.Vector256]::Add($b7, [System.Runtime.Intrinsics.Vector256]::Multiply($wb, $x))
+                        $x = [System.Runtime.Intrinsics.Vector512]::Create($source[$at])
+                        $a0 = [System.Runtime.Intrinsics.Vector512]::Add($a0, [System.Runtime.Intrinsics.Vector512]::Multiply($wa, $x)); $b0 = [System.Runtime.Intrinsics.Vector512]::Add($b0, [System.Runtime.Intrinsics.Vector512]::Multiply($wb, $x))
+                        $x = [System.Runtime.Intrinsics.Vector512]::Create($source[$at + 1])
+                        $a1 = [System.Runtime.Intrinsics.Vector512]::Add($a1, [System.Runtime.Intrinsics.Vector512]::Multiply($wa, $x)); $b1 = [System.Runtime.Intrinsics.Vector512]::Add($b1, [System.Runtime.Intrinsics.Vector512]::Multiply($wb, $x))
+                        $x = [System.Runtime.Intrinsics.Vector512]::Create($source[$at + 2])
+                        $a2 = [System.Runtime.Intrinsics.Vector512]::Add($a2, [System.Runtime.Intrinsics.Vector512]::Multiply($wa, $x)); $b2 = [System.Runtime.Intrinsics.Vector512]::Add($b2, [System.Runtime.Intrinsics.Vector512]::Multiply($wb, $x))
+                        $x = [System.Runtime.Intrinsics.Vector512]::Create($source[$at + 3])
+                        $a3 = [System.Runtime.Intrinsics.Vector512]::Add($a3, [System.Runtime.Intrinsics.Vector512]::Multiply($wa, $x)); $b3 = [System.Runtime.Intrinsics.Vector512]::Add($b3, [System.Runtime.Intrinsics.Vector512]::Multiply($wb, $x))
+                        $x = [System.Runtime.Intrinsics.Vector512]::Create($source[$at + 4])
+                        $a4 = [System.Runtime.Intrinsics.Vector512]::Add($a4, [System.Runtime.Intrinsics.Vector512]::Multiply($wa, $x)); $b4 = [System.Runtime.Intrinsics.Vector512]::Add($b4, [System.Runtime.Intrinsics.Vector512]::Multiply($wb, $x))
+                        $x = [System.Runtime.Intrinsics.Vector512]::Create($source[$at + 5])
+                        $a5 = [System.Runtime.Intrinsics.Vector512]::Add($a5, [System.Runtime.Intrinsics.Vector512]::Multiply($wa, $x)); $b5 = [System.Runtime.Intrinsics.Vector512]::Add($b5, [System.Runtime.Intrinsics.Vector512]::Multiply($wb, $x))
+                        $x = [System.Runtime.Intrinsics.Vector512]::Create($source[$at + 6])
+                        $a6 = [System.Runtime.Intrinsics.Vector512]::Add($a6, [System.Runtime.Intrinsics.Vector512]::Multiply($wa, $x)); $b6 = [System.Runtime.Intrinsics.Vector512]::Add($b6, [System.Runtime.Intrinsics.Vector512]::Multiply($wb, $x))
+                        $x = [System.Runtime.Intrinsics.Vector512]::Create($source[$at + 7])
+                        $a7 = [System.Runtime.Intrinsics.Vector512]::Add($a7, [System.Runtime.Intrinsics.Vector512]::Multiply($wa, $x)); $b7 = [System.Runtime.Intrinsics.Vector512]::Add($b7, [System.Runtime.Intrinsics.Vector512]::Multiply($wb, $x))
                     }
                 }
                 $this.Store($a0, $block, $t); $this.Store($a1, $block, $t + 1); $this.Store($a2, $block, $t + 2); $this.Store($a3, $block, $t + 3)
@@ -426,7 +426,7 @@ class OfflineDirectConvolutionWorker {
         }
         for ($block = $pairEnd; $block -lt $this.LastBlock; $block++) {
             for ($t = $tile; $t -lt $tileEnd; $t += 8) {
-                $s0 = [System.Runtime.Intrinsics.Vector256[float]]::Zero; $s1 = $s0; $s2 = $s0; $s3 = $s0
+                $s0 = [System.Runtime.Intrinsics.Vector512[float]]::Zero; $s1 = $s0; $s2 = $s0; $s3 = $s0
                 $s4 = $s0; $s5 = $s0; $s6 = $s0; $s7 = $s0
                 for ($ic = 0; $ic -lt $this.InputChannels; $ic++) {
                     $row = $ic * $this.PaddedFrames + $t + $this.InputOffset
@@ -434,14 +434,14 @@ class OfflineDirectConvolutionWorker {
                     for ($tap = 0; $tap -lt $this.Kernel; $tap++) {
                         $w = $this.Packed[$packedAt + $tap]
                         $at = $row + $tap * $this.Dilation
-                        $s0 = [System.Runtime.Intrinsics.Vector256]::Add($s0, [System.Runtime.Intrinsics.Vector256]::Multiply($w, [System.Runtime.Intrinsics.Vector256]::Create($this.Padded[$at])))
-                        $s1 = [System.Runtime.Intrinsics.Vector256]::Add($s1, [System.Runtime.Intrinsics.Vector256]::Multiply($w, [System.Runtime.Intrinsics.Vector256]::Create($this.Padded[$at + 1])))
-                        $s2 = [System.Runtime.Intrinsics.Vector256]::Add($s2, [System.Runtime.Intrinsics.Vector256]::Multiply($w, [System.Runtime.Intrinsics.Vector256]::Create($this.Padded[$at + 2])))
-                        $s3 = [System.Runtime.Intrinsics.Vector256]::Add($s3, [System.Runtime.Intrinsics.Vector256]::Multiply($w, [System.Runtime.Intrinsics.Vector256]::Create($this.Padded[$at + 3])))
-                        $s4 = [System.Runtime.Intrinsics.Vector256]::Add($s4, [System.Runtime.Intrinsics.Vector256]::Multiply($w, [System.Runtime.Intrinsics.Vector256]::Create($this.Padded[$at + 4])))
-                        $s5 = [System.Runtime.Intrinsics.Vector256]::Add($s5, [System.Runtime.Intrinsics.Vector256]::Multiply($w, [System.Runtime.Intrinsics.Vector256]::Create($this.Padded[$at + 5])))
-                        $s6 = [System.Runtime.Intrinsics.Vector256]::Add($s6, [System.Runtime.Intrinsics.Vector256]::Multiply($w, [System.Runtime.Intrinsics.Vector256]::Create($this.Padded[$at + 6])))
-                        $s7 = [System.Runtime.Intrinsics.Vector256]::Add($s7, [System.Runtime.Intrinsics.Vector256]::Multiply($w, [System.Runtime.Intrinsics.Vector256]::Create($this.Padded[$at + 7])))
+                        $s0 = [System.Runtime.Intrinsics.Vector512]::Add($s0, [System.Runtime.Intrinsics.Vector512]::Multiply($w, [System.Runtime.Intrinsics.Vector512]::Create($this.Padded[$at])))
+                        $s1 = [System.Runtime.Intrinsics.Vector512]::Add($s1, [System.Runtime.Intrinsics.Vector512]::Multiply($w, [System.Runtime.Intrinsics.Vector512]::Create($this.Padded[$at + 1])))
+                        $s2 = [System.Runtime.Intrinsics.Vector512]::Add($s2, [System.Runtime.Intrinsics.Vector512]::Multiply($w, [System.Runtime.Intrinsics.Vector512]::Create($this.Padded[$at + 2])))
+                        $s3 = [System.Runtime.Intrinsics.Vector512]::Add($s3, [System.Runtime.Intrinsics.Vector512]::Multiply($w, [System.Runtime.Intrinsics.Vector512]::Create($this.Padded[$at + 3])))
+                        $s4 = [System.Runtime.Intrinsics.Vector512]::Add($s4, [System.Runtime.Intrinsics.Vector512]::Multiply($w, [System.Runtime.Intrinsics.Vector512]::Create($this.Padded[$at + 4])))
+                        $s5 = [System.Runtime.Intrinsics.Vector512]::Add($s5, [System.Runtime.Intrinsics.Vector512]::Multiply($w, [System.Runtime.Intrinsics.Vector512]::Create($this.Padded[$at + 5])))
+                        $s6 = [System.Runtime.Intrinsics.Vector512]::Add($s6, [System.Runtime.Intrinsics.Vector512]::Multiply($w, [System.Runtime.Intrinsics.Vector512]::Create($this.Padded[$at + 6])))
+                        $s7 = [System.Runtime.Intrinsics.Vector512]::Add($s7, [System.Runtime.Intrinsics.Vector512]::Multiply($w, [System.Runtime.Intrinsics.Vector512]::Create($this.Padded[$at + 7])))
                     }
                 }
                 $this.Store($s0, $block, $t); $this.Store($s1, $block, $t + 1); $this.Store($s2, $block, $t + 2); $this.Store($s3, $block, $t + 3)
@@ -451,26 +451,26 @@ class OfflineDirectConvolutionWorker {
       }
     }
 
-    static [System.Runtime.Intrinsics.Vector256[float][]] PackWeights([float[]] $weights, [int] $outputs, [int] $inputs, [int] $tapCount, [bool] $transpose, [int] $tapStep, [int] $firstTap) {
+    static [System.Runtime.Intrinsics.Vector512[float][]] PackWeights([float[]] $weights, [int] $outputs, [int] $inputs, [int] $tapCount, [bool] $transpose, [int] $tapStep, [int] $firstTap) {
         if ($weights.Length -ne $outputs * $inputs * $tapCount) { throw [ArgumentException]::new('Packed weight shape mismatch.') }
         if ($tapStep -lt 1 -or $firstTap -lt 0) { throw [ArgumentException]::new('Invalid convolution phase.') }
         $selectedTaps = 0
         if ($firstTap -lt $tapCount) { $selectedTaps = [int](($tapCount - 1 - $firstTap - ($tapCount - 1 - $firstTap) % $tapStep) / $tapStep) + 1 }
-        $blocks = [int](($outputs + 7 - ($outputs + 7) % 8) / 8)
-        $vectors = [System.Runtime.Intrinsics.Vector256[float][]]::new($blocks * $inputs * $selectedTaps)
-        $lanes = [float[]]::new(8)
+        $blocks = [int](($outputs + 15 - ($outputs + 15) % 16) / 16)
+        $vectors = [System.Runtime.Intrinsics.Vector512[float][]]::new($blocks * $inputs * $selectedTaps)
+        $lanes = [float[]]::new(16)
         for ($block = 0; $block -lt $blocks; $block++) {
             for ($ic = 0; $ic -lt $inputs; $ic++) {
                 for ($tap = 0; $tap -lt $selectedTaps; $tap++) {
-                    for ($lane = 0; $lane -lt 8; $lane++) {
-                        $oc = $block * 8 + $lane; $lanes[$lane] = [float]0
+                    for ($lane = 0; $lane -lt 16; $lane++) {
+                        $oc = $block * 16 + $lane; $lanes[$lane] = [float]0
                         if ($oc -lt $outputs) {
                             $weightAt = ($oc * $inputs + $ic) * $tapCount + $firstTap + $tap * $tapStep
                             if ($transpose) { $weightAt = ($ic * $outputs + $oc) * $tapCount + $firstTap + $tap * $tapStep }
                             $lanes[$lane] = $weights[$weightAt]
                         }
                     }
-                    $vectors[($block * $inputs + $ic) * $selectedTaps + $tap] = [System.Runtime.Intrinsics.Vector256]::Create($lanes[0], $lanes[1], $lanes[2], $lanes[3], $lanes[4], $lanes[5], $lanes[6], $lanes[7])
+                    $vectors[($block * $inputs + $ic) * $selectedTaps + $tap] = [System.Runtime.Intrinsics.Vector512]::Create($lanes[0], $lanes[1], $lanes[2], $lanes[3], $lanes[4], $lanes[5], $lanes[6], $lanes[7], $lanes[8], $lanes[9], $lanes[10], $lanes[11], $lanes[12], $lanes[13], $lanes[14], $lanes[15])
                 }
             }
         }
@@ -563,6 +563,72 @@ class OfflineLstmWorker {
         if ($this.Phase -eq 0) { [OfflineUpstreamMath]::LstmProjection($this.Values, $this.Rows, $this.Inputs, $this.Hidden, $this.InputWeights, $this.InputBias, $this.HiddenBias, $this.Projection, $this.FirstDirection, $this.FirstGate, $this.LastGate); return }
         if ($this.Phase -eq 1) { [OfflineUpstreamMath]::LstmRecurrence($this.Projection, $this.Rows, $this.Hidden, $this.HiddenWeights, $this.Output, $this.FirstDirection); return }
         $completed = [OfflineUpstreamMath]::Lstm($this.Values, $this.Rows, $this.Inputs, $this.Hidden, $this.InputWeights, $this.HiddenWeights, $this.InputBias, $this.HiddenBias, $this.Output, $this.FirstDirection, $this.LastDirection)
+    }
+}
+
+class OfflineAdaInWorker {
+    [float[]] $Values
+    [int] $Channels
+    [int] $Frames
+    [float[]] $Style
+    [float[]] $Fc
+    [float[]] $Bias
+    [float[]] $NormWeight
+    [float[]] $NormBias
+    [float[]] $Output
+    [int] $FirstChannel
+    [int] $LastChannel
+
+    [void] Run() {
+        $inValues = $this.Values; $outValues = $this.Output; $tFrames = $this.Frames
+        $styleValues = $this.Style; $weightFc = $this.Fc; $weightBias = $this.Bias
+        $nw = $this.NormWeight; $nb = $this.NormBias
+        $totalChannels = $this.Channels; $styleLen = $styleValues.Length
+        $framesF = [float]$tFrames
+        for ($c = $this.FirstChannel; $c -lt $this.LastChannel; $c++) {
+            $gamma = [float]0; $beta = [float]0
+            $cStyle = $c * $styleLen
+            $cChanStyle = ($c + $totalChannels) * $styleLen
+            for ($j = 0; $j -lt $styleLen; $j++) {
+                $gamma = [float]($gamma + [float]($weightFc[$cStyle + $j] * $styleValues[$j]))
+                $beta = [float]($beta + [float]($weightFc[$cChanStyle + $j] * $styleValues[$j]))
+            }
+            $gamma = [float]([float]1 + [float]($gamma + $weightBias[$c])); $beta = [float]($beta + $weightBias[$c + $totalChannels])
+            $base = $c * $tFrames
+            $mean = [float]0
+            for ($t = 0; $t -lt $tFrames; $t++) { $mean = [float]($mean + $inValues[$base + $t]) }
+            $mean = [float]($mean / $framesF); $variance = [float]0
+            for ($t = 0; $t -lt $tFrames; $t++) { $delta = [float]($inValues[$base + $t] - $mean); $variance = [float]($variance + [float]($delta * $delta)) }
+            $inverse = [float]([float]1 / [MathF]::Sqrt([float]($variance / $framesF + [float]0.00001)))
+            $normW = $nw[$c]; $normB = $nb[$c]
+            for ($t = 0; $t -lt $tFrames; $t++) {
+                $normal = [float]([float]($inValues[$base + $t] - $mean) * $inverse)
+                $normal = [float]([float]($normal * $normW) + $normB)
+                $outValues[$base + $t] = [float]([float]($normal * $gamma) + $beta)
+            }
+        }
+    }
+}
+
+class OfflineSnakeWorker {
+    [float[]] $Values
+    [float[]] $alpha
+    [int] $Frames
+    [float[]] $Output
+    [int] $FirstChannel
+    [int] $LastChannel
+
+    [void] Run() {
+        $inValues = $this.Values; $outValues = $this.Output; $alphaArray = $this.alpha; $tFrames = $this.Frames
+        for ($c = $this.FirstChannel; $c -lt $this.LastChannel; $c++) {
+            $alphaVal = $alphaArray[$c]
+            $inverse = [float]([float]1 / $alphaVal)
+            $base = $c * $tFrames
+            for ($t = 0; $t -lt $tFrames; $t++) {
+                $at = $base + $t; $sine = [MathF]::Sin([float]($alphaVal * $inValues[$at]))
+                $outValues[$at] = [float]($inValues[$at] + [float]($inverse * [float]($sine * $sine)))
+            }
+        }
     }
 }
 
@@ -1225,6 +1291,8 @@ $upstreamMath = $assembly.GetType('OfflineUpstreamMath', $true)
 $directConvolution = $assembly.GetType('OfflineDirectConvolutionWorker', $true)
 $denseWorker = $assembly.GetType('OfflineDenseWorker', $true)
 $lstmWorker = $assembly.GetType('OfflineLstmWorker', $true)
+$adaInWorkerType = $assembly.GetType('OfflineAdaInWorker', $false)
+$snakeWorkerType = $assembly.GetType('OfflineSnakeWorker', $false)
 $frameIndices = $mathType.GetMethod('FrameIndices').CreateDelegate([Func[int,int,int,int,int,int,bool,int[]]])
 $packInputs = $mathType.GetMethod('PackInputs').CreateDelegate([Func[float[],int[],int,int,int,int,System.Runtime.Intrinsics.Vector128[float][]]])
 $activeIndices = $mathType.GetMethod('ActiveIndices').CreateDelegate([Func[int[],int,bool[]]])
@@ -1274,6 +1342,8 @@ $checkpoint = & $reader.Read $modelPath
 $weightCache = [Collections.Generic.Dictionary[string,float[]]]::new([StringComparer]::Ordinal)
 $convolutionCache = [Collections.Generic.Dictionary[string,object]]::new([StringComparer]::Ordinal)
 $denseCache = [Collections.Generic.Dictionary[string,object]]::new([StringComparer]::Ordinal)
+$adaInCache = [Collections.Generic.Dictionary[string,object]]::new([StringComparer]::Ordinal)
+$generatorBlockCache = [Collections.Generic.Dictionary[string,object]]::new([StringComparer]::Ordinal)
 $script:OfflineAlbertFormat = $null; $script:OfflineAlbertTrace = $null
 $script:OfflineFormatWeights = [Collections.Generic.Dictionary[string,float[]]]::new([StringComparer]::Ordinal)
 if ($null -ne $AlbertQuantization) {
@@ -1393,13 +1463,14 @@ function Invoke-OfflineConv {
                     $inputOffset = $inputPadding + [int](($phase + $Padding - $firstTap) / $Stride); $tapDirection = -1
                 }
                 $packed = $directConvolution::PackWeights($conv.Weights, $conv.OutputChannels, $conv.InputChannels, $conv.Kernel, $Transpose.IsPresent, $tapStep, $firstTap)
-                [pscustomobject]@{ Weights = $packed; Taps = [int]($packed.Length / ([Math]::Ceiling($conv.OutputChannels / 8.0) * $conv.InputChannels)); InputOffset = $inputOffset; Dilation = $tapDirection }
+                [pscustomobject]@{ Weights = $packed; Taps = [int]($packed.Length / ([Math]::Ceiling($conv.OutputChannels / 16.0) * $conv.InputChannels)); InputOffset = $inputOffset; Dilation = $tapDirection }
             })
         }
         $paddedFrames = $Frames + 2 * $inputPadding + 7
         $padded = $directConvolution::PadInput($InputValues, $conv.InputChannels, $Frames, $inputPadding, $paddedFrames)
-        $blocks = [int][Math]::Ceiling($conv.OutputChannels / 8.0); $workerCount = [Math]::Min($Threads, $blocks)
+        $blocks = [int][Math]::Ceiling($conv.OutputChannels / 16.0); $workerCount = [Math]::Min($Threads, [int][Math]::Max(1, [Math]::Floor($blocks / 2.0)))
         $running = [Collections.Generic.List[Threading.Tasks.Task]]::new(); $keepWorkers = [Collections.Generic.List[object]]::new()
+        $directRun = $directConvolution.GetMethod('Run')
         $watch = [Diagnostics.Stopwatch]::StartNew()
         for ($phase = 0; $phase -lt $phaseCount; $phase++) {
           $phaseFrames = [int][Math]::Floor(($outFrames - 1 - $phase) / [double]$phaseCount) + 1
@@ -1421,7 +1492,7 @@ function Invoke-OfflineConv {
             $worker.TimeTile = $timeTile
             $worker.FirstBlock = [int][Math]::Floor($workerIndex * $blocks / [double]$workerCount)
             $worker.LastBlock = [int][Math]::Floor(($workerIndex + 1) * $blocks / [double]$workerCount)
-            $keepWorkers.Add($worker); $running.Add([Threading.Tasks.Task]::Run($directConvolution.GetMethod('Run').CreateDelegate([Action], $worker)))
+            $keepWorkers.Add($worker); $running.Add([Threading.Tasks.Task]::Run($directRun.CreateDelegate([Action], $worker)))
           }
         }
         [Threading.Tasks.Task]::WaitAll($running.ToArray()); $watch.Stop()
@@ -1454,13 +1525,17 @@ function Invoke-OfflineConv {
 }
 function Invoke-OfflineAdaIn([float[]] $InputValues, [int] $Channels, [int] $Frames, [float[]] $AcousticStyle, [string] $Name, [string] $Module = 'decoder.module.', [int] $FrameRate = 0) {
     $prefix = $Module + $Name
-    $fc = Read-OfflineWeight ($prefix + '.fc.weight'); $bias = Read-OfflineWeight ($prefix + '.fc.bias')
-    # The checkpoint omits these affine parameters. Stock's non-strict load
-    # retains InstanceNorm's initialized ones/zeros in that case.
-    $normWeight = [float[]]::new($Channels); [Array]::Fill($normWeight, [float]1)
-    $normBias = [float[]]::new($Channels)
-    if ($checkpoint.Tensors.Contains($prefix + '.norm.weight')) { $normWeight = Read-OfflineWeight ($prefix + '.norm.weight') }
-    if ($checkpoint.Tensors.Contains($prefix + '.norm.bias')) { $normBias = Read-OfflineWeight ($prefix + '.norm.bias') }
+    if ($adaInCache.ContainsKey($prefix)) {
+        $site = $adaInCache[$prefix]
+        $fc = $site.Fc; $bias = $site.Bias; $normWeight = $site.NormWeight; $normBias = $site.NormBias
+    } else {
+        $fc = Read-OfflineWeight ($prefix + '.fc.weight'); $bias = Read-OfflineWeight ($prefix + '.fc.bias')
+        $normWeight = [float[]]::new($Channels); [Array]::Fill($normWeight, [float]1)
+        $normBias = [float[]]::new($Channels)
+        if ($checkpoint.Tensors.Contains($prefix + '.norm.weight')) { $normWeight = Read-OfflineWeight ($prefix + '.norm.weight') }
+        if ($checkpoint.Tensors.Contains($prefix + '.norm.bias')) { $normBias = Read-OfflineWeight ($prefix + '.norm.bias') }
+        $adaInCache.Add($prefix, [pscustomobject]@{ Fc = $fc; Bias = $bias; NormWeight = $normWeight; NormBias = $normBias })
+    }
     $watch = [Diagnostics.Stopwatch]::StartNew()
     $kind = 'LiveAdaIN'
     if ($null -ne $levelContext -and -not $Name.StartsWith('generator.', [StringComparison]::Ordinal)) {
@@ -1473,7 +1548,25 @@ function Invoke-OfflineAdaIn([float[]] $InputValues, [int] $Channels, [int] $Fra
         }
         $result = $applyLevels.Invoke($InputValues, $Channels, $Frames, $AcousticStyle, $fc, $bias, $normWeight, $normBias, $record.Statistics)
         $levelContext.Exported.Add($record)
-    } else { $result = $adaIn.Invoke($InputValues, $Channels, $Frames, $AcousticStyle, $fc, $bias, $normWeight, $normBias) }
+    } else {
+        if ($null -ne $adaInWorkerType -and $Threads -gt 1) {
+            $result = [float[]]::new($InputValues.Length)
+            $running = [Collections.Generic.List[Threading.Tasks.Task]]::new(); $keepWorkers = [Collections.Generic.List[object]]::new()
+        $adaInRun = $adaInWorkerType.GetMethod('Run')
+            $workerCount = [Math]::Min($Threads, $Channels)
+            for ($workerIndex = 0; $workerIndex -lt $workerCount; $workerIndex++) {
+                $worker = [Activator]::CreateInstance($adaInWorkerType)
+                $worker.Values = $InputValues; $worker.Channels = $Channels; $worker.Frames = $Frames
+                $worker.Style = $AcousticStyle; $worker.Fc = $fc; $worker.Bias = $bias
+                $worker.NormWeight = $normWeight; $worker.NormBias = $normBias; $worker.Output = $result
+                $worker.FirstChannel = [int][Math]::Floor($workerIndex * $Channels / [double]$workerCount)
+                $worker.LastChannel = [int][Math]::Floor(($workerIndex + 1) * $Channels / [double]$workerCount)
+                $action = $adaInRun.CreateDelegate([Action], $worker)
+                $keepWorkers.Add($worker); $running.Add([Threading.Tasks.Task]::Run($action))
+            }
+            [Threading.Tasks.Task]::WaitAll($running.ToArray())
+        } else { $result = $adaIn.Invoke($InputValues, $Channels, $Frames, $AcousticStyle, $fc, $bias, $normWeight, $normBias) }
+    }
     $watch.Stop()
     $profile.Add([pscustomobject]@{ Stage = $Name; Kind = $kind; Milliseconds = $watch.Elapsed.TotalMilliseconds; Frames = $Frames })
     if($null -ne $script:OfflineObservationSink){$script:OfflineObservationSink.Invoke($MyInvocation,[psvariable[]]@(Get-Variable -Scope Local))}
@@ -1559,22 +1652,62 @@ function Read-OfflineReference([hashtable] $CaptureCase, [string] $Name) {
 function Get-OfflineRms([float[]] $Samples) {
     $sum = 0.0; foreach ($v in $Samples) { $sum += [double]$v * $v }; [Math]::Sqrt($sum / [Math]::Max(1, $Samples.Length))
 }
+function Invoke-OfflineSnake([float[]] $InputValues, [float[]] $alpha, [int] $Frames) {
+    if ($null -ne $snakeWorkerType -and $Threads -gt 1) {
+        $channels = $alpha.Length
+        $result = [float[]]::new($InputValues.Length)
+        $running = [Collections.Generic.List[Threading.Tasks.Task]]::new(); $keepWorkers = [Collections.Generic.List[object]]::new()
+        $workerCount = [Math]::Min($Threads, $channels)
+        for ($workerIndex = 0; $workerIndex -lt $workerCount; $workerIndex++) {
+            $worker = [Activator]::CreateInstance($snakeWorkerType)
+            $worker.Values = $InputValues; $worker.alpha = $alpha; $worker.Frames = $Frames; $worker.Output = $result
+            $worker.FirstChannel = [int][Math]::Floor($workerIndex * $channels / [double]$workerCount)
+            $worker.LastChannel = [int][Math]::Floor(($workerIndex + 1) * $channels / [double]$workerCount)
+            $action = $snakeWorkerType.GetMethod('Run').CreateDelegate([Action], $worker)
+            $keepWorkers.Add($worker); $running.Add([Threading.Tasks.Task]::Run($action))
+        }
+        [Threading.Tasks.Task]::WaitAll($running.ToArray())
+        return , $result
+    }
+    return , $snake.Invoke($InputValues, $alpha, $Frames)
+}
 function Invoke-OfflineGeneratorBlock([float[]] $InputValues, [int] $Frames, [float[]] $AcousticStyle, [string] $Name) {
     $channels = [int]($InputValues.Length / $Frames); $x = $InputValues
+    $stages = $null
+    if ($generatorBlockCache.ContainsKey($Name)) {
+        $stages = $generatorBlockCache[$Name]
+    } else {
+        $stages = [object[]]::new(3)
+        for ($s = 0; $s -lt 3; $s++) {
+            $conv1 = Get-OfflineConvolution ($Name + '.convs1.' + $s) 1 $false
+            $dilation = 1 + 2 * $s; $p1 = [int](($conv1.Kernel - 1) * $dilation / 2)
+            $conv2 = Get-OfflineConvolution ($Name + '.convs2.' + $s) 1 $false
+            $p2 = [int](($conv2.Kernel - 1) / 2)
+            $stages[$s] = [pscustomobject]@{
+                AdaIn1 = ($Name + '.adain1.' + $s)
+                Alpha1 = Read-OfflineWeight ('decoder.module.' + $Name + '.alpha1.' + $s)
+                Conv1 = ($Name + '.convs1.' + $s)
+                Dilation = $dilation
+                Padding1 = $p1
+                AdaIn2 = ($Name + '.adain2.' + $s)
+                Alpha2 = Read-OfflineWeight ('decoder.module.' + $Name + '.alpha2.' + $s)
+                Conv2 = ($Name + '.convs2.' + $s)
+                Padding2 = $p2
+                Pair = ($Name + '.' + $s)
+            }
+        }
+        $generatorBlockCache.Add($Name, $stages)
+    }
     for ($stage = 0; $stage -lt 3; $stage++) {
-        $next = Invoke-OfflineAdaIn $x $channels $Frames $AcousticStyle ($Name + ".adain1.$stage")
-        $next = $snake.Invoke($next, (Read-OfflineWeight ('decoder.module.' + $Name + ".alpha1.$stage")), $Frames)
-        $conv = Get-OfflineConvolution ($Name + ".convs1.$stage") 1 $false
-        $dilation = 1 + 2 * $stage; $padding = [int](($conv.Kernel - 1) * $dilation / 2)
-        $next = Invoke-OfflineConv $next $Frames ($Name + ".convs1.$stage") -Dilation $dilation -Padding $padding
-        $next = Invoke-OfflineAdaIn $next $channels $Frames $AcousticStyle ($Name + ".adain2.$stage")
-        $next = $snake.Invoke($next, (Read-OfflineWeight ('decoder.module.' + $Name + ".alpha2.$stage")), $Frames)
-        $conv = Get-OfflineConvolution ($Name + ".convs2.$stage") 1 $false
-        $next = Invoke-OfflineConv $next $Frames ($Name + ".convs2.$stage") -Padding ([int](($conv.Kernel - 1) / 2))
-        # The residual pair's correction against the stream it is added to; a dropped pair leaves the stream unchanged.
-        $pair = "$Name.$stage"
+        $st = $stages[$stage]
+        $next = Invoke-OfflineAdaIn $x $channels $Frames $AcousticStyle $st.AdaIn1
+        $next = Invoke-OfflineSnake $next $st.Alpha1 $Frames
+        $next = Invoke-OfflineConv $next $Frames $st.Conv1 -Dilation $st.Dilation -Padding $st.Padding1
+        $next = Invoke-OfflineAdaIn $next $channels $Frames $AcousticStyle $st.AdaIn2
+        $next = Invoke-OfflineSnake $next $st.Alpha2 $Frames
+        $next = Invoke-OfflineConv $next $Frames $st.Conv2 -Padding $st.Padding2
+        $pair = $st.Pair
         if ($null -ne $script:OfflineResidualTrace) { $script:OfflineResidualTrace.Add([pscustomobject]@{ Pair = $pair; StreamRms = (Get-OfflineRms $x); CorrectionRms = (Get-OfflineRms $next) }) }
-        # The hook sees the pair, its stream and its correction ([channel][frame]); a returned array replaces the correction.
         if ($null -ne $script:OfflineResidualHook) { $replacement = & $script:OfflineResidualHook $pair $x $next $channels $Frames; if ($null -ne $replacement) { $next = [float[]]$replacement } }
         if ($null -ne $script:OfflineDroppedResiduals -and $script:OfflineDroppedResiduals.Contains($pair)) { continue }
         $x = $residual.Invoke($next, $x, [float]1)
@@ -1722,13 +1855,14 @@ function Invoke-OfflineLinear([float[]] $Rows, [int] $rowCount, [string] $Prefix
         $values = [float[]]::new($rowCount * $bias.Length)
         $blocks = [int][Math]::Ceiling($bias.Length / 4.0); $workerCount = [Math]::Min($Threads, $blocks)
         $running = [Collections.Generic.List[Threading.Tasks.Task]]::new(); $keepWorkers = [Collections.Generic.List[object]]::new()
+        $denseRun = $denseWorker.GetMethod('Run')
         for ($workerIndex = 0; $workerIndex -lt $workerCount; $workerIndex++) {
             $worker = [Activator]::CreateInstance($denseWorker)
             $worker.Input = $paddedRows; $worker.Packed = $packed.Weights; $worker.Bias = $packed.Bias; $worker.Output = $values
             $worker.Rows = $rowCount; $worker.InputChannels = $inputs; $worker.OutputChannels = $bias.Length
             $worker.FirstBlock = [int][Math]::Floor($workerIndex * $blocks / [double]$workerCount)
             $worker.LastBlock = [int][Math]::Floor(($workerIndex + 1) * $blocks / [double]$workerCount)
-            $keepWorkers.Add($worker); $running.Add([Threading.Tasks.Task]::Run($denseWorker.GetMethod('Run').CreateDelegate([Action], $worker)))
+            $keepWorkers.Add($worker); $running.Add([Threading.Tasks.Task]::Run($denseRun.CreateDelegate([Action], $worker)))
         }
         [Threading.Tasks.Task]::WaitAll($running.ToArray())
     }
