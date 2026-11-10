@@ -90,8 +90,30 @@ param(
     # A Kokoro.OfflineRender.dll compiled from this file elsewhere (the phone runs no compiler); it must reference
     # System.Private.CoreLib only. Without it the classes below are compiled here.
     [string] $CompiledAssembly = '',
+    # Additional original voice-pack pins, supplied by the caller's verified catalog.
+    [Collections.Generic.Dictionary[string,string]] $VoicePins = $null,
+    [switch] $ReuseText,
+    [ValidateRange(1,65536)][int] $TextPreparationCapacity = 1,
     [switch] $h
 )
+
+class OfflineTokenSequenceComparer : Collections.Generic.IEqualityComparer[int[]] {
+    [bool] Equals([int[]] $Left,[int[]] $Right) {
+        return [Linq.Enumerable]::SequenceEqual[int]($Left,$Right)
+    }
+    [int] GetHashCode([int[]] $Values) {
+        [long]$hash=17
+        foreach($value in $Values){$hash=($hash*31L+[long]$value) -band 2147483647L}
+        return [int]$hash
+    }
+}
+
+class OfflineTextPreparation {
+    [int[]] $TokenIds
+    [float[]] $Bert
+    [float[]] $BertEncoder
+    [float[]] $TextEncoding
+}
 
 class OfflineLevelRecord {
     [string] $Name
@@ -1167,6 +1189,9 @@ foreach ($finishedOutput in $finishedOutputs) {
     if ([IO.File]::Exists((Join-Path $output $finishedOutput))) { throw 'Existing completed result is immutable; choose a fresh output directory.' }
 }
 $sourceHash = (Get-FileHash -LiteralPath $PSCommandPath).Hash
+$referenceSourceTokens=$null;$referenceSourceErrors=$null
+$referenceSourceAst=[Management.Automation.Language.Parser]::ParseFile($PSCommandPath,[ref]$referenceSourceTokens,[ref]$referenceSourceErrors)
+if($referenceSourceErrors.Count -or (Get-FileHash -LiteralPath $PSCommandPath).Hash -cne $sourceHash){throw 'Reference source changed or failed parsing during initialization.'}
 if ($CompiledAssembly) {
     $dll = [IO.Path]::GetFullPath($CompiledAssembly)
     $assembly = [Reflection.Assembly]::LoadFrom($dll)
@@ -1180,7 +1205,7 @@ else {
     $loweringHash = '6900FC735D5F463ECFDB0241B326D959CF7A8B8A252B56B1A7734F20D3BD9BD6'
     $compiler = Join-Path $root "build/lowered-hexagon/compiler/$loweringHash/Export-LoweredAssembly.ps1"
     if (-not [IO.File]::Exists($compiler)) {
-        $loweringBytes = (Invoke-WebRequest -Uri "https://raw.githubusercontent.com/MansfieldPlumbing/PSLowering/$loweringCommit/Export-LoweredAssembly.ps1" -UseBasicParsing).RawContentStream.ToArray()
+        $loweringBytes = (Invoke-WebRequest -Uri "https://raw.githubusercontent.com/MansfieldPlumbing/PSC/$loweringCommit/Export-LoweredAssembly.ps1" -UseBasicParsing).RawContentStream.ToArray()
         if ([Convert]::ToHexString([Security.Cryptography.SHA256]::HashData($loweringBytes)) -cne $loweringHash) { throw 'Pinned PSLowering compiler hash mismatch.' }
         [void][IO.Directory]::CreateDirectory([IO.Path]::GetDirectoryName($compiler)); [IO.File]::WriteAllBytes($compiler, $loweringBytes)
     }
@@ -1263,6 +1288,30 @@ $script:OfflineAlbertRepeat = -1
 $lstmCache = [Collections.Generic.Dictionary[string,object]]::new([StringComparer]::Ordinal)
 $profile = [Collections.Generic.List[object]]::new()
 $levelContext = $null
+$script:OfflineObservationSink = $null
+$script:OfflineDecoderObservationSink = $null
+$script:OfflineTextPreparation = $null
+$script:OfflineTextPreparations = [Collections.Generic.Dictionary[int[],OfflineTextPreparation]]::new([OfflineTokenSequenceComparer]::new())
+$script:OfflineTextHits = 0L
+$script:OfflineTextMisses = 0L
+$referenceConfig = Get-Content -LiteralPath (Join-Path $InputRepository 'build/inputs/kokoro/f3ff3571791e39611d31c381e3a41a3af07b4987/config.json') -Raw | ConvertFrom-Json -AsHashtable
+$referenceManifest = Get-Content -LiteralPath (Join-Path $InputRepository 'lib/manifest.json') -Raw | ConvertFrom-Json
+$referenceVoicePins = [Collections.Generic.Dictionary[string,string]]::new([StringComparer]::Ordinal)
+foreach ($file in $referenceManifest.model.files) {
+    $parts=$file.path.Split([char[]]@('\','/'),[StringSplitOptions]::RemoveEmptyEntries)
+    if ($parts.Length -eq 2 -and $parts[0] -ceq 'voices') {
+        $referenceVoicePins.Add([IO.Path]::GetFileNameWithoutExtension($parts[1]), $file.sha256)
+    }
+}
+if ($null -ne $VoicePins) {
+    foreach ($name in $VoicePins.Keys) {
+        if ($referenceVoicePins.ContainsKey($name) -and $referenceVoicePins[$name] -ine $VoicePins[$name]) { throw "Conflicting voice pin: $name" }
+        $null = [Convert]::FromHexString($VoicePins[$name])
+        if ($VoicePins[$name].Length -ne 64) { throw "Invalid voice digest: $name" }
+        $referenceVoicePins[$name] = $VoicePins[$name]
+    }
+}
+$referenceVoiceArchives = [Collections.Generic.Dictionary[string,object]]::new([StringComparer]::Ordinal)
 $nodeReferences = [Collections.Generic.Dictionary[string,object]]::new([StringComparer]::Ordinal)
 $nodeResults = [Collections.Generic.Dictionary[string,object]]::new([StringComparer]::Ordinal)
 if ($Mode -eq 'Nodes') {
@@ -1377,6 +1426,7 @@ function Invoke-OfflineConv {
         }
         [Threading.Tasks.Task]::WaitAll($running.ToArray()); $watch.Stop()
         $profile.Add([pscustomobject]@{ Stage = $Name; Kind = 'DirectConvolution'; Milliseconds = $watch.Elapsed.TotalMilliseconds; Frames = $outFrames })
+        if($null -ne $script:OfflineDecoderObservationSink){$script:OfflineDecoderObservationSink.Invoke($MyInvocation.MyCommand,$result,$outFrames,[object[]]@(,$InputValues))}
         return , $result
     }
     $indices = $frameIndices.Invoke($Frames, $outFrames, $conv.Kernel, $Stride, $Dilation, $Padding, $Transpose.IsPresent)
@@ -1399,9 +1449,10 @@ function Invoke-OfflineConv {
     }
     [Threading.Tasks.Task]::WaitAll($running.ToArray()); $watch.Stop()
     $profile.Add([pscustomobject]@{ Stage = $Name; Kind = 'Convolution'; Milliseconds = $watch.Elapsed.TotalMilliseconds; Frames = $outFrames })
+    if($null -ne $script:OfflineDecoderObservationSink){$script:OfflineDecoderObservationSink.Invoke($MyInvocation.MyCommand,$result,$outFrames,[object[]]@(,$InputValues))}
     return , $result
 }
-function Invoke-OfflineAdaIn([float[]] $InputValues, [int] $Channels, [int] $Frames, [float[]] $AcousticStyle, [string] $Name, [string] $Module = 'decoder.module.') {
+function Invoke-OfflineAdaIn([float[]] $InputValues, [int] $Channels, [int] $Frames, [float[]] $AcousticStyle, [string] $Name, [string] $Module = 'decoder.module.', [int] $FrameRate = 0) {
     $prefix = $Module + $Name
     $fc = Read-OfflineWeight ($prefix + '.fc.weight'); $bias = Read-OfflineWeight ($prefix + '.fc.bias')
     # The checkpoint omits these affine parameters. Stock's non-strict load
@@ -1425,34 +1476,48 @@ function Invoke-OfflineAdaIn([float[]] $InputValues, [int] $Channels, [int] $Fra
     } else { $result = $adaIn.Invoke($InputValues, $Channels, $Frames, $AcousticStyle, $fc, $bias, $normWeight, $normBias) }
     $watch.Stop()
     $profile.Add([pscustomobject]@{ Stage = $Name; Kind = $kind; Milliseconds = $watch.Elapsed.TotalMilliseconds; Frames = $Frames })
+    if($null -ne $script:OfflineObservationSink){$script:OfflineObservationSink.Invoke($MyInvocation,[psvariable[]]@(Get-Variable -Scope Local))}
     return , $result
 }
 function Join-OfflineChannels([float[]] $A, [float[]] $B, [float[]] $C, [float[]] $D) {
     $result = [float[]]::new($A.Length + $B.Length + $C.Length + $D.Length)
     [Array]::Copy($A, 0, $result, 0, $A.Length); [Array]::Copy($B, 0, $result, $A.Length, $B.Length)
     [Array]::Copy($C, 0, $result, $A.Length + $B.Length, $C.Length); [Array]::Copy($D, 0, $result, $A.Length + $B.Length + $C.Length, $D.Length)
+    if($null -ne $script:OfflineDecoderObservationSink){$script:OfflineDecoderObservationSink.Invoke($MyInvocation.MyCommand,$result,0,[object[]]@($A,$B,$C,$D))}
     return , $result
 }
-function Invoke-OfflineDecoderBlock([float[]] $InputValues, [int] $Frames, [float[]] $AcousticStyle, [string] $Name, [switch] $Upsample, [string] $Module = 'decoder.module.') {
+function Invoke-OfflineDecoderBlock([float[]] $InputValues, [int] $Frames, [float[]] $AcousticStyle, [string] $Name, [switch] $Upsample, [string] $Module = 'decoder.module.', [int] $FrameRate = 40) {
     # Stock AdainResBlk1d (istftnet.py); the predictor's F0 and N blocks use the same form under predictor.module.
     $cin = [int]($InputValues.Length / $Frames)
-    $next = Invoke-OfflineAdaIn $InputValues $cin $Frames $AcousticStyle ($Name + '.norm1') $Module
-    $next = $leaky.Invoke($next, [float]0.2); $nextFrames = $Frames
+    $next = Invoke-OfflineAdaIn $InputValues $cin $Frames $AcousticStyle ($Name + '.norm1') $Module -FrameRate $FrameRate
+    $activationInput=$next;$next = $leaky.Invoke($next, [float]0.2); $nextFrames = $Frames
+    if($null -ne $script:OfflineDecoderObservationSink){$script:OfflineDecoderObservationSink.Invoke($leaky.Method,$next,$Frames,[object[]]@(,$activationInput))}
     if ($Upsample) { $next = Invoke-OfflineConv $next $Frames ($Name + '.pool') -Stride 2 -Padding 1 -Groups $cin -Transpose -OutputPadding 1 -Module $Module; $nextFrames = 2 * $Frames }
     $next = Invoke-OfflineConv $next $nextFrames ($Name + '.conv1') -Padding 1 -Module $Module
     $cout = [int]($next.Length / $nextFrames)
-    $next = Invoke-OfflineAdaIn $next $cout $nextFrames $AcousticStyle ($Name + '.norm2') $Module
-    $next = $leaky.Invoke($next, [float]0.2)
+    $nextRate = if ($Upsample) { 2 * $FrameRate } else { $FrameRate }
+    $next = Invoke-OfflineAdaIn $next $cout $nextFrames $AcousticStyle ($Name + '.norm2') $Module -FrameRate $nextRate
+    $activationInput=$next;$next = $leaky.Invoke($next, [float]0.2)
+    if($null -ne $script:OfflineDecoderObservationSink){$script:OfflineDecoderObservationSink.Invoke($leaky.Method,$next,$nextFrames,[object[]]@(,$activationInput))}
     $next = Invoke-OfflineConv $next $nextFrames ($Name + '.conv2') -Padding 1 -Module $Module
     $shortcut = $InputValues
-    if ($Upsample) { $shortcut = $nearest2.Invoke($InputValues, $cin, $Frames) }
+    if ($Upsample) {
+        $shortcut = $nearest2.Invoke($InputValues, $cin, $Frames)
+        if($null -ne $script:OfflineDecoderObservationSink){$script:OfflineDecoderObservationSink.Invoke($nearest2.Method,$shortcut,$nextFrames,[object[]]@(,$InputValues))}
+    }
     if ($cin -ne $cout) { $shortcut = Invoke-OfflineConv $shortcut $nextFrames ($Name + '.conv1x1') -Module $Module }
-    return , $residual.Invoke($next, $shortcut, [float]0.70710677)
+    $blockOutput=$residual.Invoke($next, $shortcut, [float]0.70710677)
+    if($null -ne $script:OfflineDecoderObservationSink){$script:OfflineDecoderObservationSink.Invoke($residual.Method,$blockOutput,$nextFrames,[object[]]@($next,$shortcut))}
+    return , $blockOutput
 }
 function Invoke-OfflineDecoder {
     param([float[]] $AsrValues, [float[]] $PitchCurve, [float[]] $EnergyCurve, [float[]] $AcousticStyle,
         [int[]] $TokenDurations, [ValidateSet('Live','Supplied')][string] $LevelMode = 'Live',
-        [Collections.Generic.Dictionary[string,object]] $SuppliedLevels = $null)
+        [Collections.Generic.Dictionary[string,object]] $SuppliedLevels = $null,
+        [Action[object,float[],int,object[]]] $ObservationSink=$null)
+    $previousDecoderSink=$script:OfflineDecoderObservationSink
+    $script:OfflineDecoderObservationSink=$ObservationSink
+    try {
     $levelContext = [pscustomobject]@{ Mode = $LevelMode; Durations = $TokenDurations; Supplied = $SuppliedLevels; Exported = [Collections.Generic.List[OfflineLevelRecord]]::new() }
     $frames = [int]($AsrValues.Length / 512)
     if ($AsrValues.Length -ne 512 * $frames -or $PitchCurve.Length -ne 2 * $frames -or $EnergyCurve.Length -ne $PitchCurve.Length -or $AcousticStyle.Length -ne 128) { throw 'Decoder input shape mismatch.' }
@@ -1469,6 +1534,7 @@ function Invoke-OfflineDecoder {
     }
     $result = [OfflineDecoderResult]::new(); $result.Features = $x; $result.Levels = $levelContext.Exported.ToArray()
     return $result
+    } finally { $script:OfflineDecoderObservationSink=$previousDecoderSink }
 }
 function Test-OfflineLevelReplay([OfflineDecoderResult] $LiveResult, [float[]] $AsrValues, [float[]] $PitchCurve, [float[]] $EnergyCurve, [float[]] $AcousticStyle, [int[]] $TokenLengths) {
     $supplied = [Collections.Generic.Dictionary[string,object]]::new([StringComparer]::Ordinal)
@@ -1696,12 +1762,17 @@ function Invoke-OfflineAlbert([int[]] $Ids) {
 }
 function Read-OfflineVoiceRow([string] $Voice, [int] $PhonemeCount) {
     # Stock KPipeline: pack[len(phonemes) - 1]; acoustic style is [:128], prosody style [128:].
-    if ($Voice -cnotmatch '^[a-z]{2}_[a-z]+$') { throw 'Invalid voice name.' }
+    if ($Voice.Length -lt 4 -or $Voice[2] -cne '_') { throw 'Invalid voice name.' }
+    for ($i=0;$i -lt $Voice.Length;$i++) {
+        if ($i -ne 2 -and ([int]$Voice[$i] -lt 97 -or [int]$Voice[$i] -gt 122)) { throw 'Invalid voice name.' }
+    }
     if ($PhonemeCount -lt 1 -or $PhonemeCount -gt 510) { throw 'Phoneme count outside the voice pack (1..510).' }
-    $manifest = Get-Content -LiteralPath (Join-Path $InputRepository 'lib/manifest.json') -Raw | ConvertFrom-Json
-    $pin = @($manifest.model.files | Where-Object path -CEQ "voices\$Voice.pt")
-    if ($pin.Count -ne 1) { throw "Voice $Voice is not pinned in lib/manifest.json." }
-    $archive = & $reader.ReadTensor (Join-Path $InputRepository "build/inputs/kokoro/$($manifest.model.revision)/voices/$Voice.pt") $pin[0].sha256
+    if (-not $referenceVoicePins.ContainsKey($Voice)) { throw "Voice $Voice has no reference-generation pin." }
+    if (-not $referenceVoiceArchives.ContainsKey($Voice)) {
+        $archive = & $reader.ReadTensor (Join-Path $InputRepository "build/inputs/kokoro/$($referenceManifest.model.revision)/voices/$Voice.pt") $referenceVoicePins[$Voice]
+        $referenceVoiceArchives.Add($Voice, $archive)
+    }
+    $archive = $referenceVoiceArchives[$Voice]
     $raw = & $reader.TensorRow $archive ($PhonemeCount - 1)
     if ($raw.Length -ne 1024) { throw 'Voice row is not 256 float32 values.' }
     $row = [float[]]::new(256); [Buffer]::BlockCopy($raw, 0, $row, 0, 1024)
@@ -1719,20 +1790,32 @@ function Invoke-OfflineSpeech {
     # for every pair with (pair, stream, correction, channels, frames) and may return a replacement correction.
     param([Parameter(Mandatory)][string] $Phonemes, [string] $Voice = 'af_heart', [double] $Speed = 1, [switch] $SkipGenerator,
         [int[]] $SuppliedDurations = $null, [float[]] $SuppliedF0 = $null, [float[]] $SuppliedN = $null, [switch] $SkipDecoder,
-        [float[]] $SuppliedFeatures = $null, [switch] $TraceResiduals, [string[]] $DropResiduals = @(), [scriptblock] $ResidualHook = $null)
+        [float[]] $SuppliedFeatures = $null, [switch] $TraceResiduals, [string[]] $DropResiduals = @(), [scriptblock] $ResidualHook = $null,
+        [Action[Management.Automation.InvocationInfo,psvariable[]]] $ObservationSink=$null,
+        [switch] $RecomputeText,
+        [Action[object,float[],int,object[]]] $DecoderObservationSink=$null)
+    $previousObservationSink=$script:OfflineObservationSink
+    $script:OfflineObservationSink=$ObservationSink
+    try {
     # Assigned in the branches, not from an if expression: an empty collection written to the pipeline would be $null.
     $script:OfflineResidualTrace = $null; $script:OfflineDroppedResiduals = $null; $script:OfflineResidualHook = $ResidualHook
     if ($TraceResiduals) { $script:OfflineResidualTrace = [Collections.Generic.List[object]]::new() }
     if ($DropResiduals.Count) { $script:OfflineDroppedResiduals = [Collections.Generic.HashSet[string]]::new([string[]]$DropResiduals, [StringComparer]::Ordinal) }
-    $config = Get-Content -LiteralPath (Join-Path $InputRepository "build/inputs/kokoro/f3ff3571791e39611d31c381e3a41a3af07b4987/config.json") -Raw | ConvertFrom-Json -AsHashtable
     $ids = [Collections.Generic.List[int]]::new(); $ids.Add(0)
-    foreach ($symbol in $Phonemes.ToCharArray()) { $id = $config.vocab[[string]$symbol]; if ($null -ne $id) { $ids.Add([int]$id) } }
+    foreach ($symbol in $Phonemes.ToCharArray()) { $id = $referenceConfig.vocab[[string]$symbol]; if ($null -ne $id) { $ids.Add([int]$id) } }
     $ids.Add(0); $tokenIds = $ids.ToArray(); $t = $tokenIds.Length
     if ($t -gt 512) { throw 'More than 510 phonemes; stock splits longer input.' }
     $style = Read-OfflineVoiceRow $Voice $Phonemes.Length
     # With -SuppliedF0 every control is supplied. Without it, -SuppliedDurations (and -SuppliedN) replace the predictor's
     # durations (and N) while its F0 branch runs on those durations.
     $supplied = $null -ne $SuppliedF0
+    # Retain exact token preparations up to the caller's capacity. The comparer checks
+    # complete token arrays; hash collisions cannot produce a hit. Experiments bypass it.
+    $reuse = $ReuseText -and -not $RecomputeText -and -not $supplied -and $null -eq $script:OfflineAlbertTrace -and $null -eq $script:OfflineAlbertFormat
+    $prepared = $null
+    $textHit = $reuse -and $script:OfflineTextPreparations.TryGetValue($tokenIds,[ref]$prepared)
+    if ($textHit) { $script:OfflineTextHits++ }
+    elseif ($reuse) { $script:OfflineTextMisses++ }
     if ($supplied) {
         if ($null -eq $SuppliedDurations -or $null -eq $SuppliedF0 -or $null -eq $SuppliedN) { throw 'Supplied prosody needs -SuppliedDurations, -SuppliedF0 and -SuppliedN together.' }
         if ($SuppliedDurations.Length -ne $t) { throw "SuppliedDurations has $($SuppliedDurations.Length) values for $t token ids." }
@@ -1744,9 +1827,9 @@ function Invoke-OfflineSpeech {
     # Each front-end stage's total time, beside the per-operator entries, as Kind FrontEndStage.
     $frontStageWatch = [Diagnostics.Stopwatch]::StartNew()
     $endStage = { param([string] $StageName, [int] $StageFrames) $profile.Add([pscustomobject]@{ Stage = $StageName; Kind = 'FrontEndStage'; Milliseconds = $frontStageWatch.Elapsed.TotalMilliseconds; Frames = $StageFrames }); $frontStageWatch.Restart() }
-    $bert = Invoke-OfflineAlbert $tokenIds
+    $bert = if ($textHit) { , ([float[]]$prepared.Bert.Clone()) } else { , (Invoke-OfflineAlbert $tokenIds) }
     & $endStage 'albert' $t
-    $durationInput = Invoke-OfflineLinear $bert $t 'bert_encoder.module'
+    $durationInput = if ($textHit) { , ([float[]]$prepared.BertEncoder.Clone()) } else { , (Invoke-OfflineLinear $bert $t 'bert_encoder.module') }
     & $endStage 'bert_encoder' $t
     $x = $upstreamMath::AppendStyle($durationInput, $t, 512, $style.Prosody)
     for ($layer = 0; $layer -lt 3; $layer++) {
@@ -1772,7 +1855,7 @@ function Invoke-OfflineSpeech {
     foreach ($curve in 'F0', 'N') {
         $values = $shared; $curveFrames = $frames
         for ($block = 0; $block -lt 3; $block++) {
-            $values = Invoke-OfflineDecoderBlock $values $curveFrames $style.Prosody "$curve.$block" -Upsample:($block -eq 1) -Module 'predictor.module.'
+            $values = Invoke-OfflineDecoderBlock $values $curveFrames $style.Prosody "$curve.$block" -Upsample:($block -eq 1) -Module 'predictor.module.' -FrameRate $(if ($block -eq 2) { 80 } else { 40 })
             if ($block -eq 1) { $curveFrames *= 2 }
         }
         $curves[$curve] = Invoke-OfflineConv $values $curveFrames "$($curve)_proj" -Module 'predictor.module.'
@@ -1810,21 +1893,34 @@ function Invoke-OfflineSpeech {
             return , (Invoke-OfflineConv $Values $FrameCount "cnn.$LayerIndex.0" -Padding 2 -Module 'text_encoder.module.')
         }
     } else { $script:OfflineTextEncoder.Convolution = $null }
-    $textEncoding = $script:OfflineTextEncoder.Run($tokenIds, $t)
+    $textEncoding = if ($textHit) { , ([float[]]$prepared.TextEncoding.Clone()) } else { , ($script:OfflineTextEncoder.Run($tokenIds, $t)) }
+    if ($reuse -and -not $textHit) {
+        $script:OfflineTextPreparation = [OfflineTextPreparation]@{
+            TokenIds = [int[]]$tokenIds.Clone()
+            Bert = [float[]]$bert.Clone()
+            BertEncoder = [float[]]$durationInput.Clone()
+            TextEncoding = [float[]]$textEncoding.Clone()
+        }
+        if($script:OfflineTextPreparations.Count -ge $TextPreparationCapacity){$script:OfflineTextPreparations.Clear()}
+        $script:OfflineTextPreparations.Add($script:OfflineTextPreparation.TokenIds,$script:OfflineTextPreparation)
+    }
     $profile.Add([pscustomobject]@{ Stage = 'text_encoder'; Kind = 'TextEncoderTotal'; Milliseconds = $encoderWatch.Elapsed.TotalMilliseconds; Frames = $t })
     # Aligned: the decoder's asr input, [channel][frame] at the duration frames. -SkipDecoder stops here.
     $aligned = $align.Invoke($textEncoding, $durations)
     if ($SkipDecoder) {
-        return [pscustomobject]@{ Phonemes = $Phonemes; Voice = $Voice; TokenIds = $tokenIds; Bert = $bert; BertEncoder = $durationInput; Durations = $durations; F0 = $curves.F0; N = $curves.N; TextEncoding = $textEncoding; Aligned = $aligned }
+        return [pscustomobject]@{ Phonemes = $Phonemes; Voice = $Voice; TokenIds = $tokenIds; Bert = $bert; BertEncoder = $durationInput; Durations = $durations; F0 = $curves.F0; N = $curves.N; TextEncoding = $textEncoding; Aligned = $aligned
+            AcousticStyle = $style.Acoustic; ProsodyStyle = $style.Prosody }
     }
-    $decoded = Invoke-OfflineDecoder $aligned $curves.F0 $curves.N $style.Acoustic -TokenDurations $durations
+    $decoded = Invoke-OfflineDecoder $aligned $curves.F0 $curves.N $style.Acoustic -TokenDurations $durations -ObservationSink $DecoderObservationSink
     $pcm = $null
     if (-not $SkipGenerator) {
         $sourceDraws = New-OfflineDraws ($curves.F0.Length * 300)
         $pcm = Invoke-OfflineGenerator $decoded.Features $style.Acoustic $curves.F0 $sourceDraws.Uniform $sourceDraws.Harmonic $sourceDraws.Extra
     }
-    [pscustomobject]@{ Phonemes = $Phonemes; Voice = $Voice; Seed = $Seed; TokenIds = $tokenIds; Bert = $bert; DurationFeatures = $durationFeatures
-        Durations = $durations; F0 = $curves.F0; N = $curves.N; TextEncoding = $textEncoding; Features = $decoded.Features; Pcm = $pcm }
+    [pscustomobject]@{ Phonemes = $Phonemes; Voice = $Voice; Seed = $Seed; TokenIds = $tokenIds; Bert = $bert; BertEncoder = $durationInput; DurationFeatures = $durationFeatures
+        Durations = $durations; F0 = $curves.F0; N = $curves.N; TextEncoding = $textEncoding; Aligned = $aligned
+        AcousticStyle = $style.Acoustic; ProsodyStyle = $style.Prosody; Features = $decoded.Features; Pcm = $pcm }
+    } finally { $script:OfflineObservationSink=$previousObservationSink }
 }
 $script:OfflineTextEncoder = $null
 function New-OfflineDraws([int] $SampleCount) {

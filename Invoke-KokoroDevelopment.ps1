@@ -119,7 +119,7 @@ pwsh -NoProfile -File ./Invoke-KokoroDevelopment.ps1 Run -Case timing-passage-0-
 [CmdletBinding()]
 param(
     [Parameter(Position = 0)]
-    [ValidateSet('Status', 'Verify', 'LineEndings', 'BuildHost','Ratchet', 'Run', 'Emit', 'Check', 'Compare', 'JobInput', 'Capture', 'MeasureAudio', 'CompareAudio', 'PhoneSpeech', 'StockCapture', 'Speak', 'FrontEnd', 'PrecomputedDecoder', 'Student', 'StudentJudges', 'Zira', 'Albert', 'AlbertError', 'AlbertLinear', 'AlbertLayerNorm', 'AlbertGelu', 'AlbertAttention', 'AlbertEmbed', 'AlbertJob', 'Api', 'Find', 'Tools', 'StageResidency', 'CopySynthesis', 'WeightAssembly')]
+    [ValidateSet('Status', 'Verify', 'LineEndings', 'BuildHost','Ratchet', 'Run', 'Emit', 'Check', 'Compare', 'JobInput', 'Capture', 'MeasureAudio', 'CompareAudio', 'PhoneSpeech', 'StockCapture', 'Speak', 'FrontEnd', 'PrecomputedDecoder', 'Student', 'StudentJudges', 'Zira', 'Albert', 'AlbertError', 'AlbertLinear', 'AlbertLayerNorm', 'AlbertGelu', 'AlbertAttention', 'AlbertEmbed', 'AlbertJob', 'Api', 'Find', 'Tools', 'StageResidency', 'CopySynthesis', 'WeightAssembly', 'ObserveStock')]
     [string] $Command = 'Status',
     [string] $Case,
     [string] $Kernel,
@@ -3871,9 +3871,965 @@ function Test-KokoroJsonCensus {
 }
 
 # Dot-sourced (. ./Invoke-KokoroDevelopment.ps1): the functions above are the API; no command runs.
+
+# Kokoro audio operators and relational evidence. Sma-prefixed CLR names retain immutable DLL compatibility.
+class KokoroObservationClock {
+    [guid] $Identity = [guid]::NewGuid()
+    [long] $RateNumerator
+    [long] $RateDenominator = 1
+    [bool] $Established
+    [System.Management.Automation.Language.Ast] $Definition
+}
+
+class KokoroObservedStream {
+    [guid] $Identity = [guid]::NewGuid()
+    [guid] $OperationIdentity
+    [object] $Producer
+    [object] $Port
+    [object] $ModelTensor
+    [System.Management.Automation.Language.Ast] $Definition
+    [type] $ElementType
+    [KokoroObservationClock] $Clock
+    [long[]] $Shape
+    [long[]] $Strides
+    [int] $TimeAxis = -1
+    [Array] $Values
+    [KokoroObservedStream[]] $Inputs
+
+    [Array] ReadFrame([int] $Position) {
+        if($this.TimeAxis -lt 0){throw 'This observation has no established time axis.'}
+        if($Position -lt 0 -or $Position -ge $this.Shape[$this.TimeAxis]){throw [ArgumentOutOfRangeException]::new('Position')}
+        $width=if($this.Shape.Length -eq 1){1}else{$this.Shape[1-$this.TimeAxis]}
+        $result=[Array]::CreateInstance($this.ElementType,[int]$width)
+        for($c=0;$c -lt $width;$c++){
+            $index=$Position*$this.Strides[$this.TimeAxis]
+            if($this.Shape.Length -eq 2){$index+=$c*$this.Strides[1-$this.TimeAxis]}
+            $result.SetValue($this.Values.GetValue($index),$c)
+        }
+        return $result
+    }
+}
+
+class KokoroObservationSlice {
+    [KokoroObservedStream] $Stream
+    [int] $Position
+    [Array] Read() { return $this.Stream.ReadFrame($this.Position) }
+}
+
+class KokoroLanguageTiming {
+    [psobject] $LanguageObject
+    [KokoroObservationClock] $Clock
+    [long] $FirstPosition
+    [long] $EndPosition
+    [Reflection.MethodInfo] $Producer
+    [object] $DurationEvidence
+}
+
+class KokoroNormalizationObservation {
+    [guid] $OperationIdentity
+    [KokoroObservedStream] $Input
+    [KokoroObservedStream] $Output
+    [KokoroObservedStream[]] $Parameters
+    [KokoroObservedStream[]] $Statistics
+    [Management.Automation.Language.FunctionDefinitionAst] $Definition
+    [Management.Automation.Language.FunctionMemberAst] $ReductionDefinition
+    [KokoroLanguageTiming[]] $SemanticContext
+    [KokoroObservationClock] $ReferenceClock
+    [long] $ReferenceEnd
+    [int] $FrameRate
+    # Full per-channel reduction extent, not an instantaneous statistic timestamp.
+    [long] $ReductionFirst
+    [long] $ReductionEnd
+
+    [KokoroObservationSlice] AtControlPosition([long] $Position) {
+        if($null -eq $this.ReferenceClock -or -not $this.ReferenceClock.Established -or $this.FrameRate -notin 40,80){throw 'No point correspondence is established for this normalization grid; its full semantic dependency extent remains available.'}
+        if($Position -lt 0 -or $Position -ge $this.ReferenceEnd){throw [ArgumentOutOfRangeException]::new('Position')}
+        $frame=[long][Math]::Floor([double]($Position*$this.FrameRate)/80.0)
+        return [KokoroObservationSlice]@{Stream=$this.Input;Position=[int]$frame}
+    }
+}
+
+class KokoroJointObservationVector {
+    [guid] $CaptureIdentity
+    [KokoroObservationClock] $Clock
+    [long] $Position
+    [KokoroObservationSlice[]] $Observations
+    [KokoroNormalizationObservation[]] $Dependencies
+    [psobject] $Language
+    [psobject[]] $RecognizedObjects
+    [bool] $LanguageTimingEstablished
+}
+
+class KokoroStockObservation {
+    [guid] $Identity = [guid]::NewGuid()
+    [IO.FileInfo] $Source
+    [System.Management.Automation.Language.ScriptBlockAst] $SourceAst
+    [byte[]] $SourceSha256
+    [object] $Checkpoint
+    [object] $Voice
+    [Reflection.Assembly] $Kernel
+    [int] $Seed
+    [double] $HostSeconds
+    [bool] $FrontEndOnly
+    [KokoroObservationDetail] $Detail
+    [string] $Purpose
+    [Management.Automation.Language.FunctionDefinitionAst] $CaptureDefinition
+    [psobject] $Language
+    [psobject] $Result
+    [KokoroObservationClock] $ControlClock
+    [KokoroObservationClock] $DurationClock
+    [KokoroObservationClock] $PcmClock
+    [bool] $LanguageTimingEstablished
+    [Management.Automation.ErrorRecord] $LanguageTimingError
+    [KokoroLanguageTiming[]] $LanguageTimings
+    [Collections.Generic.List[KokoroObservedStream]] $Streams = [Collections.Generic.List[KokoroObservedStream]]::new()
+    [Collections.Generic.List[KokoroNormalizationObservation]] $Normalizations = [Collections.Generic.List[KokoroNormalizationObservation]]::new()
+    [Collections.Generic.List[KokoroObservedStream]] $DecoderOutputs = [Collections.Generic.List[KokoroObservedStream]]::new()
+
+    [string] Explain() {
+        $unmapped=@($this.Normalizations | Where-Object FrameRate -eq 0).Count
+        return ('Purpose: {0} Selection: {1}. Retained {2} streams, {3} normalization scopes, {4} decoder outputs. Semantic timing established: {5}. Normalization grids without point correspondence: {6}. These are reference observations, not admitted percepts.' -f $this.Purpose,$this.Detail,$this.Streams.Count,$this.Normalizations.Count,$this.DecoderOutputs.Count,$this.LanguageTimingEstablished,$unmapped)
+    }
+
+    [KokoroNormalizationObservation[]] ForLanguage([psobject] $LanguageObject) {
+        if(-not $this.LanguageTimingEstablished){throw 'Semantic timing was not established for this capture.'}
+        $found=$false
+        foreach($timing in $this.LanguageTimings){if([object]::ReferenceEquals($timing.LanguageObject,$LanguageObject)){$found=$true;break}}
+        if(-not $found){throw 'The language object does not belong to this capture.'}
+        # Contextual encoders and full-axis normalization depend on the finite
+        # reference history. This is dependency scope, not local causal attribution.
+        return $this.Normalizations.ToArray()
+    }
+
+    [void] Observe([guid] $Operation,[object] $Producer,[object] $Port,[System.Management.Automation.Language.Ast] $Definition,
+        [Array] $Values,[long[]] $Shape,[long[]] $Strides,[int] $TimeAxis,[KokoroObservationClock] $Clock) {
+        if($null -eq $Values -or $Values.Rank -ne 1 -or $Shape.Length -lt 1 -or $Shape.Length -gt 2 -or $Shape.Length -ne $Strides.Length){throw 'Observation shape does not describe its values.'}
+        $count=1L;$last=0L
+        for($i=0;$i -lt $Shape.Length;$i++){if($Shape[$i] -lt 1 -or $Strides[$i] -lt 1){throw 'Invalid observation shape or stride.'};$count*=$Shape[$i];$last+=($Shape[$i]-1)*$Strides[$i]}
+        if($count -ne $Values.LongLength -or $last -ne $count-1 -or $TimeAxis -lt -1 -or $TimeAxis -ge $Shape.Length){throw 'Observation shape, stride or time axis is inconsistent.'}
+        $stream=[KokoroObservedStream]::new()
+        $stream.OperationIdentity=$Operation;$stream.Producer=$Producer;$stream.Port=$Port;$stream.Definition=$Definition
+        $stream.ElementType=$Values.GetType().GetElementType();$stream.Values=$Values.Clone()
+        $stream.Shape=$Shape.Clone();$stream.Strides=$Strides.Clone();$stream.TimeAxis=$TimeAxis;$stream.Clock=$Clock
+        $this.Streams.Add($stream)
+    }
+
+    [KokoroObservedStream[]] Select([object] $Producer,[object] $Port) {
+        return @($this.Streams | Where-Object {[object]::ReferenceEquals($_.Producer,$Producer) -and [object]::ReferenceEquals($_.Port,$Port)})
+    }
+
+    [KokoroJointObservationVector] At([KokoroObservationClock] $Clock,[long] $Position) {
+        if($null -eq $Clock -or -not $Clock.Established){throw 'A joint observation requires an established shared clock.'}
+        $selected=@($this.Streams | Where-Object {[object]::ReferenceEquals($_.Clock,$Clock)})
+        if(-not $selected.Count){throw 'The requested clock has no observed streams.'}
+        $slices=[Collections.Generic.List[KokoroObservationSlice]]::new()
+        foreach($stream in $selected){
+            if($stream.TimeAxis -lt 0 -or $Position -lt 0 -or $Position -ge $stream.Shape[$stream.TimeAxis]){throw [ArgumentOutOfRangeException]::new('Position')}
+            $slices.Add([KokoroObservationSlice]@{Stream=$stream;Position=[int]$Position})
+        }
+        $recognized=@()
+        if($this.LanguageTimingEstablished){
+            $semanticPosition=$Position;$semanticClock=$Clock
+            if([object]::ReferenceEquals($Clock,$this.DurationClock)){$semanticPosition=2L*$Position;$semanticClock=$this.ControlClock}
+            $recognized=@($this.LanguageTimings | Where-Object {[object]::ReferenceEquals($_.Clock,$semanticClock) -and $semanticPosition -ge $_.FirstPosition -and $semanticPosition -lt $_.EndPosition} | ForEach-Object LanguageObject)
+        }
+        return [KokoroJointObservationVector]@{CaptureIdentity=$this.Identity;Clock=$Clock;Position=$Position;Observations=$slices.ToArray();Language=$this.Language;RecognizedObjects=$recognized;LanguageTimingEstablished=$this.LanguageTimingEstablished;Dependencies=$this.Normalizations.ToArray()}
+    }
+}
+
+function Test-KokoroJointObservations {
+    param([Parameter(Mandatory)][psobject] $Language)
+    $capture=[KokoroStockObservation]::new();$capture.Language=$Language
+    $clock=[KokoroObservationClock]@{RateNumerator=80;Established=$true}
+    $values=[float[]]@(1,[BitConverter]::Int32BitsToSingle([int]::MinValue),3,4,5,6)
+    $port=[psvariable]::new('fixture',$values);$producer=Get-Command Test-KokoroJointObservations
+    $capture.Observe([guid]::NewGuid(),$producer,$port,$producer.ScriptBlock.Ast,$values,[long[]]@(2,3),[long[]]@(3,1),1,$clock)
+    $values[0]=99
+    $first=$capture.At($clock,0);$middle=$capture.At($clock,1);$last=$capture.At($clock,2)
+    $checks=[ordered]@{
+        SnapshotRetained=$first.Observations[0].Read().GetValue(0) -eq 1
+        ForwardAndBackward=($last.Observations[0].Read().GetValue(0) -eq 3 -and $capture.At($clock,0).Observations[0].Read().GetValue(0) -eq 1)
+        SharedLanguageObject=[object]::ReferenceEquals($first.Language,$Language)
+        SharedObservedStream=[object]::ReferenceEquals($first.Observations[0].Stream,$last.Observations[0].Stream)
+        ActualProducer=[object]::ReferenceEquals($first.Observations[0].Stream.Producer,$producer)
+        ActualPort=[object]::ReferenceEquals($first.Observations[0].Stream.Port,$port)
+        SignedZeroRetained=[BitConverter]::SingleToInt32Bits([float]$middle.Observations[0].Read().GetValue(0)) -eq [int]::MinValue
+        ActualElementType=$first.Observations[0].Stream.ElementType -eq [float]
+    }
+    $otherClock=[KokoroObservationClock]@{RateNumerator=80;Established=$true}
+    $checks.DistinctClockNotConflated=$false;try{$null=$capture.At($otherClock,0)}catch{$checks.DistinctClockNotConflated=$true}
+    $checks.UnknownClockRejected=$false;try{$null=$capture.At([KokoroObservationClock]::new(),0)}catch{$checks.UnknownClockRejected=$true}
+    $checks.OverlappingStridesRejected=$false;try{$capture.Observe([guid]::NewGuid(),$producer,$port,$null,[float[]]@(1,2,3,4),[long[]]@(2,2),[long[]]@(1,1),1,$clock)}catch{$checks.OverlappingStridesRejected=$true}
+    $checks.OutOfRangeRejected=$false;try{$null=$capture.At($clock,3)}catch{$checks.OutOfRangeRejected=$true}
+    foreach($key in $checks.Keys){[pscustomobject]@{Test=$key;Passed=[bool]$checks[$key]}}
+    if($checks.Values -contains $false){throw 'Joint observation object checks failed.'}
+}
+
+enum KokoroObservationDetail {
+    Boundaries
+    Conditioning
+    DecoderInternals
+}
+
+class KokoroReferenceVerification {
+    [psobject] $Language
+    [IO.FileInfo] $Voice
+    [int] $ArrayComparisons
+    [long] $ComparedBytes
+    [double] $FreshSeconds
+    [double] $ReusedSeconds
+    [double] $CaptureSeconds
+    [long] $CaptureBytes
+    [int] $Normalizations
+    [bool] $Passed
+}
+
+function Test-KokoroStockReferenceReuse {
+    param([Parameter(Mandatory)][PSModuleInfo] $BaselineModule,
+        [Parameter(Mandatory)][PSModuleInfo] $ReferenceModule,
+        [Parameter(Mandatory)][psobject[]] $Language,
+        [Parameter(Mandatory)][IO.FileInfo[]] $Voice)
+    if($Language.Count -lt 3 -or $Voice.Count -lt 3){throw 'Reuse verification requires at least three language inputs and three voices.'}
+    $results=[Collections.Generic.List[KokoroReferenceVerification]]::new()
+    foreach($inputLanguage in $Language){
+        foreach($voiceFile in $Voice){
+            $check=[KokoroReferenceVerification]@{Language=$inputLanguage;Voice=$voiceFile}
+            $watch=[Diagnostics.Stopwatch]::StartNew()
+            $fresh=& $BaselineModule {param($Phones,$Name) Invoke-OfflineSpeech -Phonemes $Phones -Voice $Name} $inputLanguage.KokoroPhones $voiceFile.BaseName
+            $check.FreshSeconds=$watch.Elapsed.TotalSeconds;$watch.Restart()
+            $reused=& $ReferenceModule {param($Phones,$Name) Invoke-OfflineSpeech -Phonemes $Phones -Voice $Name} $inputLanguage.KokoroPhones $voiceFile.BaseName
+            $check.ReusedSeconds=$watch.Elapsed.TotalSeconds
+            $capture=Invoke-KokoroStockObservation -ReferenceModule $ReferenceModule -Language $inputLanguage -Voice $voiceFile -Detail Conditioning -Purpose 'Verify shared computation against fresh reference output and retain actual conditioning dependencies.'
+            $check.CaptureSeconds=$capture.HostSeconds
+            foreach($property in $fresh.PSObject.Properties){
+                if($property.Value -isnot [Array]){continue}
+                foreach($actual in @($reused,$capture.Result)){
+                    $expectedValues=[Array]$property.Value;$actualValues=[Array]$actual.($property.Name)
+                    if($null -eq $actualValues -or $expectedValues.GetType() -ne $actualValues.GetType() -or $expectedValues.Length -ne $actualValues.Length){throw ('Reference boundary shape mismatch: '+$property.Name)}
+                    $left=[byte[]]::new([Buffer]::ByteLength($expectedValues));$right=[byte[]]::new($left.Length)
+                    [Buffer]::BlockCopy($expectedValues,0,$left,0,$left.Length);[Buffer]::BlockCopy($actualValues,0,$right,0,$right.Length)
+                    if(-not [Linq.Enumerable]::SequenceEqual[byte]($left,$right)){throw ('Reference boundary bytes differ: '+$property.Name)}
+                    $check.ArrayComparisons++;$check.ComparedBytes+=$left.Length
+                }
+            }
+            if(-not $capture.LanguageTimingEstablished -or -not [object]::ReferenceEquals($capture.Language,$inputLanguage)){throw 'Original semantic objects or their timing were lost.'}
+            foreach($stream in $capture.Streams){$check.CaptureBytes+=[Buffer]::ByteLength($stream.Values)}
+            foreach($normalization in $capture.ForLanguage($inputLanguage.Tokens[0])){
+                if($normalization.ReductionFirst -ne 0 -or $normalization.ReductionEnd -ne $normalization.Input.Shape[1]){throw 'Normalization reduction extent is incomplete.'}
+                if(-not [object]::ReferenceEquals($normalization.SemanticContext,$capture.LanguageTimings)){throw 'Normalization context was reconstructed.'}
+                if($normalization.FrameRate -in 40,80){
+                    $slice=$normalization.AtControlPosition(0)
+                    if(-not [object]::ReferenceEquals($slice.Stream,$normalization.Input)){throw 'Normalization slice lost its original observed stream.'}
+                }else{
+                    $rejected=$false;try{$null=$normalization.AtControlPosition(0)}catch{$rejected=$true}
+                    if(-not $rejected){throw 'An unestablished generator grid acquired a point timestamp.'}
+                }
+            }
+            $check.Normalizations=$capture.Normalizations.Count;$check.Passed=$true;$results.Add($check)
+            Write-Host ('Verified {0}: {1} phones, {2} arrays, fresh {3:F3}s, reused {4:F3}s, capture {5:F3}s, retained {6:F1} MiB' -f $voiceFile.BaseName,$inputLanguage.KokoroPhones.Length,$check.ArrayComparisons,$check.FreshSeconds,$check.ReusedSeconds,$check.CaptureSeconds,($check.CaptureBytes/1MB))
+        }
+    }
+    return $results.ToArray()
+}
+
+function Test-KokoroStockTextPreparation {
+    param([Parameter(Mandatory)][PSModuleInfo] $BaselineModule,
+        [Parameter(Mandatory)][PSModuleInfo] $ReferenceModule,
+        [Parameter(Mandatory)][psobject] $Language,
+        [Parameter(Mandatory)][IO.FileInfo] $Voice)
+    $assertBytes={param([Array]$Expected,[Array]$Actual)
+        if($null -eq $Actual -or $Expected.GetType() -ne $Actual.GetType() -or $Expected.Length -ne $Actual.Length){throw 'Shared-stage shape changed.'}
+        $left=[byte[]]::new([Buffer]::ByteLength($Expected));$right=[byte[]]::new($left.Length)
+        [Buffer]::BlockCopy($Expected,0,$left,0,$left.Length);[Buffer]::BlockCopy($Actual,0,$right,0,$right.Length)
+        if(-not [Linq.Enumerable]::SequenceEqual[byte]($left,$right)){throw 'Shared-stage bytes changed.'}
+    }
+    $first=& $ReferenceModule {param($Phones,$Name) Invoke-OfflineSpeech -Phonemes $Phones -Voice $Name -SkipDecoder} $Language.KokoroPhones $Voice.BaseName
+    $expected=[Collections.Generic.Dictionary[string,float[]]]::new([StringComparer]::Ordinal)
+    foreach($name in @('Bert','BertEncoder','TextEncoding')){$expected.Add($name,$first.$name.Clone())}
+    $first.Bert[0]=[float]::NaN;$first.BertEncoder[0]=[float]::NaN;$first.TextEncoding[0]=[float]::NaN;$first.TokenIds[0]=-1
+    $again=& $ReferenceModule {param($Phones,$Name) Invoke-OfflineSpeech -Phonemes $Phones -Voice $Name -SkipDecoder} $Language.KokoroPhones $Voice.BaseName
+    foreach($name in @('Bert','BertEncoder','TextEncoding')){& $assertBytes $expected[$name] $again.$name}
+    $characters=$Language.KokoroPhones.ToCharArray();[Array]::Reverse($characters);$different=[string]::new($characters)
+    $before=& $ReferenceModule {$script:OfflineTextMisses}
+    $changed=& $ReferenceModule {param($Phones,$Name) Invoke-OfflineSpeech -Phonemes $Phones -Voice $Name -SkipDecoder} $different $Voice.BaseName
+    $after=& $ReferenceModule {$script:OfflineTextMisses}
+    if($after -ne $before+1){throw 'A different token sequence of the same length did not invalidate preparation.'}
+    $fresh=& $ReferenceModule {param($Phones,$Name) Invoke-OfflineSpeech -Phonemes $Phones -Voice $Name -SkipDecoder -RecomputeText} $different $Voice.BaseName
+    foreach($name in @('TokenIds','Bert','BertEncoder','TextEncoding','Aligned','F0','N','Durations')){& $assertBytes $fresh.$name $changed.$name}
+    foreach($count in @(1,$Language.KokoroPhones.Length,510)){
+        $baseline=& $BaselineModule {param($Name,$Count) Read-OfflineVoiceRow $Name $Count} $Voice.BaseName $count
+        $cached=& $ReferenceModule {param($Name,$Count) Read-OfflineVoiceRow $Name $Count} $Voice.BaseName $count
+        & $assertBytes $baseline.Acoustic $cached.Acoustic;& $assertBytes $baseline.Prosody $cached.Prosody
+    }
+    return 'PASS: returned-array isolation, same-length token invalidation, fresh-stage equivalence, and voice rows at three phoneme counts.'
+}
+
+function Open-KokoroStockReference {
+    param([int] $Threads=4,[IO.FileInfo] $CompiledAssembly=$null,
+        [Collections.Generic.Dictionary[string,string]] $VoicePins=$null,[switch] $ReuseText,
+        [ValidateRange(1,65536)][int] $TextPreparationCapacity=1)
+    $reference=Join-Path $Root 'tools/Invoke-KokoroPrecomputedDecoder.ps1'
+    $out=Join-Path $Build ('joint-observation/'+[guid]::NewGuid().ToString('N'))
+    # Keep this module for successive voices; its compiled kernels and weight caches remain resident.
+    New-Module -Name ('KokoroStockObserver.'+[guid]::NewGuid().ToString('N')) -ArgumentList $reference,$out,$Threads,$CompiledAssembly,$VoicePins,([bool]$ReuseText),$TextPreparationCapacity -ScriptBlock {
+        param($Reference,$Out,$WorkerThreads,$KernelAssembly,$PinnedVoices,$KeepText,$PreparationCapacity)
+        $kernelPath=if($null -ne $KernelAssembly){$KernelAssembly.FullName}else{''}
+        . $Reference -Mode Library -OutputDirectory $Out -Threads $WorkerThreads -CompiledAssembly $kernelPath -VoicePins $PinnedVoices -ReuseText:$KeepText -TextPreparationCapacity $PreparationCapacity
+        Export-ModuleMember -Function Invoke-OfflineSpeech
+    }
+}
+
+function Invoke-KokoroStockObservation {
+    param([Parameter(Mandatory)][PSModuleInfo] $ReferenceModule,[Parameter(Mandatory)][psobject] $Language,
+        [Parameter(Mandatory)][psobject] $Voice,[KokoroObservationDetail] $Detail=[KokoroObservationDetail]::Boundaries,
+        [ValidateNotNullOrEmpty()][string] $Purpose='Retain exact component input/output relationships for discovery; no percept is admitted by this capture.',
+        [switch] $FrontEndOnly)
+    if(-not $Language.Complete -or -not $Language.KokoroPhones -or $null -eq $Language.PSObject.Properties['Tokens']){throw 'Supply the English engine result with its parsed objects.'}
+    $capture=[KokoroStockObservation]::new();$capture.Language=$Language;$capture.Voice=$Voice
+    $capture.Detail=$Detail;$capture.Purpose=$Purpose
+    $capture.FrontEndOnly=$FrontEndOnly
+    $captureDefinition=$MyInvocation.MyCommand.ScriptBlock.Ast
+    if($captureDefinition -is [Management.Automation.Language.ScriptBlockAst]){$captureDefinition=$captureDefinition.Parent}
+    if($captureDefinition -isnot [Management.Automation.Language.FunctionDefinitionAst]){throw 'Capture binding has no authored function definition.'}
+    $capture.CaptureDefinition=$captureDefinition
+    $capture.ControlClock=[KokoroObservationClock]@{RateNumerator=80}
+    $capture.DurationClock=[KokoroObservationClock]@{RateNumerator=40}
+    $capture.Source=Get-Item -LiteralPath (Join-Path $Root 'tools/Invoke-KokoroPrecomputedDecoder.ps1')
+    $capture.SourceAst=& $ReferenceModule {$referenceSourceAst}
+    if($null -eq $capture.SourceAst){throw 'Reference generation has no admitted source AST.'}
+    $capture.SourceSha256=[Convert]::FromHexString((Get-FileHash -LiteralPath $capture.Source.FullName).Hash)
+    $loadedDigest=& $ReferenceModule {[Convert]::FromHexString($sourceHash)}
+    if(-not [Linq.Enumerable]::SequenceEqual[byte]($capture.SourceSha256,[byte[]]$loadedDigest)){throw 'The resident reference source changed; open a new reference generation.'}
+    $capture.Checkpoint=& $ReferenceModule {$checkpoint};$capture.Kernel=& $ReferenceModule {$assembly};$capture.Seed=& $ReferenceModule {$Seed}
+    $binding=& $ReferenceModule {Get-Command Invoke-OfflineAdaIn}
+    $definition=$binding.ScriptBlock.Ast
+    if($definition -is [Management.Automation.Language.ScriptBlockAst]){$definition=$definition.Parent}
+    if($definition -isnot [Management.Automation.Language.FunctionDefinitionAst]){throw 'AdaIN binding has no authored function definition.'}
+    $returnAst=@($definition.Body.FindAll({param($n)$n -is [Management.Automation.Language.ReturnStatementAst]},$false))[-1]
+    $inputName=$definition.Parameters[0].Name.VariablePath.UserPath
+    $channelsName=$definition.Parameters[1].Name.VariablePath.UserPath
+    $framesName=$definition.Parameters[2].Name.VariablePath.UserPath
+    $outputName=$returnAst.Find({param($n)$n -is [Management.Automation.Language.VariableExpressionAst]},$true).VariablePath.UserPath
+    $observedArrays=[Runtime.CompilerServices.ConditionalWeakTable[Array,KokoroObservedStream]]::new()
+    $action=[Action[Management.Automation.InvocationInfo,psvariable[]]]{
+        param($Invocation,$LocalVariables)
+        if(-not [object]::ReferenceEquals($Invocation.MyCommand.ScriptBlock.Ast,$binding.ScriptBlock.Ast)){throw ('AdaIN observation has no matching authored AST: '+$Invocation.MyCommand.Name)}
+        $variables=[Collections.Generic.Dictionary[string,psvariable]]::new([StringComparer]::OrdinalIgnoreCase)
+        foreach($local in $LocalVariables){$variables.Add($local.Name,$local)}
+        $operation=[guid]::NewGuid()
+        $normalization=[KokoroNormalizationObservation]@{OperationIdentity=$operation;Definition=$definition;ReductionEnd=[long]$variables[$framesName].Value;FrameRate=[int]$variables['FrameRate'].Value}
+        $parameters=[Collections.Generic.List[KokoroObservedStream]]::new()
+        $statistics=[Collections.Generic.List[KokoroObservedStream]]::new()
+        foreach($variable in $variables.Values){
+            $value=$variable.Value
+            if($value -isnot [Array] -or $value.Rank -ne 1 -or -not $value.Length -or -not $value.GetType().GetElementType().IsPrimitive){continue}
+            $shape=[long[]]@($value.Length);$strides=[long[]]@(1);$timeAxis=-1
+            if($variable.Name -ceq $inputName -or $variable.Name -ceq $outputName){
+                $channels=[int]$variables[$channelsName].Value;$frames=[int]$variables[$framesName].Value
+                $shape=[long[]]@($channels,$frames);$strides=[long[]]@($frames,1);$timeAxis=1
+            }
+            $clock=$null
+            if($timeAxis -ge 0){
+                if($normalization.FrameRate -eq 40){$clock=$capture.DurationClock}
+                elseif($normalization.FrameRate -eq 80){$clock=$capture.ControlClock}
+            }
+            $capture.Observe($operation,$Invocation.MyCommand,$variable,$definition,$value,$shape,$strides,$timeAxis,$clock)
+            $stream=$capture.Streams[$capture.Streams.Count-1]
+            $stream.ModelTensor=$capture.Checkpoint.Tensors[$variables['prefix'].Value+'.fc.weight']
+            if($variable.Name -ceq $inputName){$normalization.Input=$stream}
+            elseif($variable.Name -ceq $outputName){$normalization.Output=$stream}
+            else{$parameters.Add($stream)}
+            if($variable.Name -ceq $inputName -or $variable.Name -ceq $outputName){
+                $prior=$null
+                if(-not $observedArrays.TryGetValue($value,[ref]$prior)){$observedArrays.Add($value,$stream)}
+                elseif(-not [object]::ReferenceEquals($stream,$prior)){$stream.Inputs=@($prior)}
+            }
+        }
+        if($variables.ContainsKey('record') -and $null -ne $variables['record'].Value){
+            foreach($property in $variables['record'].Value.PSObject.Properties){
+                $value=$property.Value
+                if($value -is [Array] -and $value.Length -and $value.GetType().GetElementType().IsPrimitive){
+                    $capture.Observe($operation,$Invocation.MyCommand,$property,$definition,$value,[long[]]@($value.Length),[long[]]@(1),-1,$null)
+                    $capture.Streams[$capture.Streams.Count-1].ModelTensor=$capture.Checkpoint.Tensors[$variables['prefix'].Value+'.fc.weight']
+                    $statistics.Add($capture.Streams[$capture.Streams.Count-1])
+                }
+            }
+        }
+        if($null -eq $normalization.Input -or $null -eq $normalization.Output){throw 'Normalization input/output capture is incomplete.'}
+        $normalization.Parameters=$parameters.ToArray();$normalization.Statistics=$statistics.ToArray()
+        $normalization.Output.Inputs=@($normalization.Input)+$normalization.Parameters+$normalization.Statistics
+        if($variables['Module'].Value -ceq 'decoder.module.' -and -not $variables['Name'].Value.StartsWith('generator.',[StringComparison]::Ordinal)){$capture.DecoderOutputs.Add($normalization.Output)}
+        $reductionName=if($statistics.Count){'MeasureLevels'}else{'AdaIn'}
+        $normalization.ReductionDefinition=$capture.SourceAst.Find({param($n)$n -is [Management.Automation.Language.FunctionMemberAst] -and $n.Name -ceq $reductionName},$true)
+        if($null -eq $normalization.ReductionDefinition){throw 'Normalization reduction has no authored definition.'}
+        $capture.Normalizations.Add($normalization)
+    }.GetNewClosure()
+    $decoderAction=[Action[object,float[],int,object[]]]{
+        param($Producer,$Values,$Frames,$Inputs)
+        $definition=if($Producer -is [Reflection.MethodInfo]){
+            $capture.SourceAst.Find({param($n)$n -is [Management.Automation.Language.FunctionMemberAst] -and $n.Name -ceq $Producer.Name -and $n.Parent.Name -ceq $Producer.DeclaringType.Name},$true)
+        }else{$Producer.ScriptBlock.Ast}
+        if($null -eq $definition){throw 'Decoder output has no authored producer.'}
+        $sources=[Collections.Generic.List[KokoroObservedStream]]::new();$index=0
+        foreach($inputArray in $Inputs){
+            if($inputArray -isnot [Array] -or -not $inputArray.Length){$index++;continue}
+            $source=$null
+            if(-not $observedArrays.TryGetValue($inputArray,[ref]$source)){
+                $capture.Observe([guid]::NewGuid(),$Producer,$index,$definition,$inputArray,[long[]]@($inputArray.Length),[long[]]@(1),-1,$null)
+                $source=$capture.Streams[$capture.Streams.Count-1];$observedArrays.Add($inputArray,$source)
+            }
+            $sources.Add($source);$index++
+        }
+        $shape=[long[]]@($Values.Length);$strides=[long[]]@(1);$timeAxis=-1
+        if($Frames -gt 0){
+            if($Values.Length % $Frames){throw 'Decoder output shape is inconsistent.'}
+            $shape=[long[]]@(($Values.Length/$Frames),$Frames);$strides=[long[]]@($Frames,1);$timeAxis=1
+        }
+        $port=if($Producer -is [Reflection.MethodInfo]){$Producer.ReturnParameter}else{$definition}
+        $capture.Observe([guid]::NewGuid(),$Producer,$port,$definition,$Values,$shape,$strides,$timeAxis,$null)
+        $stream=$capture.Streams[$capture.Streams.Count-1];$stream.Inputs=$sources.ToArray()
+        $observedArrays.Add($Values,$stream);$capture.DecoderOutputs.Add($stream)
+    }.GetNewClosure()
+    if($Detail -eq [KokoroObservationDetail]::Boundaries){$action=$null}
+    if($Detail -ne [KokoroObservationDetail]::DecoderInternals){$decoderAction=$null}
+    $watch=[Diagnostics.Stopwatch]::StartNew()
+    try{
+        # The stock reference requires its original phoneme-text and voice-name interface at this boundary.
+        $voicePath=if($Voice -is [IO.FileInfo]){$Voice.FullName}else{$Voice.path}
+        $voiceName=[IO.Path]::GetFileNameWithoutExtension($voicePath)
+        $capture.Result=& $ReferenceModule {param($Phones,$SelectedVoice,$Sink,$DecoderSink,$StopAtFrontEnd) Invoke-OfflineSpeech -Phonemes $Phones -Voice $SelectedVoice -ObservationSink $Sink -DecoderObservationSink $DecoderSink -SkipDecoder:$StopAtFrontEnd} $Language.KokoroPhones $voiceName $action $decoderAction ([bool]$FrontEndOnly)
+    }finally{$watch.Stop()}
+    $capture.HostSeconds=$watch.Elapsed.TotalSeconds
+    if($Detail -ne [KokoroObservationDetail]::Boundaries -and -not $capture.Normalizations.Count){throw 'No live AdaIN values were captured; capture coverage is incomplete.'}
+    $result=$capture.Result
+    if($result.F0.Length -ne $result.N.Length){throw 'Returned stock curves do not establish the expected shared control clock.'}
+    if($FrontEndOnly){
+        if(2L*$result.Aligned.Length -ne 512L*$result.F0.Length){throw 'Aligned text encoding does not cover the duration/control clocks.'}
+    }elseif($result.Features.Length -ne 512L*$result.F0.Length){throw 'Generator features do not cover the control clock.'}
+    foreach($normalization in $capture.Normalizations){
+        if($normalization.FrameRate -in 40,80 -and $normalization.Input.Shape[1]*80L -ne $result.F0.Length*$normalization.FrameRate){throw 'Normalization grid does not cover the duration-derived reference clock.'}
+    }
+    $capture.ControlClock.Established=$true;$capture.ControlClock.Definition=$capture.SourceAst
+    $capture.DurationClock.Established=$true;$capture.DurationClock.Definition=$capture.SourceAst
+    $capture.PcmClock=[KokoroObservationClock]@{RateNumerator=24000;Established=$true;Definition=$capture.SourceAst}
+    # This is a correspondence in the finite stock-reference experiment, not a Student state lifetime or learned rule.
+    try {
+        if($result.Phonemes -cne $Language.KokoroPhones -or $result.TokenIds.Length -ne $Language.KokoroPhones.Length+2 -or $result.Durations.Length -ne $result.TokenIds.Length){throw 'The reference token stream does not establish one id per emitted character plus its two pads.'}
+        $positions=[long[]]::new($result.Durations.Length+1)
+        for($i=0;$i -lt $result.Durations.Length;$i++){if($result.Durations[$i] -lt 0){throw 'A recorded token duration is negative.'};$positions[$i+1]=$positions[$i]+2L*$result.Durations[$i]}
+        if($positions[-1] -ne $result.F0.Length){throw 'Recorded duration expansion does not cover the control clock.'}
+        $timings=[Collections.Generic.List[KokoroLanguageTiming]]::new();$lastEmission=0
+        foreach($token in $Language.Tokens){
+            if($null -eq $token.PSObject.Properties['EmissionStart'] -or $null -eq $token.PSObject.Properties['EmissionEnd']){throw 'Language object has no established emission span.'}
+            $first=[int]$token.EmissionStart;$end=[int]$token.EmissionEnd
+            if($first -lt $lastEmission -or $end -lt $first -or $end -gt $result.Phonemes.Length){throw 'Language emission spans are inconsistent with the observed input.'}
+            if($end -gt $first -and $result.Phonemes.Substring($first,$end-$first) -cne $token.Pron){throw 'Language realization differs from the recorded phonetic span.'}
+            $timings.Add([KokoroLanguageTiming]@{LanguageObject=$token;Clock=$capture.ControlClock;FirstPosition=$positions[$first+1];EndPosition=$positions[$end+1]
+                Producer=$capture.Kernel.GetType('OfflineUpstreamMath',$true).GetMethod('ExpandChannels');DurationEvidence=$result.PSObject.Properties['Durations']})
+            $lastEmission=$end
+        }
+        $capture.LanguageTimings=$timings.ToArray();$capture.LanguageTimingEstablished=$true
+        foreach($normalization in $capture.Normalizations){$normalization.SemanticContext=$capture.LanguageTimings;$normalization.ReferenceClock=$capture.ControlClock;$normalization.ReferenceEnd=$result.F0.Length}
+    } catch { $capture.LanguageTimingError=$_ }
+    $operation=[guid]::NewGuid()
+    foreach($property in $result.PSObject.Properties){
+        $value=$property.Value
+        if($value -isnot [Array] -or -not $value.Length -or -not $value.GetType().GetElementType().IsPrimitive){continue}
+        $shape=[long[]]@($value.Length);$strides=[long[]]@(1);$timeAxis=-1;$clock=$null
+        if($property.Name -cin 'F0','N','Features'){
+            $clock=$capture.ControlClock;$timeAxis=0
+            if($property.Name -ceq 'Features'){$shape=[long[]]@(512,$result.F0.Length);$strides=[long[]]@($result.F0.Length,1);$timeAxis=1}
+        }elseif($property.Name -ceq 'Aligned'){
+            $clock=$capture.DurationClock;$timeAxis=1;$frames=[long]($result.F0.Length/2)
+            $shape=[long[]]@(512,$frames);$strides=[long[]]@($frames,1)
+        }elseif($property.Name -ceq 'Pcm'){$clock=$capture.PcmClock;$timeAxis=0}
+        $capture.Observe($operation,$result,$property,$capture.SourceAst,$value,$shape,$strides,$timeAxis,$clock)
+    }
+    if([Convert]::ToHexString($capture.SourceSha256) -cne (Get-FileHash -LiteralPath $capture.Source.FullName).Hash){throw 'Stock source changed during observation; capture is not admitted.'}
+    return $capture
+}
+
+class SmaAudioNative {
+    static [IntPtr]$Ole32=[Runtime.InteropServices.NativeLibrary]::Load('ole32.dll')
+    static [IntPtr]$Mfplat=[Runtime.InteropServices.NativeLibrary]::Load('mfplat.dll')
+    static [IntPtr]$Mfreadwrite=[Runtime.InteropServices.NativeLibrary]::Load('mfreadwrite.dll')
+    static [int] CoInitializeEx([IntPtr]$reserved,[uint]$flags){return [SmaAudioNative]::CoInitializeCall([Runtime.InteropServices.NativeLibrary]::GetExport([SmaAudioNative]::Ole32,'CoInitializeEx'),$reserved,$flags)}
+    static [void] CoUninitialize(){[SmaAudioNative]::VoidCall([Runtime.InteropServices.NativeLibrary]::GetExport([SmaAudioNative]::Ole32,'CoUninitialize'))}
+    static [int] MFStartup([uint]$version,[uint]$flags){return [SmaAudioNative]::StartupCall([Runtime.InteropServices.NativeLibrary]::GetExport([SmaAudioNative]::Mfplat,'MFStartup'),$version,$flags)}
+    static [int] MFShutdown(){return [SmaAudioNative]::HrCall([Runtime.InteropServices.NativeLibrary]::GetExport([SmaAudioNative]::Mfplat,'MFShutdown'))}
+    static [int] MFCreateMediaType([IntPtr]$output){return [SmaAudioNative]::CreateTypeCall([Runtime.InteropServices.NativeLibrary]::GetExport([SmaAudioNative]::Mfplat,'MFCreateMediaType'),$output)}
+    static [int] MFCreateSourceReaderFromURL([IntPtr]$url,[IntPtr]$attributes,[IntPtr]$output){return [SmaAudioNative]::CreateReaderCall([Runtime.InteropServices.NativeLibrary]::GetExport([SmaAudioNative]::Mfreadwrite,'MFCreateSourceReaderFromURL'),$url,$attributes,$output)}
+    [System.Runtime.InteropServices.UnmanagedCallConv(CallConvs=[System.Runtime.CompilerServices.CallConvStdcall])]
+    static [int] CoInitializeCall([IntPtr]$pointer,[IntPtr]$reserved,[uint]$flags){throw [NotSupportedException]::new()}
+    [System.Runtime.InteropServices.UnmanagedCallConv(CallConvs=[System.Runtime.CompilerServices.CallConvStdcall])]
+    static [void] VoidCall([IntPtr]$pointer){throw [NotSupportedException]::new()}
+    [System.Runtime.InteropServices.UnmanagedCallConv(CallConvs=[System.Runtime.CompilerServices.CallConvStdcall])]
+    static [int] StartupCall([IntPtr]$pointer,[uint]$version,[uint]$flags){throw [NotSupportedException]::new()}
+    [System.Runtime.InteropServices.UnmanagedCallConv(CallConvs=[System.Runtime.CompilerServices.CallConvStdcall])]
+    static [int] HrCall([IntPtr]$pointer){throw [NotSupportedException]::new()}
+    [System.Runtime.InteropServices.UnmanagedCallConv(CallConvs=[System.Runtime.CompilerServices.CallConvStdcall])]
+    static [int] CreateTypeCall([IntPtr]$pointer,[IntPtr]$output){throw [NotSupportedException]::new()}
+    [System.Runtime.InteropServices.UnmanagedCallConv(CallConvs=[System.Runtime.CompilerServices.CallConvStdcall])]
+    static [int] CreateReaderCall([IntPtr]$pointer,[IntPtr]$url,[IntPtr]$attributes,[IntPtr]$output){throw [NotSupportedException]::new()}
+    [System.Runtime.InteropServices.UnmanagedCallConv(CallConvs=[System.Runtime.CompilerServices.CallConvStdcall])]
+    static [uint] Release([IntPtr]$pointer,[IntPtr]$self){throw [NotSupportedException]::new()}
+    [System.Runtime.InteropServices.UnmanagedCallConv(CallConvs=[System.Runtime.CompilerServices.CallConvStdcall])]
+    static [int] GetU32([IntPtr]$pointer,[IntPtr]$self,[IntPtr]$key,[IntPtr]$value){throw [NotSupportedException]::new()}
+    [System.Runtime.InteropServices.UnmanagedCallConv(CallConvs=[System.Runtime.CompilerServices.CallConvStdcall])]
+    static [int] SetU32([IntPtr]$pointer,[IntPtr]$self,[IntPtr]$key,[uint]$value){throw [NotSupportedException]::new()}
+    [System.Runtime.InteropServices.UnmanagedCallConv(CallConvs=[System.Runtime.CompilerServices.CallConvStdcall])]
+    static [int] SetGuid([IntPtr]$pointer,[IntPtr]$self,[IntPtr]$key,[IntPtr]$value){throw [NotSupportedException]::new()}
+    [System.Runtime.InteropServices.UnmanagedCallConv(CallConvs=[System.Runtime.CompilerServices.CallConvStdcall])]
+    static [int] SetMediaType([IntPtr]$pointer,[IntPtr]$self,[uint]$stream,[IntPtr]$reserved,[IntPtr]$type){throw [NotSupportedException]::new()}
+    [System.Runtime.InteropServices.UnmanagedCallConv(CallConvs=[System.Runtime.CompilerServices.CallConvStdcall])]
+    static [int] GetMediaType([IntPtr]$pointer,[IntPtr]$self,[uint]$stream,[IntPtr]$output){throw [NotSupportedException]::new()}
+    [System.Runtime.InteropServices.UnmanagedCallConv(CallConvs=[System.Runtime.CompilerServices.CallConvStdcall])]
+    static [int] ReadSample([IntPtr]$pointer,[IntPtr]$self,[uint]$stream,[uint]$control,[IntPtr]$actual,[IntPtr]$flags,[IntPtr]$time,[IntPtr]$sample){throw [NotSupportedException]::new()}
+    [System.Runtime.InteropServices.UnmanagedCallConv(CallConvs=[System.Runtime.CompilerServices.CallConvStdcall])]
+    static [int] GetBuffer([IntPtr]$pointer,[IntPtr]$self,[IntPtr]$output){throw [NotSupportedException]::new()}
+    [System.Runtime.InteropServices.UnmanagedCallConv(CallConvs=[System.Runtime.CompilerServices.CallConvStdcall])]
+    static [int] LockBuffer([IntPtr]$pointer,[IntPtr]$self,[IntPtr]$data,[IntPtr]$maximum,[IntPtr]$length){throw [NotSupportedException]::new()}
+    [System.Runtime.InteropServices.UnmanagedCallConv(CallConvs=[System.Runtime.CompilerServices.CallConvStdcall])]
+    static [int] UnlockBuffer([IntPtr]$pointer,[IntPtr]$self){throw [NotSupportedException]::new()}
+}
+
+class SmaDecodedAudio {
+    [byte[]]$Pcm
+    [int]$SampleRate
+    [int]$Channels
+    [int]$BitsPerSample
+    [long]$Frames
+    [long[]]$ChunkTimes
+    [int[]]$ChunkBytes
+}
+
+class SmaAudioDecoder {
+    static [void] Check([int]$hr,[string]$operation){
+        if($hr -lt 0){throw [InvalidOperationException]::new($operation+' failed: HRESULT '+$hr.ToString('X8'))}
+    }
+    static [IntPtr] Slot([IntPtr]$instance,[int]$slot){
+        if($instance -eq [IntPtr]::Zero){throw [ArgumentNullException]::new('instance')}
+        return [Runtime.InteropServices.Marshal]::ReadIntPtr([Runtime.InteropServices.Marshal]::ReadIntPtr($instance),$slot*[IntPtr]::Size)
+    }
+    static [void] FreeInterface([IntPtr]$instance){
+        if($instance -ne [IntPtr]::Zero){[SmaAudioNative]::Release([SmaAudioDecoder]::Slot($instance,2),$instance)}
+    }
+    static [void] GuidAt([IntPtr]$destination,[string]$text){
+        [byte[]]$bytes=[Guid]::new($text).ToByteArray()
+        [Runtime.InteropServices.Marshal]::Copy($bytes,0,$destination,16)
+    }
+    static [void] SetGuidValue([IntPtr]$type,[IntPtr]$scratch,[string]$key,[string]$value){
+        [IntPtr]$keyPointer=[IntPtr]::Add($scratch,64);[IntPtr]$valuePointer=[IntPtr]::Add($scratch,80)
+        [SmaAudioDecoder]::GuidAt($keyPointer,$key);[SmaAudioDecoder]::GuidAt($valuePointer,$value)
+        [SmaAudioDecoder]::Check([SmaAudioNative]::SetGuid([SmaAudioDecoder]::Slot($type,24),$type,$keyPointer,$valuePointer),'IMFAttributes.SetGUID')
+    }
+    static [void] SetInteger([IntPtr]$type,[IntPtr]$scratch,[string]$key,[uint]$value){
+        [IntPtr]$keyPointer=[IntPtr]::Add($scratch,64);[SmaAudioDecoder]::GuidAt($keyPointer,$key)
+        [SmaAudioDecoder]::Check([SmaAudioNative]::SetU32([SmaAudioDecoder]::Slot($type,21),$type,$keyPointer,$value),'IMFAttributes.SetUINT32')
+    }
+    static [int] ReadInteger([IntPtr]$type,[IntPtr]$scratch,[string]$key){
+        [IntPtr]$keyPointer=[IntPtr]::Add($scratch,64);[IntPtr]$valuePointer=[IntPtr]::Add($scratch,40)
+        [SmaAudioDecoder]::GuidAt($keyPointer,$key)
+        [SmaAudioDecoder]::Check([SmaAudioNative]::GetU32([SmaAudioDecoder]::Slot($type,7),$type,$keyPointer,$valuePointer),'IMFAttributes.GetUINT32')
+        return [Runtime.InteropServices.Marshal]::ReadInt32($valuePointer)
+    }
+    static [SmaDecodedAudio] Decode([string]$path,[int]$rate,[int]$channels){
+        if($rate -lt 1 -or $channels -lt 1 -or $channels -gt 2){throw [ArgumentOutOfRangeException]::new('format')}
+        [int]$coStatus=[SmaAudioNative]::CoInitializeEx([IntPtr]::Zero,[uint]0)
+        if($coStatus -lt 0 -and $coStatus -ne -2147417850){[SmaAudioDecoder]::Check($coStatus,'CoInitializeEx')}
+        [bool]$coOwned=$coStatus -ge 0;[bool]$mfOwned=$false
+        [IntPtr]$scratch=[IntPtr]::Zero;[IntPtr]$url=[IntPtr]::Zero;[IntPtr]$reader=[IntPtr]::Zero
+        [IntPtr]$mediaType=[IntPtr]::Zero;[IntPtr]$actualType=[IntPtr]::Zero;[IntPtr]$sample=[IntPtr]::Zero;[IntPtr]$buffer=[IntPtr]::Zero
+        [IO.MemoryStream]$pcm=[IO.MemoryStream]::new()
+        [Collections.Generic.List[long]]$times=[Collections.Generic.List[long]]::new();[Collections.Generic.List[int]]$sizes=[Collections.Generic.List[int]]::new()
+        try{
+            [SmaAudioDecoder]::Check([SmaAudioNative]::MFStartup([uint]131184,[uint]1),'MFStartup');$mfOwned=$true
+            $scratch=[Runtime.InteropServices.Marshal]::AllocHGlobal(128)
+            [Runtime.InteropServices.Marshal]::Copy([byte[]]::new(128),0,$scratch,128)
+            $url=[Runtime.InteropServices.Marshal]::StringToCoTaskMemUni([IO.Path]::GetFullPath($path))
+            [SmaAudioDecoder]::Check([SmaAudioNative]::MFCreateSourceReaderFromURL($url,[IntPtr]::Zero,$scratch),'MFCreateSourceReaderFromURL')
+            $reader=[Runtime.InteropServices.Marshal]::ReadIntPtr($scratch)
+            [SmaAudioDecoder]::Check([SmaAudioNative]::MFCreateMediaType([IntPtr]::Add($scratch,8)),'MFCreateMediaType')
+            $mediaType=[Runtime.InteropServices.Marshal]::ReadIntPtr($scratch,8)
+            # Constants and COM slots are read from pinned Windows.Win32.winmd 71.0.45-preview.
+            [SmaAudioDecoder]::SetGuidValue($mediaType,$scratch,'48eba18e-f8c9-4687-bf11-0a74c9f96a8f','73647561-0000-0010-8000-00aa00389b71')
+            [SmaAudioDecoder]::SetGuidValue($mediaType,$scratch,'f7e34c9a-42e8-4714-b74b-cb29d72c35e5','00000001-0000-0010-8000-00aa00389b71')
+            [SmaAudioDecoder]::SetInteger($mediaType,$scratch,'37e48bf5-645e-4c5b-89de-ada9e29b696a',[uint]$channels)
+            [SmaAudioDecoder]::SetInteger($mediaType,$scratch,'5faeeae7-0290-4c31-9e8a-c534f68d9dba',[uint]$rate)
+            [SmaAudioDecoder]::SetInteger($mediaType,$scratch,'f2deb57f-40fa-4764-aa33-ed4f2d1ff669',[uint]16)
+            [SmaAudioDecoder]::SetInteger($mediaType,$scratch,'322de230-9eeb-43bd-ab7a-ff412251541d',[uint]($channels*2))
+            [SmaAudioDecoder]::SetInteger($mediaType,$scratch,'1ab75cc8-cfef-451c-ab95-ac034b8e1731',[uint]($rate*$channels*2))
+            [uint]$audioStream=4294967293
+            [SmaAudioDecoder]::Check([SmaAudioNative]::SetMediaType([SmaAudioDecoder]::Slot($reader,7),$reader,$audioStream,[IntPtr]::Zero,$mediaType),'IMFSourceReader.SetCurrentMediaType')
+            [SmaAudioDecoder]::Check([SmaAudioNative]::GetMediaType([SmaAudioDecoder]::Slot($reader,6),$reader,$audioStream,[IntPtr]::Add($scratch,96)),'IMFSourceReader.GetCurrentMediaType')
+            $actualType=[Runtime.InteropServices.Marshal]::ReadIntPtr($scratch,96)
+            if([SmaAudioDecoder]::ReadInteger($actualType,$scratch,'37e48bf5-645e-4c5b-89de-ada9e29b696a') -ne $channels -or [SmaAudioDecoder]::ReadInteger($actualType,$scratch,'5faeeae7-0290-4c31-9e8a-c534f68d9dba') -ne $rate -or [SmaAudioDecoder]::ReadInteger($actualType,$scratch,'f2deb57f-40fa-4764-aa33-ed4f2d1ff669') -ne 16){throw [IO.InvalidDataException]::new('Decoder output format differs from the requested PCM contract.')}
+            while($true){
+                [Runtime.InteropServices.Marshal]::WriteIntPtr($scratch,16,[IntPtr]::Zero)
+                [SmaAudioDecoder]::Check([SmaAudioNative]::ReadSample([SmaAudioDecoder]::Slot($reader,9),$reader,$audioStream,[uint]0,[IntPtr]::Add($scratch,48),[IntPtr]::Add($scratch,52),[IntPtr]::Add($scratch,56),[IntPtr]::Add($scratch,16)),'IMFSourceReader.ReadSample')
+                $sample=[Runtime.InteropServices.Marshal]::ReadIntPtr($scratch,16)
+                [int]$flags=[Runtime.InteropServices.Marshal]::ReadInt32($scratch,52)
+                if(($flags -band 1) -ne 0 -or ($flags -band 32) -ne 0){throw [IO.InvalidDataException]::new('Reader error or unexpected PCM media-type change.')}
+                if($sample -ne [IntPtr]::Zero){
+                    [SmaAudioDecoder]::Check([SmaAudioNative]::GetBuffer([SmaAudioDecoder]::Slot($sample,41),$sample,[IntPtr]::Add($scratch,24)),'IMFSample.ConvertToContiguousBuffer')
+                    $buffer=[Runtime.InteropServices.Marshal]::ReadIntPtr($scratch,24)
+                    [SmaAudioDecoder]::Check([SmaAudioNative]::LockBuffer([SmaAudioDecoder]::Slot($buffer,3),$buffer,[IntPtr]::Add($scratch,32),[IntPtr]::Add($scratch,40),[IntPtr]::Add($scratch,44)),'IMFMediaBuffer.Lock')
+                    try{
+                        [int]$length=[Runtime.InteropServices.Marshal]::ReadInt32($scratch,44)
+                        [byte[]]$chunk=[byte[]]::new($length)
+                        [Runtime.InteropServices.Marshal]::Copy([Runtime.InteropServices.Marshal]::ReadIntPtr($scratch,32),$chunk,0,$length)
+                        $pcm.Write($chunk,0,$length);$times.Add([Runtime.InteropServices.Marshal]::ReadInt64($scratch,56));$sizes.Add($length)
+                    }finally{[SmaAudioDecoder]::Check([SmaAudioNative]::UnlockBuffer([SmaAudioDecoder]::Slot($buffer,4),$buffer),'IMFMediaBuffer.Unlock')}
+                    [SmaAudioDecoder]::FreeInterface($buffer);$buffer=[IntPtr]::Zero
+                    [SmaAudioDecoder]::FreeInterface($sample);$sample=[IntPtr]::Zero
+                }
+                if(($flags -band 2) -ne 0){break}
+            }
+            if($pcm.Length % [long]($channels*2) -ne [long]0){throw [IO.InvalidDataException]::new('Partial PCM frame.')}
+            [SmaDecodedAudio]$result=[SmaDecodedAudio]::new();$result.Pcm=$pcm.ToArray();$result.SampleRate=$rate;$result.Channels=$channels;$result.BitsPerSample=16
+            $result.Frames=[long]($pcm.Length/[long]($channels*2));$result.ChunkTimes=$times.ToArray();$result.ChunkBytes=$sizes.ToArray();return $result
+        }finally{
+            [SmaAudioDecoder]::FreeInterface($buffer);[SmaAudioDecoder]::FreeInterface($sample);[SmaAudioDecoder]::FreeInterface($actualType);[SmaAudioDecoder]::FreeInterface($mediaType);[SmaAudioDecoder]::FreeInterface($reader)
+            if($url -ne [IntPtr]::Zero){[Runtime.InteropServices.Marshal]::FreeCoTaskMem($url)}
+            if($scratch -ne [IntPtr]::Zero){[Runtime.InteropServices.Marshal]::FreeHGlobal($scratch)}
+            $pcm.Dispose();if($mfOwned){[SmaAudioNative]::MFShutdown()};if($coOwned){[SmaAudioNative]::CoUninitialize()}
+        }
+    }
+    static [SmaDecodedAudio] DecodeWave([string]$source,[string]$destination){
+        [SmaDecodedAudio]$audio=[SmaAudioDecoder]::Decode($source,48000,2)
+        [IO.FileStream]$stream=[IO.File]::Open($destination,[IO.FileMode]::CreateNew,[IO.FileAccess]::Write)
+        [IO.BinaryWriter]$writer=[IO.BinaryWriter]::new($stream)
+        try{
+            $writer.Write([Text.Encoding]::ASCII.GetBytes('RIFF'));$writer.Write([uint]($audio.Pcm.Length+36));$writer.Write([Text.Encoding]::ASCII.GetBytes('WAVEfmt '))
+            $writer.Write([uint]16);$writer.Write([ushort]1);$writer.Write([ushort]2);$writer.Write([uint]48000);$writer.Write([uint]192000);$writer.Write([ushort]4);$writer.Write([ushort]16)
+            $writer.Write([Text.Encoding]::ASCII.GetBytes('data'));$writer.Write([uint]$audio.Pcm.Length);$writer.Write($audio.Pcm)
+        }finally{$writer.Dispose()}
+        return $audio
+    }
+}
+
+class SmaEvidence {
+    [string] $Identity
+    [string] $Kind
+    [string] $Path
+    [string] $Sha256
+    [string] $Provenance
+    [string] $Member
+}
+
+class SmaSpeechSample {
+    [string] $Identity
+    [string] $Kind
+    [SmaEvidence] $Source
+    [SmaEvidence] $Audio
+    [string] $Text
+    [int] $Start
+    [int] $Length
+    [string] $RawPhones
+    [string] $Phones
+    [long[]] $PhoneTicks
+    [long] $FirstSample = -1
+    [long] $LastSample = -1
+    [int] $SampleRate
+    [string] $Voice
+    [string] $Method
+    [string] $Coverage
+}
+
+class SmaCorpusRelation {
+    [string] $Identity
+    [SmaSpeechSample] $Subject
+    [SmaSpeechSample] $Object
+    [string] $Kind
+    [string] $Status
+    [string] $Applicability
+    [SmaEvidence[]] $Evidence
+}
+
+class SmaCorpus {
+    [string] $Identity
+    [string] $Previous
+    [string] $CompilerSha256
+    [string] $OperatorSha256
+    [SmaEvidence[]] $Evidence
+    [SmaSpeechSample[]] $Samples
+    [SmaCorpusRelation[]] $Relations
+    [SmaCorpusRelation[]] RelationsFor([string] $Identity) {
+        [Collections.Generic.List[SmaCorpusRelation]]$found=[Collections.Generic.List[SmaCorpusRelation]]::new()
+        foreach($relation in $this.Relations){if($relation.Subject.Identity -ceq $Identity -or $relation.Object.Identity -ceq $Identity){$found.Add($relation)}}
+        return $found.ToArray()
+    }
+}
+
+class SmaCorpusData {
+    static [int] $Schema
+    static [string] $Identity
+    static [string] $Previous
+    static [string] $CompilerSha256
+    static [string] $OperatorSha256
+    static [string[]] $EvidenceIdentity
+    static [string[]] $EvidenceKind
+    static [string[]] $EvidencePath
+    static [string[]] $EvidenceHash
+    static [string[]] $EvidenceProvenance
+    static [string[]] $EvidenceMember
+    static [string[]] $SampleIdentity
+    static [string[]] $SampleKind
+    static [int[]] $SampleSource
+    static [int[]] $SampleAudio
+    static [string[]] $SampleText
+    static [int[]] $SampleStart
+    static [int[]] $SampleLength
+    static [string[]] $SampleRawPhones
+    static [string[]] $SamplePhones
+    static [long[][]] $SamplePhoneTicks
+    static [long[]] $SampleFirst
+    static [long[]] $SampleLast
+    static [int[]] $SampleRate
+    static [string[]] $SampleVoice
+    static [string[]] $SampleMethod
+    static [string[]] $SampleCoverage
+    static [string[]] $RelationIdentity
+    static [int[]] $RelationSubject
+    static [int[]] $RelationObject
+    static [string[]] $RelationKind
+    static [string[]] $RelationStatus
+    static [string[]] $RelationApplicability
+    static [int[][]] $RelationEvidence
+    static [SmaCorpus] Open() {
+        if([SmaCorpusData]::Schema -ne 1){throw [IO.InvalidDataException]::new('Unknown corpus schema.')}
+        [SmaCorpus]$corpus=[SmaCorpus]::new();$corpus.Identity=[SmaCorpusData]::Identity;$corpus.Previous=[SmaCorpusData]::Previous
+        $corpus.CompilerSha256=[SmaCorpusData]::CompilerSha256;$corpus.OperatorSha256=[SmaCorpusData]::OperatorSha256
+        $corpus.Evidence=[SmaEvidence[]]::new([SmaCorpusData]::EvidenceIdentity.Length)
+        [Collections.Generic.HashSet[string]]$seen=[Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
+        for([int]$i=0;$i -lt $corpus.Evidence.Length;$i++){
+            [SmaEvidence]$sourceEvidence=[SmaEvidence]::new();$sourceEvidence.Identity=[SmaCorpusData]::EvidenceIdentity[$i]
+            if(-not $seen.Add($sourceEvidence.Identity)){throw [IO.InvalidDataException]::new('Duplicate corpus identity.')}
+            $sourceEvidence.Kind=[SmaCorpusData]::EvidenceKind[$i];$sourceEvidence.Path=[SmaCorpusData]::EvidencePath[$i];$sourceEvidence.Sha256=[SmaCorpusData]::EvidenceHash[$i]
+            $sourceEvidence.Provenance=[SmaCorpusData]::EvidenceProvenance[$i];$sourceEvidence.Member=[SmaCorpusData]::EvidenceMember[$i];$corpus.Evidence[$i]=$sourceEvidence
+        }
+        $corpus.Samples=[SmaSpeechSample[]]::new([SmaCorpusData]::SampleIdentity.Length)
+        for([int]$i=0;$i -lt $corpus.Samples.Length;$i++){
+            [SmaSpeechSample]$speechSample=[SmaSpeechSample]::new();$speechSample.Identity=[SmaCorpusData]::SampleIdentity[$i]
+            if(-not $seen.Add($speechSample.Identity)){throw [IO.InvalidDataException]::new('Duplicate corpus identity.')}
+            $speechSample.Kind=[SmaCorpusData]::SampleKind[$i];$speechSample.Source=$corpus.Evidence[[SmaCorpusData]::SampleSource[$i]]
+            if([SmaCorpusData]::SampleAudio[$i] -ge 0){$speechSample.Audio=$corpus.Evidence[[SmaCorpusData]::SampleAudio[$i]]}
+            $speechSample.Text=[SmaCorpusData]::SampleText[$i];$speechSample.Start=[SmaCorpusData]::SampleStart[$i];$speechSample.Length=[SmaCorpusData]::SampleLength[$i]
+            $speechSample.RawPhones=[SmaCorpusData]::SampleRawPhones[$i];$speechSample.Phones=[SmaCorpusData]::SamplePhones[$i];$speechSample.PhoneTicks=[SmaCorpusData]::SamplePhoneTicks[$i]
+            $speechSample.FirstSample=[SmaCorpusData]::SampleFirst[$i];$speechSample.LastSample=[SmaCorpusData]::SampleLast[$i];$speechSample.SampleRate=[SmaCorpusData]::SampleRate[$i]
+            $speechSample.Voice=[SmaCorpusData]::SampleVoice[$i];$speechSample.Method=[SmaCorpusData]::SampleMethod[$i];$speechSample.Coverage=[SmaCorpusData]::SampleCoverage[$i];$corpus.Samples[$i]=$speechSample
+        }
+        $corpus.Relations=[SmaCorpusRelation[]]::new([SmaCorpusData]::RelationIdentity.Length)
+        for([int]$i=0;$i -lt $corpus.Relations.Length;$i++){
+            [SmaCorpusRelation]$retainedRelation=[SmaCorpusRelation]::new();$retainedRelation.Identity=[SmaCorpusData]::RelationIdentity[$i]
+            if(-not $seen.Add($retainedRelation.Identity)){throw [IO.InvalidDataException]::new('Duplicate corpus identity.')}
+            $retainedRelation.Subject=$corpus.Samples[[SmaCorpusData]::RelationSubject[$i]];$retainedRelation.Object=$corpus.Samples[[SmaCorpusData]::RelationObject[$i]]
+            $retainedRelation.Kind=[SmaCorpusData]::RelationKind[$i];$retainedRelation.Status=[SmaCorpusData]::RelationStatus[$i];$retainedRelation.Applicability=[SmaCorpusData]::RelationApplicability[$i]
+            [int[]]$indices=[SmaCorpusData]::RelationEvidence[$i];$retainedRelation.Evidence=[SmaEvidence[]]::new($indices.Length)
+            for([int]$j=0;$j -lt $indices.Length;$j++){$retainedRelation.Evidence[$j]=$corpus.Evidence[$indices[$j]]}
+            $corpus.Relations[$i]=$retainedRelation
+        }
+        return $corpus
+    }
+}
+
+function Get-KokoroAudioLibrary {
+    $compiler=Join-Path (Split-Path -Parent $Root) 'PSC/Export-LoweredAssembly.ps1'
+    $compilerHash=(Get-FileHash -LiteralPath $compiler).Hash
+    $tokens=$null;$errors=$null;$ast=[System.Management.Automation.Language.Parser]::ParseFile($PSCommandPath,[ref]$tokens,[ref]$errors)
+    if($errors.Count){throw 'Kokoro operator source has parse errors.'}
+    $names=@('SmaAudioNative','SmaDecodedAudio','SmaAudioDecoder')
+    $classes=@($ast.FindAll({param($n)$n -is [System.Management.Automation.Language.TypeDefinitionAst] -and $n.Name -in $names},$true))
+    if($classes.Count -ne 3){throw 'Audio operator declarations are incomplete.'}
+    $operatorHash=[Convert]::ToHexString([Security.Cryptography.SHA256]::HashData([Text.Encoding]::UTF8.GetBytes(($classes.Extent.Text -join "`n"))))
+    $directory=Join-Path $PSScriptRoot ('data/operators/audio/'+$operatorHash+'/'+$compilerHash)
+    $null=[IO.Directory]::CreateDirectory($directory)
+    $existing=@(Get-ChildItem -LiteralPath $directory -File -Filter '*.dll')
+    if($existing.Count -gt 1){throw 'Ambiguous audio operator generation.'}
+    if($existing.Count -eq 0){
+        $pending=Join-Path $directory ('SmaAudio.'+$operatorHash.Substring(0,16)+'.'+$compilerHash.Substring(0,16)+'.pending')
+        $emitted=& $compiler -SourceAst $ast -ClassName SmaAudioDecoder -ClassNames $names -OutputPath $pending
+        if((Get-FileHash -LiteralPath $compiler).Hash -cne $compilerHash){throw 'PSC changed during audio compilation.'}
+        $path=Join-Path $directory ($emitted.SHA256+'.dll');[IO.File]::Move($pending,$path)
+    }else{$path=$existing[0].FullName}
+    $digest=(Get-FileHash -LiteralPath $path).Hash
+    if([IO.Path]::GetFileNameWithoutExtension($path) -cne $digest){throw 'Audio operator integrity failure.'}
+    $assembly=[Reflection.Assembly]::LoadFrom($path)
+    $type=$assembly.GetType('SmaAudioDecoder',$true)
+    [pscustomobject]@{PSTypeName='Sma.AudioLibrary';Path=$path;SHA256=$digest;CompilerSha256=$compilerHash;SourceSha256=$operatorHash
+        Decode=$type.GetMethod('Decode').CreateDelegate([Func[string,int,int,object]])
+        DecodeWave=$type.GetMethod('DecodeWave').CreateDelegate([Func[string,string,object]])
+        Assembly=$assembly;Contract='Media Foundation PCM16, explicit sample rate and channels; no generated or encoded script'}
+}
+
+function New-KokoroRelationalCorpus($Capture, $CaptureImage, $Driver, [string] $DictionaryPath, [string] $ArchivePath='') {
+    $evidence=[Collections.Generic.List[SmaEvidence]]::new();$samples=[Collections.Generic.List[SmaSpeechSample]]::new();$relations=[Collections.Generic.List[SmaCorpusRelation]]::new()
+    $addEvidence={param([string]$kind,[string]$path,[string]$provenance,[string]$member='')
+        $digest=(Get-FileHash -LiteralPath $path).Hash
+        $record=[SmaEvidence]@{Identity=$kind+':'+$digest;Kind=$kind;Path=[IO.Path]::GetFullPath($path);Sha256=$digest;Provenance=$provenance;Member=$member}
+        $evidence.Add($record);return $record
+    }
+    $events=& $addEvidence 'ZiraObservationAssembly' $CaptureImage.Output ('Original timed events; capture '+$Capture.Identity+'; engine '+$Capture.EngineSha256)
+    $operator=& $addEvidence 'ZiraOperatorSource' $CaptureImage.Source 'Retained source used to emit the typed observation image'
+    $wave=& $addEvidence 'ZiraPCM' $Capture.WavePath ('Same capture '+$Capture.Identity+'; native PCM16 mono 16000 Hz')
+    $driverEvidence=& $addEvidence 'PhonemizerAssembly' $Driver.Output 'Executed pronunciation driver; includes authored decisions and lexical evidence; no claim of independent correctness'
+    $dictionary=& $addEvidence 'MobyOriginalPronunciations' $DictionaryPath 'Original pinned public-domain Moby data; original readings remain candidates'
+    $converter=Get-Command ConvertFrom-MobyPronunciation -ErrorAction Stop
+    $converterHash=[Convert]::ToHexString([Security.Cryptography.SHA256]::HashData([Text.Encoding]::UTF8.GetBytes($converter.ScriptBlock.Ast.Extent.Text)))
+    $result=$Driver.Run.Invoke($Capture.Text)
+    $targets=[Collections.Generic.Dictionary[string,Collections.Generic.List[SmaSpeechSample]]]::new([StringComparer]::OrdinalIgnoreCase)
+    foreach($word in $Capture.AlignedWords){
+        $observed=[SmaSpeechSample]@{Identity='zira-word:'+$Capture.Identity+':'+$word.Start;Kind='ZiraWord';Source=$events;Audio=$wave;Text=$word.Word
+            Start=$word.Start;Length=$word.Length;RawPhones=$word.RawPhones;Phones=$word.Phones;PhoneTicks=[long[]]@($word.PhoneEvents.Ticks);SampleRate=16000
+            Voice=$Capture.Voice;Method='Get-EnglishZiraReference; exact word source spans and native event timestamps';Coverage='Word onset aligned to phone events; acoustic phone boundaries have not been independently labeled'}
+        $samples.Add($observed)
+        if(-not $targets.ContainsKey($word.Word)){$targets.Add($word.Word,[Collections.Generic.List[SmaSpeechSample]]::new())};$targets[$word.Word].Add($observed)
+        $tokens=@($result.Tokens | Where-Object {$_.SourceStart -eq $word.Start -and $_.SourceEnd -eq $word.Start+$word.Length})
+        if($tokens.Count -eq 1){
+            $decision=[SmaSpeechSample]@{Identity='phonemizer-token:'+$driverEvidence.Sha256+':'+$Capture.Identity+':'+$word.Start;Kind='PhonemizerDecision';Source=$driverEvidence
+                Text=$tokens[0].Word;Start=$tokens[0].SourceStart;Length=$tokens[0].SourceEnd-$tokens[0].SourceStart;Phones=$tokens[0].Pron;PhoneTicks=[long[]]@()
+                Method=$tokens[0].PronunciationSource;Coverage='Executed decision; grammatical status '+$tokens[0].Status+'; not gold pronunciation'}
+            $samples.Add($decision)
+            $relations.Add([SmaCorpusRelation]@{Identity='same-span:'+$Capture.Identity+':'+$word.Start;Subject=$observed;Object=$decision;Kind='SameSourceSpan';Status='Established'
+                Applicability='Exact input text and character span for this capture and driver hash; pronunciation disagreement is preserved'
+                Evidence=[SmaEvidence[]]@($events,$wave,$driverEvidence,$operator)})
+        }
+    }
+    $dictionaryText=[IO.File]::ReadAllText($DictionaryPath,[Text.Encoding]::Latin1);$offset=0
+    while($offset -lt $dictionaryText.Length){
+        $end=$dictionaryText.IndexOfAny([char[]]@("`r","`n"),$offset);if($end -lt 0){$end=$dictionaryText.Length}
+        $line=$dictionaryText.Substring($offset,$end-$offset).TrimEnd([char]13);$space=$line.IndexOf(' ')
+        if($space -gt 0){
+            $spelling=$line.Substring(0,$space);$slash=$spelling.LastIndexOf('/');$form=if($slash -ge 0){$spelling.Substring(0,$slash)}else{$spelling}
+            if($targets.ContainsKey($form)){
+                $notation=$line.Substring($space+1);$phones=ConvertFrom-MobyPronunciation -Notation $notation
+                $reading=[SmaSpeechSample]@{Identity='moby-reading:'+$dictionary.Sha256+':'+$offset;Kind='DictionaryReading';Source=$dictionary;Text=$form;Start=$offset;Length=$form.Length
+                    RawPhones=$notation;Phones=[string]$phones;PhoneTicks=[long[]]@();Method='ConvertFrom-MobyPronunciation AST SHA256 '+$converterHash+'; original tag '+$spelling
+                    Coverage='Independent lexical candidate; context selection and acoustic realization remain unestablished'}
+                $samples.Add($reading)
+                foreach($observed in $targets[$form]){$relations.Add([SmaCorpusRelation]@{Identity='lexical-form:'+$reading.Identity+':'+$observed.Identity;Subject=$observed;Object=$reading;Kind='SameLexicalForm';Status='Established'
+                    Applicability='OrdinalIgnoreCase spelling identity only; retains alternate readings and phonetic disagreement';Evidence=[SmaEvidence[]]@($events,$dictionary,$operator)})}
+            }
+        }
+        $offset=$end+1
+        if($end -lt $dictionaryText.Length -and $dictionaryText[$end] -eq [char]13 -and $offset -lt $dictionaryText.Length -and $dictionaryText[$offset] -eq [char]10){$offset++}
+    }
+    if($ArchivePath){
+        $archive=& $addEvidence 'CommonVoiceArchive' $ArchivePath 'Retained Mozilla Common Voice Spontaneous Speech archive; transcript and reported-audio metadata remain source evidence'
+        $stream=[IO.File]::OpenRead($ArchivePath);$gzip=[IO.Compression.GZipStream]::new($stream,[IO.Compression.CompressionMode]::Decompress);$tar=[System.Formats.Tar.TarReader]::new($gzip)
+        try{
+            while($null -ne ($entry=$tar.GetNextEntry())){
+                if($entry.Name.EndsWith('/ss-corpus-en.tsv',[StringComparison]::Ordinal)){
+                    $reader=[IO.StreamReader]::new($entry.DataStream,[Text.Encoding]::UTF8,$true,4096,$true)
+                    try{$manifest=$reader.ReadToEnd()}finally{$reader.Dispose()}
+                    $rows=@($manifest | ConvertFrom-Csv -Delimiter "`t");$position=0
+                    foreach($row in $rows | Select-Object -First 3){
+                        $position=$manifest.IndexOf($row.transcription,$position,[StringComparison]::Ordinal)
+                        if($position -lt 0){throw 'Transcription span could not be established.'}
+                        $sample=[SmaSpeechSample]@{Identity='common-voice:'+ $archive.Sha256+':'+$row.audio_file;Kind='HumanTranscription';Source=$archive;Audio=$archive;Text=$row.transcription
+                            Start=$position;Length=$row.transcription.Length;PhoneTicks=[long[]]@();Method=$entry.Name+'; audio member audios/'+$row.audio_file
+                            Coverage='Clip transcription only; MP3 decoding, PCM analysis, speaker-independent validity and word alignment remain unverified; votes='+$row.votes+'; split='+$row.split+'; tags='+$row.quality_tags}
+                        $samples.Add($sample);$position+=$row.transcription.Length
+                    }
+                    $archive.Member=$entry.Name
+                    break
+                }
+            }
+        }finally{$tar.Dispose();$gzip.Dispose();$stream.Dispose()}
+    }
+    return [SmaCorpus]@{Evidence=$evidence.ToArray();Samples=$samples.ToArray();Relations=$relations.ToArray()}
+}
+
+function Save-KokoroCorpus([object] $Corpus, [string] $Previous='') {
+    # A reopened generation has the same typed contract in its own CLR loader context. Preserve that graph's
+    # concrete objects instead of coercing them through a PowerShell property-bag or a different type generation.
+    if($null -eq $Corpus -or $Corpus.GetType().FullName -cne 'SmaCorpus'){throw 'Save requires a typed SmaCorpus generation.'}
+    $compiler=Join-Path (Split-Path -Parent $Root) 'PSC/Export-LoweredAssembly.ps1'
+    $data=@{'SmaCorpusData.Schema'=[int]1;'SmaCorpusData.Previous'=$Previous;'SmaCorpusData.CompilerSha256'=(Get-FileHash -LiteralPath $compiler).Hash
+        'SmaCorpusData.OperatorSha256'=(Get-FileHash -LiteralPath $PSCommandPath).Hash}
+    $evidenceIndex=[Collections.Generic.Dictionary[string,int]]::new([StringComparer]::Ordinal)
+    $sampleIndex=[Collections.Generic.Dictionary[string,int]]::new([StringComparer]::Ordinal)
+    for($i=0;$i -lt $Corpus.Evidence.Length;$i++){$evidenceIndex.Add($Corpus.Evidence[$i].Identity,$i)}
+    for($i=0;$i -lt $Corpus.Samples.Length;$i++){$sampleIndex.Add($Corpus.Samples[$i].Identity,$i)}
+    foreach($pair in @(@('Identity','Identity'),@('Kind','Kind'),@('Path','Path'),@('Hash','Sha256'),@('Provenance','Provenance'),@('Member','Member'))){$data['SmaCorpusData.Evidence'+$pair[0]]=[string[]]@(foreach($item in $Corpus.Evidence){[string]$item.($pair[1])})}
+    foreach($field in 'Identity','Kind','Text','RawPhones','Phones','Voice','Method','Coverage'){$data['SmaCorpusData.Sample'+$field]=[string[]]@(foreach($item in $Corpus.Samples){[string]$item.$field})}
+    foreach($field in 'Start','Length','SampleRate'){$name=if($field -eq 'SampleRate'){'Rate'}else{$field};$data['SmaCorpusData.Sample'+$name]=[int[]]@(foreach($item in $Corpus.Samples){$item.$field})}
+    $data['SmaCorpusData.SampleSource']=[int[]]@(foreach($item in $Corpus.Samples){$evidenceIndex[$item.Source.Identity]})
+    $data['SmaCorpusData.SampleAudio']=[int[]]@(foreach($item in $Corpus.Samples){if($null -eq $item.Audio){-1}else{$evidenceIndex[$item.Audio.Identity]}})
+    $data['SmaCorpusData.SampleFirst']=[long[]]@(foreach($item in $Corpus.Samples){$item.FirstSample})
+    $data['SmaCorpusData.SampleLast']=[long[]]@(foreach($item in $Corpus.Samples){$item.LastSample})
+    $data['SmaCorpusData.SamplePhoneTicks']=[long[][]]@(foreach($item in $Corpus.Samples){,[long[]]@($item.PhoneTicks)})
+    foreach($field in 'Identity','Kind','Status','Applicability'){$data['SmaCorpusData.Relation'+$field]=[string[]]@(foreach($item in $Corpus.Relations){[string]$item.$field})}
+    $data['SmaCorpusData.RelationSubject']=[int[]]@(foreach($item in $Corpus.Relations){$sampleIndex[$item.Subject.Identity]})
+    $data['SmaCorpusData.RelationObject']=[int[]]@(foreach($item in $Corpus.Relations){$sampleIndex[$item.Object.Identity]})
+    $data['SmaCorpusData.RelationEvidence']=[int[][]]@(foreach($item in $Corpus.Relations){,[int[]]@(foreach($evidence in $item.Evidence){$evidenceIndex[$evidence.Identity]})})
+    # This digest identifies typed compiler inputs. No encoded heap or property bag is persisted.
+    $hash=[Security.Cryptography.IncrementalHash]::CreateHash([Security.Cryptography.HashAlgorithmName]::SHA256)
+    $append={param($value)
+        if($null -eq $value){$hash.AppendData([byte[]]@(0));return}
+        $bytes=[Text.Encoding]::UTF8.GetBytes($value.GetType().FullName);$hash.AppendData([BitConverter]::GetBytes([int]$bytes.Length));$hash.AppendData($bytes)
+        if($value -is [Array]){$hash.AppendData([BitConverter]::GetBytes([int]$value.Length));foreach($element in $value){& $append $element}}
+        else{$bytes=[Text.Encoding]::UTF8.GetBytes([Convert]::ToString($value,[Globalization.CultureInfo]::InvariantCulture));$hash.AppendData([BitConverter]::GetBytes([int]$bytes.Length));$hash.AppendData($bytes)}
+    }
+    try{foreach($key in $data.Keys | Sort-Object -CaseSensitive){& $append $key;& $append $data[$key]};$identity=[Convert]::ToHexString($hash.GetHashAndReset())}finally{$hash.Dispose()}
+    $data['SmaCorpusData.Identity']=$identity
+    $directory=Join-Path $PSScriptRoot 'data/knowledge'
+    $null=[IO.Directory]::CreateDirectory($directory)
+    $pending=Join-Path $directory ('SmaCorpus.'+$identity+'.dll')
+    if(Test-Path -LiteralPath $pending){throw 'An unfinished generation already exists; preserve and inspect it.'}
+    $result=& $compiler -SourcePath $PSCommandPath -ClassName SmaCorpusData -ClassNames @('SmaCorpusData','SmaCorpus','SmaCorpusRelation','SmaSpeechSample','SmaEvidence') -StaticData $data -OutputPath $pending
+    if((Get-FileHash -LiteralPath $compiler).Hash -cne $data['SmaCorpusData.CompilerSha256'] -or (Get-FileHash -LiteralPath $PSCommandPath).Hash -cne $data['SmaCorpusData.OperatorSha256']){throw 'Compiler or operator source changed during emission; generation not admitted.'}
+    $final=Join-Path $directory ($result.SHA256+'.dll')
+    if(Test-Path -LiteralPath $final){if((Get-FileHash -LiteralPath $final).Hash -cne $result.SHA256){throw 'Existing generation is corrupt.'};Remove-Item -LiteralPath $pending}
+    else{[IO.File]::Move($pending,$final)}
+    $opened=Open-KokoroCorpus $final
+    $Corpus.Identity=$identity;$Corpus.Previous=$Previous
+    [pscustomobject]@{PSTypeName='Sma.CorpusGeneration';Path=$final;SHA256=$result.SHA256;Identity=$identity;Previous=$Previous
+        Evidence=$opened.Evidence.Length;Samples=$opened.Samples.Length;Relations=$opened.Relations.Length;Bytes=(Get-Item -LiteralPath $final).Length}
+}
+
+function Open-KokoroCorpus([string] $Path) {
+    $Path=[IO.Path]::GetFullPath($Path)
+    $bytes=[IO.File]::ReadAllBytes($Path)
+    $hash=[Convert]::ToHexString([Security.Cryptography.SHA256]::HashData($bytes))
+    if([IO.Path]::GetFileNameWithoutExtension($Path) -cne $hash){throw 'Knowledge DLL integrity failure: filename must equal SHA-256.'}
+    # Reopen verified bytes in a fresh collectible loader context. A previous reader may have mutated its
+    # resident static arrays; those heap values must never masquerade as the immutable generation on disk.
+    $context=[Runtime.Loader.AssemblyLoadContext]::new('SmaKnowledge.'+$hash+'.'+[guid]::NewGuid().ToString('N'),$true)
+    $stream=[IO.MemoryStream]::new($bytes,$false)
+    try { $assembly=$context.LoadFromStream($stream) } finally { $stream.Dispose(); $context.Unload() }
+    $type=$assembly.GetType('SmaCorpusData',$true)
+    # Reject missing, truncated and inconsistent parallel indices before executing the shared reconstruction operator.
+    $binding=[Reflection.BindingFlags]'Public,Static'
+    foreach($prefix in 'Evidence','Sample','Relation'){
+        $fields=@($type.GetFields($binding) | Where-Object {$_.Name.StartsWith($prefix,[StringComparison]::Ordinal)})
+        $expected=$type.GetField($prefix+'Identity',$binding).GetValue($null).Length
+        foreach($field in $fields){$value=$field.GetValue($null);if($null -eq $value -or $value.Length -ne $expected){throw ('Inconsistent knowledge column '+$field.Name)}}
+    }
+    $evidenceCount=$type.GetField('EvidenceIdentity',$binding).GetValue($null).Length
+    $sampleCount=$type.GetField('SampleIdentity',$binding).GetValue($null).Length
+    foreach($name in 'SampleSource','RelationSubject','RelationObject'){
+        $limit=if($name -eq 'SampleSource'){$evidenceCount}else{$sampleCount}
+        foreach($index in $type.GetField($name,$binding).GetValue($null)){if($index -lt 0 -or $index -ge $limit){throw ('Invalid knowledge index '+$name)}}
+    }
+    foreach($index in $type.GetField('SampleAudio',$binding).GetValue($null)){if($index -lt -1 -or $index -ge $evidenceCount){throw 'Invalid audio evidence index.'}}
+    foreach($indices in $type.GetField('RelationEvidence',$binding).GetValue($null)){foreach($index in $indices){if($index -lt 0 -or $index -ge $evidenceCount){throw 'Invalid relation evidence index.'}}}
+    foreach($name in 'EvidenceIdentity','SampleIdentity','RelationIdentity'){foreach($identity in $type.GetField($name,$binding).GetValue($null)){if([string]::IsNullOrEmpty($identity)){throw 'Missing knowledge identity.'}}}
+    $corpus=$type.GetMethod('Open').Invoke($null,@())
+    foreach($evidence in $corpus.Evidence){
+        if(-not [IO.File]::Exists($evidence.Path)){throw ('Missing retained evidence: '+$evidence.Path)}
+        if((Get-FileHash -LiteralPath $evidence.Path).Hash -cne $evidence.Sha256){throw ('Corrupt retained evidence: '+$evidence.Path)}
+    }
+    return $corpus
+}
+
 if ($MyInvocation.InvocationName -eq '.') { return }
 
 switch ($Command) {
+    'ObserveStock' {
+        if(-not $Parameters){throw 'ObserveStock requires typed Language and Voice objects and a resident ReferenceModule in -Parameters.'}
+        Invoke-KokoroStockObservation @Parameters
+    }
     'Student' {
         $studentArguments=@{}
         if($Parameters){foreach($key in $Parameters.Keys){$studentArguments[$key]=$Parameters[$key]}}
