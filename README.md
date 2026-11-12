@@ -67,6 +67,53 @@ Times are DSP times of warm runs unless stated. The generator rows take x and F0
 The 11.775 s row's normalization is the voice base; its waveform is not compared with stock (see the record for the
 spectral comparison and why).
 
+## What is known about HMX
+
+HMX is the Hexagon's matrix unit. Qualcomm does not publish how it works inside, so everything here is known from
+outside: what goes in through VTCM, what comes out, and where it faults.
+
+**Observed.**
+
+- In the V73 simulator, the emitted two-group HMX convolution matches a scalar C model of its integer contract: 0 of
+  12,288 mismatches in each byte plane, in every configuration tried
+  ([record](docs/results/generator60x-16bit-kernels-sim-20261007.md)).
+- On the phone, the decoder's output equals the V73 simulator's byte for byte, 163,840 bytes
+  ([record](docs/results/decoder-sm8550-20261009.md)).
+- In the simulator, an HMX activation read faults (exception 0x26) when its two croutons lie in different 1 MiB
+  regions, and when it straddles the 4 MiB VTCM boundary; the layouts avoid both
+  ([decoder](docs/results/decoder-sm8550-20261009.md), [resident](docs/results/generator60x-resident-sm8550-20261007.md)).
+  Neither is tested on a phone.
+- On SM8550, requests for a separate HMX clock are refused (-3)
+  ([record](docs/results/dsp-power-votes-sm8550-20261028.md)).
+
+**What "byte-identical to the layer reference" shows.** Both jobs run on the same phone, with the same HMX kernels,
+the same int8 weights and the same supplied AdaIN constants (exported by a layer-job run); only the schedule differs.
+The match shows that the depth-first schedule computes what the layer schedule computes. It says nothing about what HMX
+does inside, because HMX is on both sides. And in integer arithmetic that never overflows, the same sums taken in a
+different order give the same bytes, so the match is what the arithmetic predicts. Against stock Kokoro's
+floating-point PCM the same job measures 29.43 dB, not identity.
+
+**Independent bearings.** The V73 simulator is Qualcomm's model, not this repository's; the phone is checked against
+it, and the simulator against the C model. The C model was written here to state the contract; whether it was written
+independently of the simulator's behaviour is not recorded. The generator's output does respond to perturbed inputs
+([propagation](docs/results/generator-propagation-sm8550-20261020.md)), but the equivalence checks themselves record no
+one-bit control.
+
+**Not known.**
+
+- The microarchitecture: whether HMX is a systolic array, an outer-product engine or something else.
+- The accumulator's width, and whether accumulation saturates or wraps beyond the ranges exercised.
+- The order in which partial sums accumulate.
+- Whether each equivalence check would fail on a one-bit change.
+
+**Observations that would answer them.**
+
+- A one-bit control for each equivalence case: change one weight by one step and confirm the PCM hash changes.
+- Accumulation order: inputs whose partial sums overflow part-way through but whose final sum fits. If the accumulator
+  saturates or wraps, the output depends on the order and reveals it.
+- Structure: time against tile shape. A systolic array has a fill-and-drain latency that grows with its dimensions;
+  sweeping the reduction length and the output tile size separately distinguishes that from a per-step cost.
+
 ## Status
 
 | | |
