@@ -79,10 +79,14 @@ outside: what goes in through VTCM, what comes out, and where it faults.
   ([record](docs/results/generator60x-16bit-kernels-sim-20261007.md)).
 - On the phone, the decoder's output equals the V73 simulator's byte for byte, 163,840 bytes
   ([record](docs/results/decoder-sm8550-20261009.md)).
-- In the simulator, an HMX activation read faults (exception 0x26) when its two croutons lie in different 1 MiB
-  regions, and when it straddles the 4 MiB VTCM boundary; the layouts avoid both
-  ([decoder](docs/results/decoder-sm8550-20261009.md), [resident](docs/results/generator60x-resident-sm8550-20261007.md)).
-  Neither is tested on a phone.
+- On the phone, an HMX activation read faults when its two croutons lie in different pages of the VTCM mapping, and
+  the pages depend on the grant: as modelled, the request rounded up to 256 KiB and mapped from its base in the largest
+  4 MiB, 1 MiB or 256 KiB page that fits. The model predicted 12 of 12 outcomes, including where the fault begins and
+  that a 4 MiB grant removes the 1 MiB fault ([record](docs/results/hmx-vtcm-pages-sm8550-20261113.md),
+  `Run -Case hmx-vtcm-pages`). The simulator's 1 MiB rule ([decoder](docs/results/decoder-sm8550-20261009.md)) is the
+  same rule with 1 MiB pages. The page structure is inferred from where faults fall; QuRT's mapping is not read. The
+  fault belongs to the read's whole two-crouton window: a kernel-1 conv, whose taps never use the second crouton,
+  faults at the same tile.
 - On SM8550, requests for a separate HMX clock are refused (-3)
   ([record](docs/results/dsp-power-votes-sm8550-20261028.md)).
 
@@ -105,6 +109,8 @@ one-bit control.
 - The accumulator's width, and whether accumulation saturates or wraps beyond the ranges exercised.
 - The order in which partial sums accumulate.
 - Whether each equivalence check would fail on a one-bit change.
+- Whether the read's window is checked before the read or both croutons are always fetched. (Weight reads and output
+  stores are single aligned croutons, so they cannot span a page.)
 
 **Observations that would answer them.**
 

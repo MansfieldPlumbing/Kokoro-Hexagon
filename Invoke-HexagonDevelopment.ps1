@@ -1349,6 +1349,16 @@ $script:Kernels=@(
     $steps=@($run.Steps)
     $symbol='kokoro_hmx_conv_run_skel_handle_invoke'; $soname='libkokoro_hmx_conv_run_skel.so'
 } }
+    # The same conv under the phone runner (tools/Invoke-GeneratorTailProbe.ps1): its library name, its done word and the
+    # VTCM base in telemetry, and runner-layout.json. Iterations, Shift and VtcmRequest move the conv relative to VTCM pages.
+    @{ Names=@('KokoroHmxPagesRun'); Build={
+    . (Join-Path $script:HexagonToolsRoot '..\src\jobs\Kokoro.HmxConvRun.ps1')
+    $run=New-KokoroHmxConvRunSteps -Channels $ConvChannels -Kernel $ConvKernel -Dilation $ConvDilation -Tiles $ConvTiles -RunnerTelemetry -Iterations $HmxIterations -Shift $HmxShift -VtcmRequest $HmxVtcmRequest
+    $steps=@($run.Steps)
+    $symbol='kokoro_generator_tail_skel_handle_invoke'; $soname='libkokoro_generator_tail_skel.so'
+    $runner=[ordered]@{ Tiles=$run.Layout.Tiles; InputBytes=$run.Layout.ActBytes; OutputBytes=64+$run.Layout.OutputBytes; Samples=1; PcmOffset=64; Conv=$run.Layout }
+    Write-NewOrIdenticalFile (Join-Path $OutputDirectory 'runner-layout.json') ([Text.Encoding]::UTF8.GetBytes(($runner | ConvertTo-Json -Depth 4))) -AllowOverwrite:$Force
+} }
     @{ Names=@('Definition'); Build={
     if($null -eq $Definition -or $null -eq $Definition.Steps){throw 'Definition requires a kernel record with Steps.'}
     $steps=@($Definition.Steps)
@@ -1409,6 +1419,11 @@ param(
     [ValidateRange(1, 64)][int] $ConvTiles = 8,
     [ValidateSet(128, 256)][int] $ConvChannels = 128,
     [ValidateSet(1, 3, 7, 11)][int] $ConvKernel = 3,
+    # KokoroHmxPagesRun (src/jobs/Kokoro.HmxConvRun.ps1 -Iterations, -Shift, -VtcmRequest): conv tiles run (0: all),
+    # regions placed above the granted VTCM base, and the VTCM bytes requested (0: what the layout needs).
+    [ValidateRange(0, 64)][int] $HmxIterations = 0,
+    [ValidateRange(0, 4194304)][long] $HmxShift = 0,
+    [ValidateRange(0, 8388608)][long] $HmxVtcmRequest = 0,
     # KokoroHmxConvPlanesLoop: decoder shapes.
     [ValidateRange(32, 2048)][int] $ConvInputChannels = 1120,
     [ValidateRange(64, 2048)][int] $ConvOutputChannels = 1024,

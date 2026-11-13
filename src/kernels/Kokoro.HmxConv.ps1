@@ -21,7 +21,8 @@ function New-KokoroHmxConvSteps {
     param(
         [ValidateSet(128, 256, 512)][int] $InputChannels = 128,
         [ValidateSet(32, 128, 256)][int] $OutputChannels = 128,
-        [ValidateSet(3, 7, 11)][int] $Kernel = 3,
+        # 1 is pointwise: one tap at row 0, whose :single read needs only the first crouton of its pair.
+        [ValidateSet(1, 3, 7, 11)][int] $Kernel = 3,
         [ValidateSet(1, 3, 5)][int] $Dilation = 1,
         [string] $LabelPrefix = 'hmxconv',
         # FP16 uses the same real-tap address schedule and native 2 KB croutons.

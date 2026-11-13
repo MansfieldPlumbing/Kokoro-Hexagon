@@ -12,18 +12,30 @@
 #   in0 config { u32 tiles } (must equal the baked tile count), in1 activations incl. halo tiles,
 #   in2 weights, in3 column tables; out0 = 64 B telemetry + output croutons.
 # Telemetry: [0] u64 ticks before conv, [8] u64 ticks after, [16] power rc (OR of three),
-#   [20] context id, [24] VTCM bytes granted, [28] hvx lock rc, [32] hmx lock rc, [36] stage reached.
+#   [20] context id, [24] VTCM bytes granted, [28] hvx lock rc, [32] hmx lock rc, [36] stage reached;
+#   with -RunnerTelemetry also [40] the VTCM base as granted and [44] 1 once the job completes (the phone
+#   runner's done word).
 function New-KokoroHmxConvRunSteps {
     param(
         [ValidateSet(128, 256)][int] $Channels = 128,
-        [ValidateSet(3, 7, 11)][int] $Kernel = 3,
+        [ValidateSet(1, 3, 7, 11)][int] $Kernel = 3,
         [ValidateSet(1, 3, 5)][int] $Dilation = 1,
         [ValidateRange(1, 64)][int] $Tiles = 8,
         # Power records, in call order; the default is the lifecycle every job has used.
         [string[]] $PowerVotes = @('HvxPower', 'CoreTurbo', 'HmxPower'),
         # PerVote: each request's context is the address of its own call; Shared: one address for every request.
-        [ValidateSet('PerVote', 'Shared')][string] $PowerContext = 'PerVote'
+        [ValidateSet('PerVote', 'Shared')][string] $PowerContext = 'PerVote',
+        # The phone runner's telemetry (header above). Off by default, so the default emission is unchanged.
+        [switch] $RunnerTelemetry,
+        # Conv tiles run (the loop count); 0 runs all of Tiles. Buffers, admission and layout stay those of Tiles.
+        [ValidateRange(0, 64)][int] $Iterations = 0,
+        # Every region placed this many bytes above the granted VTCM base (a whole number of 2 KB croutons).
+        [ValidateRange(0, 4194304)][long] $Shift = 0,
+        # VTCM bytes requested; 0 requests exactly what the layout and Shift need.
+        [ValidateRange(0, 8388608)][long] $VtcmRequest = 0
     )
+    if ($Shift % 2048) { throw 'Shift must be a whole number of 2 KB croutons.' }
+    if ($Iterations -gt $Tiles) { throw 'Iterations exceeds Tiles.' }
     # Power lifecycle records: the 120-byte request (or 16-byte response) as (offset, u32) words. Types, offsets and values
     # from SDK 6.4.0.2 HAP_power.h, offsets checked with its hexagon-clang (enums are one byte). The DCVS v3 records each
     # set only their own field, as the header's HAP_power_set_core_corner and HAP_power_set_sleep_latency do. A query
@@ -55,6 +67,10 @@ function New-KokoroHmxConvRunSteps {
     $align = { param([long]$v) [long]([math]::Ceiling($v / 65536) * 65536) }
     $actOff = 0; $wOff = & $align $actBytes; $tblOff = $wOff + (& $align $wBytes); $outOff = $tblOff + 65536
     $vtcmBytes = & $align ($outOff + $outBytes)
+    $neededBytes = $vtcmBytes + $Shift
+    if ($VtcmRequest -and $VtcmRequest -lt $neededBytes) { throw "VtcmRequest $VtcmRequest is below the $neededBytes bytes the layout needs." }
+    $requestBytes = if ($VtcmRequest) { $VtcmRequest } else { $neededBytes }
+    $ranTiles = if ($Iterations) { $Iterations } else { $Tiles }
 
     $s = [Collections.Generic.List[hashtable]]::new()
     $imm = { param([int]$r, [long]$v) $u = [long]([uint32]($v -band 0xFFFFFFFF)); $s.Add(@{Op='lo'; x=$r; i=($u -band 65535)}); $s.Add(@{Op='hi'; x=$r; i=($u -shr 16)}) }
@@ -119,7 +135,7 @@ function New-KokoroHmxConvRunSteps {
     # VTCM + HMX context.
     for ($o = 128; $o -lt 296; $o += 4) { $s.Add(@{Op='store'; s=29; t=15; Offset=$o}) }
     $s.Add(@{Op='addi'; d=0; s=29; i=128}); & $call 'compute_resource_attr_init'
-    $s.Add(@{Op='addi'; d=0; s=29; i=128}); & $imm 1 $vtcmBytes; $s.Add(@{Op='imm'; d=2; i=0}); $s.Add(@{Op='imm'; d=3; i=0})
+    $s.Add(@{Op='addi'; d=0; s=29; i=128}); & $imm 1 $requestBytes; $s.Add(@{Op='imm'; d=2; i=0}); $s.Add(@{Op='imm'; d=3; i=0})
     & $call 'compute_resource_attr_set_vtcm_param_v2'
     $s.Add(@{Op='addi'; d=0; s=29; i=128}); $s.Add(@{Op='imm'; d=1; i=1}); & $call 'compute_resource_attr_set_hmx_param'
     $s.Add(@{Op='addi'; d=0; s=29; i=128}); & $imm 1 100000; & $call 'compute_resource_acquire'
@@ -128,10 +144,12 @@ function New-KokoroHmxConvRunSteps {
     $s.Add(@{Op='addi'; d=0; s=29; i=128}); $s.Add(@{Op='addi'; d=1; s=29; i=288}); $s.Add(@{Op='addi'; d=2; s=29; i=292})
     & $call 'compute_resource_attr_get_vtcm_ptr_v2'
     $s.Add(@{Op='load'; d=18; s=29; Offset=288}); $s.Add(@{Op='load'; d=19; s=29; Offset=292}); & $tele 24 19
+    if ($RunnerTelemetry) { & $tele 40 18 }
     $s.Add(@{Op='imm'; d=15; i=0}); $s.Add(@{Op='eq'; d=0; s=18; t=15}); $s.Add(@{Op='jump-p'; u=0; Label='release'})
-    & $imm 15 ($vtcmBytes - 1); $s.Add(@{Op='gtu'; d=0; s=19; t=15}); $s.Add(@{Op='jump-p'; u=0; Label='vtcm_ok'})
+    & $imm 15 ($neededBytes - 1); $s.Add(@{Op='gtu'; d=0; s=19; t=15}); $s.Add(@{Op='jump-p'; u=0; Label='vtcm_ok'})
     $s.Add(@{Op='eq'; d=0; s=15; t=15}); $s.Add(@{Op='jump-p'; u=0; Label='release'})
     $s.Add(@{Op='label'; Name='vtcm_ok'})
+    if ($Shift) { & $imm 13 $Shift; $s.Add(@{Op='add'; d=18; s=18; t=13}) }
     & $stage 3
 
     # Stage inputs into VTCM.
@@ -155,10 +173,10 @@ function New-KokoroHmxConvRunSteps {
     & $imm 1 $wOff; $s.Add(@{Op='add'; d=1; s=18; t=1})
     & $imm 2 $outOff; $s.Add(@{Op='add'; d=2; s=18; t=2})
     & $imm 3 $tblOff; $s.Add(@{Op='add'; d=3; s=18; t=3})
-    $s.Add(@{Op='imm'; d=4; i=$Tiles})
+    $s.Add(@{Op='imm'; d=4; i=$ranTiles})
     foreach ($step in (New-KokoroHmxConvSteps -InputChannels $Channels -OutputChannels $Channels -Kernel $Kernel -Dilation $Dilation -LabelPrefix 'conv' -NoReturn)) { $s.Add($step) }
-    # Completion before the closing tick: read back the last output word, then syncht.
-    & $imm 5 ($outOff + $outBytes - 4); $s.Add(@{Op='add'; d=5; s=18; t=5}); $s.Add(@{Op='load'; d=5; s=5; Offset=0})
+    # Completion before the closing tick: read back the last output word written, then syncht.
+    & $imm 5 ($outOff + $ranTiles * $cb * 2048 - 4); $s.Add(@{Op='add'; d=5; s=18; t=5}); $s.Add(@{Op='load'; d=5; s=5; Offset=0})
     $s.Add(@{Op='syncht'})
     $s.Add(@{Op='hwticks'; d=0})
     $s.Add(@{Op='store-d'; s=23; t=26; Offset=0}); $s.Add(@{Op='store-d'; s=23; t=0; Offset=8})
@@ -171,6 +189,7 @@ function New-KokoroHmxConvRunSteps {
     $s.Add(@{Op='addi'; d=0; s=23; i=64}); & $imm 1 $outOff; $s.Add(@{Op='add'; d=1; s=18; t=1}); & $imm 2 $outBytes
     & $call 'memcpy'
     & $stage 7
+    if ($RunnerTelemetry) { $s.Add(@{Op='imm'; d=13; i=1}); & $tele 44 13 }
     $s.Add(@{Op='label'; Name='release'})
     $s.Add(@{Op='addi'; d=0; s=17; i=0}); & $call 'compute_resource_release'
     $s.Add(@{Op='label'; Name='no_context'})
@@ -179,6 +198,7 @@ function New-KokoroHmxConvRunSteps {
     $s.Add(@{Op='dealloc-return'})
     [pscustomobject]@{
         Steps = $s.ToArray()
-        Layout = [pscustomobject]@{ Tiles=$Tiles; Pad=$pad; ActBytes=$actBytes; WeightBytes=$wBytes; TableBytes=$tblBytes; OutputBytes=$outBytes; VtcmBytes=$vtcmBytes }
+        Layout = [pscustomobject]@{ Tiles=$Tiles; Pad=$pad; ActBytes=$actBytes; WeightBytes=$wBytes; TableBytes=$tblBytes; OutputBytes=$outBytes; VtcmBytes=$vtcmBytes
+            ActivationOffset=$actOff; WeightOffset=$wOff; TableOffset=$tblOff; OutputOffset=$outOff; Shift=$Shift; RequestBytes=$requestBytes; Iterations=$ranTiles }
     }
 }

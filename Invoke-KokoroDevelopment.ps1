@@ -610,7 +610,11 @@ function Invoke-KokoroDeviceJob {
         [ValidateSet('dev.mansfieldplumbing.androidsma.preview','dev.mansfieldplumbing.kokoro')][string] $Package = 'dev.mansfieldplumbing.kokoro',
         [pscustomobject] $EmissionArtifact,
         # Relaunch the app for this one job instead of using the resident listener.
-        [switch] $OneShot)
+        [switch] $OneShot,
+        # A job that faults on the DSP is an outcome to report, not a harness failure: return its runs (InvokeRc, Stage,
+        # Done) and run 0's output when the phone kept it. The harness itself (startup restore) still throws. One-shot only.
+        [switch] $ReportJobFault)
+    if ($ReportJobFault -and $null -ne $EmissionArtifact -and -not $OneShot) { throw 'ReportJobFault needs a one-shot job (no resident listener).' }
     if ($null -ne $EmissionArtifact -and -not $OneShot) {
         Import-Evaluator
         # After a one-shot relaunch the listener can accept a connection and drop the first write; jobs are repeatable,
@@ -629,8 +633,13 @@ function Invoke-KokoroDeviceJob {
     $text = ($out | ForEach-Object { "$_" }) -join "`n"
     $field = { param([string] $n) if ($text -match "(?m)\b$n=(\S+)") { $Matches[1] } }
     $outputPath = & $field 'OutputPath'
-    if (-not $outputPath -or $text -notmatch '(?m)^Passed=True\s*$' -or $text -notmatch '(?m)^StartupRestored=True\s*$') { throw "Phone run failed or startup was not restored: $(($out | Select-Object -Last 4) -join ' | ')" }
-    [pscustomobject]@{ Output = [IO.File]::ReadAllBytes($outputPath); OutputPath = $outputPath; MedianMs = [double](& $field 'MedianRegionMs')
+    $passed = $text -match '(?m)^Passed=True\s*$'
+    if ($text -notmatch '(?m)^StartupRestored=True\s*$') { throw "Phone startup was not restored: $(($out | Select-Object -Last 4) -join ' | ')" }
+    if (-not $ReportJobFault -and (-not $outputPath -or -not $passed)) { throw "Phone run failed: $(($out | Select-Object -Last 4) -join ' | ')" }
+    $jobRuns = @([regex]::Matches($text, '(?m)^Run=(\d+) InvokeRc=(-?\d+) Stage=(-?\d+) Done=(-?\d+) RegionTicks=(\d+)') | ForEach-Object {
+        [pscustomobject]@{ Run = [int]$_.Groups[1].Value; InvokeRc = [int]$_.Groups[2].Value; Stage = [int]$_.Groups[3].Value; Done = [int]$_.Groups[4].Value; RegionTicks = [long]$_.Groups[5].Value } })
+    [pscustomobject]@{ Output = $(if ($outputPath) { [IO.File]::ReadAllBytes($outputPath) }); OutputPath = $outputPath; MedianMs = [double](& $field 'MedianRegionMs')
+        MedianTicks = [long](& $field 'MedianRegionTicks'); Passed = $passed; Runs = $jobRuns
         Lines = @($text -split '\r?\n' | Where-Object { $_ -match '^(Run=|Median|InvokeRc|Stage|Played=|Passed=|StartupRestored=|ReceiptPath=)' }) }
 }
 
@@ -3716,6 +3725,111 @@ function New-KokoroDiagnosticHost {
         -SetupPath $setupPath -OutputDirectory $outputPath -Debuggable -DiagnosticVendorRpc
 }
 
+# The pages a VTCM grant is mapped in, as this repository models them (docs/results/hmx-vtcm-pages-sm8550-20261113.md):
+# from the base, the largest Hexagon page size that is aligned there and fits (4 MiB, 1 MiB, 256 KiB). Inferred from where
+# HMX activation reads fault on SM8550; QuRT's mapping itself is not read. A grant is the request rounded up to 256 KiB.
+function Get-KokoroVtcmPageModel {
+    param([Parameter(Mandatory)][long] $RequestBytes)
+    $grant = [long]([math]::Ceiling($RequestBytes / 262144) * 262144)
+    $pages = [Collections.Generic.List[object]]::new(); $at = 0L
+    while ($at -lt $grant) {
+        $size = foreach ($candidate in 4194304L, 1048576L, 262144L) { if ($at % $candidate -eq 0 -and $at + $candidate -le $grant) { $candidate; break } }
+        $pages.Add([pscustomobject]@{ Offset = $at; Bytes = [long]$size }); $at += $size
+    }
+    [pscustomobject]@{ GrantBytes = $grant; Pages = $pages.ToArray() }
+}
+
+# The first output tile of an HmxConvRun conv whose :single activation read pairs croutons (Rs and Rs + dY) in two
+# different pages; $null when none does. Addresses are offsets from the granted base and follow
+# src/kernels/Kokoro.HmxConv.ps1 (crouton (tp, cb) at (tp*CB + cb)*2048, tap rows packed two per 128 bytes).
+function Get-KokoroHmxReadPageCrossing {
+    param([Parameter(Mandatory)] $Layout, [Parameter(Mandatory)][int] $Channels, [Parameter(Mandatory)][int] $Kernel,
+        [int] $Dilation = 1, [Parameter(Mandatory)][object[]] $Pages,
+        # Count only pairs whose second crouton holds rows the tap reads (row offset not 0): the fetch hypothesis.
+        [switch] $NeededOnly)
+    $cb = $Channels / 32; $dy = [long]$cb * 2048; $half = ($Kernel - 1) / 2
+    $tile0 = [long]$Layout.Shift + $Layout.ActivationOffset + [long]$Layout.Pad * $dy
+    $pageOf = { param([long] $Address) for ($p = 0; $p -lt $Pages.Count; $p++) { if ($Address -ge $Pages[$p].Offset -and $Address -lt $Pages[$p].Offset + $Pages[$p].Bytes) { return $p } }; -1 }
+    for ($t = 0; $t -lt $Layout.Iterations; $t++) {
+        for ($k = 0; $k -lt $Kernel; $k++) {
+            $rows = $Dilation * ($k - $half); [int]$tileShift = [math]::Floor($rows / 32); [int]$row = $rows - 32 * $tileShift
+            if ($NeededOnly -and $row -eq 0) { continue }
+            for ($c = 0; $c -lt $cb; $c++) {
+                $rs = $tile0 + $t * $dy + (($tileShift * $cb) + $c) * 2048 + (($row -shr 1) -shl 7) + (($row -band 1) -shl 1)
+                if ((& $pageOf $rs) -ne (& $pageOf ($rs + $dy))) { return $t }
+            }
+        }
+    }
+    $null
+}
+
+# HMX activation reads against VTCM pages on the phone. Each configuration's outcome is predicted first, from its emitted
+# read addresses and the page model, then run (KokoroHmxPagesRun, one-shot). A DSP fault is an outcome, not an error.
+function Test-KokoroHmxVtcmPages {
+    param([Parameter(Mandatory)][string]$OutputDirectory,[string]$Soc='SM8550',[string]$Package='dev.mansfieldplumbing.kokoro',
+        [ValidateRange(1,121)][int]$Runs=3,[int]$Seed=17,
+        # Run only these configurations (by name); all when empty.
+        [string[]]$Names=@())
+    $out=[IO.Path]::GetFullPath($OutputDirectory)
+    if(-not $out.StartsWith($Build+[IO.Path]::DirectorySeparatorChar,[StringComparison]::OrdinalIgnoreCase) -or (Test-Path -LiteralPath $out)){throw 'Choose a fresh hmx-vtcm-pages directory under build/.'}
+    [void][IO.Directory]::CreateDirectory($out)
+    Import-Evaluator
+    . (Join-Path $Root 'src/jobs/Kokoro.HmxConvRun.ps1')
+    $configurations=@(
+        @{Name='c128-k3-t32';C=128;K=3;T=32}
+        @{Name='c128-k3-t32-first30';C=128;K=3;T=32;I=30}
+        @{Name='c128-k3-t32-first31';C=128;K=3;T=32;I=31}
+        @{Name='c128-k3-t32-request1MiB';C=128;K=3;T=32;R=1048576}
+        @{Name='c128-k3-t32-shift64KiB-first22';C=128;K=3;T=32;S=65536;I=22}
+        @{Name='c128-k3-t32-shift64KiB-first23';C=128;K=3;T=32;S=65536;I=23}
+        @{Name='c128-k11-t32';C=128;K=11;T=32}
+        @{Name='c256-k3-t32';C=256;K=3;T=32}
+        @{Name='c256-k3-t64-first62';C=256;K=3;T=64;I=62}
+        @{Name='c256-k3-t64-first63';C=256;K=3;T=64;I=63}
+        @{Name='c256-k3-t64';C=256;K=3;T=64}
+        @{Name='c256-k3-t64-request4MiB';C=256;K=3;T=64;R=4194304}
+        # Kernel 1: every tap at row 0, so a pair's second crouton is never read. Separates a check of the whole read
+        # window (fault) from a fault on data actually fetched (pass).
+        @{Name='c128-k1-t32-first30';C=128;K=1;T=32;I=30}
+        @{Name='c128-k1-t32';C=128;K=1;T=32}
+        @{Name='c128-k1-t32-request1MiB';C=128;K=1;T=32;R=1048576})
+    if($Names.Count){
+        $unknown=@($Names | Where-Object { $_ -cnotin @($configurations | ForEach-Object { $_.Name }) })
+        if($unknown.Count){throw "Unknown hmx-vtcm-pages configuration: $($unknown -join ', ')."}
+        $configurations=@($configurations | Where-Object { $_.Name -cin $Names })
+    }
+    $random=[Random]::new($Seed)
+    $rows=foreach($cfg in $configurations){
+        $iterations=if($cfg.I){$cfg.I}else{0}; $shift=if($cfg.S){[long]$cfg.S}else{0L}; $request=if($cfg.R){[long]$cfg.R}else{0L}
+        $layout=(New-KokoroHmxConvRunSteps -Channels $cfg.C -Kernel $cfg.K -Tiles $cfg.T -RunnerTelemetry -Iterations $iterations -Shift $shift -VtcmRequest $request).Layout
+        $model=Get-KokoroVtcmPageModel -RequestBytes $layout.RequestBytes
+        $crossing=Get-KokoroHmxReadPageCrossing -Layout $layout -Channels $cfg.C -Kernel $cfg.K -Pages $model.Pages
+        $predicted=if($null -ne $crossing){'Fault'}else{'Pass'}
+        $fetchCrossing=Get-KokoroHmxReadPageCrossing -Layout $layout -Channels $cfg.C -Kernel $cfg.K -Pages $model.Pages -NeededOnly
+        $predictedFetch=if($null -ne $fetchCrossing){'Fault'}else{'Pass'}
+        $emission=Invoke-KokoroEmission -Kernel KokoroHmxPagesRun -Parameters @{ConvChannels=$cfg.C;ConvKernel=$cfg.K;ConvTiles=$cfg.T;HmxIterations=$iterations;HmxShift=$shift;HmxVtcmRequest=$request}
+        $inputs=Join-Path $out $cfg.Name; [void][IO.Directory]::CreateDirectory($inputs)
+        $activations=[byte[]]::new($layout.ActBytes); $random.NextBytes($activations); $weights=[byte[]]::new($layout.WeightBytes); $random.NextBytes($weights)
+        [IO.File]::WriteAllBytes((Join-Path $inputs 'activations.bin'),$activations); [IO.File]::WriteAllBytes((Join-Path $inputs 'weights.bin'),$weights)
+        [IO.File]::WriteAllBytes((Join-Path $inputs 'tables.bin'),[byte[]]::new($layout.TableBytes))
+        $job=Invoke-KokoroDeviceJob -EmissionDirectory $emission.Directory -InputDirectory $inputs -Soc $Soc -Runs $Runs -Package $Package -ReportJobFault
+        $first=@($job.Runs | Where-Object Run -eq 0)[0]
+        $observed=if($job.Passed){'Pass'}elseif($first -and $first.InvokeRc -ne 0 -and $first.Stage -eq 5){'Fault'}else{'Other'}
+        $telemetry=$job.Output
+        [pscustomobject]@{Name=$cfg.Name;Channels=$cfg.C;Kernel=$cfg.K;Tiles=$cfg.T;Iterations=$layout.Iterations;Shift=$shift;RequestBytes=$layout.RequestBytes
+            ModelGrantBytes=$model.GrantBytes;GrantedBytes=$(if($telemetry){[BitConverter]::ToUInt32($telemetry,24)})
+            VtcmBase=$(if($telemetry){'0x{0:X8}' -f [BitConverter]::ToUInt32($telemetry,40)})
+            Pages=(($model.Pages | ForEach-Object { '{0}K' -f ($_.Bytes/1024) }) -join '+');CrossingTile=$crossing;Predicted=$predicted;PredictedIfFetchOnly=$predictedFetch;Observed=$observed
+            InvokeRc=$(if($first){'0x{0:X8}' -f $first.InvokeRc});Stage=$(if($first){$first.Stage});MedianTicks=$job.MedianTicks;Agrees=($predicted -ceq $observed)
+            LibrarySHA256=$emission.LibrarySHA256}
+        '{0,-32} predicted {1,-5} (fetch only: {2,-5}) observed {3,-5} (crossing tile {4}, pages {5})' -f $cfg.Name,$predicted,$predictedFetch,$observed,$(if($null -ne $crossing){$crossing}else{'none'}),(($model.Pages | ForEach-Object { '{0}K' -f ($_.Bytes/1024) }) -join '+') | Write-Host
+    }
+    $receipt=[pscustomobject]@{Case='hmx-vtcm-pages';Commit=(git -C $Root rev-parse HEAD);Soc=$Soc;Runs=$Runs;Seed=$Seed;Rows=@($rows)
+        Agreed=@($rows | Where-Object Agrees).Count;Disagreed=@($rows | Where-Object { -not $_.Agrees }).Count}
+    $receipt | Export-Clixml -LiteralPath (Join-Path $out 'receipt.clixml')
+    $receipt
+}
+
 # Run -Case measurement cases and the function each one calls.
 $script:KokoroMeasurementCases = [ordered]@{
     'generator-pmu' = 'Test-KokoroGeneratorPmu'
@@ -3730,6 +3844,7 @@ $script:KokoroMeasurementCases = [ordered]@{
     'student-speech' = 'Invoke-KokoroStudentSpeech'
     'generator-normalization' = 'Invoke-KokoroGeneratorNormalization'
     'generator-score' = 'Invoke-KokoroGeneratorScore'
+    'hmx-vtcm-pages' = 'Test-KokoroHmxVtcmPages'
 }
 
 # No C runtime in anything this repository emits or binds (skill no-c-runtime). Banned library names, matched on the
