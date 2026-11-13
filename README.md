@@ -89,6 +89,13 @@ outside: what goes in through VTCM, what comes out, and where it faults.
   faults at the same tile.
 - On SM8550, requests for a separate HMX clock are refused (-3)
   ([record](docs/results/dsp-power-votes-sm8550-20261028.md)).
+- HMX streams activation-and-weight pairs at about 9.4 core cycles each, behind a fixed latency of about 40 to 59
+  cycles that does not depend on how many pairs a group accumulated. The core issues pairs at HMX's rate, and holds a
+  load to a stored crouton until the whole crouton lands
+  ([record](docs/results/hmx-timing-reduction-sm8550-20261113.md)).
+- The FP16 path reduces as a chain, not a tree: products join the accumulator 4 at a time in ascending input-channel
+  order, with a 24-bit significand, rounded to odd on the grid of the largest operand. That model predicts 156 of 160
+  fingerprint rows bit for bit (same record).
 
 **What "byte-identical to the layer reference" shows.** Both jobs run on the same phone, with the same HMX kernels,
 the same int8 weights and the same supplied AdaIN constants (exported by a layer-job run); only the schedule differs.
@@ -105,9 +112,11 @@ one-bit control.
 
 **Not known.**
 
-- The microarchitecture: whether HMX is a systolic array, an outer-product engine or something else.
-- The accumulator's width, and whether accumulation saturates or wraps beyond the ranges exercised.
-- The order in which partial sums accumulate.
+- Whether HMX's chained reduction is laid out in space (a systolic array, partial sums passed cell to cell) or is one
+  4-wide unit reused in time: the two give the same numbers and the same timing.
+- The int8 path's accumulator width and order, and whether it saturates or wraps beyond the ranges exercised; only the
+  FP16 path has been fingerprinted.
+- How the FP16 running total is rounded between groups (4 of 160 fingerprint rows).
 - Whether each equivalence check would fail on a one-bit change.
 - Whether the read's window is checked before the read or both croutons are always fetched. (Weight reads and output
   stores are single aligned croutons, so they cannot span a page.)
@@ -115,10 +124,10 @@ one-bit control.
 **Observations that would answer them.**
 
 - A one-bit control for each equivalence case: change one weight by one step and confirm the PCM hash changes.
-- Accumulation order: inputs whose partial sums overflow part-way through but whose final sum fits. If the accumulator
-  saturates or wraps, the output depends on the order and reveals it.
-- Structure: time against tile shape. A systolic array has a fill-and-drain latency that grows with its dimensions;
-  sweeping the reduction length and the output tile size separately distinguishes that from a per-step cost.
+- The int8 path's order: inputs whose partial sums overflow part-way through but whose final sum fits. If the
+  accumulator saturates or wraps, the output depends on the order and reveals it.
+- Space against time: something that scales with the chain's physical extent rather than its arithmetic, such as power
+  or behaviour under contention from a second HMX context.
 
 ## Status
 
