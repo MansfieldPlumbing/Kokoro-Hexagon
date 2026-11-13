@@ -61,6 +61,17 @@ to odd on the grid of the largest operand. **156 of 160 rows bit for bit.** The 
 different groups, one of them cancelling a B; the rounding of the running total between groups is not fully captured
 (a two-level variant fits 126 of 160).
 
+**The misses are in the reduction, not the output conversion.** The 32 confirmation rows (the 4 misses among them)
+were run again at conversion scales 1.0, 2.0 and 0.5 (FP16, bias 0), predicted to scale exactly if conversion plays no
+part. Every row at scale k equals k times its scale-1 output, bit for bit (the one row whose value overflows FP16 at 2.0
+is infinity, as expected), and the scale-1 job reproduces the earlier run bit for bit. The loss itself also happens
+before cancellation: a final sum of exactly 2^-10 would convert to FP16 exactly, but the output is 2^-8.
+
+Qualcomm's V81 HMX reference describes a 37-bit floating-point accumulator followed by a separate FP16 conversion. V81
+is not V73, and bit-exact behaviour is not promised across versions. A float that wide would keep s next to B, so on
+V73 either the accumulator is narrower or the 24-bit window observed here belongs to an earlier stage, such as aligning
+each group's products for the fused add, ahead of a wider accumulator. The 4 misses are where those two would differ.
+
 ## What this says about systolic
 
 A systolic array reduces along its reduction dimension as a chain: each stage adds its products to the partial sum it is
@@ -70,7 +81,8 @@ one 4-wide unit reused in time, which give the same numbers and the same times.
 
 ## Not established
 
-- The rounding of the running total between groups (the 4 rows above).
+- The rounding of the running total between groups (the 4 rows above), and whether the 24-bit window belongs to the
+  accumulator or to the products' alignment ahead of it.
 - The int8 path's accumulator and order; only the FP16 path was fingerprinted.
 - Space against time for the chain.
 - Whether `syncht`'s own cost overlaps the drain.
