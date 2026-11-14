@@ -133,6 +133,8 @@ class OfflineLevelRecord {
     [int[]] $TokenFrames
     # Means, variances, token-major sums, token-major squared sums.
     [double[]] $Statistics
+    # Supplied mode: the same measurements of the site's actual input, which the supplied levels normalized.
+    [double[]] $Observed
 }
 # Where per-token AdaIN levels are measured (Live) or replayed (Supplied): one part of the network (Decoder, its ten
 # sites, or Generator, its 48), the tokens' durations in decoder frames, the supplied records by site name, and the
@@ -1583,6 +1585,7 @@ function Invoke-OfflineAdaIn([float[]] $InputValues, [int] $Channels, [int] $Fra
         else {
             if (-not $levelContext.Supplied.ContainsKey($Name) -or $levelContext.Supplied[$Name].Channels -ne $Channels) { throw "Missing/mismatched supplied site: $Name" }
             $record.Statistics = $levelContext.Supplied[$Name].Statistics; $kind = 'SuppliedAdaIN'
+            $record.Observed = $measureLevels.Invoke($InputValues, $Channels, $Frames, $record.TokenFrames)
         }
         $result = $applyLevels.Invoke($InputValues, $Channels, $Frames, $AcousticStyle, $fc, $bias, $normWeight, $normBias, $record.Statistics)
         $levelContext.Exported.Add($record)
