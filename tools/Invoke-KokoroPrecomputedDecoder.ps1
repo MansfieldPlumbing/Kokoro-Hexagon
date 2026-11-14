@@ -97,15 +97,26 @@ param(
     [switch] $h
 )
 
-class OfflineTokenSequenceComparer : Collections.Generic.IEqualityComparer[int[]] {
-    [bool] Equals([int[]] $Left,[int[]] $Right) {
-        return [Linq.Enumerable]::SequenceEqual[int]($Left,$Right)
+# A token sequence is a value: two are equal when every token is equal. It keeps its own copy of the tokens, so a
+# caller's later change to its array cannot change a key already in a dictionary. Whole sequences are compared, so a
+# hash collision cannot produce a match. It derives from System.Object, as the pinned lowering requires of every class.
+class OfflineTokenSequence {
+    [int[]] $Tokens
+    hidden [int] $Hash
+    OfflineTokenSequence([int[]] $sequence) {
+        $this.Tokens = [int[]]$sequence.Clone()
+        [long]$running = 17
+        foreach ($token in $this.Tokens) { $running = ($running * 31L + [long]$token) -band 2147483647L }
+        $this.Hash = [int]$running
     }
-    [int] GetHashCode([int[]] $Values) {
-        [long]$hash=17
-        foreach($value in $Values){$hash=($hash*31L+[long]$value) -band 2147483647L}
-        return [int]$hash
+    [bool] Equals([object] $other) {
+        if ($null -eq $other -or -not [object]::ReferenceEquals($other.GetType(), $this.GetType())) { return $false }
+        $that = [OfflineTokenSequence]$other
+        if ($this.Hash -ne $that.Hash -or $this.Tokens.Length -ne $that.Tokens.Length) { return $false }
+        for ($i = 0; $i -lt $this.Tokens.Length; $i++) { if ($this.Tokens[$i] -ne $that.Tokens[$i]) { return $false } }
+        return $true
     }
+    [int] GetHashCode() { return $this.Hash }
 }
 
 class OfflineTextPreparation {
@@ -122,6 +133,16 @@ class OfflineLevelRecord {
     [int[]] $TokenFrames
     # Means, variances, token-major sums, token-major squared sums.
     [double[]] $Statistics
+}
+# Where per-token AdaIN levels are measured (Live) or replayed (Supplied): one part of the network (Decoder, its ten
+# sites, or Generator, its 48), the tokens' durations in decoder frames, the supplied records by site name, and the
+# records each site exports.
+class OfflineLevelContext {
+    [string] $Part
+    [string] $Mode
+    [int[]] $Durations
+    [System.Collections.Generic.Dictionary[string,object]] $Supplied
+    [System.Collections.Generic.List[OfflineLevelRecord]] $Exported
 }
 class OfflineDecoderResult {
     [float[]] $Features
@@ -1360,8 +1381,13 @@ $profile = [Collections.Generic.List[object]]::new()
 $levelContext = $null
 $script:OfflineObservationSink = $null
 $script:OfflineDecoderObservationSink = $null
+# Residual diagnostics Invoke-OfflineSpeech sets per call; null here so Library callers of Invoke-OfflineGenerator run
+# under strict mode.
+$script:OfflineResidualTrace = $null
+$script:OfflineResidualHook = $null
+$script:OfflineDroppedResiduals = $null
 $script:OfflineTextPreparation = $null
-$script:OfflineTextPreparations = [Collections.Generic.Dictionary[int[],OfflineTextPreparation]]::new([OfflineTokenSequenceComparer]::new())
+$script:OfflineTextPreparations = [Collections.Generic.Dictionary[OfflineTokenSequence,OfflineTextPreparation]]::new()
 $script:OfflineTextHits = 0L
 $script:OfflineTextMisses = 0L
 $referenceConfig = Get-Content -LiteralPath (Join-Path $InputRepository 'build/inputs/kokoro/f3ff3571791e39611d31c381e3a41a3af07b4987/config.json') -Raw | ConvertFrom-Json -AsHashtable
@@ -1374,11 +1400,11 @@ foreach ($file in $referenceManifest.model.files) {
     }
 }
 if ($null -ne $VoicePins) {
-    foreach ($name in $VoicePins.Keys) {
-        if ($referenceVoicePins.ContainsKey($name) -and $referenceVoicePins[$name] -ine $VoicePins[$name]) { throw "Conflicting voice pin: $name" }
-        $null = [Convert]::FromHexString($VoicePins[$name])
-        if ($VoicePins[$name].Length -ne 64) { throw "Invalid voice digest: $name" }
-        $referenceVoicePins[$name] = $VoicePins[$name]
+    foreach ($pinnedVoice in $VoicePins.Keys) {
+        if ($referenceVoicePins.ContainsKey($pinnedVoice) -and $referenceVoicePins[$pinnedVoice] -ine $VoicePins[$pinnedVoice]) { throw "Conflicting voice pin: $pinnedVoice" }
+        $null = [Convert]::FromHexString($VoicePins[$pinnedVoice])
+        if ($VoicePins[$pinnedVoice].Length -ne 64) { throw "Invalid voice digest: $pinnedVoice" }
+        $referenceVoicePins[$pinnedVoice] = $VoicePins[$pinnedVoice]
     }
 }
 $referenceVoiceArchives = [Collections.Generic.Dictionary[string,object]]::new([StringComparer]::Ordinal)
@@ -1523,6 +1549,17 @@ function Invoke-OfflineConv {
     if($null -ne $script:OfflineDecoderObservationSink){$script:OfflineDecoderObservationSink.Invoke($MyInvocation.MyCommand,$result,$outFrames,[object[]]@(,$InputValues))}
     return , $result
 }
+# Rows of each token at an AdaIN site: the site's rows per decoder frame (1 or 2 in the decoder, 20 or 120 in the
+# generator) times each token's duration. A site with one row more (the generator's 128-channel sites, after stock
+# Generator.reflection_pad = ReflectionPad1d((1, 0))) gives that row to the first token, which it precedes.
+function Get-OfflineSiteTokenFrames([int[]] $TokenDurations, [int] $Frames) {
+    $total = 0; foreach ($duration in $TokenDurations) { $total += $duration }
+    if ($total -lt 1) { throw 'Token durations are empty.' }
+    $scale = [int][Math]::Floor($Frames / [double]$total); $extra = $Frames - $scale * $total
+    if ($scale -lt 1 -or $extra -gt 1) { throw "A site of $Frames rows does not divide $total decoder frames into whole tokens." }
+    $tokenFrames = $scaleFrames.Invoke($TokenDurations, $scale); $tokenFrames[0] += $extra
+    return , $tokenFrames
+}
 function Invoke-OfflineAdaIn([float[]] $InputValues, [int] $Channels, [int] $Frames, [float[]] $AcousticStyle, [string] $Name, [string] $Module = 'decoder.module.', [int] $FrameRate = 0) {
     $prefix = $Module + $Name
     if ($adaInCache.ContainsKey($prefix)) {
@@ -1538,9 +1575,10 @@ function Invoke-OfflineAdaIn([float[]] $InputValues, [int] $Channels, [int] $Fra
     }
     $watch = [Diagnostics.Stopwatch]::StartNew()
     $kind = 'LiveAdaIN'
-    if ($null -ne $levelContext -and -not $Name.StartsWith('generator.', [StringComparison]::Ordinal)) {
+    $part = if ($Name.StartsWith('generator.', [StringComparison]::Ordinal)) { 'Generator' } else { 'Decoder' }
+    if ($null -ne $levelContext -and $levelContext.Part -ceq $part) {
         $record = [OfflineLevelRecord]::new(); $record.Name = $Name; $record.Channels = $Channels; $record.Frames = $Frames
-        $record.TokenFrames = $scaleFrames.Invoke($levelContext.Durations, $(if ($Name -ceq 'decode.3.norm2') { 2 } else { 1 }))
+        $record.TokenFrames = Get-OfflineSiteTokenFrames $levelContext.Durations $Frames
         if ($levelContext.Mode -ceq 'Live') { $record.Statistics = $measureLevels.Invoke($InputValues, $Channels, $Frames, $record.TokenFrames) }
         else {
             if (-not $levelContext.Supplied.ContainsKey($Name) -or $levelContext.Supplied[$Name].Channels -ne $Channels) { throw "Missing/mismatched supplied site: $Name" }
@@ -1611,7 +1649,7 @@ function Invoke-OfflineDecoder {
     $previousDecoderSink=$script:OfflineDecoderObservationSink
     $script:OfflineDecoderObservationSink=$ObservationSink
     try {
-    $levelContext = [pscustomobject]@{ Mode = $LevelMode; Durations = $TokenDurations; Supplied = $SuppliedLevels; Exported = [Collections.Generic.List[OfflineLevelRecord]]::new() }
+    $levelContext = [OfflineLevelContext]@{ Part = 'Decoder'; Mode = $LevelMode; Durations = $TokenDurations; Supplied = $SuppliedLevels; Exported = [Collections.Generic.List[OfflineLevelRecord]]::new() }
     $frames = [int]($AsrValues.Length / 512)
     if ($AsrValues.Length -ne 512 * $frames -or $PitchCurve.Length -ne 2 * $frames -or $EnergyCurve.Length -ne $PitchCurve.Length -or $AcousticStyle.Length -ne 128) { throw 'Decoder input shape mismatch.' }
     $pitch = Invoke-OfflineConv $PitchCurve $PitchCurve.Length 'F0_conv' -Stride 2 -Padding 1
@@ -1714,7 +1752,20 @@ function Invoke-OfflineGeneratorBlock([float[]] $InputValues, [int] $Frames, [fl
     }
     return , $x
 }
-function Invoke-OfflineGenerator([float[]] $Features, [float[]] $AcousticStyle, [float[]] $PitchCurve, [float[]] $UniformDraw, [float[]] $HarmonicDraw, [float[]] $ExtraDraw) {
+# With -TokenDurations (decoder frames, summing to half the pitch curve's ticks) each of the 48 AdaIN sites measures
+# its per-token levels (Live, appended to -LevelRecords) or applies supplied ones (Supplied, by site name), as the
+# decoder's Levels mode does; its normalization then uses those levels' mean and variance. Without it, unchanged.
+function Invoke-OfflineGenerator([float[]] $Features, [float[]] $AcousticStyle, [float[]] $PitchCurve, [float[]] $UniformDraw, [float[]] $HarmonicDraw, [float[]] $ExtraDraw,
+    [int[]] $TokenDurations = $null, [ValidateSet('Live','Supplied')][string] $LevelMode = 'Live',
+    [Collections.Generic.Dictionary[string,object]] $SuppliedLevels = $null, [Collections.Generic.List[OfflineLevelRecord]] $LevelRecords = $null) {
+    if ($null -ne $TokenDurations) {
+        $tokenTotal = 0; foreach ($duration in $TokenDurations) { $tokenTotal += $duration }
+        if (2 * $tokenTotal -ne $PitchCurve.Length) { throw 'Token durations do not cover the pitch curve.' }
+        if ($LevelMode -ceq 'Supplied' -and $null -eq $SuppliedLevels) { throw 'Supplied generator levels need -SuppliedLevels.' }
+        $exported = $LevelRecords
+        if ($null -eq $exported) { $exported = [Collections.Generic.List[OfflineLevelRecord]]::new() }
+        $levelContext = [OfflineLevelContext]@{ Part = 'Generator'; Mode = $LevelMode; Durations = $TokenDurations; Supplied = $SuppliedLevels; Exported = $exported }
+    }
     Test-OfflineNode 'gen.input_x' $Features
     $source = $harmonic.Invoke($PitchCurve, $UniformDraw, $HarmonicDraw, $ExtraDraw, (Read-OfflineWeight 'decoder.module.generator.m_source.l_linear.weight'), (Read-OfflineWeight 'decoder.module.generator.m_source.l_linear.bias'))
     Test-OfflineNode 'gen.m_source.out0' $source
@@ -1943,11 +1994,11 @@ function Invoke-OfflineSpeech {
     # With -SuppliedF0 every control is supplied. Without it, -SuppliedDurations (and -SuppliedN) replace the predictor's
     # durations (and N) while its F0 branch runs on those durations.
     $supplied = $null -ne $SuppliedF0
-    # Retain exact token preparations up to the caller's capacity. The comparer checks
-    # complete token arrays; hash collisions cannot produce a hit. Experiments bypass it.
+    # Retain exact token preparations up to the caller's capacity, keyed by the token sequence
+    # (OfflineTokenSequence compares complete sequences). Experiments bypass it.
     $reuse = $ReuseText -and -not $RecomputeText -and -not $supplied -and $null -eq $script:OfflineAlbertTrace -and $null -eq $script:OfflineAlbertFormat
     $prepared = $null
-    $textHit = $reuse -and $script:OfflineTextPreparations.TryGetValue($tokenIds,[ref]$prepared)
+    $textHit = $reuse -and $script:OfflineTextPreparations.TryGetValue([OfflineTokenSequence]::new($tokenIds),[ref]$prepared)
     if ($textHit) { $script:OfflineTextHits++ }
     elseif ($reuse) { $script:OfflineTextMisses++ }
     if ($supplied) {
@@ -2036,7 +2087,7 @@ function Invoke-OfflineSpeech {
             TextEncoding = [float[]]$textEncoding.Clone()
         }
         if($script:OfflineTextPreparations.Count -ge $TextPreparationCapacity){$script:OfflineTextPreparations.Clear()}
-        $script:OfflineTextPreparations.Add($script:OfflineTextPreparation.TokenIds,$script:OfflineTextPreparation)
+        $script:OfflineTextPreparations.Add([OfflineTokenSequence]::new($script:OfflineTextPreparation.TokenIds),$script:OfflineTextPreparation)
     }
     $profile.Add([pscustomobject]@{ Stage = 'text_encoder'; Kind = 'TextEncoderTotal'; Milliseconds = $encoderWatch.Elapsed.TotalMilliseconds; Frames = $t })
     # Aligned: the decoder's asr input, [channel][frame] at the duration frames. -SkipDecoder stops here.
