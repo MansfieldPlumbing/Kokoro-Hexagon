@@ -123,3 +123,35 @@ exploratory; none was predicted.
 
 `OfflineLevelRecord.Observed`: in Supplied mode each site also records the measured moments of its actual input, which
 the supplied levels normalized (A5). Live mode is unchanged.
+
+## Plan-conditioned base (added the same day, exploratory)
+
+Question: does a base that moves with features of the utterance's plan, all known before synthesis, land closer to the
+exact whole-window moments than the voice base? Predictions `PREDICTIONS-PLAN-BASE.md` (SHA-256
+`E1BD18308B50599BF80715C4D64B930B0F97F753081CA7CE5D41CCF52EAEF1E8`, 14:51) were written after Stage B's scores and
+before any fit.
+
+Each channel's coordinates ln(inv) and mean x inv (A0's coordinates) are fitted by least squares on the training
+windows against standardized plan features (ridge 1e-6), then scored as above (`Measure-StageBPlan.ps1`,
+`stage-b-plan-scores.csv`). Features, from the cached phonemes, durations, F0 and N: pad share; ln(frames);
+punctuation and space share; voiced share; mean and standard deviation of ln F0 over voiced ticks; mean and standard
+deviation of N.
+
+| Arm | Features | Held out (59) | Worst window | Under 600 ticks | Development (57) | Predicted, held out |
+| --- | --- | ---: | ---: | ---: | ---: | --- |
+| P0 | intercept | 34.07 dB | 23.07 dB | 28.53 dB | 34.15 dB | 34.07 dB (control): exact |
+| P1 | + pad share | 36.24 dB | 29.07 dB | 33.44 dB | 36.51 dB | 35.0 to 36.5 dB: in range |
+| P2 | + ln(frames) | 36.30 dB | 29.10 dB | 33.68 dB | 36.63 dB | 0.2 to 1.0 dB above P1: below, +0.06 dB |
+| P3noN | + the four share and F0 features | 37.61 dB | 32.29 dB | 34.70 dB | 37.92 dB | not predicted |
+| P3 | + mean and sd of N | 37.85 dB | 32.70 dB | 34.89 dB | 38.15 dB (56) | 36.5 to 39 dB, worst above 27 dB: in range |
+
+P3's two halves are a mean offset at 40.50 dB and a scale term at 36.26 dB (A0: 34.40 and 33.88 dB); its variance bias
+is +0.002 dB. Eight scalars of the plan and a linear fit move the base 3.8 dB on average and 9.6 dB in the worst window.
+A plan-conditioned base is one K/M/S set per utterance, known before the first sample, so it loads once per job as the
+host coefficients do today and needs no coefficient change inside a job.
+
+Deviation from the predictions: 11 cached windows hold no N (10 training, 1 development). P3 is fitted on the 490
+training windows that do and leaves the one development window out; P3noN (not predicted) uses all windows.
+
+Not measured: audio with these moments; whether the stream then drifts from them as in A5; Student-produced F0, N and
+durations in place of the teacher's.
