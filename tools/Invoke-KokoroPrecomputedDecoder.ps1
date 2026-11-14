@@ -135,6 +135,85 @@ class OfflineLevelRecord {
     [double[]] $Statistics
     # Supplied mode: the same measurements of the site's actual input, which the supplied levels normalized.
     [double[]] $Observed
+    # Measured mode: the moments the policy gave at each of its probe points (probe-major; means, then variances).
+    [double[]] $Probed
+}
+# Measured mode: how each generator tick's (point's) AdaIN moments are formed from the cumulative sums of the site's own
+# input. Whole: the whole utterance (the stock scope). Block: BlockTicks-tick blocks from the start, each point by its
+# own block; a last remainder shorter than half a block joins the block before it. Groups: GroupEnds, each group's last
+# tick. Running: everything so far (WindowTicks 0) or the last WindowTicks ticks, reading LookaheadTicks ahead. Every
+# scope may add a prior of PriorTicks ticks of the supplied moments (rows never played). TokenContributes, one flag
+# per token (null: every token), says whose rows enter the sums; a point is still normalized when its token does not
+# contribute. A point with no rows and no prior is an error. Moments are rounded through float as MeasureLevels rounds.
+# NudgeSite/NudgePoint/NudgeChannel move that one mean up one float unit (a control); NudgeSite empty is off.
+class OfflineMomentPolicy {
+    [string] $Scope
+    [int] $BlockTicks
+    [int[]] $GroupEnds
+    [int] $PriorTicks
+    [int] $WindowTicks
+    [int] $LookaheadTicks
+    [bool[]] $TokenContributes
+    [int[]] $Probes
+    [string] $NudgeSite
+    [int] $NudgePoint
+    [int] $NudgeChannel
+
+    # cumulative: MeasureCumulative's table. prior: 2 x channels (means, variances) or null. Returns points x channels
+    # means (point-major), then points x channels variances.
+    [double[]] Moments([double[]] $cumulative, [int] $channels, [int] $points, [int] $rowsPerTick, [double[]] $prior) {
+        if ($cumulative.Length -ne $points + 2 * $points * $channels) { throw [System.ArgumentException]::new('Cumulative table shape mismatch.') }
+        $usePrior = $this.PriorTicks -gt 0
+        if ($usePrior -and ([object]::ReferenceEquals($prior, $null) -or $prior.Length -lt 2 * $channels)) { throw [System.ArgumentException]::new('The policy has a prior and none was supplied.') }
+        $kind = 0
+        if ($this.Scope -ceq 'Whole') { $kind = 1 } elseif ($this.Scope -ceq 'Block') { $kind = 2 } elseif ($this.Scope -ceq 'Groups') { $kind = 3 } elseif ($this.Scope -ceq 'Running') { $kind = 4 }
+        if ($kind -eq 0) { throw [System.ArgumentException]::new('Unknown moment scope.') }
+        if ($kind -eq 2 -and $this.BlockTicks -lt 1) { throw [System.ArgumentException]::new('Block scope needs BlockTicks.') }
+        if ($kind -eq 3 -and ([object]::ReferenceEquals($this.GroupEnds, $null) -or $this.GroupEnds.Length -lt 1 -or $this.GroupEnds[$this.GroupEnds.Length - 1] -ne $points - 1)) { throw [System.ArgumentException]::new('Groups must end at the last point.') }
+        if ($this.WindowTicks -lt 0 -or $this.LookaheadTicks -lt 0 -or $this.PriorTicks -lt 0) { throw [System.ArgumentException]::new('Negative policy span.') }
+        $lastBlock = 0
+        if ($kind -eq 2) {
+            $full = [int][System.Math]::Floor([double]$points / [double]$this.BlockTicks); $remainder = $points - $full * $this.BlockTicks
+            $lastBlock = $full - 1
+            if ($full -eq 0 -or 2 * $remainder -ge $this.BlockTicks) { $lastBlock = $full }
+        }
+        $priorRows = [double]$this.PriorTicks * [double]$rowsPerTick
+        $output = [double[]]::new(2 * $points * $channels)
+        $group = 0
+        for ($p = 0; $p -lt $points; $p++) {
+            $first = 0; $last = $points - 1
+            if ($kind -eq 2) {
+                $block = [int][System.Math]::Floor([double]$p / [double]$this.BlockTicks)
+                if ($block -gt $lastBlock) { $block = $lastBlock }
+                $first = $block * $this.BlockTicks
+                if ($block -lt $lastBlock) { $last = $first + $this.BlockTicks - 1 }
+            } elseif ($kind -eq 3) {
+                while ($this.GroupEnds[$group] -lt $p) { $group++ }
+                if ($group -gt 0) { $first = $this.GroupEnds[$group - 1] + 1 }
+                $last = $this.GroupEnds[$group]
+            } elseif ($kind -eq 4) {
+                $last = $p + $this.LookaheadTicks
+                if ($last -gt $points - 1) { $last = $points - 1 }
+                if ($this.WindowTicks -gt 0) { $first = $last - $this.WindowTicks + 1; if ($first -lt 0) { $first = 0 } }
+            }
+            $count = $cumulative[$last]
+            if ($first -gt 0) { $count = $count - $cumulative[$first - 1] }
+            if ($usePrior) { $count = $count + $priorRows }
+            if (-not ($count -gt [double]0)) { throw [System.ArgumentException]::new('A point has no rows and no prior.') }
+            for ($c = 0; $c -lt $channels; $c++) {
+                $sum = $cumulative[$points + $last * $channels + $c]; $squared = $cumulative[$points + ($points + $last) * $channels + $c]
+                if ($first -gt 0) { $sum = $sum - $cumulative[$points + ($first - 1) * $channels + $c]; $squared = $squared - $cumulative[$points + ($points + $first - 1) * $channels + $c] }
+                if ($usePrior) {
+                    $priorMean = $prior[$c]; $priorVariance = $prior[$channels + $c]
+                    $sum = $sum + $priorRows * $priorMean; $squared = $squared + $priorRows * ($priorVariance + $priorMean * $priorMean)
+                }
+                $mean = $sum / $count
+                $variance = [System.Math]::Max([double]0, $squared / $count - $mean * $mean)
+                $output[$p * $channels + $c] = [double][float]$mean; $output[($points + $p) * $channels + $c] = [double][float]$variance
+            }
+        }
+        return $output
+    }
 }
 # Where per-token AdaIN levels are measured (Live) or replayed (Supplied): one part of the network (Decoder, its ten
 # sites, or Generator, its 48), the tokens' durations in decoder frames, the supplied records by site name, and the
@@ -145,6 +224,8 @@ class OfflineLevelContext {
     [int[]] $Durations
     [System.Collections.Generic.Dictionary[string,object]] $Supplied
     [System.Collections.Generic.List[OfflineLevelRecord]] $Exported
+    # Measured mode: the compiled OfflineMomentPolicy (New-OfflineMomentPolicy).
+    [object] $Policy
 }
 class OfflineDecoderResult {
     [float[]] $Features
@@ -674,6 +755,73 @@ class OfflineRenderMath {
             $mean = $total / [double]$frames
             $variance = [Math]::Max([double]0, $totalSquared / [double]$frames - $mean * $mean)
             $output[$c] = [double][float]$mean; $output[$channels + $c] = [double][float]$variance
+        }
+        return $output
+    }
+    # Measured mode: per point (one generator tick's rows; a first extra row joins point 0) the cumulative row count,
+    # and per point and channel the cumulative sum and sum of squares of the site's input through the end of that point.
+    # Layout: points counts, points x channels sums (point-major), points x channels squares. Accumulated in
+    # MeasureLevels' order (each token's sum from zero, added to the total when the token ends; a point inside a token
+    # reads total plus the partial token sum), so with every token contributing the last point equals MeasureLevels'
+    # totals bit for bit. A token whose flag is false (contributes null: all true) adds nothing.
+    static [double[]] MeasureCumulative([float[]] $values, [int] $channels, [int] $frames, [int[]] $tokenFrames, [int] $rowsPerPoint, [bool[]] $contributes) {
+        $totalFrames = 0
+        for ($token = 0; $token -lt $tokenFrames.Length; $token++) { if ($tokenFrames[$token] -lt 1) { throw [ArgumentException]::new('Invalid token frame count.') }; $totalFrames += $tokenFrames[$token] }
+        if ($totalFrames -ne $frames -or $values.Length -ne $channels * $frames -or $rowsPerPoint -lt 1) { throw [ArgumentException]::new('Level export alignment mismatch.') }
+        if (-not [object]::ReferenceEquals($contributes, $null) -and $contributes.Length -ne $tokenFrames.Length) { throw [ArgumentException]::new('Token contribution flags do not match the tokens.') }
+        $points = [int][Math]::Floor([double]$frames / [double]$rowsPerPoint); $extra = $frames - $points * $rowsPerPoint
+        if ($points -lt 1 -or $extra -gt 1) { throw [ArgumentException]::new('Site rows are not whole points.') }
+        $output = [double[]]::new($points + 2 * $points * $channels)
+        for ($c = 0; $c -lt $channels; $c++) {
+            $at = 0; $total = [double]0; $totalSquared = [double]0; $point = 0; $pointEnd = $rowsPerPoint + $extra; $rowsBefore = 0
+            for ($token = 0; $token -lt $tokenFrames.Length; $token++) {
+                $on = $true
+                if (-not [object]::ReferenceEquals($contributes, $null)) { $on = $contributes[$token] }
+                $sum = [double]0; $squared = [double]0
+                for ($i = 0; $i -lt $tokenFrames[$token]; $i++) {
+                    $value = [double]$values[$c * $frames + $at]; $sum += $value; $squared += $value * $value; $at++
+                    if ($at -eq $pointEnd) {
+                        if ($on) {
+                            $output[$points + $point * $channels + $c] = $total + $sum; $output[$points + ($points + $point) * $channels + $c] = $totalSquared + $squared
+                            if ($c -eq 0) { $output[$point] = [double]($rowsBefore + $i + 1) }
+                        } else {
+                            $output[$points + $point * $channels + $c] = $total; $output[$points + ($points + $point) * $channels + $c] = $totalSquared
+                            if ($c -eq 0) { $output[$point] = [double]$rowsBefore }
+                        }
+                        $point++; $pointEnd += $rowsPerPoint
+                    }
+                }
+                if ($on) { $total += $sum; $totalSquared += $squared; $rowsBefore += $tokenFrames[$token] }
+            }
+        }
+        return $output
+    }
+    # Measured mode: ApplyLevels with each point's own moments (Moments' layout), in the same float arithmetic.
+    static [float[]] ApplyPointLevels([float[]] $values, [int] $channels, [int] $frames, [int] $rowsPerPoint, [float[]] $style, [float[]] $fc, [float[]] $bias, [float[]] $normWeight, [float[]] $normBias, [double[]] $moments) {
+        $points = [int][Math]::Floor([double]$frames / [double]$rowsPerPoint); $extra = $frames - $points * $rowsPerPoint
+        if ($values.Length -ne $channels * $frames -or $points -lt 1 -or $extra -gt 1 -or $moments.Length -ne 2 * $points * $channels -or $fc.Length -ne 2 * $channels * $style.Length -or $bias.Length -ne 2 * $channels) { throw [ArgumentException]::new('Point level shape mismatch.') }
+        $output = [float[]]::new($values.Length)
+        for ($c = 0; $c -lt $channels; $c++) {
+            $gamma = [float]0; $beta = [float]0
+            for ($j = 0; $j -lt $style.Length; $j++) {
+                $gamma = [float]($gamma + [float]($fc[$c * $style.Length + $j] * $style[$j]))
+                $beta = [float]($beta + [float]($fc[($c + $channels) * $style.Length + $j] * $style[$j]))
+            }
+            $gamma = [float]([float]1 + [float]($gamma + $bias[$c])); $beta = [float]($beta + $bias[$c + $channels])
+            $t = 0
+            for ($p = 0; $p -lt $points; $p++) {
+                $mean = [float]$moments[$p * $channels + $c]; $variance = [float]$moments[($points + $p) * $channels + $c]
+                if (-not [float]::IsFinite($mean) -or -not [float]::IsFinite($variance) -or $variance -lt [float]0) { throw [ArgumentException]::new('Invalid point level.') }
+                $inverse = [float]([float]1 / [MathF]::Sqrt([float]($variance + [float]0.00001)))
+                $end = $t + $rowsPerPoint
+                if ($p -eq 0) { $end += $extra }
+                while ($t -lt $end) {
+                    $normal = [float]([float]($values[$c * $frames + $t] - $mean) * $inverse)
+                    $normal = [float]([float]($normal * $normWeight[$c]) + $normBias[$c])
+                    $output[$c * $frames + $t] = [float]([float]($normal * $gamma) + $beta)
+                    $t++
+                }
+            }
         }
         return $output
     }
@@ -1357,6 +1505,9 @@ $sourceExtra = $mathType.GetMethod('SourceExtra').CreateDelegate([Func[float[],f
 $measureLevels = $mathType.GetMethod('MeasureLevels').CreateDelegate([Func[float[],int,int,int[],double[]]])
 $scaleFrames = $mathType.GetMethod('ScaleFrames').CreateDelegate([Func[int[],int,int[]]])
 $applyLevels = $mathType.GetMethod('ApplyLevels').CreateDelegate([Func[float[],int,int,float[],float[],float[],float[],float[],double[],float[]]])
+$measureCumulative = $mathType.GetMethod('MeasureCumulative').CreateDelegate([Func[float[],int,int,int[],int,bool[],double[]]])
+$applyPointLevels = $mathType.GetMethod('ApplyPointLevels').CreateDelegate([Func[float[],int,int,int,float[],float[],float[],float[],float[],double[],float[]]])
+$momentPolicyType = $assembly.GetType('OfflineMomentPolicy', $true)
 $torch = Import-Module (Join-Path $root 'src/runspace/Torch.Checkpoint.psm1') -PassThru
 $reader = $torch.Invoke({ [pscustomobject]@{ Read = $read; Bytes = $bytes; ReadTensor = $readTensor; TensorRow = $tensorRow } })[0]
 $modelPath = Join-Path $InputRepository 'build/inputs/kokoro/f3ff3571791e39611d31c381e3a41a3af07b4987/kokoro-v1_0.pth'
@@ -1582,12 +1733,37 @@ function Invoke-OfflineAdaIn([float[]] $InputValues, [int] $Channels, [int] $Fra
         $record = [OfflineLevelRecord]::new(); $record.Name = $Name; $record.Channels = $Channels; $record.Frames = $Frames
         $record.TokenFrames = Get-OfflineSiteTokenFrames $levelContext.Durations $Frames
         if ($levelContext.Mode -ceq 'Live') { $record.Statistics = $measureLevels.Invoke($InputValues, $Channels, $Frames, $record.TokenFrames) }
+        elseif ($levelContext.Mode -ceq 'Measured') {
+            # One point per generator tick; each site measures its own actual input.
+            $policy = $levelContext.Policy; $ticks = 0; foreach ($duration in $levelContext.Durations) { $ticks += 2 * $duration }
+            $rowsPerTick = [int][Math]::Floor($Frames / [double]$ticks)
+            $prior = $null
+            if ($policy.PriorTicks -gt 0) {
+                if ($null -eq $levelContext.Supplied -or -not $levelContext.Supplied.ContainsKey($Name) -or $levelContext.Supplied[$Name].Channels -ne $Channels) { throw "Missing/mismatched prior for site: $Name" }
+                $prior = [double[]]$levelContext.Supplied[$Name].Statistics
+            }
+            $cumulative = $measureCumulative.Invoke($InputValues, $Channels, $Frames, $record.TokenFrames, $rowsPerTick, $policy.TokenContributes)
+            $moments = $policy.Moments($cumulative, $Channels, $ticks, $rowsPerTick, $prior)
+            if ($policy.NudgeSite -ceq $Name) { $at = $policy.NudgePoint * $Channels + $policy.NudgeChannel; $moments[$at] = [double][MathF]::BitIncrement([float]$moments[$at]) }
+            if ($null -ne $policy.Probes) {
+                $record.Probed = [double[]]::new(2 * $Channels * $policy.Probes.Length)
+                for ($probe = 0; $probe -lt $policy.Probes.Length; $probe++) {
+                    $point = $policy.Probes[$probe]
+                    if ($point -lt 0 -or $point -ge $ticks) { [Array]::Fill($record.Probed, [double]::NaN, 2 * $Channels * $probe, 2 * $Channels); continue }
+                    [Array]::Copy($moments, $point * $Channels, $record.Probed, 2 * $Channels * $probe, $Channels)
+                    [Array]::Copy($moments, ($ticks + $point) * $Channels, $record.Probed, 2 * $Channels * $probe + $Channels, $Channels)
+                }
+            }
+            $record.Statistics = $measureLevels.Invoke($InputValues, $Channels, $Frames, $record.TokenFrames)
+            $kind = 'MeasuredAdaIN'
+            $result = $applyPointLevels.Invoke($InputValues, $Channels, $Frames, $rowsPerTick, $AcousticStyle, $fc, $bias, $normWeight, $normBias, $moments)
+        }
         else {
             if (-not $levelContext.Supplied.ContainsKey($Name) -or $levelContext.Supplied[$Name].Channels -ne $Channels) { throw "Missing/mismatched supplied site: $Name" }
             $record.Statistics = $levelContext.Supplied[$Name].Statistics; $kind = 'SuppliedAdaIN'
             $record.Observed = $measureLevels.Invoke($InputValues, $Channels, $Frames, $record.TokenFrames)
         }
-        $result = $applyLevels.Invoke($InputValues, $Channels, $Frames, $AcousticStyle, $fc, $bias, $normWeight, $normBias, $record.Statistics)
+        if ($levelContext.Mode -cne 'Measured') { $result = $applyLevels.Invoke($InputValues, $Channels, $Frames, $AcousticStyle, $fc, $bias, $normWeight, $normBias, $record.Statistics) }
         $levelContext.Exported.Add($record)
     } else {
         if ($null -ne $adaInWorkerType -and $Threads -gt 1) {
@@ -1755,19 +1931,36 @@ function Invoke-OfflineGeneratorBlock([float[]] $InputValues, [int] $Frames, [fl
     }
     return , $x
 }
+# A compiled OfflineMomentPolicy (its fields are described at the class). Probes are ticks (points) whose moments each
+# Measured site keeps in its record.
+function New-OfflineMomentPolicy {
+    param([Parameter(Mandatory)][ValidateSet('Whole','Block','Groups','Running')][string] $Scope, [int] $BlockTicks = 0, [int[]] $GroupEnds = $null,
+        [int] $PriorTicks = 0, [int] $WindowTicks = 0, [int] $LookaheadTicks = 0, [object] $TokenContributes = $null, [int[]] $Probes = $null,
+        [string] $NudgeSite = '', [int] $NudgePoint = 0, [int] $NudgeChannel = 0)
+    $policy = [Activator]::CreateInstance($momentPolicyType)
+    $policy.Scope = $Scope; $policy.BlockTicks = $BlockTicks; $policy.GroupEnds = $GroupEnds; $policy.PriorTicks = $PriorTicks
+    $policy.WindowTicks = $WindowTicks; $policy.LookaheadTicks = $LookaheadTicks; if ($null -ne $TokenContributes) { $policy.TokenContributes = [bool[]]$TokenContributes }; $policy.Probes = $Probes
+    $policy.NudgeSite = $NudgeSite; $policy.NudgePoint = $NudgePoint; $policy.NudgeChannel = $NudgeChannel
+    return $policy
+}
 # With -TokenDurations (decoder frames, summing to half the pitch curve's ticks) each of the 48 AdaIN sites measures
 # its per-token levels (Live, appended to -LevelRecords) or applies supplied ones (Supplied, by site name), as the
-# decoder's Levels mode does; its normalization then uses those levels' mean and variance. Without it, unchanged.
+# decoder's Levels mode does; its normalization then uses those levels' mean and variance. Measured: each site
+# normalizes every tick by moments its -MomentPolicy forms from the cumulative sums of its own actual input, with
+# -SuppliedLevels as the prior when the policy has one. Without -TokenDurations, unchanged.
 function Invoke-OfflineGenerator([float[]] $Features, [float[]] $AcousticStyle, [float[]] $PitchCurve, [float[]] $UniformDraw, [float[]] $HarmonicDraw, [float[]] $ExtraDraw,
-    [int[]] $TokenDurations = $null, [ValidateSet('Live','Supplied')][string] $LevelMode = 'Live',
-    [Collections.Generic.Dictionary[string,object]] $SuppliedLevels = $null, [Collections.Generic.List[OfflineLevelRecord]] $LevelRecords = $null) {
+    [int[]] $TokenDurations = $null, [ValidateSet('Live','Supplied','Measured')][string] $LevelMode = 'Live',
+    [Collections.Generic.Dictionary[string,object]] $SuppliedLevels = $null, [Collections.Generic.List[OfflineLevelRecord]] $LevelRecords = $null,
+    [object] $MomentPolicy = $null) {
     if ($null -ne $TokenDurations) {
         $tokenTotal = 0; foreach ($duration in $TokenDurations) { $tokenTotal += $duration }
         if (2 * $tokenTotal -ne $PitchCurve.Length) { throw 'Token durations do not cover the pitch curve.' }
         if ($LevelMode -ceq 'Supplied' -and $null -eq $SuppliedLevels) { throw 'Supplied generator levels need -SuppliedLevels.' }
+        if ($LevelMode -ceq 'Measured' -and ($null -eq $MomentPolicy -or -not [object]::ReferenceEquals($MomentPolicy.GetType(), $momentPolicyType))) { throw 'Measured generator levels need a compiled -MomentPolicy.' }
+        if ($LevelMode -ceq 'Measured' -and $MomentPolicy.PriorTicks -gt 0 -and $null -eq $SuppliedLevels) { throw 'A policy prior needs -SuppliedLevels.' }
         $exported = $LevelRecords
         if ($null -eq $exported) { $exported = [Collections.Generic.List[OfflineLevelRecord]]::new() }
-        $levelContext = [OfflineLevelContext]@{ Part = 'Generator'; Mode = $LevelMode; Durations = $TokenDurations; Supplied = $SuppliedLevels; Exported = $exported }
+        $levelContext = [OfflineLevelContext]@{ Part = 'Generator'; Mode = $LevelMode; Durations = $TokenDurations; Supplied = $SuppliedLevels; Exported = $exported; Policy = $MomentPolicy }
     }
     Test-OfflineNode 'gen.input_x' $Features
     $source = $harmonic.Invoke($PitchCurve, $UniformDraw, $HarmonicDraw, $ExtraDraw, (Read-OfflineWeight 'decoder.module.generator.m_source.l_linear.weight'), (Read-OfflineWeight 'decoder.module.generator.m_source.l_linear.bias'))
