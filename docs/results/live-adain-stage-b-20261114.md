@@ -155,3 +155,36 @@ training windows that do and leaves the one development window out; P3noN (not p
 
 Not measured: audio with these moments; whether the stream then drifts from them as in A5; Student-produced F0, N and
 durations in place of the teacher's.
+
+### Audio and drift with the plan-conditioned base
+
+Predictions `PREDICTIONS-PLAN-AUDIO.md` (SHA-256 `98C1EAA894938130B127D6082A663D910BE33CDE301546B56FE0A8AFBEB44E7B`,
+14:59), written before any render. The same 8 held-out windows as A5 and A7, rendered with the P1 and P3 moments
+supplied at every site (`renders-plan/`); A0 and the second-seed yardstick are Stage B's renders. Control: all 8 exact
+renders are byte-identical to Stage B's.
+
+| Render, mean over 8 windows | Log-spectral distance | Mel-cepstral distortion | Magnitude SNR | f0 RMSE | Voicing |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| Seed 18 (yardstick) | 1.43 dB | 4.58 dB | 26.11 dB | 15.6 cents | 0.986 |
+| A0 | 2.27 dB | 13.04 dB | 16.59 dB | 48.0 cents | 0.965 |
+| P1 (pad share) | 1.88 dB | 11.23 dB | 19.27 dB | 36.5 cents | 0.967 |
+| P3 (eight features) | 1.78 dB | 10.83 dB | 20.21 dB | 34.2 cents | 0.967 |
+
+| Prediction | Outcome |
+| --- | --- |
+| P3 mel-cepstral distortion 8 to 11 dB | 10.83 dB: in range |
+| P3 log-spectral distance 1.8 to 2.1 dB | 1.78 dB: just below the range |
+| P3 below A0 on mel-cepstral distortion in at least 6 of 8 windows | 8 of 8 |
+| P1 between A0 and P3 | on both means; in three windows P1 is below P3 |
+| The stream still drifts 4 to 7 dB from the supplied moments | 4.0 to 6.0 dB (mean: exact-vs-composed 37.70 dB, observed-vs-composed 33.00 dB) |
+
+P3 closes about a quarter of the mel-cepstral gap between A0 and the yardstick (13.04 to 10.83 dB against 4.58 dB) and
+is above the yardstick in every window (6.5 to 18.1 dB against 4.3 to 5.1 dB). The two shortest windows stay worst
+(378 ticks: 18.1 dB; 502 ticks: 15.1 dB). P3's log-spectral distance is below the yardstick's in 4 of 8 windows; the
+arms share the exact render's seed and the yardstick does not, so that says a reseed moves the log spectrum more than
+P3's moment error does there, and nothing about the cepstral measure.
+
+Read together: the plan predicts part of the whole-window moments, and the audio follows the boundary score, but a linear
+fit on eight scalars is not enough to reach the yardstick, and supplied moments still drift with depth. Not tried: more
+or richer plan features (the per-token plan, not eight scalars), a fit in the stream's own drift (closed loop), and
+moments measured from the stream.
