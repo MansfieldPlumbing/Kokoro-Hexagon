@@ -146,7 +146,10 @@ class OfflineLevelRecord {
 # per token (null: every token), says whose rows enter the sums; a point is still normalized when its token does not
 # contribute. A point with no rows and no prior is an error. Moments are rounded through float as MeasureLevels rounds.
 # NudgeSite/NudgePoint/NudgeChannel move that one mean up one float unit (a control); NudgeSite empty is off.
+# SuppliedSites (null: none) names the sites that do not measure: each takes its supplied moments for the whole
+# utterance, as Supplied mode does, and records what its input then had.
 class OfflineMomentPolicy {
+    [string[]] $SuppliedSites
     [string] $Scope
     [int] $BlockTicks
     [int[]] $GroupEnds
@@ -1732,8 +1735,9 @@ function Invoke-OfflineAdaIn([float[]] $InputValues, [int] $Channels, [int] $Fra
     if ($null -ne $levelContext -and $levelContext.Part -ceq $part) {
         $record = [OfflineLevelRecord]::new(); $record.Name = $Name; $record.Channels = $Channels; $record.Frames = $Frames
         $record.TokenFrames = Get-OfflineSiteTokenFrames $levelContext.Durations $Frames
+        $measures = $levelContext.Mode -ceq 'Measured' -and ($null -eq $levelContext.Policy.SuppliedSites -or [Array]::IndexOf($levelContext.Policy.SuppliedSites, $Name) -lt 0)
         if ($levelContext.Mode -ceq 'Live') { $record.Statistics = $measureLevels.Invoke($InputValues, $Channels, $Frames, $record.TokenFrames) }
-        elseif ($levelContext.Mode -ceq 'Measured') {
+        elseif ($measures) {
             # One point per generator tick; each site measures its own actual input.
             $policy = $levelContext.Policy; $ticks = 0; foreach ($duration in $levelContext.Durations) { $ticks += 2 * $duration }
             $rowsPerTick = [int][Math]::Floor($Frames / [double]$ticks)
@@ -1763,7 +1767,7 @@ function Invoke-OfflineAdaIn([float[]] $InputValues, [int] $Channels, [int] $Fra
             $record.Statistics = $levelContext.Supplied[$Name].Statistics; $kind = 'SuppliedAdaIN'
             $record.Observed = $measureLevels.Invoke($InputValues, $Channels, $Frames, $record.TokenFrames)
         }
-        if ($levelContext.Mode -cne 'Measured') { $result = $applyLevels.Invoke($InputValues, $Channels, $Frames, $AcousticStyle, $fc, $bias, $normWeight, $normBias, $record.Statistics) }
+        if (-not $measures) { $result = $applyLevels.Invoke($InputValues, $Channels, $Frames, $AcousticStyle, $fc, $bias, $normWeight, $normBias, $record.Statistics) }
         $levelContext.Exported.Add($record)
     } else {
         if ($null -ne $adaInWorkerType -and $Threads -gt 1) {
@@ -1936,8 +1940,8 @@ function Invoke-OfflineGeneratorBlock([float[]] $InputValues, [int] $Frames, [fl
 function New-OfflineMomentPolicy {
     param([Parameter(Mandatory)][ValidateSet('Whole','Block','Groups','Running')][string] $Scope, [int] $BlockTicks = 0, [int[]] $GroupEnds = $null,
         [int] $PriorTicks = 0, [int] $WindowTicks = 0, [int] $LookaheadTicks = 0, [object] $TokenContributes = $null, [int[]] $Probes = $null,
-        [string] $NudgeSite = '', [int] $NudgePoint = 0, [int] $NudgeChannel = 0)
-    $policy = [Activator]::CreateInstance($momentPolicyType)
+        [string] $NudgeSite = '', [int] $NudgePoint = 0, [int] $NudgeChannel = 0, [string[]] $SuppliedSites = $null)
+    $policy = [Activator]::CreateInstance($momentPolicyType); $policy.SuppliedSites = $SuppliedSites
     $policy.Scope = $Scope; $policy.BlockTicks = $BlockTicks; $policy.GroupEnds = $GroupEnds; $policy.PriorTicks = $PriorTicks
     $policy.WindowTicks = $WindowTicks; $policy.LookaheadTicks = $LookaheadTicks; if ($null -ne $TokenContributes) { $policy.TokenContributes = [bool[]]$TokenContributes }; $policy.Probes = $Probes
     $policy.NudgeSite = $NudgeSite; $policy.NudgePoint = $NudgePoint; $policy.NudgeChannel = $NudgeChannel
@@ -1947,7 +1951,8 @@ function New-OfflineMomentPolicy {
 # its per-token levels (Live, appended to -LevelRecords) or applies supplied ones (Supplied, by site name), as the
 # decoder's Levels mode does; its normalization then uses those levels' mean and variance. Measured: each site
 # normalizes every tick by moments its -MomentPolicy forms from the cumulative sums of its own actual input, with
-# -SuppliedLevels as the prior when the policy has one. Without -TokenDurations, unchanged.
+# -SuppliedLevels as the prior when the policy has one; the policy's SuppliedSites take their supplied moments
+# instead of measuring. Without -TokenDurations, unchanged.
 function Invoke-OfflineGenerator([float[]] $Features, [float[]] $AcousticStyle, [float[]] $PitchCurve, [float[]] $UniformDraw, [float[]] $HarmonicDraw, [float[]] $ExtraDraw,
     [int[]] $TokenDurations = $null, [ValidateSet('Live','Supplied','Measured')][string] $LevelMode = 'Live',
     [Collections.Generic.Dictionary[string,object]] $SuppliedLevels = $null, [Collections.Generic.List[OfflineLevelRecord]] $LevelRecords = $null,
@@ -1957,7 +1962,7 @@ function Invoke-OfflineGenerator([float[]] $Features, [float[]] $AcousticStyle, 
         if (2 * $tokenTotal -ne $PitchCurve.Length) { throw 'Token durations do not cover the pitch curve.' }
         if ($LevelMode -ceq 'Supplied' -and $null -eq $SuppliedLevels) { throw 'Supplied generator levels need -SuppliedLevels.' }
         if ($LevelMode -ceq 'Measured' -and ($null -eq $MomentPolicy -or -not [object]::ReferenceEquals($MomentPolicy.GetType(), $momentPolicyType))) { throw 'Measured generator levels need a compiled -MomentPolicy.' }
-        if ($LevelMode -ceq 'Measured' -and $MomentPolicy.PriorTicks -gt 0 -and $null -eq $SuppliedLevels) { throw 'A policy prior needs -SuppliedLevels.' }
+        if ($LevelMode -ceq 'Measured' -and ($MomentPolicy.PriorTicks -gt 0 -or $null -ne $MomentPolicy.SuppliedSites) -and $null -eq $SuppliedLevels) { throw 'A policy prior or supplied sites need -SuppliedLevels.' }
         $exported = $LevelRecords
         if ($null -eq $exported) { $exported = [Collections.Generic.List[OfflineLevelRecord]]::new() }
         $levelContext = [OfflineLevelContext]@{ Part = 'Generator'; Mode = $LevelMode; Durations = $TokenDurations; Supplied = $SuppliedLevels; Exported = $exported; Policy = $MomentPolicy }
