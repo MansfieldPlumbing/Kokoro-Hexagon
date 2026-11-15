@@ -40,6 +40,10 @@ blocks gives the same differences within 0.1 dB.
 ## Limitations
 
 - One listener, one sitting, two passages, one voice. Labelled clips, not a forced-choice test.
+- Laptop speakers. Later the same day, of the precision clips, Scott said he was listening on laptop speakers, that
+  "about the same" there is not an endorsement over the reference, and that the reference may still be better
+  (`generator-precision-listening-20261115.md`). Read "the same" here with that limit: it says held levels are not
+  worse in a way laptop speakers reveal.
 - Host float32 renders at 24 kHz, converted to 16-bit, played through a browser page. Not the phone, not the int8
   DSP path, not the phone's voice-base table (A0 is the host training mean of the same kind).
 - Teacher durations, F0 and x. Nothing here says how a Student's own x would sound.
