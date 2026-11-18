@@ -102,3 +102,11 @@ On the SM8550 the vector library ran first, followed by the scalar library from 
 All 22 calls returned the original PCM SHA-256. An independent reconstruction from a separate vector-kernel speech capture matched all 9,666,560 bytes of phase-major output, including the partial rows and unused channels. [Vector timing receipt](../../build/pcm-return-20261118T115942/har-vector-paired.log) · [Scalar timing receipt](../../build/pcm-return-20261118T115942/har-adaptive-paired.log) · [Capture receipt](../../build/pcm-return-20261118T115942/har-vector-check.log)
 
 The median instrumented harmonic-layout stage was 1.31 ms over three vector calls. The preceding three-call profile with the scalar 48-tile gather measured 23.79 ms. [Vector profile](../../build/pcm-return-20261118T115942/har-vector-pmu.log)
+
+## HVX packing in the AdaIN/Snake fill
+
+The fill now extracts the fractional turns for both time rows with equal shifts and one halfword shuffle. After the existing Snake calculation and signed clamp, it interleaves the two rows once. A mask and sign-bit flip produce the high plane, and a halfword shift produces the low plane. This preserves the per-channel and per-tile coefficient path. The generator layout JSON hashes match.
+
+On the SM8550, the new generator ran first and the a930ffb control second, each on the same stock lighthouse speech input. After one warmup, median generator DSP time over ten calls fell from 244.82 to 236.16 ms (3.5%). The observed intervals were 242.11–246.95 and 234.22–238.27 ms respectively. Median host invoke time was 299.32 and 283.61 ms. All 22 PCM hashes matched. In the last instrumented call, the four lockstep workers spent 61.83–63.20 ms apiece filling windows, compared with 68.10–69.70 ms in the earlier control profile. The worker times overlap.
+
+A host arithmetic check covered every signed 16-bit output value in each row and all 65,536 fractional lanes at Q22 and Q24. The kernel emitted for both supported channel counts, both precisions, controller contact on and off, and ordinary and mirrored stores. Phone timings used stock conditioning on one passage. [Control](../../build/pcm-return-20261118T115942/snake-ab-har-vector.log) · [Candidate](../../build/pcm-return-20261118T115942/snake-ab-snake-pack.log) · [Hardware profile](../../build/pcm-return-20261118T115942/snake-pack-pmu.log)

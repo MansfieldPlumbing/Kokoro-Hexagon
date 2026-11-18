@@ -15,7 +15,7 @@
 # r2 low-plane window tiles: u8 = out & 255 in the odd byte of each halfword.
 # r3 per-channel constants, int32 each: K[C] at 0 (Q31 multiplier of x*2^16, giving QT turns),
 #    M[C] at 4C (QT turns), S[C] at 8C (Q31 multiplier of QT turns giving the 16-bit output).
-# r4 tiles >= 1. out is clamped to int16 before the plane split. r16..r27 are untouched (r28 is used).
+# r4 tiles >= 1. out is clamped to int16 before the plane split. r16..r28 are preserved.
 # -TurnsBits QT (24 above; 22 gives K four times the range, one input LSB up to 1/64 turn): the cos
 # argument stays the 16-bit fractional turn, bits QT-16..QT-1 of P.
 function New-KokoroAdaInSnakeTurnsSteps {
@@ -27,9 +27,9 @@ function New-KokoroAdaInSnakeTurnsSteps {
     param([ValidateSet(128,256)][int]$Channels=128,[ValidateSet(22,24)][int]$TurnsBits=24,[string]$LabelPrefix='adainsnaketurns',[switch]$NoReturn,[switch]$ControllerContact,[long]$MirrorDelta=0)
     $frame = $ControllerContact -or $MirrorDelta -ne 0
     if ($frame -and $NoReturn) { throw 'The controller contact and mirrored stores restore r16 to r18 on return.' }
-    # Shift registers: fraction of the even row (right, QT-16), of the odd row (left, 32-QT), and (1-cos)/(2 pi)
-    # from Q30 to QT (right, 30-QT); r9 = 8, r11 = 6, r28 = 10.
-    $sh = if ($TurnsBits -eq 24) { @{ Even = 9; Odd = 9; Cos = 11 } } else { @{ Even = 11; Odd = 28; Cos = 9 } }
+    # Shift registers: fraction of both rows (right, QT-16) and (1-cos)/(2 pi)
+    # from Q30 to QT (right, 30-QT); r9 = 8, r11 = 6.
+    $sh = if ($TurnsBits -eq 24) { @{ Fraction = 9; Cos = 11 } } else { @{ Fraction = 11; Cos = 9 } }
     $q14 = foreach ($k in 1..5) {
         $f = 1.0; for ($i = 1; $i -le 2 * $k - 1; $i++) { $f *= $i }
         [int][math]::Round([math]::Pow(-1, $k - 1) * [math]::Pow([math]::PI / 2, 2 * $k - 1) / $f * 16384)
@@ -44,16 +44,13 @@ function New-KokoroAdaInSnakeTurnsSteps {
     # Resident constants.
     & $splat 31 0x80008000L                     # u16 bias
     & $splat 30 0xFFFF0000L                     # odd-halfword mask
-    & $splat 29 0x0000FFFFL                     # even-halfword mask
+    & $splat 29 0xFF00FF00L                     # high byte of each packed output
     & $splat 28 (& $half 16384)                 # 1.0 in Q14
     for ($k = 0; $k -lt 5; $k++) { & $splat (23 + $k) (& $half $q14[$k]) }   # v23 = h0 ... v27 = h4
     & $splat 22 10430                           # round(2^16 / (2*pi)) in each even halfword
-    & $splat 21 128
-    & $splat 20 255
     & $splat 18 32767
     & $splat 17 -32768
-    foreach ($kv in @(@(8,16),@(9,8),@(10,1),@(11,6),@(12,24),@(7,0))) { $s.Add(@{Op='imm';d=$kv[0];i=$kv[1]}) }
-    if ($TurnsBits -eq 22) { $s.Add(@{Op='imm';d=28;i=10}) }
+    foreach ($kv in @(@(8,16),@(9,8),@(10,1),@(11,6),@(7,0))) { $s.Add(@{Op='imm';d=$kv[0];i=$kv[1]}) }
     for ($block = 0; $block -lt ($Channels / 32); $block++) {
         $s.Add(@{Op='addi';d=6;s=3;i=($block*128)})
         $s.Add(@{Op='vload';d=14;s=6;Offset=0})
@@ -90,9 +87,8 @@ function New-KokoroAdaInSnakeTurnsSteps {
             $s.Add(@{Op='vadd-w';d=$p[0];s=$p[0];t=15})
         }
         # 16-bit fractional turn of both rows in one halfword vector.
-        $s.Add(@{Op='vlsr-uw';d=5;s=3;t=$sh.Even}); $s.Add(@{Op='vand';d=5;s=5;t=29})
-        $s.Add(@{Op='vasl-w';d=6;s=4;t=$sh.Odd});  $s.Add(@{Op='vand';d=6;s=6;t=30})
-        $s.Add(@{Op='vor';d=5;s=5;t=6})
+        $s.Add(@{Op='vlsr-uw';d=5;s=3;t=$sh.Fraction}); $s.Add(@{Op='vlsr-uw';d=6;s=4;t=$sh.Fraction})
+        $s.Add(@{Op='vshuffe-h';d=5;s=6;t=5})
         $s.Add(@{Op='vabs-h-sat';d=5;s=5})                      # fold onto [0, 1/2) turn
         $s.Add(@{Op='vsub-h';d=5;s=5;t=28})
         $s.Add(@{Op='vasl-h';d=5;s=5;t=10})                     # u = 4g - 1, Q15
@@ -115,16 +111,13 @@ function New-KokoroAdaInSnakeTurnsSteps {
             $s.Add(@{Op='vmax-w';d=$p[0];s=$p[0];t=17})
             $s.Add(@{Op='vmin-w';d=$p[0];s=$p[0];t=18})
         }
-        # High plane: (out >> 8) + 128 into the odd byte of each halfword.
-        $s.Add(@{Op='vasr-w';d=12;s=10;t=9}); $s.Add(@{Op='vadd-w';d=12;s=12;t=21}); $s.Add(@{Op='vasl-w';d=12;s=12;t=9})
-        $s.Add(@{Op='vasr-w';d=13;s=11;t=9}); $s.Add(@{Op='vadd-w';d=13;s=13;t=21}); $s.Add(@{Op='vasl-w';d=13;s=13;t=12})
-        $s.Add(@{Op='vor';d=12;s=12;t=13})
+        # Interleave the clamped rows once. The high plane flips the sign bit;
+        # the halfword shift places each low byte directly in its window lane.
+        $s.Add(@{Op='vshuffe-h';d=10;s=11;t=10})
+        $s.Add(@{Op='vand';d=12;s=10;t=29}); $s.Add(@{Op='vxor';d=12;s=12;t=31})
         $s.Add(@{Op='vstore';s=6;t=12;Offset=0})
         if ($MirrorDelta) { $s.Add(@{Op='add';d=17;s=6;t=18}); $s.Add(@{Op='vstore';s=17;t=12;Offset=0}) }
-        # Low plane: out & 255 into the odd byte of each halfword.
-        $s.Add(@{Op='vand';d=10;s=10;t=20}); $s.Add(@{Op='vasl-w';d=10;s=10;t=9})
-        $s.Add(@{Op='vand';d=11;s=11;t=20}); $s.Add(@{Op='vasl-w';d=11;s=11;t=12})
-        $s.Add(@{Op='vor';d=10;s=10;t=11})
+        $s.Add(@{Op='vasl-h';d=10;s=10;t=9})
         $s.Add(@{Op='vstore';s=13;t=10;Offset=0})
         if ($MirrorDelta) { $s.Add(@{Op='add';d=17;s=13;t=18}); $s.Add(@{Op='vstore';s=17;t=10;Offset=0}) }
         $s.Add(@{Op='addi';d=5;s=5;i=128}); $s.Add(@{Op='addi';d=6;s=6;i=128}); $s.Add(@{Op='addi';d=13;s=13;i=128})
