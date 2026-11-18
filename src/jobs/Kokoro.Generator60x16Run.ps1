@@ -535,8 +535,16 @@ function New-KokoroGenerator60x16RunSteps {
         $totalInput+=$sourceLayout.InputBytes; $totalWeights+=$sourceLayout.WeightBytes; $totalParameters+=$sourceLayout.ParameterBytes
         # The phase-major gather uses VTCM from 0: both 60x har planes, then both phase-major planes.
         $gHi=0L; $gLo=[long]([math]::Ceiling($tiles60*4096/65536)*65536); $gPmHi=2*$gLo; $gPmLo=$gPmHi+[long]([math]::Ceiling($tiles10*16384/65536)*65536)
-        # Spans lay out the phase-major har in chunks of 8 slow tiles ($harLayoutChunks), not whole.
-        $vtcmTotal=[math]::Max($vtcmTotal,[math]::Max($sourceLayout.VtcmBytes,$(if($spanMode){4L*65536*[math]::Ceiling((6*8+1)*4096/65536.0)}else{$gPmLo+$tiles10*16384L})))
+        $vtcmTotal=[math]::Max($vtcmTotal,$sourceLayout.VtcmBytes)
+        if($spanMode){
+            # Each input plane holds six fast tiles per slow tile plus one halo.
+            # Each output plane uses four fast tiles' worth of bytes per slow tile.
+            $harChunkTiles=8
+            $largeChunkTiles=48
+            $largeChunkBytes=2L*65536*([math]::Ceiling((6*$largeChunkTiles+1)/16.0)+[math]::Ceiling($largeChunkTiles/4.0))
+            if(-not $RuntimeFrames -and $tiles10 -ge $largeChunkTiles -and $largeChunkBytes -le $vtcmTotal){$harChunkTiles=$largeChunkTiles}
+            $vtcmTotal=[math]::Max($vtcmTotal,4L*65536*[math]::Ceiling((6*8+1)/16.0))
+        }else{$vtcmTotal=[math]::Max($vtcmTotal,$gPmLo+$tiles10*16384L)}
         if($Decoder){ $decInOff=$totalInput; $decWOff=$totalWeights; $decPOff=$totalParameters; $totalInput+=$decLayout.InputBytes; $totalWeights+=$decLayout.WeightBytes; $totalParameters+=$(if($DecoderMoments -eq 'Constants'){$decLayout.ConstantsParameterBytes}else{$decLayout.ParameterBytes}); $vtcmTotal=[math]::Max($vtcmTotal,$decLayout.VtcmBytes) }
     }
     $bind={param([int]$i) $q=$bases[$i]; . $configure $sections[$i] $q[0] $q[1] $q[2] $q[3]}
@@ -987,7 +995,7 @@ function New-KokoroGenerator60x16RunSteps {
     # runs the same bodies with virtual base pointers (chunk buffer minus chunk start), and writes its tiles to the
     # workspace. Complete output tiles are independent; the partial tile and the last row are done where they fall.
     $harLayoutChunks={
-        $chunk=8; $phaseTileCount=[int][math]::Floor($upFramesWhole/32)
+        $chunk=$harChunkTiles; $phaseTileCount=[int][math]::Floor($upFramesWhole/32)
         $al64={param([long]$v) [long]([math]::Ceiling($v/65536)*65536)}
         $cHi=0L; $cLo=& $al64 ((6L*$chunk+1)*4096); $cPmHi=2*$cLo; $cPmLo=$cPmHi+(& $al64 ([long]$chunk*16384))
         for($a=0;$a -lt $tiles10;$a+=$chunk){

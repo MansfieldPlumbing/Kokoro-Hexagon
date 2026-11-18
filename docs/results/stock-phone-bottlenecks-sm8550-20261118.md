@@ -78,3 +78,17 @@ The panel experiment kept one 720,896-byte HMX-ready panel in a reserved VTCM sl
 | Host invoke | 333.93 ms | 343.13 ms |
 
 The saved transfers produced no measurable DSP speedup on this schedule. This tests reuse of one already-packed panel. A different disk representation that eliminates a conversion or changes the compute schedule is a separate experiment. The resident-panel variant is confined to the experiment directory. [Control receipt](../../build/pcm-return-20261118T115942/control.log) · [Panel receipt](../../build/pcm-return-20261118T115942/panel.log) · [Emitter change](../../build/pcm-return-20261118T115942/panel-variant.diff)
+
+## Hardware counters on the lighthouse generator
+
+The instrumented stock kernel ran three times on the same real generator input. All three PCM hashes matched. In the last call the DSP region took 279.76 ms. The lockstep regions accounted for 107.27 ms. Within those regions the four workers each spent 68.18–69.81 ms filling AdaIN/Snake inputs, 17.14–18.06 ms combining outputs and 1.03–3.22 ms waiting for the HMX lock. These workers run concurrently. Their time also falls inside the lockstep region.
+
+Viewed by stage, Front128 took 72.81 ms, Front256 43.74 ms, harmonic source generation 41.01 ms and harmonic layout 29.26 ms. The stage and activity counters are overlapping views. Time marked as DMA was 9.41 ms and covers the marked intervals only. The matched transfer-reuse experiment above measures the effect of eliminating those transfers on total DSP time. A next comparison could have the harmonic source producer write the consumer's layout directly, with the same excitation, live controls and final PCM. [Full hardware-counter receipt](../../build/pcm-return-20261118T115942/pmu.log)
+
+## Harmonic layout batch size on the lighthouse passage
+
+The 128-channel front consumes the original 60× harmonic tensor. The 256-channel front consumes a second representation that folds six time phases into channels. On the SM8550 the gather ran in 37 batches of eight slow tiles, including a final partial batch. Using up to 48 tiles cut that to seven batches with the same 7,602,176-byte peak VTCM allocation. The emitter selects the larger batch for fixed-length spans when a full batch is available and the existing VTCM reservation fits its input and output planes.
+
+The two separately staged libraries each processed the same live generator input 11 times via the repository ADB client. The candidate ran first. Excluding each first call, median generator DSP time fell from 272.45 to 268.21 ms (1.56%). The median instrumented harmonic-layout stage fell from 29.25 to 23.79 ms over three calls per build; the control profile was recorded earlier. Both builds produced the original PCM hash throughout. A separate capture checked all 9,666,560 bytes of the candidate's phase-major tensor against an independent reconstruction from the live source, including padding and the one-phase tail. Both planes matched exactly. This measures a single passage and device. Full text-to-PCM latency was outside the paired generator measurement.
+
+[Stock receipt](../../build/pcm-return-20261118T115942/har8-control.log) · [Larger batch](../../build/pcm-return-20261118T115942/har48.log) · [Hardware profile](../../build/pcm-return-20261118T115942/har48-pmu.log) · [Layout check](../../build/pcm-return-20261118T115942/check-har-layout.py)
