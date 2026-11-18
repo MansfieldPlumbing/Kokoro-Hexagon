@@ -84,8 +84,8 @@ try {
     $lines.Add("OpenRc=$rc"); if ($rc -ne 0) { throw 'Kernel library open failed' }
     $handle = [uint64]$oa[1]; $opened = $true
     # One job on an open handle: method 2 (sc 0x02040100) with the tile count, input, weights, tables and an output
-    # buffer, JobRuns times. Every run's PCM must match run 0's; Output is run 0's whole buffer.
-    $runJob = { param([uint64]$JobHandle, [int]$JobTiles, [byte[]]$JobInput, [byte[]]$JobWeights, [byte[]]$JobTables, [int]$JobOutputBytes, [int]$JobPcmOffset, [int]$JobSamples, [int]$JobRuns)
+    # buffer, JobRuns times. Keep the first result and compare each subsequent PCM hash to it.
+    $runJob = { param([uint64]$JobHandle, [int]$JobTiles, [byte[]]$JobInput, [byte[]]$JobWeights, [byte[]]$JobTables, [int]$JobOutputBytes, [int]$JobPcmOffset, [int]$JobSamples, [int]$JobRuns, [switch]$PcmOnly)
         $out = [byte[]]::new($JobOutputBytes)
         $bufs = @(([BitConverter]::GetBytes([uint32]$JobTiles)), $JobInput, $JobWeights, $JobTables, $out)
         $jobPins = [Collections.Generic.List[object]]::new(); $jobBlock = $Marshal::AllocHGlobal(16 * $bufs.Count)
@@ -102,7 +102,15 @@ try {
                 $stage = [BitConverter]::ToInt32($out, 36); $done = [BitConverter]::ToInt32($out, 44)
                 $dt = [long]([BitConverter]::ToUInt64($out, 8) - [BitConverter]::ToUInt64($out, 0))
                 $hash = [Convert]::ToHexString([Security.Cryptography.SHA256]::HashData([IO.MemoryStream]::new($out, $JobPcmOffset, 2 * $JobSamples, $false)))
-                if ($run -eq 0) { $firstHash = $hash; $firstOutput = [byte[]]$out.Clone() }
+                if ($run -eq 0) {
+                    $firstHash = $hash
+                    if ($PcmOnly) {
+                        $firstOutput = [byte[]]::new(2 * $JobSamples)
+                        [Buffer]::BlockCopy($out, $JobPcmOffset, $firstOutput, 0, $firstOutput.Length)
+                    } else {
+                        $firstOutput = [byte[]]$out.Clone()
+                    }
+                }
                 if ($rc -ne 0 -or $stage -ne 7 -or $done -ne 1 -or $hash -ne $firstHash) { $jobOk = $false }
                 if ($rc -eq 0 -and $done -eq 1) { $jobTicks.Add($dt) }
                 $jobLines.Add("Run=$run InvokeRc=$rc Stage=$stage Done=$done RegionTicks=$dt InvokeMs=$($sw.Elapsed.TotalMilliseconds.ToString('F3', $inv)) PcmSHA256=$hash")
@@ -112,7 +120,7 @@ try {
         finally { foreach ($g in $jobPins) { $g.Free() }; $Marshal::FreeHGlobal($jobBlock) }
         $medianMs = $null
         if ($jobTicks.Count) { $sorted = $jobTicks.ToArray(); [Array]::Sort($sorted); $medianMs = $sorted[[int][math]::Floor($sorted.Count / 2)] / 19200.0 }
-        [pscustomobject]@{ Ok = $jobOk; Output = $firstOutput; MedianMs = $medianMs; Lines = $jobLines.ToArray() }
+        [pscustomobject]@{ Ok = $jobOk; Output = $firstOutput; PcmSHA256 = $firstHash; MedianMs = $medianMs; Lines = $jobLines.ToArray() }
     }
 
     if ($serve) {
@@ -249,11 +257,11 @@ try {
                 $decoderMs = $clock.Elapsed.TotalMilliseconds
                 $clock.Restart()
                 $generatorInput = ConvertTo-KokoroGeneratorInput -XCroutons $decoded.XCroutons -Pitch ([float[]]$front.F0) -Ticks $speechTicks -InputBytes ([long]$kv.InputBytes) -NoiseOffset $pack.NoiseOffset -Seed $pack.Seed -NoiseScale $pack.NoiseScale
-                $generatorJob = & $runJob $handle $tiles $generatorInput $generatorWeights $generatorTables $outputBytes $pcmOffset $samples 1
+                $generatorJob = & $runJob $handle $tiles $generatorInput $generatorWeights $generatorTables $outputBytes $pcmOffset $samples 1 -PcmOnly
                 if (-not $generatorJob.Ok) { throw "Generator job failed: $($generatorJob.Lines -join ' ')" }
-                $pcm = ConvertFrom-KokoroPcm16 -Output $generatorJob.Output -Offset $pcmOffset -Samples $samples
+                $pcm = ConvertFrom-KokoroPcm16 -Output $generatorJob.Output -Offset 0 -Samples $samples
                 $generatorMs = $clock.Elapsed.TotalMilliseconds
-                $hash = [Convert]::ToHexString([Security.Cryptography.SHA256]::HashData([IO.MemoryStream]::new($generatorJob.Output, $pcmOffset, 2 * $samples, $false)))
+                $hash = $generatorJob.PcmSHA256
                 $totalMs = $total.Elapsed.TotalMilliseconds
                 if ($run -eq 0) { $speechHash = $hash; $speechPcm = $pcm; Write-OfflineWave $wave $pcm }
                 elseif ($hash -cne $speechHash) { $allOk = $false }
