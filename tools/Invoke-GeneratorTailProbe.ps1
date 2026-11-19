@@ -33,12 +33,17 @@ param(
     # (Invoke-KokoroPhoneSpeech). The WAV is fetched beside the receipt.
     [switch] $Speech,
     [hashtable] $StageFiles = @{},
-    [pscustomobject] $WeightAssembly
+    [pscustomobject] $WeightAssembly,
+    [string] $GeneratorAssembly
 )
 $ErrorActionPreference = 'Stop'
+$phoneMutex = [Threading.Mutex]::new($false, 'Local\KokoroGeneratorPhoneBenchmark')
+try {
+try { [void]$phoneMutex.WaitOne() } catch [Threading.AbandonedMutexException] {}
 if ($Package -notmatch '^[a-zA-Z0-9_.]+$') { throw 'Invalid Android package name' }
 $emission = [IO.Path]::GetFullPath($EmissionDirectory); $fixture = [IO.Path]::GetFullPath($FixtureDirectory)
 $library = Join-Path $emission 'libkokoro_generator_tail_skel.so'
+if ($GeneratorAssembly -and $EmissionArtifact) { throw 'Choose one generator artifact.' }
 if ($null -ne $EmissionArtifact) {
     if ($null -eq $EmissionArtifact.Layout -or
         [IO.Path]::GetFullPath($EmissionArtifact.Directory) -cne $emission -or
@@ -48,14 +53,14 @@ if ($null -ne $EmissionArtifact) {
         throw 'Typed emission identity or library integrity mismatch.'
     }
     $layout = $EmissionArtifact.Layout
-} else {
+} elseif (!$GeneratorAssembly) {
     # Preserved reference artifacts retain their original metadata contract.
     $layout = Get-Content (Join-Path $emission 'runner-layout.json') -Raw | ConvertFrom-Json
 }
-if ([long]$layout.Tiles -lt 1 -or [long]$layout.Tiles -gt 32768 -or
+if (!$GeneratorAssembly -and ([long]$layout.Tiles -lt 1 -or [long]$layout.Tiles -gt 32768 -or
     [long]$layout.InputBytes -lt 1 -or [long]$layout.Samples -lt 1 -or
     [long]$layout.PcmOffset -lt 0 -or
-    [long]$layout.PcmOffset + 2L * [long]$layout.Samples -gt [long]$layout.OutputBytes) {
+    [long]$layout.PcmOffset + 2L * [long]$layout.Samples -gt [long]$layout.OutputBytes)) {
     throw 'Runner layout is out of range.'
 }
 if ([IO.Path]::GetFileName($Adb) -cne 'adb.ps1' -or -not (Test-Path -LiteralPath $Adb)) { throw 'Pass -Adb, the pinned PowerShell ADB client (Get-KokoroAdbClient).' }
@@ -77,7 +82,11 @@ $aaudio = Join-Path $PSScriptRoot '..\src\runspace\Audio.AAudio.psm1'
 foreach ($p in $harness, $binding, $aaudio) { $e = $null; $null = [Management.Automation.Language.Parser]::ParseFile($p, [ref]$null, [ref]$e); if ($e.Count) { throw "Does not parse: $p" } }
 $id = [Guid]::NewGuid().ToString('N')
 $spec = Join-Path $emission "tail-spec-$id.txt"
-[IO.File]::WriteAllLines($spec, @("Tiles=$($layout.Tiles)", "Runs=$Runs", "OutputBytes=$($layout.OutputBytes)", "PcmOffset=$($layout.PcmOffset)", "Samples=$($layout.Samples)", "InputBytes=$($layout.InputBytes)"))
+if (!$GeneratorAssembly) { [IO.File]::WriteAllLines($spec, @("Tiles=$($layout.Tiles)", "Runs=$Runs", "OutputBytes=$($layout.OutputBytes)", "PcmOffset=$($layout.PcmOffset)", "Samples=$($layout.Samples)", "InputBytes=$($layout.InputBytes)")) }
+if ($GeneratorAssembly) {
+    if ($Serve -or $Speech -or $WeightAssembly -or $ResidentPayloads) { throw 'GeneratorAssembly currently supports the whole-generator fixture probe.' }
+    [IO.File]::WriteAllLines($spec, @("GeneratorAssembly=$id","Runs=$Runs"))
+}
 if ($ExpectedPcmSHA256) { [IO.File]::AppendAllText($spec, "ExpectedPcmSHA256=$ExpectedPcmSHA256`n") }
 if ($Serve) { [IO.File]::AppendAllText($spec, "Serve=True`n") }
 if ($Speech) { [IO.File]::AppendAllText($spec, "Speech=True`n") }
@@ -119,13 +128,18 @@ try {
         @($harness, "$target/KokoroGeneratorTailProbe.ps1"),
         @($binding, 'files/kokoro/Native.Binding.psm1'),
         @($aaudio, 'files/kokoro/Audio.AAudio.psm1'),
-        @($library, 'files/kokoro/dsp/libkokoro_generator_tail_skel.so'),
         @($spec, "$target/spec.txt"))
-    foreach ($n in 'activations.bin', 'tables.bin') { $files += , @((Join-Path $fixture $n), "$target/$n") }
-    if ($null -ne $WeightAssembly) {
-        $files += , @($WeightAssembly.AssemblyPath, "$target/Kokoro.Generator.Weights.dll")
-        $files += , @($WeightAssembly.LoaderPath, "$target/Kokoro.MappedPayload.dll")
-    } else { $files += , @((Join-Path $fixture 'weights.bin'), "$target/weights.bin") }
+    if ($GeneratorAssembly) {
+        $files += , @($GeneratorAssembly, "$target/Kokoroku.dll")
+        $files += , @((Join-Path $fixture 'activations.bin'), "$target/activations.bin")
+    } else {
+        $files += , @($library, 'files/kokoro/dsp/libkokoro_generator_tail_skel.so')
+        foreach ($n in 'activations.bin', 'tables.bin') { $files += , @((Join-Path $fixture $n), "$target/$n") }
+        if ($null -ne $WeightAssembly) {
+            $files += , @($WeightAssembly.AssemblyPath, "$target/Kokoro.Generator.Weights.dll")
+            $files += , @($WeightAssembly.LoaderPath, "$target/Kokoro.MappedPayload.dll")
+        } else { $files += , @((Join-Path $fixture 'weights.bin'), "$target/weights.bin") }
+    }
     foreach ($staged in $StageFiles.GetEnumerator()) { $files += , @($staged.Value, "files/$($staged.Key)") }
     foreach ($file in $files) {
         $name = Split-Path $file[1] -Leaf; $destination = $file[1]
@@ -193,6 +207,10 @@ try {
     }
     $receipt
     "ReceiptPath=$receiptPath"
+    if ($GeneratorAssembly -and $receipt -match '(?m)^Passed=' -and
+        ($receipt -notmatch '(?m)^Passed=True\s*$' -or !$receipt.Contains("Program=libkokoroku_${id}.so "))) {
+        throw "Managed generator verification failed. See $receiptPath"
+    }
     if ($Serve -and $receipt -notmatch '(?m)^Listening=') { $receipt = $receipt -replace '(?m)^Passed=.*$', '' }
     if ($receipt -notmatch $ready) {
         $startupMarkers = [Collections.Generic.List[string]]::new()
@@ -248,3 +266,4 @@ finally {
     }
     $null = & $run @('shell', "rm -rf $temp")
 }
+} finally { $phoneMutex.ReleaseMutex(); $phoneMutex.Dispose() }

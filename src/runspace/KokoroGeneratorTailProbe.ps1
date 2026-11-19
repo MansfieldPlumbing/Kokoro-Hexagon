@@ -21,16 +21,10 @@ $Marshal = [Runtime.InteropServices.Marshal]; $native = [IntPtr]::Zero; $opened 
 $pins = [Collections.Generic.List[object]]::new(); $allocations = [Collections.Generic.List[object]]::new()
 $passed = $false; $stream = $null; $audio = $null
 $sharedPayloads = [Collections.Generic.List[object]]::new()
+$managedProgram = $null
 $mappedWeights = $null
 try {
     $kv = @{}; foreach ($l in [IO.File]::ReadAllLines([IO.Path]::Combine($dir, 'spec.txt'))) { $p = $l.Split('=', 2); if ($p.Count -eq 2) { $kv[$p[0]] = $p[1] } }
-    $tiles = [int]$kv.Tiles; $runs = [int]$kv.Runs; $outputBytes = [int]$kv.OutputBytes; $pcmOffset = [int]$kv.PcmOffset; $samples = [int]$kv.Samples
-    # Serve=True: the resident job listener below instead of one job; each request carries its own job fields.
-    $serve = $kv.ContainsKey('Serve')
-    # Speech=True: text to WAV in this runspace (the speech mode below) with this job's generator library.
-    $speech = $kv.ContainsKey('Speech')
-    if (-not $serve -and ($tiles -lt 1 -or $tiles -gt 32768 -or $runs -lt 1 -or $runs -gt 121 -or $samples -lt 1 -or $pcmOffset + 2 * $samples -gt $outputBytes)) { throw 'Spec out of range' }
-    $lines.Add("Tiles=$tiles Runs=$runs Samples=$samples")
     $load = { param([string]$Name, [object[]]$Arguments)
         $ast = [Management.Automation.Language.Parser]::ParseFile([IO.Path]::Combine($root, $Name), [ref]$null, [ref]$null)
         $ast.GetScriptBlock().InvokeReturnAsIs($Arguments) }
@@ -38,6 +32,46 @@ try {
     $abi = & $load 'Native.Binding.psm1' @()
     Write-KokoroProbeStage 'BindingsReady'
     $so = [IO.Path]::Combine($root, 'dsp', 'libkokoro_generator_tail_skel.so')
+    $libraryName = [IO.Path]::GetFileName($so)
+    if ($kv.GeneratorAssembly) {
+        if ($kv.GeneratorAssembly -notmatch '^[0-9a-f]{32}$') { throw 'Invalid probe identifier' }
+        $loadTime = [Diagnostics.Stopwatch]::StartNew()
+        $assembly = [Reflection.Assembly]::LoadFrom([IO.Path]::Combine($dir, 'Kokoroku.dll'))
+        $generator = $assembly.GetType('Kokoroku.Generator', $true)
+        $libraryName = "libkokoroku_$($kv.GeneratorAssembly).so"
+        $managedProgram = [IO.Path]::Combine($root, 'dsp', $libraryName)
+        $so = $managedProgram
+        $program = $generator.GetMethod('OpenProgram').Invoke($null, $null)
+        try {
+            $file = [IO.File]::Open($so, 'CreateNew', 'Write', 'None')
+            try { $program.CopyTo($file) } finally { $file.Dispose() }
+        } finally { $program.Dispose() }
+        $layoutReader = [IO.StreamReader]::new($generator.GetMethod('OpenLayout').Invoke($null, $null))
+        try { $embedded = [Text.Json.JsonDocument]::Parse($layoutReader.ReadToEnd()) } finally { $layoutReader.Dispose() }
+        foreach ($key in 'Tiles','InputBytes','OutputBytes','PcmOffset','Samples') {
+            $kv[$key] = $embedded.RootElement.GetProperty($key).GetInt64()
+        }
+        $embedded.Dispose()
+        $readPayload = { param($name)
+            $resource = $generator.GetMethod("Open$name").Invoke($null, $null)
+            try {
+                $bytes = [byte[]]::new($resource.Length)
+                $resource.ReadExactly($bytes, 0, $bytes.Length)
+                ,$bytes
+            } finally { $resource.Dispose() }
+        }
+        $wts = & $readPayload Weights
+        $tbl = & $readPayload Tables
+        $loadTime.Stop()
+        $lines.Add("AndroidAssembly=$($assembly.GetName().Name) Program=$libraryName WeightBytes=$($wts.Length) TableBytes=$($tbl.Length) PrepareMs=$($loadTime.Elapsed.TotalMilliseconds)")
+    }
+    $tiles = [int]$kv.Tiles; $runs = [int]$kv.Runs; $outputBytes = [int]$kv.OutputBytes; $pcmOffset = [int]$kv.PcmOffset; $samples = [int]$kv.Samples
+    # Serve=True: the resident job listener below instead of one job; each request carries its own job fields.
+    $serve = $kv.ContainsKey('Serve')
+    # Speech=True: text to WAV in this runspace (the speech mode below) with this job's generator library.
+    $speech = $kv.ContainsKey('Speech')
+    if (-not $serve -and ($tiles -lt 1 -or $tiles -gt 32768 -or $runs -lt 1 -or $runs -gt 121 -or $samples -lt 1 -or $pcmOffset + 2 * $samples -gt $outputBytes)) { throw 'Spec out of range' }
+    $lines.Add("Tiles=$tiles Runs=$runs Samples=$samples")
     $lines.Add('LibrarySHA256=' + [Convert]::ToHexString([Security.Cryptography.SHA256]::HashData([IO.File]::ReadAllBytes($so))))
     $search = [IO.Path]::Combine($root, 'dsp') + ';/vendor/lib/rfsa/adsp;/vendor/dsp/cdsp;/dsp'
     # Bionic stdlib.h: int setenv(const char*, const char*, int). UTF-8 buffers
@@ -78,7 +112,7 @@ try {
     Write-KokoroProbeStage 'SessionControlBegin'
     $rc = [int]$control.DynamicInvoke([object[]]@([uint32]2, $cfg, [uint32]8))
     $lines.Add("UnsignedPdRc=$rc"); if ($rc -ne 0) { throw 'Unsigned PD configuration failed' }
-    $uri = [Text.Encoding]::UTF8.GetBytes('file:///libkokoro_generator_tail_skel.so?kokoro_generator_tail_skel_handle_invoke&_modver=1.0&_dom=cdsp' + [char]0)
+    $uri = [Text.Encoding]::UTF8.GetBytes("file:///${libraryName}?kokoro_generator_tail_skel_handle_invoke&_modver=1.0&_dom=cdsp" + [char]0)
     $oa = [object[]]@((& $pin $uri), [uint64]0)
     $rc = [int]$open.DynamicInvoke($oa)
     $lines.Add("OpenRc=$rc"); if ($rc -ne 0) { throw 'Kernel library open failed' }
@@ -309,10 +343,10 @@ try {
         $wts = $null
         $lines.Add("WeightAssembly=True LaunchMapMs=$($mapClock.Elapsed.TotalMilliseconds.ToString('F3',$inv)) LaunchHashPasses=0")
     } else {
-        $wts = [IO.File]::ReadAllBytes([IO.Path]::Combine($dir, 'weights.bin'))
+        if (!$kv.GeneratorAssembly) { $wts = [IO.File]::ReadAllBytes([IO.Path]::Combine($dir, 'weights.bin')) }
         $weightBytes = $wts.Length
     }
-    $tbl = [IO.File]::ReadAllBytes([IO.Path]::Combine($dir, 'tables.bin'))
+    if (!$kv.GeneratorAssembly) { $tbl = [IO.File]::ReadAllBytes([IO.Path]::Combine($dir, 'tables.bin')) }
     $inputBytes = if ($kv.InputBytes) { [long]$kv.InputBytes } else { $tiles * 8192L }
     if ($act.Length -ne $inputBytes) { throw 'Input length' }
     $config = [BitConverter]::GetBytes([uint32]$tiles)
@@ -343,11 +377,15 @@ try {
         if ($requestLifetime) { $lines.Add("Request=$run GapSeconds=$idleSeconds ElapsedMs=$($requestClock.Elapsed.TotalMilliseconds.ToString('F3',$inv)) SameProcess=True SameSession=True") }
         $phaseClock = [Diagnostics.Stopwatch]::StartNew()
         $setupEntry = $phaseClock.ElapsedTicks
-        if (-not $requestLifetime -or $run -eq 0) {
+        if ($run -eq 0) {
             $out = [byte[]]::new($outputBytes)
             $bufs = if ($resident) { @($config,$act,$out) } else { @($config, $act, $wts, $tbl, $out) }
             $argBlock = $Marshal::AllocHGlobal(16 * $bufs.Count); $allocations.Add($argBlock)
             for ($i = 0; $i -lt $bufs.Count; $i++) { $Marshal::WriteIntPtr($argBlock, 16 * $i, (& $pin $bufs[$i])); $Marshal::WriteInt64($argBlock, 16 * $i + 8, [long]$bufs[$i].Length) }
+        }
+        if ($run -gt 0 -and !$requestLifetime) {
+            # Preserve the original fresh-buffer contract, including the DSP workspace.
+            [Array]::Clear($out, 0, $out.Length)
         }
         $scalars = if ($resident) { [uint32]0x03020100 } else { [uint32]0x02040100 }
         $invokeArguments = [object[]]@($handle, $scalars, $argBlock)
@@ -471,6 +509,7 @@ finally {
     foreach ($g in $pins) { $g.Free() }
     foreach ($a in $allocations) { $Marshal::FreeHGlobal($a) }
     if ($native -ne [IntPtr]::Zero) { [Runtime.InteropServices.NativeLibrary]::Free($native) }
+    if ($managedProgram -and [IO.File]::Exists($managedProgram)) { [IO.File]::Delete($managedProgram) }
     $lines.Add("Passed=$passed")
     [IO.File]::WriteAllLines($receipt, $lines)
 }
