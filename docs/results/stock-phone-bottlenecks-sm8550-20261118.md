@@ -179,3 +179,9 @@ Replaced the three explicit 128-byte pointer advances per row pair with HVX post
 ### Clean float phone output
 
 `PhoneSpeech -Parameters @{Text=<sentence>; Runs=1; FloatSynthesis=$true}` uses the float decoder and generator in the phone process and plays the resulting WAV through the same output path. The diagnostic float render of the lighthouse passage passed both quality checks. Excess modulation was 0 dB, loudness differed by less than 0.000001 LU, and waveform SNR against the clean reference was 110.99 dB with zero lag. The phone played all 282,600 samples with zero underruns. Synthesis took 27.731 seconds for 11.775 seconds of audio (0.42× real time). The fixed-point DSP route remains the default and still produces the affected waveform.
+
+### DSP decoder with float generator
+
+Ran the same phone front end and DSP span decoder as stock. Unpacked its 512-channel croutons and multiplied each channel by its calibrated decoder unit. The float generator consumed those features and the original duration, F0 and energy curves, using the float renderer's seed 17. The phone played the resulting 282,600 samples with zero underruns and restored startup files.
+
+The hybrid passed the lighthouse quality check. Compared with the clean all-float reference, it was 0.132 LU louder and had 0.428 dB excess 10–30 Hz modulation, with 0.99695 envelope correlation and zero lag. The inverse experiment (float decoder features quantized into the DSP generator) failed both checks. These substitutions place the measured defect on the DSP generator side of the decoder boundary, including its conditioning, source, and arithmetic. The hybrid required 26.736 seconds cold, including 17.732 seconds for feature conversion and float generation, so it remains a diagnostic.
