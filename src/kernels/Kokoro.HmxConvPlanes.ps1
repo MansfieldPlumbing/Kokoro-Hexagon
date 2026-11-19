@@ -35,7 +35,7 @@ function New-KokoroHmxConvPlanesSteps {
         # Rows every tap reads before the centred position: output row m then reads input rows m - TapDelay - reach to
         # m - TapDelay + reach, so with TapDelay >= reach the convolution reads only rows at or before m (backward).
         # The products and their order are unchanged; output row m is the centred output at row m - TapDelay.
-        [ValidateRange(0, 32)][int] $TapDelay = 0
+        [int[]] $ActivePanels, [ValidateRange(0, 32)][int] $TapDelay = 0
     )
     [int]$cb = $InputChannels / 32; [int]$ob = $OutputChannels / 32; [int]$groups = $OutputChannels / 64
     $accGroups = if ($WeightPlanes -eq 2) { 3 } else { 2 }
@@ -53,16 +53,25 @@ function New-KokoroHmxConvPlanesSteps {
     $s.Add(@{Op='imm'; d=11; i=0})                    # store Rt, loop compare zero
     # One MAC sequence: activation base register, weight base register.
     $macs = { param([int]$act,[int]$wt)
-        $s.Add(@{Op='addi'; d=12; s=$wt; i=0})
+        $previous=-1
+
         for ($k = 0; $k -lt $Kernel; $k++) {
             $shift = $Dilation * ($k - $half) - $TapDelay
             [int]$tile = [math]::Floor($shift / 32); [int]$row = $shift - 32 * $tile
             for ($c = 0; $c -lt $cb; $c++) {
                 $offset = (($tile * $cb) + $c) * 2048 + (($row -shr 1) -shl 7) + (($row -band 1) -shl 1)
                 if ($offset -lt -32768 -or $offset -gt 32767) { throw 'Activation offset out of addi range' }
+                # Both addresses depend only on the prior packet. The MAC reads them in the next packet.
+                $panel=$k*$cb+$c
+                if($ActivePanels -and $panel -notin $ActivePanels){continue}
+                $base=if($previous -lt 0){$wt}else{12}
+                $delta=2048*($panel-[Math]::Max(0,$previous))
+                $previous=$panel
+                if($delta -gt 32767){& $imm 15 $delta;$s.Add(@{Op='add';d=12;s=$base;t=15;Pack=1})}
+                else{$s.Add(@{Op='addi';d=12;s=$base;i=$delta;Pack=1})}
                 $s.Add(@{Op='addi'; d=8; s=$act; i=$offset})
                 $s.Add(@{Op='hmx-pair'; Act='act-ub-single'; Wt='wt-b-deep'; s=8; t=9; u=12; v=10})
-                $s.Add(@{Op='addi'; d=12; s=12; i=2048})
+
             }
         }
     }
@@ -118,7 +127,7 @@ function New-KokoroHmxConvPlanesLoopSteps {
         [switch] $NoReturn,
         # Rows every tap reads before the centred position, as New-KokoroHmxConvPlanesSteps: output row m is the centred
         # output at row m - TapDelay, and with TapDelay >= reach the convolution reads only rows at or before m.
-        [ValidateRange(0, 32)][int] $TapDelay = 0
+        [int[]] $ActivePanels, [ValidateRange(0, 32)][int] $TapDelay = 0
     )
     if ($InputChannels % 32) { throw 'Input channels must be whole 32-channel blocks' }
     if ($OutputChannels % 64) { throw 'Output channels must be whole 64-channel groups' }
@@ -139,6 +148,7 @@ function New-KokoroHmxConvPlanesLoopSteps {
     $s.Add(@{Op='imm'; d=10; i=0x7ff})                # weight :deep range
     $s.Add(@{Op='imm'; d=11; i=0})                    # store Rt, loop compare zero
     $macs = { param([int]$act,[int]$wt)
+        $previous=-1
         $s.Add(@{Op='addi'; d=12; s=$wt; i=0})
         for ($k = 0; $k -lt $Kernel; $k++) {
             $shift = $Dilation * ($k - $half) - $TapDelay

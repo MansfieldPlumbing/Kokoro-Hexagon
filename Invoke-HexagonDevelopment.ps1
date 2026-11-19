@@ -61,6 +61,10 @@ $script:Instructions = @(
     @{ Op='vmpy-sf';        Pattern='00011111100tttttPP1sssss001ddddd'; Asm='v{d}.sf = vmpy(v{s}.sf,v{t}.sf)'; Source='HVX PRM' }
     @{ Op='vmpy-hf-qf32';   Pattern='00011111111tttttPP1sssss111ddddd'; Rule='Pairs'; Pairs='d'; Message='FP32 conversion destination pair must be even and 0..30'; Asm='v{d1}:{d}.qf32 = vmpy(v{s}.hf,v{t}.hf)'; Source='SDK 19.0.04 +hvx-ieee-fp' }
     @{ Op='vconv-qf32-hf';  Pattern='00011110--0--100PP1sssss110ddddd'; Rule='Pairs'; Pairs='s'; Message='QFloat source pair must be even and 0..30'; Asm='v{d}.hf = v{s1}:{s}.qf32'; Source='SDK 19.0.04 +hvx-ieee-fp' }
+    @{ Op='vsat-h-w'; Pattern='00011111011tttttPP0sssss011ddddd'; Asm='v{d}.h = vsat(v{s}.w,v{t}.w)'; Source='LLVM 19.1.7 V6_vsatwh' }
+    @{ Op='vmpyo-w-h-rnd'; Pattern='00011111010tttttPP0sssss000ddddd'; Asm='v{d}.w = vmpyo(v{s}.w,v{t}.h):<<1:rnd:sat'; Source='LLVM 19.1.7 V6_vmpyowh_rnd' }
+    @{ Op='vshuffo-b'; Pattern='00011111010tttttPP0sssss010ddddd'; Asm='v{d}.b = vshuffo(v{s}.b,v{t}.b)'; Source='LLVM 19.1.7 V6_vshuffob' }
+    @{ Op='vmpy-ww-h-h'; Pattern='00011100000tttttPP0sssss111ddddd'; AsmEvenD=$true; Asm='v{d1}:{d}.w = vmpy(v{s}.h,v{t}.h)'; Source='LLVM 19.1.7 V6_vmpyhv' }
     @{ Op='vshuffe-h';      Pattern='00011111010tttttPP0sssss011ddddd'; Asm='v{d}.h = vshuffe(v{s}.h,v{t}.h)'; Source='SDK 19.0.04' }
     @{ Op='vmpy-sf-qf32';   Pattern='00011111111tttttPP1sssss001ddddd'; Asm='v{d}.qf32 = vmpy(v{s}.sf,v{t}.sf)'; Source='HVX PRM pp.154,250,262' }
     @{ Op='vadd-sf-qf32';   Pattern='00011111101tttttPP1sssss001ddddd'; Asm='v{d}.qf32 = vadd(v{s}.sf,v{t}.sf)'; Source='HVX PRM pp.154,250,262' }
@@ -745,10 +749,10 @@ function Get-InstructionSet {
 $script:PacketClasses = @{}
 foreach ($op in 'vload') { $script:PacketClasses[$op] = @{ Kind='VLoad'; Slots=@(1,0) } }
 foreach ($op in 'vstore') { $script:PacketClasses[$op] = @{ Kind='VStore'; Slots=@(0) } }
-foreach ($op in 'vmpy-h-rnd-sat','vmpye-w-uh','vmpyo-acc-w-h-rnd-sat-shift','vmpyie-w-uh') { $script:PacketClasses[$op] = @{ Kind='Mpy'; Slots=@(3,2) } }
+foreach ($op in 'vmpyo-w-h-rnd','vmpy-h-rnd-sat','vmpye-w-uh','vmpyo-acc-w-h-rnd-sat-shift','vmpyie-w-uh') { $script:PacketClasses[$op] = @{ Kind='Mpy'; Slots=@(3,2) } }
 foreach ($op in 'vasl-w','vasr-w','vlsr-uw','vasl-h') { $script:PacketClasses[$op] = @{ Kind='Shift'; Slots=@(3,2,1,0) } }
 foreach ($op in 'vsplat') { $script:PacketClasses[$op] = @{ Kind='Alu'; Slots=@(3,2) } }
-foreach ($op in 'vadd-w','vadd-h','vadd-h-sat','vsub-h','vand','vor','vxor','vmax-w','vmin-w','vabs-h-sat') { $script:PacketClasses[$op] = @{ Kind='Alu'; Slots=@(3,2,1,0) } }
+foreach ($op in 'vshuffo-b','vsat-h-w','vadd-w','vadd-h','vadd-h-sat','vsub-h','vand','vor','vxor','vmax-w','vmin-w','vabs-h-sat') { $script:PacketClasses[$op] = @{ Kind='Alu'; Slots=@(3,2,1,0) } }
 foreach ($op in 'addi','add','sub','imm','lo','hi') { $script:PacketClasses[$op] = @{ Kind='Scalar'; Slots=@(3,2,1,0) } }
 
 function Get-HexagonStepRegisters {
@@ -769,7 +773,7 @@ function Get-HexagonStepRegisters {
 }
 
 function Group-HexagonPackets {
-    param([Parameter(Mandatory)][object[]]$Steps)
+    param([Parameter(Mandatory)][object[]]$Steps,[ValidateRange(1,4)][int]$MaxInstructions=4)
     $out = [Collections.Generic.List[hashtable]]::new()
     $run = [Collections.Generic.List[hashtable]]::new()
     # Slots as the SDK assembler assigns them: most constrained first in program order, vector loads and stores the
@@ -803,7 +807,7 @@ function Group-HexagonPackets {
                 $members = @($packets[$at]) + @(@{ Step=$step; Class=$class })
                 $kinds = @($members | ForEach-Object { $_.Class.Kind })
                 $count = { param($k) @($kinds | Where-Object { $_ -eq $k }).Count }
-                $fits = $members.Count -le 4 -and (& $count 'VLoad') -le 1 -and (& $count 'VStore') -le 1 -and (& $count 'Shift') -le 1 -and (& $count 'Mpy') -le 1 -and
+                $fits = $members.Count -le $MaxInstructions -and (& $count 'VLoad') -le 1 -and (& $count 'VStore') -le 1 -and (& $count 'Shift') -le 1 -and (& $count 'Mpy') -le 1 -and
                     ((& $count 'Alu') + (& $count 'Shift') + 2 * (& $count 'Mpy')) -le 4
                 if ($fits) { $fits = $null -ne (& $assign $members) }
                 if ($fits) { break }

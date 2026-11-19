@@ -206,6 +206,8 @@ function New-KokoroGenerator60x16RunSteps {
 
     if($WeightPlanes -eq 1 -and $Schedule -eq 'Layer'){ throw 'One weight plane is a backward schedule option.' }
     $packets={ param([object[]]$Steps) $grouped=if($VectorPackets){ Group-HexagonPackets $Steps } else { $Steps }; $grouped }
+
+    $fillPackets={ param([object[]]$Steps) $grouped=if($VectorPackets){Group-HexagonPackets $Steps -MaxInstructions 2}else{$Steps}; $grouped }
     if($ControllerContact -and $Schedule -eq 'Layer'){ throw 'The controller contact is a backward schedule option.' }
     if($SeededNoise -and -not $Source){ throw 'Seeded noise is a source option.' }
     if(-not $PoolWait){ $PoolWait=if($Schedule -ne 'Layer'){'Spin'}else{'Futex'} }
@@ -971,7 +973,7 @@ function New-KokoroGenerator60x16RunSteps {
             for($start=0;$start -lt $upTiles;$start+=$upBatch){
                 $count=[math]::Min($upBatch,$upTiles-$start)
                 & $ptr 0 18 ($upHi+($start+1)*16384L); & $ptr 1 18 ($upLo+($start+1)*16384L); & $ptr 2 18 $offFrontWeights; & $ptr 3 18 ($offFrontTables+16384+12288*$c); & $imm 4 $count; & $ptr 5 18 $offPlanes
-                & $call 'body_conv_front_up'; & $mark 'HmxConv'; & $mark 'Unmarked' -site 6; & $sync
+                & $call $(if($c -lt 2){'body_conv_front_up_early'}else{'body_conv_front_up_late'}); & $mark 'HmxConv'; & $mark 'Unmarked' -site 6; & $sync
                 & $ptr 0 18 $offPlanes; & $ptr 1 18 ($offUpPhase+$start*16384L); & $ptr 2 18 ($offFrontTables+53248+2048*$c-1024); & $imm 3 $count
                 & $call 'body_combine_conv256'; & $mark 'Combine'; & $mark 'Unmarked' -site 7; & $sync
             }
@@ -1022,7 +1024,7 @@ function New-KokoroGenerator60x16RunSteps {
             for($start=0;$start -lt $decTiles;$start+=$upBatch10){
                 $count=[math]::Min($upBatch10,$decTiles-$start)
                 & $ptr 0 18 ($upHi+32768+$start*32768L); & $ptr 1 18 ($upLo+32768+$start*32768L); & $ptr 2 18 $offFrontWeights; & $ptr 3 18 ($offFrontTables+16384+12288*$r); & $imm 4 $count; & $ptr 5 18 $offPlanes
-                & $call 'body_conv_front10_up'; & $mark 'HmxConv'; & $mark 'Unmarked' -site 25; & $sync
+                & $call $(if($r -lt 5){'body_conv_front10_up_early'}else{'body_conv_front10_up_late'}); & $mark 'HmxConv'; & $mark 'Unmarked' -site 25; & $sync
                 & $parallel $(if($WeightPlanes -eq 2){"body_combine_conv$sfx"}else{"body_combine_front$sfx"}) @($offPlanes,($(if($r%2){$offUpB}else{$offUpA})+$start*16384L),($offFrontTables+139264+1024*$r-1024)) @($true,$true,$false) $count
                 & $mark 'Combine'
             }
@@ -1361,11 +1363,19 @@ function New-KokoroGenerator60x16RunSteps {
     }
     # Chunked schedule. VTCM bytes srcOff -> destOff on the main thread, 1 KiB at a time.
     $copyTiles={param([long]$destOff,[long]$srcOff,[long]$bytes)
-        & $ptr 4 18 $srcOff; & $ptr 5 18 $destOff; & $imm 6 ($bytes/1024); $s.Add(@{Op='imm';d=7;i=0})
+        # History and work occupy disjoint regions. Pipeline a load and the previous store,
+        # using an address in the middle of each 2 KiB crouton for signed vector offsets.
+        & $ptr 4 18 ($srcOff+1024); & $ptr 5 18 ($destOff+1024); & $imm 6 ($bytes/2048)
+        $s.Add(@{Op='imm';d=7;i=0})
         $n=& $label; $s.Add(@{Op='label';Name=$n})
-        for($k=0;$k -lt 8;$k++){ $s.Add(@{Op='vload';d=$k;s=4;Offset=(128*$k)}) }
-        for($k=0;$k -lt 8;$k++){ $s.Add(@{Op='vstore';s=5;t=$k;Offset=(128*$k)}) }
-        $s.Add(@{Op='addi';d=4;s=4;i=1024}); $s.Add(@{Op='addi';d=5;s=5;i=1024}); $s.Add(@{Op='addi';d=6;s=6;i=-1}); $s.Add(@{Op='gtu';d=0;s=6;t=7}); $s.Add(@{Op='jump-p';u=0;Label=$n})
+        $s.Add(@{Op='vload';d=0;s=4;Offset=-1024})
+        for($k=1;$k -lt 16;$k++){
+            $s.Add(@{Op='vload';d=$k;s=4;Offset=(128*$k-1024);Pack=1})
+            $s.Add(@{Op='vstore';s=5;t=($k-1);Offset=(128*($k-1)-1024)})
+        }
+        $s.Add(@{Op='vstore';s=5;t=15;Offset=896})
+        $s.Add(@{Op='addi';d=4;s=4;i=2048;Pack=1});$s.Add(@{Op='addi';d=5;s=5;i=2048})
+        $s.Add(@{Op='addi';d=6;s=6;i=-1});$s.Add(@{Op='gtu';d=0;s=6;t=7});$s.Add(@{Op='jump-p';u=0;Label=$n})
         & $mark 'TileFix'
     }
     # Stage st's saved history of branch b in plane (0 high, 1 low), and its conv-input buffer's tile i (0 and 1 history,
@@ -1390,7 +1400,7 @@ function New-KokoroGenerator60x16RunSteps {
         for($st=0;$st -lt 6;$st++){
             $p=[int][math]::Floor($st/2); $half=$st % 2; $src=& $fillSource $st
             if(-not $AsyncWeights){ for($branch=0;$branch -lt $branches;$branch++){ & $dma 18 ($tileRegions.Weights+$streamAt[$branch]) 21 $tileStages[6*$branch+$st].WeightOffset $tileStages[6*$branch+$st].WeightBytes } }
-            for($plane=0;$plane -lt 2;$plane++){ for($branch=0;$branch -lt $branches;$branch++){ & $copyTiles (& $workAt $plane $branch 0) (& $historyAt $st $plane $branch) $guardBytes } }
+            for($plane=0;$plane -lt 2;$plane++){ for($branch=0;$branch -lt $branches;$branch++){ $reach=if($st%2){($sectionKernels[$branch]-1)/2}else{& $pairReach $branch $p}; $needed=[int][Math]::Ceiling(((& $tapDelay $branch $st)+$reach)/32.0); $skip=2-$needed; & $copyTiles (& $workAt $plane $branch $skip) ((& $historyAt $st $plane $branch)+$skip*$tileBytes) ($needed*$tileBytes) } }
             $segments=[Collections.Generic.List[object]]::new()
             for($w=0;$w -lt $batch;$w++){
                 $segment=@{Count=1;Body="body_turnsB_$($src[1])$sfx";Arguments=@((& $tileArg $src[0] $block $w),(& $workAt 0 0 (2+$w)),(& $workAt 1 0 (2+$w)),($tileRegions.Kms+$st*$kmsBytes))}
@@ -1416,7 +1426,7 @@ function New-KokoroGenerator60x16RunSteps {
                 if($AsyncWeights){ & $streamQueued (($st+1) % 6) $branch }
             }
             & $mark 'HmxConv'; & $sync
-            for($plane=0;$plane -lt 2;$plane++){ for($branch=0;$branch -lt $branches;$branch++){ & $copyTiles (& $historyAt $st $plane $branch) (& $workAt $plane $branch $batch) $guardBytes } }
+            for($plane=0;$plane -lt 2;$plane++){ for($branch=0;$branch -lt $branches;$branch++){ $reach=if($st%2){($sectionKernels[$branch]-1)/2}else{& $pairReach $branch $p}; $needed=[int][Math]::Ceiling(((& $tapDelay $branch $st)+$reach)/32.0); $skip=2-$needed; & $copyTiles ((& $historyAt $st $plane $branch)+$skip*$tileBytes) (& $workAt $plane $branch ($batch+$skip)) ($needed*$tileBytes) } }
             $rAt=$tileRegions.Records+$st*$recordBytes; $segments=[Collections.Generic.List[object]]::new()
             for($w=0;$w -lt $batch;$w++){
                 $planes=$tileRegions.Planes+$w*[long]$tileBytes
@@ -1498,7 +1508,7 @@ function New-KokoroGenerator60x16RunSteps {
             for($start=0;$start -lt $n;$start+=$upBatch10){
                 $count=[math]::Min($upBatch10,$n-$start)
                 & $ptr 0 18 ($F.High+32768+$start*32768L); & $ptr 1 18 ($F.Low+32768+$start*32768L); & $ptr 2 18 $F.Weights; & $ptr 3 18 ($F.Tables+16384+12288*$r); & $imm 4 $count; & $ptr 5 18 $F.Planes
-                & $call 'body_conv_front10_up'; & $mark 'HmxConv'; & $sync
+                & $call $(if($r -lt 5){'body_conv_front10_up_early'}else{'body_conv_front10_up_late'}); & $mark 'HmxConv'; & $sync
                 & $parallel $(if($WeightPlanes -eq 2){"body_combine_conv$sfx"}else{"body_combine_front$sfx"}) @($F.Planes,($(if($r%2){$F.PhaseB}else{$F.PhaseA})+$start*16384L),($F.Tables+139264+1024*$r-1024)) @($true,$true,$false) $count
                 & $mark 'Combine'
             }
@@ -1539,7 +1549,7 @@ function New-KokoroGenerator60x16RunSteps {
             for($start=0;$start -lt $n;$start+=$upBatch){
                 $count=[math]::Min($upBatch,$n-$start)
                 & $ptr 0 18 ($F.High+($start+1)*16384L); & $ptr 1 18 ($F.Low+($start+1)*16384L); & $ptr 2 18 $slots[$c]; & $ptr 3 18 ($F.Tables+16384+12288*$c); & $imm 4 $count; & $ptr 5 18 $F.Planes
-                & $call 'body_conv_front_up'; & $mark 'HmxConv'; & $sync
+                & $call $(if($c -lt 2){'body_conv_front_up_early'}else{'body_conv_front_up_late'}); & $mark 'HmxConv'; & $sync
                 & $ptr 0 18 $F.Planes; & $ptr 1 18 ($F.Phase+$start*16384L); & $ptr 2 18 ($F.Tables+53248+2048*$c-1024); & $imm 3 $count
                 & $call 'body_combine_conv256'; & $mark 'Combine'; & $sync
             }
@@ -1871,7 +1881,7 @@ function New-KokoroGenerator60x16RunSteps {
     $bodies=[Collections.Generic.List[object]]::new()
     for($section=0;$section -lt $sections.Count;$section++){
     if($sections.Count -gt 1){ . $bind $section }
-    $bodies.Add(@("body_turns$sfx",@(& $packets @(New-KokoroAdaInSnakeTurnsSteps -TurnsBits 22 -Channels $Channels -LabelPrefix "adainsnaketurns$sfx" -ControllerContact:$ControllerContact))))
+    $bodies.Add(@("body_turns$sfx",@(& $fillPackets @(New-KokoroAdaInSnakeTurnsSteps -TurnsBits 22 -Channels $Channels -LabelPrefix "adainsnaketurns$sfx" -ControllerContact:$ControllerContact))))
     if($AdaInMode -eq 'Constants'){
         $bodies.Add(@("body_constant$sfx",@(New-KokoroAdaInConstantCoefficientsLoopSteps -Channels $Channels -Turns -LabelPrefix "turnsconstant$sfx")))
     } else {
@@ -1909,7 +1919,7 @@ function New-KokoroGenerator60x16RunSteps {
         }
         # Fill: source ring tile, conv-input tiles (high, low), K/M/S, count, mirror delta; the input ring is shared by the
         # branches (stride 0). Combines: planes, target ring tile, record, count, residual source.
-        if($sectionSchedule -eq 'Backward'){ $bodies.Add(@("body_turns_mirror$sfx",@(& $packets @(New-KokoroAdaInSnakeTurnsSteps -TurnsBits 22 -Channels $Channels -LabelPrefix "adainsnaketurnsmirror$sfx" -ControllerContact:$ControllerContact -MirrorDelta (-$ringBytes))))) }
+        if($sectionSchedule -eq 'Backward'){ $bodies.Add(@("body_turns_mirror$sfx",@(& $fillPackets @(New-KokoroAdaInSnakeTurnsSteps -TurnsBits 22 -Channels $Channels -LabelPrefix "adainsnaketurnsmirror$sfx" -ControllerContact:$ControllerContact -MirrorDelta (-$ringBytes))))) }
         $bodies.Add(@("body_combine_residual_separate$sfx",@(& $packets @(New-KokoroPlaneCombineSteps -Mode Residual -Channels $Channels @combineGroups -PlaneStride $planeStride -LabelPrefix "combineresidualseparate$sfx" -SeparateResidual))))
         foreach($sharing in @(@('shared',0L),@('branch',$ringBytes))){
             $bodies.Add((& $branchBodies "body_turnsB_$($sharing[0])$sfx" "body_turns$sfx" @($sharing[1],$fillBytes,$fillBytes,(6L*$kmsBytes),0L,0L)))
@@ -1919,18 +1929,22 @@ function New-KokoroGenerator60x16RunSteps {
         $bodies.Add((& $branchBodies "body_combine_convB$sfx" "body_combine_conv$sfx" @($planesStride,$ringBytes,(6L*$recordBytes),0L,0L,0L)))
         for($branch=0;$branch -lt $branches;$branch++){ for($st=0;$st -lt 6;$st++){ $bodies.Add(@("body_convB_b${branch}_s$st$sfx",@(New-KokoroHmxConvPlanesSteps -InputChannels $Channels -OutputChannels $Channels -Kernel $sectionKernels[$branch] -Dilation $(if($st % 2){1}else{1+$st}) @convPlanes -PlaneStride $planeStride -TapDelay (& $tapDelay $branch $st) -LabelPrefix "g16b_b${branch}_s$st$sfx"))) } }
     }
-    $bodies.Add(@("body_mean$sfx",@(New-KokoroBranchMean16Steps -Channels $Channels -LabelPrefix "branchmean16$sfx")))
+    $bodies.Add(@("body_mean$sfx",@(& $packets @(New-KokoroBranchMean16Steps -Channels $Channels -LabelPrefix "branchmean16$sfx"))))
     for($b=0;$b -lt $branches;$b++){foreach($d in 1,3,5){$bodies.Add(@("body_conv_b${b}_d$d$sfx",@(New-KokoroHmxConvPlanesSteps -InputChannels $Channels -OutputChannels $Channels -Kernel $sectionKernels[$b] -Dilation $d @convPlanes -PlaneStride $planeStride -LabelPrefix "g16_b${b}_d$d$sfx")))}}
     if($front10){
-        $bodies.Add(@('body_conv_front10_noise',@(New-KokoroHmxConvPlanesSteps -InputChannels 256 -OutputChannels 256 -Kernel 3 -Dilation 1 -WeightPlanes 2 -PlaneStride $planeStride -LabelPrefix 'g16tn')))
-        $bodies.Add(@('body_conv_front10_up',@(New-KokoroHmxConvPlanesSteps -InputChannels 512 -OutputChannels 256 -Kernel 3 -Dilation 1 -WeightPlanes 2 -PlaneStride $planeStride -LabelPrefix 'g16tu')))
-        $bodies.Add(@('body_leaky_up',@(New-KokoroLeakyRelu16Steps -Slope 0.1 -LabelPrefix 'leakyup')))
-        $bodies.Add(@('body_front10_interleave',@(New-KokoroPhaseInterleaveSteps -Phases 10 -Channels 256)))
-        $bodies.Add(@('body_front10_add',@(New-KokoroResidualAdd16Steps -Channels 256)))
+        $bodies.Add(@('body_conv_front10_noise',@(New-KokoroHmxConvPlanesSteps -InputChannels 256 -OutputChannels 256 -Kernel 3 -Dilation 1 -WeightPlanes 2 -PlaneStride $planeStride -ActivePanels @(2,3,4,8,9,10,11,12,16,17,18) -LabelPrefix 'g16tn')))
+        $bodies.Add(@('body_conv_front10_up_early',@(New-KokoroHmxConvPlanesSteps -InputChannels 512 -OutputChannels 256 -Kernel 3 -Dilation 1 -WeightPlanes 2 -PlaneStride $planeStride -ActivePanels (0..31) -LabelPrefix 'g16tu_early')))
+
+        $bodies.Add(@('body_conv_front10_up_late',@(New-KokoroHmxConvPlanesSteps -InputChannels 512 -OutputChannels 256 -Kernel 3 -Dilation 1 -WeightPlanes 2 -PlaneStride $planeStride -ActivePanels (16..47) -LabelPrefix 'g16tu_late')))
+        $bodies.Add(@('body_leaky_up',@(& $packets @(New-KokoroLeakyRelu16Steps -Slope 0.1 -LabelPrefix 'leakyup'))))
+        $bodies.Add(@('body_front10_interleave',@(& $packets @(New-KokoroPhaseInterleaveSteps -Phases 10 -Channels 256))))
+        $bodies.Add(@('body_front10_add',@(& $packets @(New-KokoroResidualAdd16Steps -Channels 256))))
     }
     elseif($Front){
-        $bodies.Add(@('body_conv_front_noise',@(New-KokoroHmxConvPlanesSteps -InputChannels 64 -OutputChannels 128 -Kernel 3 -Dilation 1 -WeightPlanes 2 -PlaneStride $planeStride -LabelPrefix 'g16fn')))
-        $bodies.Add(@('body_conv_front_up',@(New-KokoroHmxConvPlanesSteps -InputChannels 256 -OutputChannels 256 -Kernel 3 -Dilation 1 -WeightPlanes 2 -PlaneStride $planeStride -LabelPrefix 'g16fu')))
+        $bodies.Add(@('body_conv_front_noise',@(New-KokoroHmxConvPlanesSteps -InputChannels 64 -OutputChannels 128 -Kernel 3 -Dilation 1 -WeightPlanes 2 -PlaneStride $planeStride -ActivePanels @(2) -LabelPrefix 'g16fn')))
+        $bodies.Add(@('body_conv_front_up_early',@(New-KokoroHmxConvPlanesSteps -InputChannels 256 -OutputChannels 256 -Kernel 3 -Dilation 1 -WeightPlanes 2 -PlaneStride $planeStride -ActivePanels (0..15) -LabelPrefix 'g16fu_early')))
+
+        $bodies.Add(@('body_conv_front_up_late',@(New-KokoroHmxConvPlanesSteps -InputChannels 256 -OutputChannels 256 -Kernel 3 -Dilation 1 -WeightPlanes 2 -PlaneStride $planeStride -ActivePanels (8..23) -LabelPrefix 'g16fu_late')))
         $bodies.Add(@('body_combine_conv256',@(& $packets @(New-KokoroPlaneCombineSteps -Mode Conv -Channels 256 -Groups 3 -Group3Shifts -PlaneStride $planeStride -LabelPrefix 'combine256'))))
         $bodies.Add(@('body_front_interleave',@(& $packets @(New-KokoroFrontInterleaveSteps))))
         $bodies.Add(@('body_front_add',@(& $packets @(New-KokoroFrontAddSteps))))
@@ -1944,10 +1958,10 @@ function New-KokoroGenerator60x16RunSteps {
     }
     if($Decoder){ foreach($pair in (Get-KokoroDecoder16Bodies -Job $decJob)){ $bodies.Add($pair) } }
     if($Source){
-        foreach($pair in (Get-KokoroHarmonicSource16Bodies -PlaneStride $sourceLayout.Stft.PlaneStride -SeededNoise:$SeededNoise -Chunked:($chunkTilesOfSource -gt 0) -VectorPackets:$VectorPackets)){ $bodies.Add($pair) }
-        $bodies.Add(@('body_har_phase_major',@(New-KokoroHarPhaseMajor16Steps -Phases 6)))
-        $bodies.Add(@('body_har_phase_major_tiles',@(New-KokoroHarPhaseMajor16Steps -Phases 6 -TileBatch -LabelPrefix 'harphasemajor16tiles')))
-        $bodies.Add(@('body_har_phase_major_last',@(New-KokoroHarPhaseMajor16Steps -Phases 1 -LabelPrefix 'harphasemajor16last')))
+        foreach($pair in (Get-KokoroHarmonicSource16Bodies -PlaneStride $sourceLayout.Stft.PlaneStride -SeededNoise:$SeededNoise -Chunked:($chunkTilesOfSource -gt 0) -VectorPackets:$VectorPackets)){ if($VectorPackets -and $pair[0] -in 'body_stft_window','body_combine_stft','body_stft_polar'){ $pair[1]=Group-HexagonPackets $pair[1] }; $bodies.Add($pair) }
+        $bodies.Add(@('body_har_phase_major',@(& $packets @(New-KokoroHarPhaseMajor16Steps -Phases 6))))
+        $bodies.Add(@('body_har_phase_major_tiles',@(& $packets @(New-KokoroHarPhaseMajor16Steps -Phases 6 -TileBatch -LabelPrefix 'harphasemajor16tiles'))))
+        $bodies.Add(@('body_har_phase_major_last',@(& $packets @(New-KokoroHarPhaseMajor16Steps -Phases 1 -LabelPrefix 'harphasemajor16last'))))
     }
     foreach($pair in $spanBodies){ $bodies.Add($pair) }
     foreach($entry in $padBodies){

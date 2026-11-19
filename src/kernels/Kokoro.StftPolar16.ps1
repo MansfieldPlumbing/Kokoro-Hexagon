@@ -45,9 +45,23 @@ function New-KokoroStftPolar16Steps {
     # v22 mask 11..21, v21 0xFF00FF00.
     & $c 31 0; & $c 30 1; & $c 29 2; & $c 21 3; & $c 28 4; & $c 27 5; & $c 26 6; & $c 25 7; & $c 24 8; & $c 23 9; & $c 22 10
     # One row: x (v2), y (v3) from Re (v0), Im (v1); magnitude to v9, phase to v10, both int32 saturated to int16.
-    $row = { param([bool]$Odd)
-        if ($Odd) { $s.Add(@{Op='vand';d=2;s=0;t=30}); $s.Add(@{Op='vand';d=3;s=1;t=30}) }
-        else { $s.Add(@{Op='vasl-w';d=2;s=0;t=8}); $s.Add(@{Op='vasl-w';d=3;s=1;t=8}) }
+    # CORDIC needs only eleven bins in each 32-word vector. Use lanes 16..26 for the odd row.
+    $s.Add(@{Op='imm';d=7;i=64})
+    foreach($reg in 26,27){
+        $s.Add(@{Op='vand';d=$reg;s=$reg;t=23})
+        $s.Add(@{Op='valign';d=15;s=$reg;t=$reg;r=7})
+        $s.Add(@{Op='vor';d=$reg;s=$reg;t=15})
+    }
+    $row = {
+        $s.Add(@{Op='imm';d=7;i=64})
+        foreach($pair in @(@(0,2),@(1,3))){
+            $inReg,$outReg=$pair
+            $s.Add(@{Op='vand';d=15;s=$inReg;t=23})
+            $s.Add(@{Op='vasl-w';d=$outReg;s=15;t=8})
+            $s.Add(@{Op='vand';d=15;s=15;t=30})
+            $s.Add(@{Op='valign';d=15;s=15;t=15;r=7})
+            $s.Add(@{Op='vor';d=$outReg;s=$outReg;t=15})
+        }
         $s.Add(@{Op='vasr-w';d=2;s=2;t=5}); $s.Add(@{Op='vasr-w';d=3;s=3;t=5})
         # Half-plane x < 0: rotate by pi.
         $s.Add(@{Op='vasr-w';d=5;s=2;t=6}); $s.Add(@{Op='vasr-w';d=6;s=3;t=6})
@@ -73,11 +87,13 @@ function New-KokoroStftPolar16Steps {
     $s.Add(@{Op='label';Name="${LabelPrefix}_pair"})
     $s.Add(@{Op='vload';d=0;s=0;Offset=0}); $s.Add(@{Op='addi';d=7;s=0;i=2048}); $s.Add(@{Op='vload';d=1;s=7;Offset=0})
     $s.Add(@{Op='vxor';d=0;s=0;t=31}); $s.Add(@{Op='vxor';d=1;s=1;t=31})
-    & $row $false
-    $s.Add(@{Op='vand';d=11;s=9;t=29}); $s.Add(@{Op='vand';d=12;s=10;t=29})
-    & $row $true
-    $s.Add(@{Op='vasl-w';d=9;s=9;t=8}); $s.Add(@{Op='vor';d=11;s=11;t=9})
-    $s.Add(@{Op='vasl-w';d=10;s=10;t=8}); $s.Add(@{Op='vor';d=12;s=12;t=10})
+    & $row
+    $s.Add(@{Op='imm';d=7;i=64})
+    foreach($pair in @(@(9,11),@(10,12))){
+        $inReg,$outReg=$pair
+        $s.Add(@{Op='valign';d=15;s=$inReg;t=$inReg;r=7})
+        $s.Add(@{Op='vshuffe-h';d=$outReg;s=15;t=$inReg})
+    }
     # Phase lanes k -> 11 + k (valign by 84 bytes: Vd.ub[i] = Vu.ub[i - 44] for i >= 44), masks, bias, planes.
     $s.Add(@{Op='imm';d=7;i=84}); $s.Add(@{Op='valign';d=12;s=12;t=12;r=7})   # valign's Rt is r0..r7
     $s.Add(@{Op='vand';d=11;s=11;t=23}); $s.Add(@{Op='vand';d=12;s=12;t=22}); $s.Add(@{Op='vor';d=11;s=11;t=12})

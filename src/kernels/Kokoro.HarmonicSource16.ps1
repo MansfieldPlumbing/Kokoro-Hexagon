@@ -191,6 +191,49 @@ function New-KokoroSourceNoiseSteps {
     param([string]$LabelPrefix='sourcenoise')
     $s=[Collections.Generic.List[hashtable]]::new()
     $imm={param([int]$r,[long]$v) $u=[long]([uint32]($v -band 0xffffffffL)); $s.Add(@{Op='lo';x=$r;i=($u -band 65535)}); $s.Add(@{Op='hi';x=$r;i=($u -shr 16)}) }
+    # Bulk path for aligned whole vectors. Other shapes use the scalar loop below.
+    $scalar="${LabelPrefix}_scalar"; $bulk="${LabelPrefix}_bulk"
+    & $imm 8 127; $s.Add(@{Op='and';d=5;s=0;t=8})
+    & $imm 8 63; $s.Add(@{Op='and';d=6;s=1;t=8});$s.Add(@{Op='or';d=5;s=5;t=6})
+    & $imm 14 0; $s.Add(@{Op='gtu';d=0;s=5;t=14});$s.Add(@{Op='jump-p';u=0;Label=$scalar})
+    $gold=0x9E3779B9L
+    & $imm 10 $gold
+    $s.Add(@{Op='add';d=5;s=4;t=4});$s.Add(@{Op='mpyi';d=5;s=5;t=10})
+    & $imm 11 ((4*$gold) -band 0xffffffffL)
+    for($i=0;$i -lt 32;$i++){
+        $s.Add(@{Op='store';s=0;t=5;Offset=(4*$i)});$s.Add(@{Op='add';d=5;s=5;t=11})
+    }
+    $s.Add(@{Op='syncht'});$s.Add(@{Op='vload';d=0;s=0;Offset=0})
+    $s.Add(@{Op='vsplat';d=16;s=2});$s.Add(@{Op='vsplat';d=17;s=3})
+    $values=@($gold,0x352D,0x7FEB0000L,0xA68B,0x846C0000L,65535,131070,((128*$gold) -band 0xffffffffL))
+    for($i=0;$i -lt $values.Count;$i++){& $imm 5 $values[$i];$s.Add(@{Op='vsplat';d=(18+$i);s=5})}
+    & $imm 8 16;& $imm 9 15
+    $s.Add(@{Op='label';Name=$bulk})
+    # Four streams hold the two hash inputs of each even and odd output sample.
+    $s.Add(@{Op='vor';d=1;s=0;t=0})
+    foreach($i in 2..4){$s.Add(@{Op='vadd-w';d=$i;s=($i-1);t=18})}
+    foreach($i in 1..4){$s.Add(@{Op='vxor';d=$i;s=$i;t=16})}
+    foreach($round in 0,1,2){
+        foreach($i in 1..4){$s.Add(@{Op='vlsr-uw';d=($i+4);s=$i;t=$(if($round -eq 1){9}else{8})})}
+        foreach($i in 1..4){$s.Add(@{Op='vxor';d=$i;s=$i;t=($i+4)})}
+        if($round -lt 2){
+            foreach($i in 1..4){$s.Add(@{Op='vmpyie-w-uh';d=($i+4);s=(20+2*$round);t=$i})}
+            foreach($i in 1..4){$s.Add(@{Op='vmpyie-w-uh';d=$i;s=$i;t=(19+2*$round)})}
+            foreach($i in 1..4){$s.Add(@{Op='vadd-w';d=$i;s=$i;t=($i+4)})}
+        }
+    }
+    foreach($i in 1..4){
+        $s.Add(@{Op='vlsr-uw';d=($i+4);s=$i;t=8});$s.Add(@{Op='vand';d=$i;s=$i;t=23})
+        $s.Add(@{Op='vadd-w';d=$i;s=$i;t=($i+4)})
+    }
+    foreach($i in 1,3){
+        $s.Add(@{Op='vadd-w';d=$i;s=$i;t=($i+1)});$s.Add(@{Op='vsub-w';d=$i;s=$i;t=24})
+        $s.Add(@{Op='vmpyie-w-uh';d=$i;s=$i;t=17});$s.Add(@{Op='vasr-w';d=$i;s=$i;t=8})
+    }
+    $s.Add(@{Op='vshuffe-h';d=1;s=3;t=1});$s.Add(@{Op='vstore';s=0;t=1;Offset=0})
+    $s.Add(@{Op='vadd-w';d=0;s=0;t=25});$s.Add(@{Op='addi';d=0;s=0;i=128});$s.Add(@{Op='addi';d=1;s=1;i=-64})
+    $s.Add(@{Op='gtu';d=0;s=1;t=14});$s.Add(@{Op='jump-p';u=0;Label=$bulk})
+    $s.Add(@{Op='return'});$s.Add(@{Op='label';Name=$scalar})
     & $imm 10 0x9E3779B9L; & $imm 11 0x7FEB352DL; & $imm 12 0x846CA68BL; & $imm 13 131070; & $imm 15 65535; $s.Add(@{Op='imm';d=14;i=0})
     # r4 walks the prescaled counter modulo 2^32. Initialize from the absolute
     # first sample so overlapping chunks produce identical noise.

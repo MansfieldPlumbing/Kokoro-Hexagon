@@ -58,10 +58,12 @@ function New-KokoroPlaneCombineSteps {
     $tile = "${LabelPrefix}_tile"
     $s.Add(@{Op='label';Name=$tile})
     for ($b = 0; $b -lt $ob; $b++) {
-        $s.Add(@{Op='imm';d=14;i=16})
+        $width=if($Group3Shifts -and $shiftBase -lt 16){1}else{4}
+        $s.Add(@{Op='imm';d=14;i=(16/$width)})
         $pair = "${LabelPrefix}_b${b}"
         $s.Add(@{Op='label';Name=$pair})
         # Planes: r0 (A1 high), r0+S (A1 low), r0+2S (A2 high), r0+3S (A2 low).
+        $innerStart=$s.Count
         $s.Add(@{Op='vload';d=0;s=0;Offset=0})
         $s.Add(@{Op='add';d=11;s=0;t=10}); $s.Add(@{Op='vload';d=1;s=11;Offset=0})
         $s.Add(@{Op='add';d=11;s=11;t=10}); $s.Add(@{Op='vload';d=2;s=11;Offset=0})
@@ -74,10 +76,7 @@ function New-KokoroPlaneCombineSteps {
             else { $s.Add(@{Op='vasr-h';d=6;s=6;t=8}) }                     # sign-extend the odd byte
         }
         foreach ($g in $pairs) {
-            $s.Add(@{Op='vand';d=$g[0];s=$g[0];t=31})                 # high byte stays in the odd position
-            $s.Add(@{Op='vlsr-uw';d=$g[1];s=$g[1];t=8})
-            $s.Add(@{Op='vand';d=$g[1];s=$g[1];t=30})                 # low byte to the even position
-            $s.Add(@{Op='vor';d=$g[0];s=$g[0];t=$g[1]})
+            $s.Add(@{Op='vshuffo-b';d=$g[0];s=$g[0];t=$g[1]})
             $s.Add(@{Op='vxor';d=$g[0];s=$g[0];t=29})                 # signed window
         }
         $s.Add(@{Op='vadd-h-sat';d=4;s=0;t=2})                        # value, int16
@@ -90,8 +89,29 @@ function New-KokoroPlaneCombineSteps {
         }
         $s.Add(@{Op='vxor';d=4;s=4;t=29})
         $s.Add(@{Op='vstore';s=1;t=4;Offset=0})
-        $s.Add(@{Op='addi';d=0;s=0;i=128}); $s.Add(@{Op='addi';d=1;s=1;i=128})
-        if ($SeparateResidual) { $s.Add(@{Op='addi';d=5;s=5;i=128}) }
+        if($width -eq 4){
+            $body=$s.GetRange($innerStart,$s.Count-$innerStart)
+            $s.RemoveRange($innerStart,$body.Count)
+            # Each row pair owns four temporaries. After the saturating add,
+            # the output and residual can reuse the first two registers.
+            foreach($step in $body){
+                if($step.Op -eq 'add'){ $s.Add($step);continue }
+                foreach($lane in 0..3){
+                    $copy=$step.Clone()
+                    $fields=switch($step.Op){
+                        'vload' {'d';break}
+                        'vstore' {'t';break}
+                        'vlsr-uw' {'d';'s';break}
+                        default {'d';'s';'t'}
+                    }
+                    foreach($field in $fields){if($step[$field] -eq 6){$copy[$field]=24+$lane}elseif($step[$field] -lt 6){$copy[$field]=(@(0,1,2,3,0,1)[$step[$field]])+4*$lane}}
+                    if($copy.ContainsKey('Offset')){$copy.Offset=128*$lane}
+                    $s.Add($copy)
+                }
+            }
+        }
+        $s.Add(@{Op='addi';d=0;s=0;i=(128*$width)}); $s.Add(@{Op='addi';d=1;s=1;i=(128*$width)})
+        if ($SeparateResidual) { $s.Add(@{Op='addi';d=5;s=5;i=(128*$width)}) }
         $s.Add(@{Op='addi';d=14;s=14;i=-1})
         $s.Add(@{Op='gtu';d=0;s=14;t=7})
         $s.Add(@{Op='jump-p';u=0;Label=$pair})

@@ -18,22 +18,34 @@ function New-KokoroLeakyRelu16Steps {
     & $imm 13 (($q15 -shl 16) -bor $q15); $s.Add(@{Op='vsplat';d=29;s=13})   # round(slope * 32768) per halfword
     $s.Add(@{Op='vxor';d=28;s=28;t=28})                             # zero
     $s.Add(@{Op='imm';d=8;i=8}); $s.Add(@{Op='imm';d=7;i=0})
-    $loop = "${LabelPrefix}_v"
-    $s.Add(@{Op='label';Name=$loop})
-    $s.Add(@{Op='vload';d=0;s=0;Offset=0})
-    $s.Add(@{Op='vxor';d=0;s=0;t=31})                               # signed q
-    $s.Add(@{Op='vmin-h';d=1;s=0;t=28})
-    $s.Add(@{Op='vmax-h';d=2;s=0;t=28})
-    $s.Add(@{Op='vmpy-h-rnd-sat';d=1;s=1;t=29})
-    $s.Add(@{Op='vadd-h';d=0;s=2;t=1})                              # y
-    $s.Add(@{Op='vand';d=3;s=0;t=30}); $s.Add(@{Op='vxor';d=3;s=3;t=31})
-    $s.Add(@{Op='vasl-h';d=4;s=0;t=8})
-    $s.Add(@{Op='vstore';s=1;t=3;Offset=0})
-    $s.Add(@{Op='vstore';s=2;t=4;Offset=0})
-    $s.Add(@{Op='addi';d=0;s=0;i=128}); $s.Add(@{Op='addi';d=1;s=1;i=128}); $s.Add(@{Op='addi';d=2;s=2;i=128})
-    $s.Add(@{Op='addi';d=3;s=3;i=-1})
-    $s.Add(@{Op='gtu';d=0;s=3;t=7})
-    $s.Add(@{Op='jump-p';u=0;Label=$loop})
+    # The rounded scaled value lies between q and zero on negative inputs,
+    # and at most q on positive inputs. Their maximum is the leaky output.
+    $s.Add(@{Op='imm';d=6;i=3})
+    $bulk="${LabelPrefix}_bulk";$tail="${LabelPrefix}_tail";$done="${LabelPrefix}_done"
+    $s.Add(@{Op='gtu';d=0;s=3;t=6});$s.Add(@{Op='jump-p';u=0;Label=$bulk})
+    $s.Add(@{Op='label';Name=$tail})
+    $body={param([int]$width)
+        foreach($lane in 0..($width-1)){
+            $v=4*$lane
+            $s.Add(@{Op='vload';d=$v;s=0;Offset=(128*$lane)})
+            $s.Add(@{Op='vxor';d=$v;s=$v;t=31})
+            $s.Add(@{Op='vmpy-h-rnd-sat';d=($v+1);s=$v;t=29})
+            $s.Add(@{Op='vmax-h';d=$v;s=$v;t=($v+1)})
+            $s.Add(@{Op='vand';d=($v+1);s=$v;t=30});$s.Add(@{Op='vxor';d=($v+1);s=($v+1);t=31})
+            $s.Add(@{Op='vasl-h';d=($v+2);s=$v;t=8})
+            $s.Add(@{Op='vstore';s=1;t=($v+1);Offset=(128*$lane)})
+            $s.Add(@{Op='vstore';s=2;t=($v+2);Offset=(128*$lane)})
+        }
+        foreach($r in 0..2){$s.Add(@{Op='addi';d=$r;s=$r;i=(128*$width)})}
+        $s.Add(@{Op='addi';d=3;s=3;i=(-$width)})
+    }
+    & $body 1
+    $s.Add(@{Op='gtu';d=0;s=3;t=7});$s.Add(@{Op='jump-p';u=0;Label=$tail})
+    $s.Add(@{Op='eq';d=0;s=7;t=7});$s.Add(@{Op='jump-p';u=0;Label=$done})
+    $s.Add(@{Op='label';Name=$bulk});& $body 4
+    $s.Add(@{Op='gtu';d=0;s=3;t=6});$s.Add(@{Op='jump-p';u=0;Label=$bulk})
+    $s.Add(@{Op='gtu';d=0;s=3;t=7});$s.Add(@{Op='jump-p';u=0;Label=$tail})
+    $s.Add(@{Op='label';Name=$done})
     if (-not $NoReturn) { $s.Add(@{Op='return'}) }
     $s.ToArray()
 }

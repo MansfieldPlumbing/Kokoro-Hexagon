@@ -57,6 +57,13 @@ function New-KokoroTailSpectrum16Steps {
     for ($k = 0; $k -lt 5; $k++) { & $c (23 + $k) (30 + $k) }
     for ($k = 0; $k -lt 4; $k++) { & $c (16 + $k) $k }
     & $c 20 25; & $c 21 23
+    # Join low sixteen word lanes from two vectors. The eleven valid bins fit in each half.
+    $joinHalves={param([int]$dst,[int]$first,[int]$second)
+        $s.Add(@{Op='valign';d=22;s=$first;t=$first;r=3})
+        $s.Add(@{Op='valign';d=$dst;s=$second;t=22;r=3})
+    }
+    $s.Add(@{Op='imm';d=3;i=64})
+    foreach($reg in 16..19){& $joinHalves $reg $reg $reg}
     # Q31 multiply of the two rows: words x * 2^16 (even, odd) by the lane constant, plus the lane offset.
     $rows = { param([int]$src,[int]$k,[int]$m,[int]$de,[int]$do)
         $s.Add(@{Op='vasl-w';d=2;s=$src;t=8}); $s.Add(@{Op='vand';d=3;s=$src;t=30})
@@ -69,13 +76,20 @@ function New-KokoroTailSpectrum16Steps {
     $s.Add(@{Op='label';Name="${LabelPrefix}_tile"})
     $s.Add(@{Op='imm';d=12;i=16})
     $s.Add(@{Op='label';Name="${LabelPrefix}_pair"})
-    $s.Add(@{Op='vload';d=0;s=0;Offset=0})
-    $s.Add(@{Op='addi';d=14;s=0;i=2048}); $s.Add(@{Op='vload';d=1;s=14;Offset=0})
-    $s.Add(@{Op='vxor';d=0;s=0;t=31}); $s.Add(@{Op='vxor';d=1;s=1;t=31})
-    # Magnitude: w (v4 even row, v5 odd row) = min(fine, coarse + delta), clamped below 15.
+    $s.Add(@{Op='vload';d=0;s=0;Offset=0});$s.Add(@{Op='vload';d=6;s=0;Offset=128})
+    $s.Add(@{Op='addi';d=14;s=0;i=2048})
+    $s.Add(@{Op='vload';d=1;s=14;Offset=0});$s.Add(@{Op='vload';d=7;s=14;Offset=128})
+    foreach($reg in 0,1,6,7){$s.Add(@{Op='vxor';d=$reg;s=$reg;t=31})}
+    $s.Add(@{Op='imm';d=3;i=44})
+    $s.Add(@{Op='valign';d=10;s=0;t=0;r=3});$s.Add(@{Op='valign';d=15;s=6;t=6;r=3})
+    $s.Add(@{Op='imm';d=3;i=64})
+    & $joinHalves 10 10 15
+    & $joinHalves 0 0 6
+    & $joinHalves 1 1 7
     & $rows 0 16 17 4 5
-    $s.Add(@{Op='valign';d=10;s=0;t=0;r=3})
     & $c 11 35; & $c 12 36
+    & $joinHalves 11 11 11
+    & $joinHalves 12 12 12
     & $rows 10 11 12 6 7
     $s.Add(@{Op='vmin-w';d=4;s=4;t=6}); $s.Add(@{Op='vmin-w';d=5;s=5;t=7})
     & $c 6 19; $s.Add(@{Op='vmin-w';d=4;s=4;t=6}); $s.Add(@{Op='vmin-w';d=5;s=5;t=6})
@@ -123,11 +137,19 @@ function New-KokoroTailSpectrum16Steps {
         $s.Add(@{Op='vand';d=2;s=2;t=29}); $s.Add(@{Op='vasl-w';d=3;s=3;t=8}); $s.Add(@{Op='vor';d=2;s=2;t=3})
         & $c 3 24; $s.Add(@{Op='vand';d=4;s=2;t=3}); $s.Add(@{Op='vxor';d=4;s=4;t=31})
         $s.Add(@{Op='vasl-h';d=5;s=2;t=9})
-        $s.Add(@{Op='addi';d=14;s=1;i=$part[1]}); $s.Add(@{Op='vstore';s=14;t=4;Offset=0})
-        $s.Add(@{Op='addi';d=15;s=2;i=$part[1]}); $s.Add(@{Op='vstore';s=15;t=5;Offset=0})
+        foreach($plane in 0,1){
+            $reg=4+$plane
+            $s.Add(@{Op='addi';d=14;s=(1+$plane);i=$part[1]})
+            # High bytes use biased zero for the inactive half, low bytes use zero.
+            if($plane -eq 0){$s.Add(@{Op='vor';d=15;s=31;t=31})}else{$s.Add(@{Op='vxor';d=15;s=15;t=15})}
+            & $joinHalves 3 $reg 15
+            $s.Add(@{Op='vstore';s=14;t=3;Offset=0})
+            $s.Add(@{Op='valign';d=3;s=15;t=$reg;r=3})
+            $s.Add(@{Op='vstore';s=14;t=3;Offset=128})
+        }
     }
-    $s.Add(@{Op='addi';d=0;s=0;i=128}); $s.Add(@{Op='addi';d=1;s=1;i=128}); $s.Add(@{Op='addi';d=2;s=2;i=128})
-    $s.Add(@{Op='addi';d=12;s=12;i=-1})
+    foreach($r in 0..2){$s.Add(@{Op='addi';d=$r;s=$r;i=256})}
+    $s.Add(@{Op='addi';d=12;s=12;i=-2})
     $s.Add(@{Op='gtu';d=0;s=12;t=13})
     $s.Add(@{Op='jump-p';u=0;Label="${LabelPrefix}_pair"})
     $s.Add(@{Op='addi';d=0;s=0;i=2048}); $s.Add(@{Op='addi';d=1;s=1;i=2048}); $s.Add(@{Op='addi';d=2;s=2;i=2048})

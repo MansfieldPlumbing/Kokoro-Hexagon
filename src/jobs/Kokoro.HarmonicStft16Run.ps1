@@ -106,7 +106,7 @@ function Get-KokoroHarmonicStft16Bodies {
     param([Parameter(Mandatory)][long]$PlaneStride)
     @(
         @('body_stft_window',@(New-KokoroStftWindow16Steps)),
-        @('body_conv_stft',@(New-KokoroHmxConvPlanesSteps -InputChannels 64 -OutputChannels 64 -Kernel 3 -Dilation 1 -WeightPlanes 2 -PlaneStride $PlaneStride -LabelPrefix 'h16stft')),
+        @('body_conv_stft',@(New-KokoroHmxConvPlanesSteps -InputChannels 64 -OutputChannels 64 -Kernel 3 -Dilation 1 -WeightPlanes 2 -PlaneStride $PlaneStride -ActivePanels @(2) -LabelPrefix 'h16stft')),
         @('body_combine_stft',@(New-KokoroPlaneCombineSteps -Mode Conv -Channels 64 -Groups 3 -Group3Shifts -PlaneStride $PlaneStride -LabelPrefix 'h16combine')),
         @('body_stft_polar',@(New-KokoroStftPolar16Steps)))
 }

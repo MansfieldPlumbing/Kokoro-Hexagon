@@ -13,12 +13,20 @@ function New-KokoroBranchMean16Steps {
     $s.Add(@{Op='asl-i';d=9;s=4;i=$(if($Channels -eq 128){6}else{7})}); $s.Add(@{Op='imm';d=7;i=0})
     $loop="${LabelPrefix}_vector"
     $s.Add(@{Op='label';Name=$loop})
-    $s.Add(@{Op='vload';d=0;s=0;Offset=0}); $s.Add(@{Op='vload';d=1;s=1;Offset=0}); $s.Add(@{Op='vload';d=2;s=2;Offset=0})
-    foreach($v in 0,1,2){ $s.Add(@{Op='vxor';d=$v;s=$v;t=3}); $s.Add(@{Op='vmpy-h-rnd-sat';d=$v;s=$v;t=4}) }
-    $s.Add(@{Op='vadd-h-sat';d=0;s=0;t=1}); $s.Add(@{Op='vadd-h-sat';d=0;s=0;t=2}); $s.Add(@{Op='vxor';d=0;s=0;t=3})
-    $s.Add(@{Op='vstore';s=3;t=0;Offset=0})
-    foreach($r in 0,1,2,3){ $s.Add(@{Op='addi';d=$r;s=$r;i=128}) }
-    $s.Add(@{Op='addi';d=9;s=9;i=-1}); $s.Add(@{Op='gtu';d=0;s=9;t=7}); $s.Add(@{Op='jump-p';u=0;Label=$loop})
+    # A tile contains a multiple of four vectors. Read all three inputs for the
+    # four disjoint output offsets before any store, including in-place calls.
+    foreach($lane in 0..3){foreach($r in 0..2){
+        $s.Add(@{Op='vload';d=(5+3*$lane+$r);s=$r;Offset=(128*$lane)})
+    }}
+    foreach($v in 5..16){$s.Add(@{Op='vxor';d=$v;s=$v;t=3});$s.Add(@{Op='vmpy-h-rnd-sat';d=$v;s=$v;t=4})}
+    foreach($lane in 0..3){
+        $v=5+3*$lane
+        $s.Add(@{Op='vadd-h-sat';d=$v;s=$v;t=($v+1)})
+        $s.Add(@{Op='vadd-h-sat';d=$v;s=$v;t=($v+2)})
+        $s.Add(@{Op='vxor';d=$v;s=$v;t=3});$s.Add(@{Op='vstore';s=3;t=$v;Offset=(128*$lane)})
+    }
+    foreach($r in 0..3){$s.Add(@{Op='addi';d=$r;s=$r;i=512})}
+    $s.Add(@{Op='addi';d=9;s=9;i=-4}); $s.Add(@{Op='gtu';d=0;s=9;t=7}); $s.Add(@{Op='jump-p';u=0;Label=$loop})
     if(-not $NoReturn){ $s.Add(@{Op='return'}) }
     $s.ToArray()
 }

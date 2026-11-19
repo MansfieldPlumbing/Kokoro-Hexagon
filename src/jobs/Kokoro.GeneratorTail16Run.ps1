@@ -179,7 +179,7 @@ function Get-KokoroGeneratorTail16Bodies {
         @('body_conv_post',@(New-KokoroHmxConvPlanesSteps -InputChannels 128 -OutputChannels 64 -Kernel 7 -Dilation 1 -WeightPlanes 2 -PlaneStride $planeStride -LabelPrefix 't16post')),
         @('body_combine',@(New-KokoroPlaneCombineSteps -Mode Conv -Channels 64 -Groups 3 -PlaneStride $planeStride -LabelPrefix 't16combine')),
         @('body_spectrum',@(New-KokoroTailSpectrum16Steps)),
-        @('body_conv_istft',@(New-KokoroHmxConvPlanesSteps -InputChannels 64 -OutputChannels 64 -Kernel 7 -Dilation 1 -WeightPlanes 2 -PlaneStride $planeStride -LabelPrefix 't16istft')))
+        @('body_conv_istft',@(New-KokoroHmxConvPlanesSteps -InputChannels 64 -OutputChannels 64 -Kernel 7 -Dilation 1 -WeightPlanes 2 -PlaneStride $planeStride -ActivePanels (4..11) -LabelPrefix 't16istft')))
     $bodies
 }
 

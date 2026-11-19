@@ -47,7 +47,7 @@ function New-KokoroAdaInSnakeTurnsSteps {
     & $splat 29 0xFF00FF00L                     # high byte of each packed output
     & $splat 28 (& $half 16384)                 # 1.0 in Q14
     for ($k = 0; $k -lt 5; $k++) { & $splat (23 + $k) (& $half $q14[$k]) }   # v23 = h0 ... v27 = h4
-    & $splat 22 10430                           # round(2^16 / (2*pi)) in each even halfword
+    & $splat 22 (& $half 10430)                           # round(2^16 / (2*pi)) in each even halfword
     & $splat 18 32767
     & $splat 17 -32768
     foreach ($kv in @(@(8,16),@(9,8),@(10,1),@(11,6),@(7,0))) { $s.Add(@{Op='imm';d=$kv[0];i=$kv[1]}) }
@@ -75,17 +75,18 @@ function New-KokoroAdaInSnakeTurnsSteps {
                 $s.Add(@{Op='vadd-w';d=$m[0];s=$m[0];t=2})
             }
         }
-        $s.Add(@{Op='imm';d=14;i=16})
+        $width=4
+        $s.Add(@{Op='imm';d=14;i=(16/$width)})
         $s.Add(@{Op='label';Name=$pair})
+        $innerStart=$s.Count
         $s.Add(@{Op='vload';d=0;s=5;Offset=0})
         $s.Add(@{Op='vxor';d=0;s=0;t=31})                       # signed halfwords
         $s.Add(@{Op='vasl-w';d=1;s=0;t=8})                      # even row x * 2^16
-        $s.Add(@{Op='vand';d=2;s=0;t=30})                       # odd row  x * 2^16
-        foreach ($p in @(@(3,1),@(4,2))) {                      # P = K*x*2^16 >> 31 + M, QT turns
-            $s.Add(@{Op='vmpye-w-uh';d=$p[0];s=$p[1];t=14})
-            $s.Add(@{Op='vmpyo-acc-w-h-rnd-sat-shift';d=$p[0];s=$p[1];t=14})
-            $s.Add(@{Op='vadd-w';d=$p[0];s=$p[0];t=15})
-        }
+        # Both rows multiply a signed halfword by a Q31 constant. The old low
+        # partial product was exact because the activation word had 16 zero low bits.
+        $s.Add(@{Op='vmpyo-w-h-rnd';d=3;s=14;t=1})
+        $s.Add(@{Op='vmpyo-w-h-rnd';d=4;s=14;t=0})
+        $s.Add(@{Op='vadd-w';d=3;s=3;t=15}); $s.Add(@{Op='vadd-w';d=4;s=4;t=15})
         # 16-bit fractional turn of both rows in one halfword vector.
         $s.Add(@{Op='vlsr-uw';d=5;s=3;t=$sh.Fraction}); $s.Add(@{Op='vlsr-uw';d=6;s=4;t=$sh.Fraction})
         $s.Add(@{Op='vshuffe-h';d=5;s=6;t=5})
@@ -98,29 +99,57 @@ function New-KokoroAdaInSnakeTurnsSteps {
         $s.Add(@{Op='vmpy-h-rnd-sat';d=7;s=7;t=5})              # sin(pi/2 u), Q14
         $s.Add(@{Op='vadd-h-sat';d=7;s=7;t=28})                 # 1 - cos, Q14
         # Back to words per row, scale (1 - cos)/(2 pi) into QT turns, add to P.
-        $s.Add(@{Op='vasl-w';d=8;s=7;t=8}); $s.Add(@{Op='vasr-w';d=8;s=8;t=8})
-        $s.Add(@{Op='vasr-w';d=9;s=7;t=8})
+        $s.Add(@{Op='vmpy-ww-h-h';d=8;s=7;t=22})
         foreach ($p in @(@(8,3),@(9,4))) {
-            $s.Add(@{Op='vmpyie-w-uh';d=$p[0];s=$p[0];t=22})
+
             $s.Add(@{Op='vasr-w';d=$p[0];s=$p[0];t=$sh.Cos})
             $s.Add(@{Op='vadd-w';d=$p[1];s=$p[1];t=$p[0]})
         }
         foreach ($p in @(@(10,3),@(11,4))) {                    # out = V*S >> 31, clamped to int16
             $s.Add(@{Op='vmpye-w-uh';d=$p[0];s=$p[1];t=16})
             $s.Add(@{Op='vmpyo-acc-w-h-rnd-sat-shift';d=$p[0];s=$p[1];t=16})
-            $s.Add(@{Op='vmax-w';d=$p[0];s=$p[0];t=17})
-            $s.Add(@{Op='vmin-w';d=$p[0];s=$p[0];t=18})
         }
         # Interleave the clamped rows once. The high plane flips the sign bit;
         # the halfword shift places each low byte directly in its window lane.
-        $s.Add(@{Op='vshuffe-h';d=10;s=11;t=10})
+        $s.Add(@{Op='vsat-h-w';d=10;s=11;t=10})
         $s.Add(@{Op='vand';d=12;s=10;t=29}); $s.Add(@{Op='vxor';d=12;s=12;t=31})
         $s.Add(@{Op='vstore';s=6;t=12;Offset=0})
         if ($MirrorDelta) { $s.Add(@{Op='add';d=17;s=6;t=18}); $s.Add(@{Op='vstore';s=17;t=12;Offset=0}) }
         $s.Add(@{Op='vasl-h';d=10;s=10;t=9})
         $s.Add(@{Op='vstore';s=13;t=10;Offset=0})
         if ($MirrorDelta) { $s.Add(@{Op='add';d=17;s=13;t=18}); $s.Add(@{Op='vstore';s=17;t=10;Offset=0}) }
-        $s.Add(@{Op='addi';d=5;s=5;i=128}); $s.Add(@{Op='addi';d=6;s=6;i=128}); $s.Add(@{Op='addi';d=13;s=13;i=128})
+        # Generate the original row-pair operations once, then schedule four independent inputs.
+        if($width -eq 4){
+            $body=$s.GetRange($innerStart,$s.Count-$innerStart)
+            $s.RemoveRange($innerStart,$body.Count)
+            # Each column names one temporary in a row pair. The two later pairs reuse
+            # polynomial temporaries after the first two pairs have stored their output.
+            $map=0,1,2,2,0,1,3,4,1,3,1,3,2
+            $banks=@(@(2,0,3,1,4),@(5,6,9,7,8),@(12,10,13,11,17),@(20,18,21,19,30))
+            foreach($section in 0){
+                $ops=$body
+                $lanes=0..3
+                foreach($step in $ops){
+                    if($step.Op -eq 'add'){ $s.Add($step); continue }
+                    foreach($lane in $lanes){
+                        $copy=$step.Clone()
+                        $fields=switch -Regex ($step.Op){
+                            '^vload$' { 'd'; break }
+                            '^vstore$' { 't'; break }
+                            '^vabs|^vasl-|^vasr-|^vlsr-' { 'd';'s'; break }
+                            default {'d';'s';'t'}
+                        }
+                        foreach($field in $fields){
+                            $v=$step[$field]
+                            if($v -lt $map.Count){$copy[$field]=$banks[$lane][$map[$v]]}
+                        }
+                        if($copy.ContainsKey('Offset')){$copy.Offset=128*$lane}
+                        $s.Add($copy)
+                    }
+                }
+            }
+        }
+        $s.Add(@{Op='addi';d=5;s=5;i=(128*$width)}); $s.Add(@{Op='addi';d=6;s=6;i=(128*$width)}); $s.Add(@{Op='addi';d=13;s=13;i=(128*$width)})
         $s.Add(@{Op='addi';d=14;s=14;i=-1})
         $s.Add(@{Op='gtu';d=0;s=14;t=7})
         $s.Add(@{Op='jump-p';u=0;Label=$pair})
