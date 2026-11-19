@@ -156,3 +156,14 @@ Tried emitting a source-complete generator Export job for all 56,521 generator f
 A bounded-memory matched reference needs a stage barrier at each AdaIN site. Accumulate each channel's sum, squared sum, and count over the complete valid stage tensor in spans, derive one coefficient record, then stream the stage with that record. Save the stage tensor in DDR or recompute its producer on the second pass. Check the moment and coefficient records against the existing 130-tick Export path before moving to the lighthouse length. To isolate the normalization policy, feed those exported coefficients back through the existing backward job with the original decoder features, F0, seed, and weights. The layer job uses a different weight representation, so terminal PCM from that job alone would confound the comparison.
 
 The existing moments kernel stores signed 32-bit S1, A2, AB, and B2 partials. B2 can grow by 65,025 per valid frame, so its worst-case signed limit is 33,025 frames. At 56,521 frames the worst-case B2 is 3,675,278,025. A checked host arithmetic probe split that input into chunks of at most 7,801 frames, cast each partial to signed int32, and recovered the full result by widening before addition. A streamed exporter needs to merge partial records in int64, reconstruct squared sums in int64, and pass the valid frame count (excluding tile padding) to coefficient calculation.
+
+### Span size and flutter on SM8550
+
+Rendered the same 942-tick lighthouse passage through the pinned adb client with 120-tile spans first and 60-tile spans second. Each configuration ran one warmup and four timed renders. The generator input, weights, coefficients, seed, and 7,602,176 bytes of VTCM were held constant. All ten PCM hashes matched and both launches restored startup files after playback with zero underruns.
+
+| Span tiles | Spans | Scheduled state save and restore | Scheduled weights | Warm median generator DSP | Warm median text to PCM |
+| ---: | ---: | ---: | ---: | ---: | ---: |
+| 60 | 5 | 167.24 MB | 679.53 MB | 235.90 ms | 5,154.2 ms |
+| 120 | 3 | 83.62 MB | 657.80 MB | 234.43 ms | 5,223.4 ms |
+
+The 120-tile configuration still measured 3.10 LU of level loss and 6.90 dB of excess modulation. Moving these span boundaries leaves the affected waveform byte-identical. The DSP timing ranges overlap and the end-to-end median increased. The default stays at 60 tiles. A 300-tile configuration failed emission because its front required 16,121,856 bytes of VTCM, above the 8 MiB limit.
