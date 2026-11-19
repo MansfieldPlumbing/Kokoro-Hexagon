@@ -736,7 +736,7 @@ function New-KokoroGenerator60x16RunSteps {
     # +28 the interval's start tick (low word).
     $lockstepTelemetryOffset=$scratchOffset+60928
     # Spin waits poll the pool between pause(#16) instructions.
-    $poolPause=16
+    $poolPause=128
     $futexWait={param([int]$addrReg,[int]$valueReg) $s.Add(@{Op='addi';d=1;s=$valueReg;i=0}); $s.Add(@{Op='addi';d=0;s=$addrReg;i=0}); $s.Add(@{Op='imm';d=3;i=0}); $s.Add(@{Op='imm';d=4;i=-1}); $s.Add(@{Op='imm';d=5;i=-1}); $s.Add(@{Op='trap0';i=0x20}) }
     # Tile-parallel call: arguments are VTCM offsets (r18-relative); perTile ones advance 8192 bytes per tile.
     # With -Moments the second argument is the job's moments record: each worker accumulates into its own
@@ -1362,22 +1362,6 @@ function New-KokoroGenerator60x16RunSteps {
         & $matrixLock; & $mark 'Lockstep'
     }
     # Chunked schedule. VTCM bytes srcOff -> destOff on the main thread, 1 KiB at a time.
-    $copyTiles={param([long]$destOff,[long]$srcOff,[long]$bytes)
-        # History and work occupy disjoint regions. Pipeline a load and the previous store,
-        # using an address in the middle of each 2 KiB crouton for signed vector offsets.
-        & $ptr 4 18 ($srcOff+1024); & $ptr 5 18 ($destOff+1024); & $imm 6 ($bytes/2048)
-        $s.Add(@{Op='imm';d=7;i=0})
-        $n=& $label; $s.Add(@{Op='label';Name=$n})
-        $s.Add(@{Op='vload';d=0;s=4;Offset=-1024})
-        for($k=1;$k -lt 16;$k++){
-            $s.Add(@{Op='vload';d=$k;s=4;Offset=(128*$k-1024);Pack=1})
-            $s.Add(@{Op='vstore';s=5;t=($k-1);Offset=(128*($k-1)-1024)})
-        }
-        $s.Add(@{Op='vstore';s=5;t=15;Offset=896})
-        $s.Add(@{Op='addi';d=4;s=4;i=2048;Pack=1});$s.Add(@{Op='addi';d=5;s=5;i=2048})
-        $s.Add(@{Op='addi';d=6;s=6;i=-1});$s.Add(@{Op='gtu';d=0;s=6;t=7});$s.Add(@{Op='jump-p';u=0;Label=$n})
-        & $mark 'TileFix'
-    }
     # Stage st's saved history of branch b in plane (0 high, 1 low), and its conv-input buffer's tile i (0 and 1 history,
     # 2 + w tile w of the block).
     $historyAt={param([int]$st,[int]$plane,[int]$branch) $tileRegions.History+(2L*$st+$plane)*$historyBytes+$branch*$guardBytes}
@@ -1386,6 +1370,41 @@ function New-KokoroGenerator60x16RunSteps {
     # -AsyncWeights: a run queues its first stage's weights; each stage waits for its own just before its convolutions,
     # and as each branch's convolution returns queues that branch's weights of the next stage (stage 5 the next step's
     # stage 0) into the slot it freed; a step's input and output transfers start with nothing in flight.
+    # Workers copy disjoint, whole croutons. The existing dispatch join and publication fence precede HMX reads.
+    $historyWrappers=@{}
+    $historyBody={param($baseBody,$st,$worker,$saving)
+        $name="hist_${baseBody}_${st}_${worker}_${saving}"
+        if($historyWrappers.ContainsKey($name)){ return $name }
+        $s=[Collections.Generic.List[hashtable]]::new()
+        $s.Add(@{Op='allocframe';Bytes=8})
+        $baseReg=if($saving){0}else{1}
+        $known=if($saving){$tileRegions.Planes+$worker*[long]$tileBytes}else{& $workAt 0 0 (2+$worker)}
+        $ranges=@(foreach($plane in 0,1){for($branch=0;$branch -lt $branches;$branch++){
+            $p=[int][Math]::Floor($st/2); $reach=if($st%2){($sectionKernels[$branch]-1)/2}else{& $pairReach $branch $p}
+            $needed=[int][Math]::Ceiling(((& $tapDelay $branch $st)+$reach)/32.0); $skip=2-$needed
+            $history=(& $historyAt $st $plane $branch)+$skip*$tileBytes
+            $work=& $workAt $plane $branch ($skip+$batch*[int]$saving)
+            @{Src=$(if($saving){$work}else{$history});Dst=$(if($saving){$history}else{$work});Size=($needed*$tileBytes)}
+        }})
+        $total=0L;foreach($r in $ranges){$total+=$r.Size}
+        $lo=[long]([Math]::Floor($total*$worker/$batch/2048)*2048)
+        $hi=[long]([Math]::Floor($total*($worker+1)/$batch/2048)*2048)
+        $at=0L
+        foreach($r in $ranges){
+            $first=[Math]::Max($at,$lo);$last=[Math]::Min(($at+$r.Size),$hi)
+            if($last -gt $first){
+                & $imm 7 ($r.Src+$first-$at-$known+1024);$s.Add(@{Op='add';d=7;s=$baseReg;t=7})
+                & $imm 8 ($r.Dst+$first-$at-$known+1024);$s.Add(@{Op='add';d=8;s=$baseReg;t=8})
+                & $imm 9 (($last-$first)/2048)
+                & $call 'history_copy_croutons'
+            }
+            $at+=$r.Size
+        }
+        & $call $baseBody
+        $s.Add(@{Op='dealloc-return'})
+        $historyWrappers[$name]=$s.ToArray()
+        return $name
+    }
     $chunkedStep={param($block)
         $inputTiles=if($null -eq $block){$batch}else{[math]::Max(0,[math]::Min($batch,$tiles-$batch*$block))}
         & $dmaWait
@@ -1400,13 +1419,14 @@ function New-KokoroGenerator60x16RunSteps {
         for($st=0;$st -lt 6;$st++){
             $p=[int][math]::Floor($st/2); $half=$st % 2; $src=& $fillSource $st
             if(-not $AsyncWeights){ for($branch=0;$branch -lt $branches;$branch++){ & $dma 18 ($tileRegions.Weights+$streamAt[$branch]) 21 $tileStages[6*$branch+$st].WeightOffset $tileStages[6*$branch+$st].WeightBytes } }
-            for($plane=0;$plane -lt 2;$plane++){ for($branch=0;$branch -lt $branches;$branch++){ $reach=if($st%2){($sectionKernels[$branch]-1)/2}else{& $pairReach $branch $p}; $needed=[int][Math]::Ceiling(((& $tapDelay $branch $st)+$reach)/32.0); $skip=2-$needed; & $copyTiles (& $workAt $plane $branch $skip) ((& $historyAt $st $plane $branch)+$skip*$tileBytes) ($needed*$tileBytes) } }
+
             $segments=[Collections.Generic.List[object]]::new()
             for($w=0;$w -lt $batch;$w++){
                 $segment=@{Count=1;Body="body_turnsB_$($src[1])$sfx";Arguments=@((& $tileArg $src[0] $block $w),(& $workAt 0 0 (2+$w)),(& $workAt 1 0 (2+$w)),($tileRegions.Kms+$st*$kmsBytes))}
                 if($ControllerContact){ $segment.Extra=@{Controller=$true;Block=$block;Delta=0;Within=($w-$p)} }
                 $segments.Add($segment)
             }
+            for($worker=0;$worker -lt $segments.Count;$worker++){ $segments[$worker].Body=& $historyBody $segments[$worker].Body $st $worker $false }
             & $dispatch $segments[0].Body $segments.ToArray(); & $mark 'AdaInSnake'
             if($null -ne $block){
                 for($w=0;$w -lt $batch;$w++){ for($branch=0;$branch -lt $branches;$branch++){
@@ -1426,7 +1446,7 @@ function New-KokoroGenerator60x16RunSteps {
                 if($AsyncWeights){ & $streamQueued (($st+1) % 6) $branch }
             }
             & $mark 'HmxConv'; & $sync
-            for($plane=0;$plane -lt 2;$plane++){ for($branch=0;$branch -lt $branches;$branch++){ $reach=if($st%2){($sectionKernels[$branch]-1)/2}else{& $pairReach $branch $p}; $needed=[int][Math]::Ceiling(((& $tapDelay $branch $st)+$reach)/32.0); $skip=2-$needed; & $copyTiles ((& $historyAt $st $plane $branch)+$skip*$tileBytes) (& $workAt $plane $branch ($batch+$skip)) ($needed*$tileBytes) } }
+
             $rAt=$tileRegions.Records+$st*$recordBytes; $segments=[Collections.Generic.List[object]]::new()
             for($w=0;$w -lt $batch;$w++){
                 $planes=$tileRegions.Planes+$w*[long]$tileBytes
@@ -1436,6 +1456,7 @@ function New-KokoroGenerator60x16RunSteps {
                     $segments.Add(@{Count=1;Body="body_combine_residualB_$($residual[1])$sfx";Arguments=@($planes,(& $tileArg ($tileRegions.Levels+[long]$branches*$p*$ringBytes) $block $w),($rAt+$ratiosAt));Extra=(& $tileArg $residual[0] $block ($w-1))})
                 }
             }
+            for($worker=0;$worker -lt $segments.Count;$worker++){ $segments[$worker].Body=& $historyBody $segments[$worker].Body $st $worker $true }
             & $dispatch $segments[0].Body $segments.ToArray(); & $mark 'Combine'
             if($half -eq 1 -and $null -ne $block){
                 for($w=0;$w -lt $batch;$w++){
@@ -1927,31 +1948,31 @@ function New-KokoroGenerator60x16RunSteps {
             $bodies.Add((& $branchBodies "body_combine_residualB_$($sharing[0])$sfx" "body_combine_residual_separate$sfx" @($planesStride,$ringBytes,(6L*$recordBytes),0L,0L,$sharing[1])))
         }
         $bodies.Add((& $branchBodies "body_combine_convB$sfx" "body_combine_conv$sfx" @($planesStride,$ringBytes,(6L*$recordBytes),0L,0L,0L)))
-        for($branch=0;$branch -lt $branches;$branch++){ for($st=0;$st -lt 6;$st++){ $bodies.Add(@("body_convB_b${branch}_s$st$sfx",@(New-KokoroHmxConvPlanesSteps -InputChannels $Channels -OutputChannels $Channels -Kernel $sectionKernels[$branch] -Dilation $(if($st % 2){1}else{1+$st}) @convPlanes -PlaneStride $planeStride -TapDelay (& $tapDelay $branch $st) -LabelPrefix "g16b_b${branch}_s$st$sfx"))) } }
+        for($branch=0;$branch -lt $branches;$branch++){ for($st=0;$st -lt 6;$st++){ $bodies.Add(@("body_convB_b${branch}_s$st$sfx",@(New-KokoroHmxConvPlanesSteps -LowByteOnlyGroup3 -InputChannels $Channels -OutputChannels $Channels -Kernel $sectionKernels[$branch] -Dilation $(if($st % 2){1}else{1+$st}) @convPlanes -PlaneStride $planeStride -TapDelay (& $tapDelay $branch $st) -LabelPrefix "g16b_b${branch}_s$st$sfx"))) } }
     }
     $bodies.Add(@("body_mean$sfx",@(& $packets @(New-KokoroBranchMean16Steps -Channels $Channels -LabelPrefix "branchmean16$sfx"))))
-    for($b=0;$b -lt $branches;$b++){foreach($d in 1,3,5){$bodies.Add(@("body_conv_b${b}_d$d$sfx",@(New-KokoroHmxConvPlanesSteps -InputChannels $Channels -OutputChannels $Channels -Kernel $sectionKernels[$b] -Dilation $d @convPlanes -PlaneStride $planeStride -LabelPrefix "g16_b${b}_d$d$sfx")))}}
+    for($b=0;$b -lt $branches;$b++){foreach($d in 1,3,5){$bodies.Add(@("body_conv_b${b}_d$d$sfx",@(New-KokoroHmxConvPlanesSteps -LowByteOnlyGroup3 -InputChannels $Channels -OutputChannels $Channels -Kernel $sectionKernels[$b] -Dilation $d @convPlanes -PlaneStride $planeStride -LabelPrefix "g16_b${b}_d$d$sfx")))}}
     if($front10){
-        $bodies.Add(@('body_conv_front10_noise',@(New-KokoroHmxConvPlanesSteps -InputChannels 256 -OutputChannels 256 -Kernel 3 -Dilation 1 -WeightPlanes 2 -PlaneStride $planeStride -ActivePanels @(2,3,4,8,9,10,11,12,16,17,18) -LabelPrefix 'g16tn')))
-        $bodies.Add(@('body_conv_front10_up_early',@(New-KokoroHmxConvPlanesSteps -InputChannels 512 -OutputChannels 256 -Kernel 3 -Dilation 1 -WeightPlanes 2 -PlaneStride $planeStride -ActivePanels (0..31) -LabelPrefix 'g16tu_early')))
+        $bodies.Add(@('body_conv_front10_noise',@(New-KokoroHmxConvPlanesSteps -LowByteOnlyGroup3 -InputChannels 256 -OutputChannels 256 -Kernel 3 -Dilation 1 -WeightPlanes 2 -PlaneStride $planeStride -ActivePanels @(2,3,4,8,9,10,11,12,16,17,18) -LabelPrefix 'g16tn')))
+        $bodies.Add(@('body_conv_front10_up_early',@(New-KokoroHmxConvPlanesSteps -LowByteOnlyGroup3 -InputChannels 512 -OutputChannels 256 -Kernel 3 -Dilation 1 -WeightPlanes 2 -PlaneStride $planeStride -ActivePanels (0..31) -LabelPrefix 'g16tu_early')))
 
-        $bodies.Add(@('body_conv_front10_up_late',@(New-KokoroHmxConvPlanesSteps -InputChannels 512 -OutputChannels 256 -Kernel 3 -Dilation 1 -WeightPlanes 2 -PlaneStride $planeStride -ActivePanels (16..47) -LabelPrefix 'g16tu_late')))
+        $bodies.Add(@('body_conv_front10_up_late',@(New-KokoroHmxConvPlanesSteps -LowByteOnlyGroup3 -InputChannels 512 -OutputChannels 256 -Kernel 3 -Dilation 1 -WeightPlanes 2 -PlaneStride $planeStride -ActivePanels (16..47) -LabelPrefix 'g16tu_late')))
         $bodies.Add(@('body_leaky_up',@(& $packets @(New-KokoroLeakyRelu16Steps -Slope 0.1 -LabelPrefix 'leakyup'))))
         $bodies.Add(@('body_front10_interleave',@(& $packets @(New-KokoroPhaseInterleaveSteps -Phases 10 -Channels 256))))
         $bodies.Add(@('body_front10_add',@(& $packets @(New-KokoroResidualAdd16Steps -Channels 256))))
     }
     elseif($Front){
-        $bodies.Add(@('body_conv_front_noise',@(New-KokoroHmxConvPlanesSteps -InputChannels 64 -OutputChannels 128 -Kernel 3 -Dilation 1 -WeightPlanes 2 -PlaneStride $planeStride -ActivePanels @(2) -LabelPrefix 'g16fn')))
-        $bodies.Add(@('body_conv_front_up_early',@(New-KokoroHmxConvPlanesSteps -InputChannels 256 -OutputChannels 256 -Kernel 3 -Dilation 1 -WeightPlanes 2 -PlaneStride $planeStride -ActivePanels (0..15) -LabelPrefix 'g16fu_early')))
+        $bodies.Add(@('body_conv_front_noise',@(New-KokoroHmxConvPlanesSteps -LowByteOnlyGroup3 -InputChannels 64 -OutputChannels 128 -Kernel 3 -Dilation 1 -WeightPlanes 2 -PlaneStride $planeStride -ActivePanels @(2) -LabelPrefix 'g16fn')))
+        $bodies.Add(@('body_conv_front_up_early',@(New-KokoroHmxConvPlanesSteps -LowByteOnlyGroup3 -InputChannels 256 -OutputChannels 256 -Kernel 3 -Dilation 1 -WeightPlanes 2 -PlaneStride $planeStride -ActivePanels (0..15) -LabelPrefix 'g16fu_early')))
 
-        $bodies.Add(@('body_conv_front_up_late',@(New-KokoroHmxConvPlanesSteps -InputChannels 256 -OutputChannels 256 -Kernel 3 -Dilation 1 -WeightPlanes 2 -PlaneStride $planeStride -ActivePanels (8..23) -LabelPrefix 'g16fu_late')))
+        $bodies.Add(@('body_conv_front_up_late',@(New-KokoroHmxConvPlanesSteps -LowByteOnlyGroup3 -InputChannels 256 -OutputChannels 256 -Kernel 3 -Dilation 1 -WeightPlanes 2 -PlaneStride $planeStride -ActivePanels (8..23) -LabelPrefix 'g16fu_late')))
         $bodies.Add(@('body_combine_conv256',@(& $packets @(New-KokoroPlaneCombineSteps -Mode Conv -Channels 256 -Groups 3 -Group3Shifts -PlaneStride $planeStride -LabelPrefix 'combine256'))))
         $bodies.Add(@('body_front_interleave',@(& $packets @(New-KokoroFrontInterleaveSteps))))
         $bodies.Add(@('body_front_add',@(& $packets @(New-KokoroFrontAddSteps))))
     }
     if($Tail){
         foreach($pair in (Get-KokoroGeneratorTail16Bodies -PlaneStride $tailLayout.PlaneStride)){
-            if($VectorPackets -and $pair[0] -in 'body_leaky','body_combine','body_spectrum'){ $pair[1]=Group-HexagonPackets $pair[1] }
+            if($VectorPackets -and $pair[0] -in 'body_leaky','body_combine','body_pcm_combine','body_spectrum'){ $pair[1]=Group-HexagonPackets $pair[1] }
             $bodies.Add($pair)
         }
     }
@@ -1967,6 +1988,21 @@ function New-KokoroGenerator60x16RunSteps {
     foreach($entry in $padBodies){
         $width,$halfword=$entry.Split(','); $name="body_padcapacity_${width}_$halfword"
         $bodies.Add(@($name,@(New-KokoroPadCapacity16Steps -Channels ([int]$width) -Halfword ([int]$halfword) -LabelPrefix $name)))
+    }
+    if($historyWrappers.Count){
+        [string[]]$wrapperNames=$historyWrappers.Keys; [array]::Sort($wrapperNames); foreach($name in $wrapperNames){ $bodies.Add(@($name,$historyWrappers[$name])) }
+        $cp=[Collections.Generic.List[hashtable]]::new()
+        $cp.Add(@{Op='loop0-r';s=9;Label='history_copy_next'})
+        $cp.Add(@{Op='label';Name='history_copy_next'})
+        $cp.Add(@{Op='vload';d=0;s=7;Offset=-1024})
+        for($k=1;$k -lt 16;$k++){
+            $cp.Add(@{Op='vload';d=$k;s=7;Offset=(128*$k-1024);Pack=1})
+            $cp.Add(@{Op='vstore';s=8;t=($k-1);Offset=(128*($k-1)-1024)})
+        }
+        $cp.Add(@{Op='vstore';s=8;t=15;Offset=896})
+        $cp.Add(@{Op='addi';d=7;s=7;i=2048;Pack=1});$cp.Add(@{Op='addi';d=8;s=8;i=2048})
+        $cp.Add(@{Op='endloop0'});$cp.Add(@{Op='return'})
+        $bodies.Add(@('history_copy_croutons',$cp.ToArray()))
     }
     foreach($pair in $bodies){$s.Add(@{Op='label';Name=$pair[0]});foreach($step in $pair[1]){$s.Add($step)}}
     if($HvxThreads -gt 1){

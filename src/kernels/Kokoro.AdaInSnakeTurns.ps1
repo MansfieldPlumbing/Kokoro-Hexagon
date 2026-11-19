@@ -43,15 +43,15 @@ function New-KokoroAdaInSnakeTurnsSteps {
     if ($MirrorDelta) { & $imm 18 $MirrorDelta }
     # Resident constants.
     & $splat 31 0x80008000L                     # u16 bias
-    & $splat 30 0xFFFF0000L                     # odd-halfword mask
     & $splat 29 0xFF00FF00L                     # high byte of each packed output
     & $splat 28 (& $half 16384)                 # 1.0 in Q14
     for ($k = 0; $k -lt 5; $k++) { & $splat (23 + $k) (& $half $q14[$k]) }   # v23 = h0 ... v27 = h4
     & $splat 22 (& $half 10430)                           # round(2^16 / (2*pi)) in each even halfword
-    & $splat 18 32767
-    & $splat 17 -32768
     foreach ($kv in @(@(8,16),@(9,8),@(10,1),@(11,6),@(7,0))) { $s.Add(@{Op='imm';d=$kv[0];i=$kv[1]}) }
-    for ($block = 0; $block -lt ($Channels / 32); $block++) {
+    $s.Add(@{Op='imm';d=12;i=($Channels/32)})
+    $s.Add(@{Op='label';Name="${LabelPrefix}_channel"})
+    $block=0
+    & {
         $s.Add(@{Op='addi';d=6;s=3;i=($block*128)})
         $s.Add(@{Op='vload';d=14;s=6;Offset=0})
         $s.Add(@{Op='addi';d=6;s=6;i=($Channels*4)})
@@ -77,7 +77,7 @@ function New-KokoroAdaInSnakeTurnsSteps {
         }
         $width=4
         $s.Add(@{Op='imm';d=14;i=(16/$width)})
-        $s.Add(@{Op='label';Name=$pair})
+        $s.Add(@{Op='loop0-r';s=14;Label=$pair}); $s.Add(@{Op='label';Name=$pair})
         $innerStart=$s.Count
         $s.Add(@{Op='vload';d=0;s=5;Offset=0})
         $s.Add(@{Op='vxor';d=0;s=0;t=31})                       # signed halfwords
@@ -150,14 +150,15 @@ function New-KokoroAdaInSnakeTurnsSteps {
             }
         }
         $s.Add(@{Op='addi';d=5;s=5;i=(128*$width)}); $s.Add(@{Op='addi';d=6;s=6;i=(128*$width)}); $s.Add(@{Op='addi';d=13;s=13;i=(128*$width)})
-        $s.Add(@{Op='addi';d=14;s=14;i=-1})
-        $s.Add(@{Op='gtu';d=0;s=14;t=7})
-        $s.Add(@{Op='jump-p';u=0;Label=$pair})
+        $s.Add(@{Op='endloop0'})
         $s.Add(@{Op='addi';d=5;s=5;i=($Channels*64-2048)}); $s.Add(@{Op='addi';d=6;s=6;i=($Channels*64-2048)}); $s.Add(@{Op='addi';d=13;s=13;i=($Channels*64-2048)})
         $s.Add(@{Op='addi';d=15;s=15;i=-1})
         $s.Add(@{Op='gtu';d=0;s=15;t=7})
         $s.Add(@{Op='jump-p';u=0;Label=$tile})
     }
+    foreach($arg in 0,1,2){$s.Add(@{Op='addi';d=$arg;s=$arg;i=2048})}
+    $s.Add(@{Op='addi';d=3;s=3;i=128})
+    $s.Add(@{Op='addi';d=12;s=12;i=-1});$s.Add(@{Op='gtu';d=0;s=12;t=7});$s.Add(@{Op='jump-p';u=0;Label="${LabelPrefix}_channel"})
     if ($frame) { foreach ($r in 16,17,18) { $s.Add(@{Op='load';d=$r;s=29;Offset=(4*($r-16))}) }; $s.Add(@{Op='dealloc-return'}) }
     elseif (-not $NoReturn) { $s.Add(@{Op='return'}) }
     $s.ToArray()

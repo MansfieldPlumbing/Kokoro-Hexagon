@@ -24,9 +24,10 @@ function New-KokoroPlaneCombineSteps {
         [string] $LabelPrefix = 'planecombine',
         [switch] $NoReturn,
         # Residual: read R from r5 instead of the output tiles r1 (the residual of another ring, written to r1).
-        [switch] $SeparateResidual
+        [switch] $FirstBlockOnly, [switch] $SeparateResidual
     )
     if ($PlaneStride % 2048 -ne 0) { throw 'Plane stride must keep 2 KB tile alignment' }
+    if ($FirstBlockOnly -and ($Mode -ne 'Conv' -or $Channels -ne 64)) { throw 'FirstBlockOnly expects a 64-channel convolution output.' }
     if ($SeparateResidual -and $Mode -ne 'Residual') { throw 'A separate residual source is a residual combine option.' }
     $ob = $Channels / 32
     # Per-block vector registers: residual ratios from v20 and group 3 shifts from v16 for up to four blocks; with eight
@@ -58,6 +59,7 @@ function New-KokoroPlaneCombineSteps {
     $tile = "${LabelPrefix}_tile"
     $s.Add(@{Op='label';Name=$tile})
     for ($b = 0; $b -lt $ob; $b++) {
+        if($FirstBlockOnly -and $b -gt 0){ $s.Add(@{Op="addi";d=0;s=0;i=2048}); $s.Add(@{Op="addi";d=1;s=1;i=2048}); continue }
         $width=if($Group3Shifts -and $shiftBase -lt 16){1}else{4}
         $s.Add(@{Op='imm';d=14;i=(16/$width)})
         $pair = "${LabelPrefix}_b${b}"

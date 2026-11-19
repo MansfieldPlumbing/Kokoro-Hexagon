@@ -147,7 +147,7 @@ function Add-KokoroGeneratorTail16JobSteps {
         & $call 'body_conv_istft'
         $s.Add(@{Op='syncht'})
         & $ptr 0 18 $reg.Planes.Offset; & $ptr 1 18 $reg.Pcm.Offset; & $imm 3 $count
-        & $call 'body_combine'
+        & $call 'body_pcm_combine'
         $s.Add(@{Op='syncht'})
         # Copy: frame m, lane r (word lane r of the row pair holds frames m (low) and m + 1 (high)) -> samples 5m + r.
         & $ptr 4 18 $reg.Pcm.Offset; & $ptr 5 $PcmBase ($PcmOffset+320L*$startTile); & $imm 12 0x80008000L
@@ -176,10 +176,11 @@ function Get-KokoroGeneratorTail16Bodies {
     $planeStride=$PlaneStride
     $bodies=@(
         @('body_leaky',@(New-KokoroLeakyRelu16Steps)),
-        @('body_conv_post',@(New-KokoroHmxConvPlanesSteps -InputChannels 128 -OutputChannels 64 -Kernel 7 -Dilation 1 -WeightPlanes 2 -PlaneStride $planeStride -LabelPrefix 't16post')),
+        @('body_conv_post',@(New-KokoroHmxConvPlanesSteps -LowByteOnlyGroup3 -InputChannels 128 -OutputChannels 64 -Kernel 7 -Dilation 1 -WeightPlanes 2 -PlaneStride $planeStride -LabelPrefix 't16post')),
         @('body_combine',@(New-KokoroPlaneCombineSteps -Mode Conv -Channels 64 -Groups 3 -PlaneStride $planeStride -LabelPrefix 't16combine')),
+        @('body_pcm_combine',@(New-KokoroPlaneCombineSteps -Mode Conv -Channels 64 -Groups 3 -PlaneStride $planeStride -LabelPrefix 't16pcm' -FirstBlockOnly)),
         @('body_spectrum',@(New-KokoroTailSpectrum16Steps)),
-        @('body_conv_istft',@(New-KokoroHmxConvPlanesSteps -InputChannels 64 -OutputChannels 64 -Kernel 7 -Dilation 1 -WeightPlanes 2 -PlaneStride $planeStride -ActivePanels (4..11) -LabelPrefix 't16istft')))
+        @('body_conv_istft',@(New-KokoroHmxConvPlanesSteps -LowByteOnlyGroup3 -InputChannels 64 -OutputChannels 64 -Kernel 7 -Dilation 1 -WeightPlanes 2 -PlaneStride $planeStride -FirstOutputBlockOnly -ActivePanels (4..11) -LabelPrefix 't16istft')))
     $bodies
 }
 

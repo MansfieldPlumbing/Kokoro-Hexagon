@@ -34,12 +34,14 @@ function New-KokoroHmxConvPlanesSteps {
         [ValidateRange(0, 3)][int] $TableGroups = 0,
         # Rows every tap reads before the centred position: output row m then reads input rows m - TapDelay - reach to
         # m - TapDelay + reach, so with TapDelay >= reach the convolution reads only rows at or before m (backward).
-        # The products and their order are unchanged; output row m is the centred output at row m - TapDelay.
+        # Each product retains its original weight panel; output row m is the centred output at row m - TapDelay.
+        [switch] $LowByteOnlyGroup3, [switch] $FirstOutputBlockOnly,
         [int[]] $ActivePanels, [ValidateRange(0, 32)][int] $TapDelay = 0
     )
     [int]$cb = $InputChannels / 32; [int]$ob = $OutputChannels / 32; [int]$groups = $OutputChannels / 64
     $accGroups = if ($WeightPlanes -eq 2) { 3 } else { 2 }
     $tableStride = if ($TableGroups) { $TableGroups } else { $accGroups }
+    if ($FirstOutputBlockOnly -and $groups -ne 1) { throw 'FirstOutputBlockOnly requires a 64-channel output.' }
     if ($tableStride -lt $accGroups) { throw 'Table stride must cover every accumulator group' }
     $wlOffset = $groups * $Kernel * $cb * 2048
     [int]$half = ($Kernel - 1) / 2
@@ -53,30 +55,41 @@ function New-KokoroHmxConvPlanesSteps {
     $s.Add(@{Op='imm'; d=11; i=0})                    # store Rt, loop compare zero
     # One MAC sequence: activation base register, weight base register.
     $macs = { param([int]$act,[int]$wt)
-        $previous=-1
+        # Visit neighboring taps in each input crouton. Weight panels retain their original offsets.
+        $stream=[Collections.Generic.List[hashtable]]::new()
+        for($c=0;$c -lt $cb;$c++){
+            for($k=0;$k -lt $Kernel;$k++){
+                $shift=$Dilation*($k-$half)-$TapDelay
+                $tile=[int][Math]::Floor($shift/32);$row=$shift-32*$tile
 
-        for ($k = 0; $k -lt $Kernel; $k++) {
-            $shift = $Dilation * ($k - $half) - $TapDelay
-            [int]$tile = [math]::Floor($shift / 32); [int]$row = $shift - 32 * $tile
-            for ($c = 0; $c -lt $cb; $c++) {
-                $offset = (($tile * $cb) + $c) * 2048 + (($row -shr 1) -shl 7) + (($row -band 1) -shl 1)
-                if ($offset -lt -32768 -or $offset -gt 32767) { throw 'Activation offset out of addi range' }
-                # Both addresses depend only on the prior packet. The MAC reads them in the next packet.
                 $panel=$k*$cb+$c
                 if($ActivePanels -and $panel -notin $ActivePanels){continue}
-                $base=if($previous -lt 0){$wt}else{12}
-                $delta=2048*($panel-[Math]::Max(0,$previous))
-                $previous=$panel
-                if($delta -gt 32767){& $imm 15 $delta;$s.Add(@{Op='add';d=12;s=$base;t=15;Pack=1})}
-                else{$s.Add(@{Op='addi';d=12;s=$base;i=$delta;Pack=1})}
-                $s.Add(@{Op='addi'; d=8; s=$act; i=$offset})
-                $s.Add(@{Op='hmx-pair'; Act='act-ub-single'; Wt='wt-b-deep'; s=8; t=9; u=12; v=10})
-
+                $stream.Add(@{Offset=(($tile*$cb+$c)*2048+(($row -shr 1)*128)+2*($row -band 1));Weight=(2048*$panel)})
+            }
+        }
+        $priorAddress=0;$priorRegister=$wt
+        for($at=0;$at -lt $stream.Count;$at+=3){
+            $count=[Math]::Min(3,$stream.Count-$at)
+            for($n=0;$n -lt $count;$n++){
+                $ar=@(8,6,14)[$n];$wr=@(12,7,15)[$n]
+                $next=$stream[$at+$n]
+                $delta=$next.Weight-$priorAddress
+                if($delta -lt -32768 -or $delta -gt 32767){& $imm $wr $delta;$s.Add(@{Op='add';d=$wr;s=$priorRegister;t=$wr;Pack=1})}
+                else{$s.Add(@{Op='addi';d=$wr;s=$priorRegister;i=$delta;Pack=1})}
+                $s.Add(@{Op='addi';d=$ar;s=$act;i=$next.Offset})
+                $priorAddress=$next.Weight;$priorRegister=$wr
+            }
+            for($n=0;$n -lt $count;$n++){
+                $s.Add(@{Op='hmx-pair';Act='act-ub-single';Wt='wt-b-deep';s=@(8,6,14)[$n];t=9;u=@(12,7,15)[$n];v=10})
             }
         }
     }
+    $compact=($groups -gt 1 -and -not $NoReturn)
+    if($compact){ $s.Add(@{Op='allocframe';Bytes=8}); $s.Add(@{Op='store';s=29;t=28;Offset=0}) }
     $s.Add(@{Op='label'; Name="${LabelPrefix}_tile"})
+    if($compact){ $s.Add(@{Op='imm';d=28;i=$groups}); $s.Add(@{Op='label';Name="${LabelPrefix}_group"}) }
     for ($g = 0; $g -lt $groups; $g++) {
+        if($compact -and $g -gt 0){break}
         $gw = $g * $Kernel * $cb * 2048
         foreach ($group in 0..($accGroups - 1)) {
             $s.Add(@{Op='mxclracc'})
@@ -89,8 +102,10 @@ function New-KokoroHmxConvPlanesSteps {
                 & $imm 15 ($wlOffset + $gw); $s.Add(@{Op='add'; d=13; s=2; t=15}); & $macs 1 13
             }
             foreach ($h in 0, 1) {
+                if($FirstOutputBlockOnly -and $h -gt 0){continue}
                 $o = 2 * $g + $h
                 foreach ($plane in 0, 1) {
+                    if($group -eq 2 -and $plane -eq 0 -and $LowByteOnlyGroup3){continue}
                     $p = 2 * $group + $plane
                     $s.Add(@{Op='addi'; d=14; s=3; i=(512 * $tableStride * $o + 256 * $p)})
                     $s.Add(@{Op='bias-mxmem2'; s=14})
@@ -101,13 +116,20 @@ function New-KokoroHmxConvPlanesSteps {
             }
         }
     }
+    if($compact){
+        & $imm 15 ($Kernel*$cb*2048); $s.Add(@{Op='add';d=2;s=2;t=15})
+        $s.Add(@{Op='addi';d=3;s=3;i=(1024*$tableStride)})
+        $s.Add(@{Op='addi';d=5;s=5;i=4096})
+        $s.Add(@{Op='addi';d=28;s=28;i=-1}); $s.Add(@{Op='gtu';d=0;s=28;t=11}); $s.Add(@{Op='jump-p';u=0;Label="${LabelPrefix}_group"})
+        & $imm 15 (-$groups*$Kernel*$cb*2048); $s.Add(@{Op='add';d=2;s=2;t=15}); $s.Add(@{Op='addi';d=3;s=3;i=(-1024*$groups*$tableStride)})
+    }
     if ($dy -le 32767) { $s.Add(@{Op='addi'; d=0; s=0; i=$dy}); $s.Add(@{Op='addi'; d=1; s=1; i=$dy}) }
     else { & $imm 15 $dy; $s.Add(@{Op='add'; d=0; s=0; t=15}); $s.Add(@{Op='add'; d=1; s=1; t=15}) }   # 512-channel tiles: 32 KB
-    $s.Add(@{Op='addi'; d=5; s=5; i=($ob * 2048)})
+    if(-not $compact){$s.Add(@{Op='addi'; d=5; s=5; i=($ob * 2048)})}
     $s.Add(@{Op='addi'; d=4; s=4; i=-1})
     $s.Add(@{Op='gtu'; d=0; s=4; t=11})
     $s.Add(@{Op='jump-p'; u=0; Label="${LabelPrefix}_tile"})
-    if (-not $NoReturn) { $s.Add(@{Op='return'}) }
+    if($compact){$s.Add(@{Op='load';d=28;s=29;Offset=0});$s.Add(@{Op='dealloc-return'})} elseif (-not $NoReturn) { $s.Add(@{Op='return'}) }
     $s.ToArray()
 }
 
@@ -115,6 +137,7 @@ function New-KokoroHmxConvPlanesSteps {
 # output groups, kernel 1 or 3. Output groups are a loop (code size independent of the channel count) and each tap walks
 # its activation pointer by register, so offsets are not bound by addi's range. Calling convention, weight order, table
 # layout and plane output as New-KokoroHmxConvPlanesSteps; also uses r6, r7 and r28 (caller-saved).
+
 function New-KokoroHmxConvPlanesLoopSteps {
     param(
         [ValidateRange(32, 2048)][int] $InputChannels = 1120,
