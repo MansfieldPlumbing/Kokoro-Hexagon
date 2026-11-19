@@ -167,3 +167,7 @@ Rendered the same 942-tick lighthouse passage through the pinned adb client with
 | 120 | 3 | 83.62 MB | 657.80 MB | 234.43 ms | 5,223.4 ms |
 
 The 120-tile configuration still measured 3.10 LU of level loss and 6.90 dB of excess modulation. Moving these span boundaries leaves the affected waveform byte-identical. The DSP timing ranges overlap and the end-to-end median increased. The default stays at 60 tiles. A 300-tile configuration failed emission because its front required 16,121,856 bytes of VTCM, above the 8 MiB limit.
+
+### Two-tile generator batch on SM8550
+
+Kept the 60-tile span and four HVX threads, reduced the resident batch from four tiles to two, then ran the lighthouse passage through the pinned adb client. VTCM fell from 7,602,176 to 5,505,024 bytes. Scheduled weight transfers rose from 679.53 to 1,290.58 MB. After one warmup, the median of four DSP times was 350.01 ms versus 235.90 ms in the prior four-tile control, a 48% regression. The ranges did not overlap (348.66–351.42 ms versus 232.07–237.08 ms). PCM and WAV hashes matched the four-tile run, so both audio quality flags remain. Playback had zero underruns and startup restoration succeeded. The four-tile batch stays in production.
