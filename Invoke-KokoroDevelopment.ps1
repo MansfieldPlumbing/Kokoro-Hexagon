@@ -43,7 +43,7 @@ twice, or written as a scratch script, is a missing command: add it here.
                               distance, mel-cepstral distortion, loudness envelope, YIN f0 and voicing, HNR; with
                               -OutputDirectory also spectrogram, difference, pitch and envelope PNGs; with a yardstick
                               (a render the same by construction, e.g. another seed) the same measures for scale.
-  PhoneSpeech -Parameters @{Text=<sentence>; Runs=3} [-Soc] [-OutputDirectory]
+  PhoneSpeech -Parameters @{Text=<sentence>; Runs=3} [-Soc] [-OutputDirectory] [-Reference <clean WAV>]
                               Text to WAV on the phone in one process: our phonemizer and the stock front end on the CPU,
                               the decoder and the generator on the DSP (each on its voice base); per-stage times, the WAV,
                               and a comparison with the same text rendered from the host front end.
@@ -2054,7 +2054,7 @@ function Invoke-KokoroGeneratorScore {
 function Invoke-KokoroPhoneSpeech {
     param([Parameter(Mandatory)][string]$Text,[string]$OutputDirectory,[string]$Soc='SM8550',[string]$Package='dev.mansfieldplumbing.kokoro',[ValidateRange(1,20)][int]$Runs=3,
         # The voice bases (a decoder constants table, DecoderVoiceBase; generator constants, VoiceBase); by default the newest under build/.
-        [string]$DecoderBase,[string]$GeneratorBase,
+        [string]$DecoderBase,[string]$GeneratorBase,[string]$QualityReference,
         [string]$Phonemizer='build/phonemizer/english/driver/340D763896245937C41417BF7D3D197B6FE407AC750130B9299062E4D3152348-library-dll',
         # The decoder on the phone and in the reference: Spans (the span decoder in one job, up to the renderer's span
         # capacity; longer text falls back) or Chunks (the layer job in overlap-save chunks). The reference is also
@@ -2139,12 +2139,24 @@ function Invoke-KokoroPhoneSpeech {
         ReferenceXSHA256=[Convert]::ToHexString([Security.Cryptography.SHA256]::HashData([byte[]]$decoded.XCroutons))
         OtherScheduleXIdentical=$(if($other){[Linq.Enumerable]::SequenceEqual([byte[]]$decoded.XCroutons,[byte[]]$other.XCroutons)})
         DecoderBase=$decoderBasePath;GeneratorBase=$generatorBasePath;GeneratorLibrarySHA256=$generator.Emission.LibrarySHA256;Lines=$lines}
-    if($Text.Trim() -ceq 'When the evening came, the old keeper climbed the narrow stairs of the lighthouse, lit the great lamp, and watched the ships pass slowly along the dark and quiet coast until the morning light returned.'){
-        $quality=if($ticks -ne 942){[pscustomobject]@{Passed=$false;ExpectedTicks=942;ActualTicks=$ticks}}else{Compare-KokoroSpeechQuality -Reference (Join-Path $Root 'tools/fixtures/lighthouse-af_heart-float.wav') -Candidate $phoneWave}
-        $result | Add-Member -NotePropertyName SpeechQuality -NotePropertyValue $quality
-        if(-not $quality.Passed){Write-Warning "Lighthouse audio regression. See SpeechQuality in the receipt."}
+    if (-not $QualityReference) {
+        $isLighthouse = $Text.Trim() -ceq 'When the evening came, the old keeper climbed the narrow stairs of the lighthouse, lit the great lamp, and watched the ships pass slowly along the dark and quiet coast until the morning light returned.'
+        if ($isLighthouse) { $QualityReference = Join-Path $Root 'tools/fixtures/lighthouse-af_heart-float.wav' }
     }
-    $result | Export-Clixml -LiteralPath (Join-Path $out 'phone-speech.clixml') -Depth 6
+    $quality = if ($QualityReference) {
+        try {
+            Compare-KokoroSpeechQuality -Reference $QualityReference -Candidate $phoneWave
+        } catch {
+            [pscustomobject]@{Passed=$false; Error=$_.Exception.Message}
+        }
+    } else {
+        [pscustomobject]@{Passed=$null; Reason='No clean aligned reference was supplied. Pass -Reference to check this utterance.'}
+    }
+    $result | Add-Member -NotePropertyName SpeechQuality -NotePropertyValue $quality
+    if ($null -eq $quality.Passed) { Write-Warning $quality.Reason }
+    $receiptPath = Join-Path $out 'phone-speech.clixml'
+    $result | Export-Clixml -LiteralPath $receiptPath -Depth 6
+    if ($quality.Passed -eq $false) { throw "Phone audio failed the quality check. WAV: $phoneWave. Receipt: $receiptPath." }
     $result
 }
 
@@ -5014,6 +5026,7 @@ switch ($Command) {
         if (-not $Parameters -or -not $Parameters.Text) { throw 'PhoneSpeech needs -Parameters @{Text=<sentence>}.' }
         $speech = @{}; foreach ($k in $Parameters.Keys) { $speech[$k] = $Parameters[$k] }
         if ($OutputDirectory) { $speech.OutputDirectory = $OutputDirectory }
+        if ($Reference) { $speech.QualityReference = $Reference }
         Invoke-KokoroPhoneSpeech -Soc $Soc @speech
     }
     'MeasureAudio' {
