@@ -48,7 +48,8 @@ function Add-KokoroGeneratorTail16JobSteps {
         [string]$LabelPrefix='t16',
         # Diagnosis: DMA the 16-bit logits (64-channel croutons) to DumpBase + DumpOffset after conv_post, then the
         # spectrum high and low planes ((tiles + 2) * 4096 bytes each, halo tiles included) after them.
-        [int]$DumpBase=-1,[long]$DumpOffset=0)
+        [int]$DumpBase=-1,[long]$DumpOffset=0,
+        [scriptblock]$EmitParallel)
     $layout=Get-KokoroGeneratorTail16Layout -Frames $Frames -BatchTiles $BatchTiles
     $tiles=$layout.Tiles; $batch=$BatchTiles; $reg=$layout.Regions
     if($EndTile -lt 0){ $EndTile=$tiles }
@@ -123,18 +124,30 @@ function Add-KokoroGeneratorTail16JobSteps {
             & $dma 18 $reg.Input.Offset $InputBase ($InputOffset+$first*8192L) (($last-$first)*8192L)
             if($chunkAt -eq 0){ & $fill $reg.Window.Offset 64 0x80008000L; & $fill $reg.WindowLow.Offset 64 0 }
             if($chunkAt+$chunk -eq $tiles){ & $fill ($reg.Window.Offset+($chunk+1)*8192) 64 0x80008000L; & $fill ($reg.WindowLow.Offset+($chunk+1)*8192) 64 0 }
-            & $ptr 0 18 $reg.Input.Offset; & $ptr 1 18 ($reg.Window.Offset+($first-$chunkAt+1)*8192); & $ptr 2 18 ($reg.WindowLow.Offset+($first-$chunkAt+1)*8192); & $imm 3 (64*($last-$first))
-            & $call 'body_leaky'
+            if($EmitParallel){
+                & $EmitParallel 'body_leaky' @($reg.Input.Offset,($reg.Window.Offset+($first-$chunkAt+1)*8192),($reg.WindowLow.Offset+($first-$chunkAt+1)*8192)) @(128,128,128) (64*($last-$first))
+            } else {
+                & $ptr 0 18 $reg.Input.Offset; & $ptr 1 18 ($reg.Window.Offset+($first-$chunkAt+1)*8192); & $ptr 2 18 ($reg.WindowLow.Offset+($first-$chunkAt+1)*8192); & $imm 3 (64*($last-$first))
+                & $call 'body_leaky'
+            }
             $s.Add(@{Op='syncht'})
             & $ptr 0 18 ($reg.Window.Offset+8192); & $ptr 1 18 ($reg.WindowLow.Offset+8192); & $ptr 2 18 $reg.Weights.Offset; & $ptr 3 18 $reg.Tables.Offset; & $imm 4 $chunk; & $ptr 5 18 $reg.Planes.Offset
             & $call 'body_conv_post'
             $s.Add(@{Op='syncht'})
-            & $ptr 0 18 $reg.Planes.Offset; & $ptr 1 18 $reg.Logits.Offset; & $imm 3 $chunk
-            & $call 'body_combine'
+            if($EmitParallel){
+                & $EmitParallel 'body_combine' @($reg.Planes.Offset,$reg.Logits.Offset,0) @(4096,4096,0) $chunk
+            } else {
+                & $ptr 0 18 $reg.Planes.Offset; & $ptr 1 18 $reg.Logits.Offset; & $imm 3 $chunk
+                & $call 'body_combine'
+            }
             if($DumpBase -ge 0){ $s.Add(@{Op='syncht'}); & $dma $DumpBase ($DumpOffset+$chunkAt*4096L) 18 $reg.Logits.Offset ($chunk*4096L) }
             # Spectrum, with zero rows past the frames.
-            & $ptr 0 18 $reg.Logits.Offset; & $ptr 1 18 (& $spectrumAt 0 $chunkAt $base); & $ptr 2 18 (& $spectrumAt 1 $chunkAt $base); & $ptr 3 18 ($reg.Tables.Offset+8192); & $imm 4 $chunk
-            & $call 'body_spectrum'
+            if($EmitParallel){
+                & $EmitParallel 'body_spectrum' @($reg.Logits.Offset,(& $spectrumAt 0 $chunkAt $base),(& $spectrumAt 1 $chunkAt $base),($reg.Tables.Offset+8192)) @(4096,4096,4096,0) $chunk
+            } else {
+                & $ptr 0 18 $reg.Logits.Offset; & $ptr 1 18 (& $spectrumAt 0 $chunkAt $base); & $ptr 2 18 (& $spectrumAt 1 $chunkAt $base); & $ptr 3 18 ($reg.Tables.Offset+8192); & $imm 4 $chunk
+                & $call 'body_spectrum'
+            }
             if($chunkAt+$chunk -eq $tiles){ & $padRows (& $spectrumAt 0 ($tiles-1) $base) 0x8000; & $padRows (& $spectrumAt 1 ($tiles-1) $base) 0 }
             $s.Add(@{Op='syncht'})
             & $spectrumDump $chunkAt $base $chunk
@@ -146,11 +159,15 @@ function Add-KokoroGeneratorTail16JobSteps {
         & $ptr 0 18 (& $spectrumAt 0 $startTile $base); & $ptr 1 18 (& $spectrumAt 1 $startTile $base); & $ptr 2 18 ($reg.Weights.Offset+114688); & $ptr 3 18 ($reg.Tables.Offset+4096); & $imm 4 $count; & $ptr 5 18 $reg.Planes.Offset
         & $call 'body_conv_istft'
         $s.Add(@{Op='syncht'})
-        & $ptr 0 18 $reg.Planes.Offset; & $ptr 1 18 $reg.Pcm.Offset; & $imm 3 $count
-        & $call 'body_pcm_combine'
+        if($EmitParallel){
+            & $EmitParallel 'body_pcm_combine' @($reg.Planes.Offset,$reg.Pcm.Offset,0) @(4096,4096,0) $count
+        } else {
+            & $ptr 0 18 $reg.Planes.Offset; & $ptr 1 18 $reg.Pcm.Offset; & $imm 3 $count
+            & $call 'body_pcm_combine'
+        }
         $s.Add(@{Op='syncht'})
         # Copy: frame m, lane r (word lane r of the row pair holds frames m (low) and m + 1 (high)) -> samples 5m + r.
-        & $ptr 4 18 $reg.Pcm.Offset; & $ptr 5 $PcmBase ($PcmOffset+320L*$startTile); & $imm 12 0x80008000L
+        & $ptr 4 18 $reg.Pcm.Offset; & $ptr 5 18 $reg.Input.Offset; & $imm 12 0x80008000L
         & $imm 6 $count; $s.Add(@{Op='imm';d=8;i=0})
         $tl=& $label; $pl=& $label
         $s.Add(@{Op='label';Name=$tl}); $s.Add(@{Op='imm';d=7;i=16})
@@ -163,6 +180,7 @@ function Add-KokoroGeneratorTail16JobSteps {
         $s.Add(@{Op='addi';d=7;s=7;i=-1}); $s.Add(@{Op='gtu';d=0;s=7;t=8}); $s.Add(@{Op='jump-p';u=0;Label=$pl})
         $s.Add(@{Op='addi';d=4;s=4;i=2048})
         $s.Add(@{Op='addi';d=6;s=6;i=-1}); $s.Add(@{Op='gtu';d=0;s=6;t=8}); $s.Add(@{Op='jump-p';u=0;Label=$tl})
+        $s.Add(@{Op='syncht'}); & $dma $PcmBase ($PcmOffset+320L*$startTile) 18 $reg.Input.Offset (320L*$count)
         if($startTile -eq 0){ for($r=0;$r -lt 5;$r++){ & $edgeSample ($reg.Pcm.Offset+4*$r) $false $r $r } }
         if($lastTile -ge $startTile -and $lastTile -lt $startTile+$count){
             $pairOff=($lastTile-$startTile)*4096+128*[int][math]::Floor(($lastFrame%32)/2)

@@ -758,7 +758,7 @@ function New-KokoroGenerator60x16RunSteps {
             $s.Add(@{Op='label';Name=$done})
         }
     }
-    $parallel={param([string]$body,[object[]]$off,[bool[]]$perTile,[int]$count,[switch]$Moments)
+    $parallel={param([string]$body,[object[]]$off,[bool[]]$perTile,[int]$count,[switch]$Moments,[long[]]$Strides)
         $n=$off.Count
         if($HvxThreads -eq 1 -or $count -lt 2){ for($i=0;$i -lt $n;$i++){ & $ptr $i 18 $off[$i] }; & $imm $n $count; & $call $body; return }
         $chunk=[int][math]::Ceiling($count/$HvxThreads)
@@ -768,7 +768,11 @@ function New-KokoroGenerator60x16RunSteps {
             & $ptr 6 25 ($poolOffset+64*$k)
             if($c -gt 0){
                 for($i=0;$i -lt $n;$i++){
-                    $value=if($Moments -and $i -eq 1){$privateMoments[$k]}elseif($perTile[$i]){$off[$i]+$o*$tileBytes}else{$off[$i]}; & $ptr 0 18 $value
+                    $value = if($Moments -and $i -eq 1){ $privateMoments[$k] }
+                             elseif($Strides){ $off[$i] + $o*$Strides[$i] }
+                             elseif($perTile[$i]){ $off[$i] + $o*$tileBytes }
+                             else{ $off[$i] }
+                    & $ptr 0 18 $value
                     $s.Add(@{Op='store';s=6;t=0;Offset=(4*$i)})
                 }
                 # Offset 4 n is the count's slot below five arguments. At five it is the worker's report word (offset 20), which
@@ -1062,12 +1066,15 @@ function New-KokoroGenerator60x16RunSteps {
             & $dma 25 ($harPmAt+$a*16384L) 18 $cPmHi (($b-$a)*16384L); & $dma 25 ($harPmAt+$tiles10*16384L+$a*16384L) 18 $cPmLo (($b-$a)*16384L)
         }
     }
+    $parallelEmitter=if($HvxThreads -gt 1){
+        { param($body,$offsets,$strides,$count) & $parallel $body $offsets @() $count -Strides $strides }
+    }
     & $poolStart
     $stopped=$false
     if($Decoder){ & $mark 'Boundary' 'Decoder'; $decJob=Add-KokoroDecoder16JobSteps -Steps $s -Calls $calls -Frames $decIn -InputBase 20 -InputOffset $decInOff -WeightsBase 21 -WeightsOffset $decWOff -TablesBase 22 -TablesOffset $decPOff -OutputBase 25 -OutputOffset $decSlot -Moments $DecoderMoments; & $mark 'Decoder' 'Setup'; & $mark 'Unmarked' -site 30; & $sync }
     if($Source){
         & $mark 'Boundary' 'Source'
-        Add-KokoroHarmonicSource16JobSteps -Steps $s -Calls $calls -Frames $sourceFrames -InputBase 20 -InputOffset $sourceIn -WeightsBase 21 -WeightsOffset $sourceW -TablesBase 22 -TablesOffset $sourceP -HarBase 25 -HarOffset $har60At -SeededNoise:$SeededNoise -ChunkTiles $chunkTilesOfSource
+        Add-KokoroHarmonicSource16JobSteps -EmitParallel $parallelEmitter -Steps $s -Calls $calls -Frames $sourceFrames -InputBase 20 -InputOffset $sourceIn -WeightsBase 21 -WeightsOffset $sourceW -TablesBase 22 -TablesOffset $sourceP -HarBase 25 -HarOffset $har60At -SeededNoise:$SeededNoise -ChunkTiles $chunkTilesOfSource
         & $mark 'Source' 'HarLayout'
         & $mark 'Unmarked' -site 31; & $sync
         if($spanMode){ . $harLayoutChunks }
@@ -1197,7 +1204,7 @@ function New-KokoroGenerator60x16RunSteps {
     $progressValue={param([int]$r,$block,[int]$add)
         if($null -ne $block){ & $imm $r (6L*$block+$add); return }
         $s.Add(@{Op='imm';d=15;i=6}); $s.Add(@{Op='mpyi';d=$r;s=17;t=15}); $s.Add(@{Op='addi';d=$r;s=$r;i=$add}) }
-    # Wait until the thread holding tile 4 j + k - 1 has completed stage st (its progress word > 6 j' + st).
+    # Wait until the thread holding tile 4 j + k - 1 has published its fenced activation window for stage st (its progress word > 6 j' + st).
     $waitNeighbor={param($block,[int]$thread,[int]$st)
         if($null -ne $block -and $thread -eq 0 -and $block -eq 0){ return }
         $neighbor=($thread+$batch-1) % $batch
@@ -1248,8 +1255,11 @@ function New-KokoroGenerator60x16RunSteps {
                     }
                 }
             }
+            # The fenced fill and the neighbor dependency are complete when this thread takes the matrix lock.
+            # The next tile's residual comes from an earlier stage, already complete at publication.
+            # The lock serializes HMX while workers combine disjoint output tiles.
             & $tickStart $thread; & $waitNeighbor $block $thread $st; & $tickAdd $thread 8
-            $s.Add(@{Op='syncht'}); & $tickStart $thread; & $matrixLock; & $tickAdd $thread 0; & $tickStart $thread
+            $s.Add(@{Op='syncht'}); & $tickStart $thread; & $matrixLock; & $publish $block $thread $st; & $tickAdd $thread 0; & $tickStart $thread
             for($branch=0;$branch -lt $branches;$branch++){
                 $at=6*$branch+$st
                 & $tileAt 0 ($highBase+$branch*$fillBytes) $ringTiles $block $w; & $tileAt 1 ($lowBase+$branch*$fillBytes) $ringTiles $block $w
@@ -1271,7 +1281,7 @@ function New-KokoroGenerator60x16RunSteps {
                 }
             }
             & $tickAdd $thread 16
-            & $publish $block $thread $st
+
         }
         # The output tile (position m - 3): the three branches' mean, or one branch's last level.
         & $tickStart $thread
@@ -1503,7 +1513,7 @@ function New-KokoroGenerator60x16RunSteps {
     $tailSteps={
         & $mark 'Boundary' 'Tail'
         & $mark 'Unmarked' -site 51; & $sync
-        Add-KokoroGeneratorTail16JobSteps -Steps $s -Calls $calls -Frames $Frames -InputBase 25 -InputOffset $finalOffset -WeightsBase 21 -WeightsOffset $tailWeightOffset -TablesBase 22 -TablesOffset $tailParameterOffset -PcmBase 23 -PcmOffset $pcmOffset
+        Add-KokoroGeneratorTail16JobSteps -EmitParallel $parallelEmitter -Steps $s -Calls $calls -Frames $Frames -InputBase 25 -InputOffset $finalOffset -WeightsBase 21 -WeightsOffset $tailWeightOffset -TablesBase 22 -TablesOffset $tailParameterOffset -PcmBase 23 -PcmOffset $pcmOffset
         & $mark 'Tail' 'Exit'
     }
     $lockstepBodies=[Collections.Generic.List[object]]::new()
@@ -1518,8 +1528,7 @@ function New-KokoroGenerator60x16RunSteps {
         $pairs=if($d1 -eq $decTiles){[int][math]::Ceiling(($decFrames-32*$d0+1)/2)}else{16*$n}
         & $dma 18 $F.Tables 22 $frontParameterOffset 163840
         & $dma 18 ($F.Input+($first-$d0+1)*32768L) 20 ($inBase+$first*32768L) (($last-$first)*32768L)
-        & $ptr 0 18 ($F.Input+($first-$d0+1)*32768L); & $ptr 1 18 ($F.High+($first-$d0+1)*32768L); & $ptr 2 18 ($F.Low+($first-$d0+1)*32768L); & $imm 3 (($last-$first)*256)
-        & $call 'body_leaky_up'
+        & $parallel 'body_leaky_up' @(($F.Input+($first-$d0+1)*32768L),($F.High+($first-$d0+1)*32768L),($F.Low+($first-$d0+1)*32768L)) @($true,$true,$true) (($last-$first)*256) -Strides @(128,128,128)
         if($d0 -eq 0){ & $fill $F.High 2 0x80008000L; & $fill $F.Low 2 0 }
         if($d1 -eq $decTiles){ & $fill ($F.High+($n+1)*32768L) 2 0x80008000L; & $fill ($F.Low+($n+1)*32768L) 2 0 }
         & $sync
@@ -1561,8 +1570,7 @@ function New-KokoroGenerator60x16RunSteps {
         $t0=6*$s0; $t1=[math]::Min($tiles,6*$s1)
         $pairs=if($s1 -eq $upTiles){[int][math]::Ceiling(($upFrames-32*$s0)/2)}else{16*$n}
         & $dma 18 ($F.Input+($first-$s0+1)*16384L) 25 ($chainOffset+$first*16384L) (($last-$first)*16384L)
-        & $ptr 0 18 ($F.Input+($first-$s0+1)*16384L); & $ptr 1 18 ($F.High+($first-$s0+1)*16384L); & $ptr 2 18 ($F.Low+($first-$s0+1)*16384L); & $imm 3 (($last-$first)*128)
-        & $call 'body_leaky_up'
+        & $parallel 'body_leaky_up' @(($F.Input+($first-$s0+1)*16384L),($F.High+($first-$s0+1)*16384L),($F.Low+($first-$s0+1)*16384L)) @($true,$true,$true) (($last-$first)*128) -Strides @(128,128,128)
         if($s0 -eq 0){ & $fillVectors $F.High 128 0x80008000L; & $fillVectors $F.Low 128 0 }
         if($s1 -eq $upTiles){ & $fillVectors ($F.High+($n+1)*16384L) 128 0x80008000L; & $fillVectors ($F.Low+($n+1)*16384L) 128 0 }
         & $sync
@@ -1571,8 +1579,7 @@ function New-KokoroGenerator60x16RunSteps {
                 $count=[math]::Min($upBatch,$n-$start)
                 & $ptr 0 18 ($F.High+($start+1)*16384L); & $ptr 1 18 ($F.Low+($start+1)*16384L); & $ptr 2 18 $slots[$c]; & $ptr 3 18 ($F.Tables+16384+12288*$c); & $imm 4 $count; & $ptr 5 18 $F.Planes
                 & $call $(if($c -lt 2){'body_conv_front_up_early'}else{'body_conv_front_up_late'}); & $mark 'HmxConv'; & $sync
-                & $ptr 0 18 $F.Planes; & $ptr 1 18 ($F.Phase+$start*16384L); & $ptr 2 18 ($F.Tables+53248+2048*$c-1024); & $imm 3 $count
-                & $call 'body_combine_conv256'; & $mark 'Combine'; & $sync
+                & $parallel 'body_combine_conv256' @($F.Planes,($F.Phase+$start*16384L),($F.Tables+53248+2048*$c-1024)) @($true,$true,$false) $count -Strides @(16384,16384,0); & $mark 'Combine'; & $sync
             }
             & $ptr 0 18 $F.Phase; & $ptr 1 18 $F.Target; & $imm 2 $c; & $imm 3 $pairs
             & $call 'body_front_interleave'; & $mark 'Combine'; & $sync
@@ -1588,8 +1595,7 @@ function New-KokoroGenerator60x16RunSteps {
         if($ExportFrontTensors){ & $sync; & $dma 25 ($upsSlot+$t0*8192L) 18 $F.Target (($t1-$t0)*8192L) }
         & $dma 18 $F.Sum $sourceBase ($sourceAt+$t0*8192L) (($t1-$t0)*8192L); & $sync
         if(1 -notin $SuppliedSectionInputs){
-            & $ptr 0 18 $F.Target; & $ptr 1 18 $F.Sum; & $ptr 2 18 ($F.Tables+59392); & $imm 3 ($t1-$t0)
-            & $call 'body_front_add'; & $mark 'Combine'
+            & $parallel 'body_front_add' @($F.Target,$F.Sum,($F.Tables+59392)) @($true,$true,$false) ($t1-$t0) -Strides @(8192,8192,0); & $mark 'Combine'
         }
         if($t1 -eq $tiles){ & $padRows ($F.Sum+($tiles-1-$t0)*8192L) 0x8000 }
         & $sync; & $dma 25 ($r0Slot+$t0*8192L) 18 $F.Sum (($t1-$t0)*8192L)
@@ -1629,7 +1635,7 @@ function New-KokoroGenerator60x16RunSteps {
         # The tail reads two tiles of halo each side (Add-KokoroGeneratorTail16JobSteps: conv_post and the spectrum).
         & $wsCheck 'Main128.Final' $span.Index 'Read' ([math]::Max(0,$t0-2)) ([math]::Min($tiles,$t1+2))
         & $mark 'Boundary' 'Tail'; & $sync
-        Add-KokoroGeneratorTail16JobSteps -Steps $s -Calls $calls -Frames $Frames -InputBase 25 -InputOffset $finalOffset -WeightsBase 21 -WeightsOffset $tailWeightOffset -TablesBase 22 -TablesOffset $tailParameterOffset -PcmBase 23 -PcmOffset $pcmOffset -FirstTile $t0 -EndTile $t1 -LabelPrefix "t16r$t0"
+        Add-KokoroGeneratorTail16JobSteps -EmitParallel $parallelEmitter -Steps $s -Calls $calls -Frames $Frames -InputBase 25 -InputOffset $finalOffset -WeightsBase 21 -WeightsOffset $tailWeightOffset -TablesBase 22 -TablesOffset $tailParameterOffset -PcmBase 23 -PcmOffset $pcmOffset -FirstTile $t0 -EndTile $t1 -LabelPrefix "t16r$t0"
     }
     # Spans ($spans): per span the 256-channel front and section, then the 128-channel front, section and tail. A
     # section's first steps start from its initial state; later ones restore the state its previous steps saved.
@@ -1979,7 +1985,7 @@ function New-KokoroGenerator60x16RunSteps {
     }
     if($Decoder){ foreach($pair in (Get-KokoroDecoder16Bodies -Job $decJob)){ $bodies.Add($pair) } }
     if($Source){
-        foreach($pair in (Get-KokoroHarmonicSource16Bodies -PlaneStride $sourceLayout.Stft.PlaneStride -SeededNoise:$SeededNoise -Chunked:($chunkTilesOfSource -gt 0) -VectorPackets:$VectorPackets)){ if($VectorPackets -and $pair[0] -in 'body_stft_window','body_combine_stft','body_stft_polar'){ $pair[1]=Group-HexagonPackets $pair[1] }; $bodies.Add($pair) }
+        foreach($pair in (Get-KokoroHarmonicSource16Bodies -ParallelLayout $(if($parallelEmitter){$sourceLayout}) -PlaneStride $sourceLayout.Stft.PlaneStride -SeededNoise:$SeededNoise -Chunked:($chunkTilesOfSource -gt 0) -VectorPackets:$VectorPackets)){ if($VectorPackets -and $pair[0] -in 'body_stft_window','body_combine_stft','body_stft_polar'){ $pair[1]=Group-HexagonPackets $pair[1] }; $bodies.Add($pair) }
         $bodies.Add(@('body_har_phase_major',@(& $packets @(New-KokoroHarPhaseMajor16Steps -Phases 6))))
         $bodies.Add(@('body_har_phase_major_tiles',@(& $packets @(New-KokoroHarPhaseMajor16Steps -Phases 6 -TileBatch -LabelPrefix 'harphasemajor16tiles'))))
         $bodies.Add(@('body_har_phase_major_last',@(& $packets @(New-KokoroHarPhaseMajor16Steps -Phases 1 -LabelPrefix 'harphasemajor16last'))))

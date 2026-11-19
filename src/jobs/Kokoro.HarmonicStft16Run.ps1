@@ -43,7 +43,8 @@ function Add-KokoroHarmonicStft16JobSteps {
         # batches from -FirstTile to -EndTile, with -SignalOffset the VTCM offset where halfword 0 of the whole signal
         # would be (the chunk's buffer minus its first halfword; may be negative). -Regions places the VTCM buffers.
         [ValidateSet('Include','Only','Skip')][string]$Setup='Include',[int]$FirstTile=0,[int]$EndTile=-1,[Nullable[long]]$SignalOffset=$null,
-        [Collections.IDictionary]$Regions=$null)
+        [Collections.IDictionary]$Regions=$null,
+        [scriptblock]$EmitParallel)
     $layout=Get-KokoroHarmonicStft16Layout -Frames $Frames -BatchTiles $BatchTiles
     $tiles=$layout.Tiles; $batch=$BatchTiles; $reg=if($Regions){$Regions}else{$layout.Regions}
     $signalAt=if($null -ne $SignalOffset){[long]$SignalOffset}else{[long]$reg.Signal.Offset}; $endAt=if($EndTile -ge 0){$EndTile}else{$tiles}
@@ -84,17 +85,29 @@ function Add-KokoroHarmonicStft16JobSteps {
     if($FirstTile%$batch){ throw 'A chunk starts on a batch boundary' }
     for($startTile=$FirstTile;$startTile -lt $endAt;$startTile+=$batch){
         $count=[math]::Min($batch,$endAt-$startTile)
-        & $ptr 0 18 ($signalAt+320L*$startTile); & $ptr 1 18 ($reg.Window.Offset+4096); & $ptr 2 18 ($reg.WindowLow.Offset+4096); & $imm 3 ([math]::Ceiling($count/2))
-        & $call 'body_stft_window'
+        if($EmitParallel){
+            & $EmitParallel 'body_stft_window' @(($signalAt+320L*$startTile),($reg.Window.Offset+4096),($reg.WindowLow.Offset+4096)) @(640,8192,8192) ([math]::Ceiling($count/2))
+        } else {
+            & $ptr 0 18 ($signalAt+320L*$startTile); & $ptr 1 18 ($reg.Window.Offset+4096); & $ptr 2 18 ($reg.WindowLow.Offset+4096); & $imm 3 ([math]::Ceiling($count/2))
+            & $call 'body_stft_window'
+        }
         $s.Add(@{Op='syncht'})
         & $ptr 0 18 ($reg.Window.Offset+4096); & $ptr 1 18 ($reg.WindowLow.Offset+4096); & $ptr 2 18 $reg.Weights.Offset; & $ptr 3 18 $reg.Tables.Offset; & $imm 4 $count; & $ptr 5 18 $reg.Planes.Offset
         & $call 'body_conv_stft'
         $s.Add(@{Op='syncht'})
-        & $ptr 0 18 $reg.Planes.Offset; & $ptr 1 18 $reg.Spectrum.Offset; & $ptr 2 18 ($reg.Tables.Offset+4096); & $imm 3 $count
-        & $call 'body_combine_stft'
+        if($EmitParallel){
+            & $EmitParallel 'body_combine_stft' @($reg.Planes.Offset,$reg.Spectrum.Offset,($reg.Tables.Offset+4096)) @(4096,4096,0) $count
+        } else {
+            & $ptr 0 18 $reg.Planes.Offset; & $ptr 1 18 $reg.Spectrum.Offset; & $ptr 2 18 ($reg.Tables.Offset+4096); & $imm 3 $count
+            & $call 'body_combine_stft'
+        }
         $s.Add(@{Op='syncht'})
-        & $ptr 0 18 $reg.Spectrum.Offset; & $ptr 1 18 $reg.HarHigh.Offset; & $ptr 2 18 $reg.HarLow.Offset; & $ptr 3 18 ($reg.Tables.Offset+8192); & $imm 4 $count
-        & $call 'body_stft_polar'
+        if($EmitParallel){
+            & $EmitParallel 'body_stft_polar' @($reg.Spectrum.Offset,$reg.HarHigh.Offset,$reg.HarLow.Offset,($reg.Tables.Offset+8192)) @(4096,4096,4096,0) $count
+        } else {
+            & $ptr 0 18 $reg.Spectrum.Offset; & $ptr 1 18 $reg.HarHigh.Offset; & $ptr 2 18 $reg.HarLow.Offset; & $ptr 3 18 ($reg.Tables.Offset+8192); & $imm 4 $count
+            & $call 'body_stft_polar'
+        }
         if($startTile+$count -eq $tiles -and $endAt -eq $tiles){ & $padRows ($reg.HarHigh.Offset+($count-1)*4096L) 0x8000; & $padRows ($reg.HarLow.Offset+($count-1)*4096L) 0 }
         $s.Add(@{Op='syncht'})
         & $dma $HarBase ($HarOffset+4096L*$startTile) 18 $reg.HarHigh.Offset (4096L*$count)

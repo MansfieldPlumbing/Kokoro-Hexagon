@@ -48,7 +48,8 @@ function Add-KokoroHarmonicSource16JobSteps {
         # ChunkTiles > 0: the source runs in chunks of that many har tiles, each from 64 samples before its first tile to
         # 64 after its last, so VTCM holds one chunk at any length. P_k crosses chunks in the Carry word; the bodies are
         # Get-KokoroHarmonicSource16Bodies -Chunked.
-        [ValidateRange(0,4096)][int]$ChunkTiles=0)
+        [ValidateRange(0,4096)][int]$ChunkTiles=0,
+        [scriptblock]$EmitParallel)
     $layout=Get-KokoroHarmonicSource16Layout -Frames $Frames -BatchTiles $BatchTiles -ChunkTiles $ChunkTiles
     $reg=$layout.Regions
     $s=$Steps; $calls=$Calls
@@ -62,7 +63,7 @@ function Add-KokoroHarmonicSource16JobSteps {
     }
     if($ChunkTiles){
         if($SignalBase -ge 0){ throw 'A chunked source keeps no whole signal to write out' }
-        $stftArgs=@{Steps=$s;Calls=$calls;Frames=$Frames;BatchTiles=$BatchTiles;WeightsBase=$WeightsBase;WeightsOffset=$WeightsOffset;TablesBase=$TablesBase;TablesOffset=$TablesOffset;HarBase=$HarBase;HarOffset=$HarOffset;SignalInVtcm=$true;Regions=$reg}
+        $stftArgs=@{EmitParallel=$EmitParallel;Steps=$s;Calls=$calls;Frames=$Frames;BatchTiles=$BatchTiles;WeightsBase=$WeightsBase;WeightsOffset=$WeightsOffset;TablesBase=$TablesBase;TablesOffset=$TablesOffset;HarBase=$HarBase;HarOffset=$HarOffset;SignalInVtcm=$true;Regions=$reg}
         & $dma 18 $reg.F0.Offset $InputBase $InputOffset $layout.F0Bytes
         & $dma 18 $reg.SourceConstants.Offset $TablesBase ($TablesOffset+$layout.Stft.ParameterBytes) 4096
         Add-KokoroHarmonicStft16JobSteps @stftArgs -Setup Only
@@ -106,9 +107,13 @@ function Add-KokoroHarmonicSource16JobSteps {
             & $ptr 0 18 ($reg.F0.Offset+4L*$fA); & $imm 1 ($fB-$fA+1); & $ptr 4 18 ($masks+600L*$fA); & $imm 5 $chb; & $ptr 6 18 $reg.SourceConstants.Offset
             & $call 'body_source_voicing'
             $s.Add(@{Op='syncht'})
-            & $ptr 0 18 ($psiE+2*$m0); & $ptr 1 18 ($psiO+2*$m0); & $ptr 2 18 ($masks+2*$m0); & $imm 3 $chb; & $ptr 4 18 $reg.Noise.Offset
-            & $ptr 5 18 ($signalAt+2*(64+$m0)); & $ptr 6 18 $reg.SourceConstants.Offset; & $imm 7 (($m1-$m0)/64)
-            & $call 'body_source_merge'
+            if($EmitParallel){
+                & $EmitParallel 'body_source_merge_parallel' @(($psiE+2*$m0),$reg.Noise.Offset,($signalAt+2*(64+$m0)),$reg.SourceConstants.Offset) @(128,128,128,0) (($m1-$m0)/64)
+            } else {
+                & $ptr 0 18 ($psiE+2*$m0); & $ptr 1 18 ($psiO+2*$m0); & $ptr 2 18 ($masks+2*$m0); & $imm 3 $chb; & $ptr 4 18 $reg.Noise.Offset
+                & $ptr 5 18 ($signalAt+2*(64+$m0)); & $ptr 6 18 $reg.SourceConstants.Offset; & $imm 7 (($m1-$m0)/64)
+                & $call 'body_source_merge'
+            }
             $s.Add(@{Op='syncht'})
             if($t0 -eq 0){ & $ptr 0 18 $signalAt; & $call 'body_source_reflect_front' }
             if($last){ & $ptr 0 18 $signalAt; & $imm 1 $samplesN; & $call 'body_source_reflect_back' }
@@ -139,13 +144,28 @@ function Add-KokoroHarmonicSource16JobSteps {
     & $call 'body_source_reflect'
     $s.Add(@{Op='syncht'})
     if($SignalBase -ge 0){ & $dma $SignalBase $SignalOffset 18 $reg.Signal.Offset $layout.Stft.SignalBytes }
-    Add-KokoroHarmonicStft16JobSteps -Steps $s -Calls $calls -Frames $Frames -BatchTiles $BatchTiles -WeightsBase $WeightsBase -WeightsOffset $WeightsOffset -TablesBase $TablesBase -TablesOffset $TablesOffset -HarBase $HarBase -HarOffset $HarOffset -SignalInVtcm
+    Add-KokoroHarmonicStft16JobSteps -EmitParallel $EmitParallel -Steps $s -Calls $calls -Frames $Frames -BatchTiles $BatchTiles -WeightsBase $WeightsBase -WeightsOffset $WeightsOffset -TablesBase $TablesBase -TablesOffset $TablesOffset -HarBase $HarBase -HarOffset $HarOffset -SignalInVtcm
 }
 
 function Get-KokoroHarmonicSource16Bodies {
-    param([Parameter(Mandatory)][long]$PlaneStride,[switch]$SeededNoise,[switch]$Chunked,[switch]$VectorPackets)
+    param([Parameter(Mandatory)][long]$PlaneStride,[switch]$SeededNoise,[switch]$Chunked,[switch]$VectorPackets,[pscustomobject]$ParallelLayout)
     $merge = @(New-KokoroSourceMergeSteps)
     if ($VectorPackets) { $merge = Group-HexagonPackets $merge }
+    $parallelMerge=@()
+    if($ParallelLayout -and $Chunked){
+        # Workers receive an even-phase pointer, noise pointer, output pointer, constants pointer and block count.
+        # The odd phases and voicing masks advance by the same 128 bytes per block as the even phases.
+        $regs=$ParallelLayout.Regions
+        $prep=[Collections.Generic.List[hashtable]]::new()
+        foreach($move in @(@(7,4),@(5,2),@(6,3),@(4,1))){$prep.Add(@{Op='addi';d=$move[0];s=$move[1];i=0})}
+        foreach($pair in @(@(1,($regs.PsiOdd.Offset-$regs.PsiEven.Offset)),@(2,($regs.Masks.Offset-$regs.PsiEven.Offset)),@(3,$ParallelLayout.ChunkHalfwordBytes))){
+            $prep.Add(@{Op='lo';x=$pair[0];i=($pair[1] -band 65535)});$prep.Add(@{Op='hi';x=$pair[0];i=($pair[1] -shr 16)})
+            if($pair[0] -ne 3){$prep.Add(@{Op='add';d=$pair[0];s=0;t=$pair[0]})}
+        }
+        $body=@(New-KokoroSourceMergeSteps -LabelPrefix 'srcpool')
+        if($VectorPackets){$body=Group-HexagonPackets $body}
+        $parallelMerge=@(,@('body_source_merge_parallel',($prep.ToArray()+$body)))
+    }
     $noise=@(); if($SeededNoise){ $noise=@(,@('body_source_noise',@(New-KokoroSourceNoiseSteps))) }
     if($Chunked){
         foreach($part in 'Head','Segments','Tail'){ $noise+=@(,@("body_source_phase_$($part.ToLower())",@(New-KokoroSourcePhaseSteps -Part $part -LabelPrefix "sourcephase$($part.ToLower())"))) }
@@ -155,7 +175,7 @@ function Get-KokoroHarmonicSource16Bodies {
         @('body_source_phase',@(New-KokoroSourcePhaseSteps)),
         @('body_source_voicing',@(New-KokoroSourceVoicingSteps)),
         @('body_source_merge',$merge),
-        @('body_source_reflect',@(New-KokoroSourceReflectSteps))) + $noise + @(Get-KokoroHarmonicStft16Bodies -PlaneStride $PlaneStride)
+        @('body_source_reflect',@(New-KokoroSourceReflectSteps))) + $parallelMerge + $noise + @(Get-KokoroHarmonicStft16Bodies -PlaneStride $PlaneStride)
 }
 
 function New-KokoroHarmonicSource16RunSteps {
