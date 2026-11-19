@@ -24,7 +24,9 @@ function New-KokoroPlaneCombineSteps {
         [string] $LabelPrefix = 'planecombine',
         [switch] $NoReturn,
         # Residual: read R from r5 instead of the output tiles r1 (the residual of another ring, written to r1).
-        [switch] $FirstBlockOnly, [switch] $SeparateResidual
+        [switch] $FirstBlockOnly, [switch] $SeparateResidual,
+        # The noise convolution starts with R = 0. Its destination can be written directly.
+        [switch] $ZeroResidual
     )
     if ($PlaneStride % 2048 -ne 0) { throw 'Plane stride must keep 2 KB tile alignment' }
     if ($FirstBlockOnly -and ($Mode -ne 'Conv' -or $Channels -ne 64)) { throw 'FirstBlockOnly expects a 64-channel convolution output.' }
@@ -85,9 +87,11 @@ function New-KokoroPlaneCombineSteps {
         if ($Groups -eq 3) { $s.Add(@{Op='vadd-h-sat';d=4;s=4;t=6}) }
         if ($Mode -eq 'Residual') {
             $s.Add(@{Op='vmpy-h-rnd-sat';d=4;s=4;t=($ratioBase+$b)})          # O = v * ratio_c
-            $s.Add(@{Op='vload';d=5;s=$(if ($SeparateResidual) { 5 } else { 1 });Offset=0})
-            $s.Add(@{Op='vxor';d=5;s=5;t=29})
-            $s.Add(@{Op='vadd-h-sat';d=4;s=5;t=4})                    # R + O
+            if (!$ZeroResidual) {
+                $s.Add(@{Op='vload';d=5;s=$(if ($SeparateResidual) { 5 } else { 1 });Offset=0})
+                $s.Add(@{Op='vxor';d=5;s=5;t=29})
+                $s.Add(@{Op='vadd-h-sat';d=4;s=5;t=4})                    # R + O
+            }
         }
         $s.Add(@{Op='vxor';d=4;s=4;t=29})
         $s.Add(@{Op='vstore';s=1;t=4;Offset=0})

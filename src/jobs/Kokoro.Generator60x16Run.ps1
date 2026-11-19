@@ -1606,7 +1606,6 @@ function New-KokoroGenerator60x16RunSteps {
         $F=$spanFront; $n=$c1-$c0; $harTile=if($Channels -eq 256){16384L}else{4096L}
         & $wsCheck "Source$Channels.Input" $span.Index 'Write' $c0 $c1
         & $dma 18 $F.Weights 21 $sec.ConvWeights $(if($Channels -eq 256){393216L}else{49152L}); & $dma 18 $F.Tables 22 $sec.ConvTables $(if($Channels -eq 256){163840L}else{65536L})
-        & $fill $F.Sum $n 0x80008000L
         for($start=$c0;$start -lt $c1;$start+=$batch){
             $count=[math]::Min($batch,$c1-$start); $first=[math]::Max(0,$start-1); $last=[math]::Min($tiles,$start+$count+1)
             if($start -eq 0){ & $fillVectors $F.Window ($harTile/128) 0x80008000L; & $fillVectors $F.WindowLow ($harTile/128) 0 }
@@ -1925,7 +1924,7 @@ function New-KokoroGenerator60x16RunSteps {
         # This section's thread programs (body_lockstep_t<k><suffix>_s<run>).
         if($sectionSchedule -eq 'Backward'){ foreach($pair in $lockstepBodies){ if($pair[0] -cmatch "^body_lockstep_t\d+$([regex]::Escape($sfx))_s"){ $bodies.Add($pair) } } }
         # A computed source's noise_convs convolves both weight planes: its sum is the three-group combine.
-        if($sec.Source){ $bodies.Add(@("body_combine_noise$sfx",@(& $packets @(New-KokoroPlaneCombineSteps -Mode Residual -Channels $Channels -Groups 3 -Group3Shifts -PlaneStride $planeStride -LabelPrefix "combinenoise$sfx")))) }
+        if($sec.Source){ $bodies.Add(@("body_combine_noise$sfx",@(& $packets @(New-KokoroPlaneCombineSteps -Mode Residual -Channels $Channels -Groups 3 -Group3Shifts -PlaneStride $planeStride -ZeroResidual -LabelPrefix "combinenoise$sfx")))) }
         # A body over three branches: the inner body for branch 0 with the caller's r0 to r5, then for branches 1 and 2
         # with each argument advanced by its branch stride (bytes; 0 keeps it). Arguments live in the frame between calls.
         $branchBodies={param([string]$name,[string]$inner,[long[]]$strides)
