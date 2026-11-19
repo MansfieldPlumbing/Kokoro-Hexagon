@@ -117,3 +117,13 @@ On SM8550 the warm median DSP times for candidate, direct-call control, and cand
 The section-cordic-abs variant builds on section-shift-acc. Each CORDIC iteration computes a signed right shift of y and then its magnitude. The shift preserves the sign for negative y. The non-saturating vector word absolute-value instruction therefore replaces the XOR and subtraction used to take that magnitude, including the two’s-complement minimum case.
 
 The candidate, shift-accumulate control, and candidate warm DSP medians were 107.132, 107.837, and 106.787 ms on the SM8550. The candidate medians were 109.91× and 110.27×. Each trial included one cold and twelve warm invocations. Every candidate PCM hash matched. Five further invocations matched the second seed. The candidate library SHA-256 is A2F62789957701CDBF08C07A69EAD98A378277D7F1C6EEB591D00F63C282757F. This version retains the control packetization policy for vector word subtraction. Enabling general word-subtraction packetization in a separate experiment changed the full waveform hash.
+
+## Managed generator program and payload
+
+New-ManagedGeneratorAssembly.ps1 in the experiment tools builds a PE/CLI library from the emission and fixture directories. It uses the persisted Reflection.Emit and GenerateMetadata approach used in PSC and Pwsh. The generated Kokoroku.Generator type exposes OpenProgram(), OpenWeights(), OpenTables(), and OpenLayout(). Each method returns a readable resource stream owned by the caller. The builder reloads the staged assembly and verifies every stream against its source file before publishing the DLL.
+
+The section-cordic-abs package occupied 42,155,008 bytes. A fresh host PowerShell process loaded the DLL and recovered its four resources. The SM8550 probe used those files and the separately supplied lighthouse activations. All 13 invocations matched the reference PCM. Across the twelve warm invocations the median was 107.023 ms, or 110.02× DSP realtime. The phone played 282,600 frames. This run covers host-side assembly loading followed by the existing phone transport. Direct Android CLR loading and a session-lifetime DSP mapping are separate measurements.
+
+~~~powershell
+& "$tools/New-ManagedGeneratorAssembly.ps1" -EmissionDirectory "$tree/build/emission" -FixtureDirectory $fixture -OutputPath "$tree/build/Kokoroku.dll"
+~~~
