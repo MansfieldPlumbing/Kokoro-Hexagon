@@ -1,228 +1,131 @@
-# Kokoro-Hexagon
+# Kokoroku
 
-Text to speech on the Hexagon DSP of a Snapdragon phone, built on Kokoro-82M's frozen decoder and generator, with every
-DSP instruction emitted by PowerShell. PowerShell reads the checkpoint, packs the weights, and writes the HMX and HVX
-machine code and the ELF itself. No C or C++, LLVM, QNN or ONNX Runtime is involved in the product path.
+**It's Kokoro. It's Hexagon. It's Pwsh.**
 
-## Design
+**Offline neural speech synthesis on Qualcomm Hexagon — with machine code emitted directly from PowerShell.**
+
+Kokoroku is an independent implementation of [Kokoro-82M](https://github.com/hexgrad/kokoro) for Qualcomm's Hexagon DSP. Instead of handing a model to PyTorch, ONNX Runtime, QNN, or a GPU delegate, it reads the original model checkpoint, prepares the weights, constructs HMX/HVX instructions, schedules the work, and emits the ELF library itself.
+
+Its generator runs depth-first, keeping small activation windows close to the matrix hardware rather than materializing whole-utterance intermediate tensors. The result is a speech-generation engine written *for* the DSP, not a wrapper around a general-purpose inference runtime.
+
+**Measured on Snapdragon 8 Gen 2 (SM8550): approximately 107× real-time DSP generator throughput**, with exact PCM equivalence to the project's integer layer-by-layer reference. No Adreno GPU is used. HMX is a dedicated matrix accelerator on the Hexagon DSP.
+
+> **Project status:** Active systems research and reproducible hardware experiments. This repository is not yet a turnkey Android TTS library or a polished end-user release.
+
+## Measured performance
+
+The qualified November 19, 2026 **`section-front-pack`** candidate generated **11.775 seconds of 24 kHz speech** with the harmonic source on the DSP:
+
+| Measurement | Result | Boundary |
+| --- | ---: | --- |
+| DSP generator | **106.93–107.02× real time** | **110.027–110.119 ms** warm median |
+| DSP generator RTF | **~0.00935** | Generator only; lower is better |
+| Host-visible invocation | **80.4–80.8× real time** | **145.721–146.407 ms** |
+| Waveform correctness | **Exact PCM** | 26 confirmation runs plus 5 runs with a second seed |
+
+The benchmark starts with supplied acoustic representation and controls; it **does not include text normalization, phonemization, the stock linguistic front end, or the decoder**. Exact PCM means byte-for-byte agreement with the *integer layer-by-layer generator reference under the same weights and supplied normalization*, **not** bit identity with upstream PyTorch's floating-point output.
+
+The qualified candidate is preserved as a **reproducible experimental patch**, not silently substituted for the repository's default generator. Faster diagnostic variants exceeding 120× bypass learned source residuals or change activation arithmetic and **do not preserve the same audio**; they are not equivalent-quality benchmark claims.
+
+Read the [November 19 throughput report](docs/results/generator-depth-first-throughput-sm8550-20261119.md) for candidate/control comparisons, SHA-256 checks, per-run timing, negative results, and reproduction steps.
+
+## What makes it different
+
+- **PowerShell is the development environment.** It reads the original `.pth` checkpoint, constructs typed instruction records, packs weights, and emits native Hexagon ELF code. No C/C++ compiler, LLVM, QNN, or ONNX Runtime is needed for the device generator path.
+- **Direct HMX/HVX execution.** HMX performs matrix convolutions; HVX handles activation transforms, AdaIN, Snake, harmonic synthesis, and spectral operations. Four HVX hardware threads cooperate with the matrix engine.
+- **Depth-first scheduling.** Convolutions operate on 32-frame tiles and maintain bounded history rings. Intermediate activations can remain in VTCM instead of repeatedly traversing full-length DDR tensors.
+- **Explicit machine-level behavior.** Instruction encoding, VLIW packet grouping, DMA, memory layout, synchronization, and weight residency are implemented and investigated in the repository.
+- **Reference-driven verification.** Emitted kernels are checked against reference arithmetic, a Qualcomm simulator where applicable, and actual SM8550 execution. Schedule-only changes must reproduce the same integer-reference PCM.
+
+The absence of a conventional ML runtime does **not** mean an absence of hardware acceleration: HMX and HVX are the accelerators.
+
+## Architecture
 
 ```text
-Text → phonemizer (CoreCLR) → front end: phonemes, durations, F0 and N → Kokoro's text encoder → aligned encoding
-     → Hexagon: decoder → x → harmonic source → generator, depth-first in spans → PCM
+                         Text
+                          |
+             English phonemizer / CoreCLR
+                          |
+          Stock linguistic front end (CPU)
+             or procedural Student (WIP)
+                          |
+        Phonemes / durations / F0 / N / style
+                          |
+                 Decoder (Hexagon)
+                          |  acoustic x
+        +-----------------+------------------+
+        |                                    |
+   Harmonic source                  Depth-first generator
+   and seeded noise                HMX convolution / HVX
+        |                                    |
+        +-----------------+------------------+
+                          |
+                Inverse spectral tail
+                          |
+                      24 kHz PCM
 ```
 
-- **Front end.** Two producers of the low-rate controls (each phoneme's duration, and F0 and energy N on the generator's
-  80-per-second tick clock):
-  - the lowered port of stock Kokoro's front end (ALBERT, `bert_encoder`, the predictor and the text encoder), compiled
-    from PowerShell to IL and run on CoreCLR ([`tools/Invoke-KokoroPrecomputedDecoder.ps1`](tools/Invoke-KokoroPrecomputedDecoder.ps1));
-  - the Student, a procedural learning system of typed objects that replaces PL-BERT, `bert_encoder` and the predictor
-    ([student/AGENTS.md](student/AGENTS.md)).
-- **Decoder** on the DSP. With a supplied normalization table it decodes any length by overlap-save: chunks of at most
-  128 frames with 16 frames of context on each side, joined on whole output tiles. Its AdaIN coefficients are computed
-  once on the host from the table.
-- **Generator** on the DSP, depth-first in spans (below), with its source branch (harmonic source, STFT, `noise_convs`,
-  `noise_res`) computed on the DSP from F0 and seeded noise.
-- **Normalization.** Stock Kokoro normalizes every AdaIN site with moments over the whole utterance, which ties each
-  output sample to the end of the utterance. Here the coefficients are supplied: a voice base per site (the mean of
-  exported moments over training stretches), so neither the decoder nor the generator has a whole-utterance dependency.
-- **Arithmetic.** Integer kernels throughout: 16-bit activations carried as two byte planes, int8 weights with
-  per-channel scales. HMX runs the convolutions; HVX runs AdaIN, Snake, the source and the transforms, on four hardware
-  threads.
+The **stock front end** remains the established input path. The procedural **Student** is an independent research effort to replace increasingly large parts of the learned linguistic and acoustic conditioning. The decoder and generator use supplied normalization coefficients to avoid a whole-utterance normalization dependency.
 
-### Depth-first execution
+The generator has three kernel-width branches (`3`, `7`, `11`), each progressing through dilation pairs (`1`, `3`, `5`). Its backward schedule staggers the dependencies so each pair advances by one output tile while carrying only the necessary history. Scheduling, weight traffic, and intermediate-buffer lifetimes are first-class parts of the implementation.
 
-A conventional generator runs layer by layer: each layer reads the whole utterance's activations and writes them back
-before the next starts, so memory traffic and working memory grow with the length of the speech.
+## Reproduce the generator experiment
 
-Here the generator runs depth-first. Time is cut into 32-frame tiles, and each tile passes through all of a section's
-stages while its data stays in VTCM, the DSP's 8 MiB local memory:
-
-- Every convolution reads only rows at or before its output; its left context lives in small rings that carry from one
-  tile to the next. In each residual pair the first convolution taps its reach late and the second the remainder, so a
-  pair's output emerges exactly one tile behind its input.
-- The 128-channel section and both source sections keep their weights resident and run one tile per HVX thread, the four
-  threads staggered one stage apart around the matrix unit. The 256-channel section streams its weights per stage over
-  a block of tiles, the next stage's transfers queued behind the current stage's convolutions.
-- The job runs in spans of 60 tiles. Each span advances every stage over the tiles its upstream stage has finished and
-  saves each section's VTCM state for the next span, so VTCM does not depend on the length of the input. A span is an
-  execution boundary only: the output is the same at any span size.
-
-Every schedule change is proved against the layer-by-layer generator, which stays in the repository as the reference:
-given the same integer weights and inputs, the depth-first job must produce byte-identical PCM. Changes to the
-synthesis itself (the supplied normalization) are judged by listening and by spectral measures, not by waveform
-agreement with stock Kokoro.
-
-## Measured on SM8550
-
-| Measurement | Result | Record |
-|---|---:|---|
-| Generator with its source on the DSP, from x and F0 to PCM, 1.625 s of speech | **39.65 ms, 41.0× real time**; PCM byte-identical to the layer reference | [source on the DSP](docs/results/generator-source-on-dsp-sm8550-20261024.md) |
-| The same job on 2026-10-27 before this day's changes (host coefficients, resident sources, 60-tile spans, queued weights, packed fill and combines) | 62.58 ms, 26.0× | same |
-| DMA per run for that job, by the emitted ledger | 135.9 MB at 60-tile spans, from 226.4 MB at 20-tile spans | same |
-| Decoder and generator on voice-base normalization, 11.775 s of speech in one pass | 314.6 ms on the DSP (decoder 24.96 ms, generator 289.6 ms), 37.4× real time | [stock pipeline](docs/results/stock-end-to-end-sm8550-20261027.md) |
-| Text to WAV, our phonemizer and the host front end, then decoder and generator on the DSP, 2.85 s of speech | DSP 88.0 ms; host front end 2,528 ms warm on the development PC | same |
-| Phonemizer on the phone, warm median per sentence | 57.8 µs (challenge set), 96.6 µs (held out) | [phonemizer](docs/results/phonemizer-polish-sm8550-20261008.md) |
-
-Times are DSP times of warm runs unless stated. The generator rows take x and F0 from a captured stock Kokoro run.
-The 11.775 s row's normalization is the voice base; its waveform is not compared with stock (see the record for the
-spectral comparison and why).
-
-## What is known about HMX
-
-HMX is the Hexagon's matrix unit. Qualcomm does not publish how it works inside, so everything here is known from
-outside: what goes in through VTCM, what comes out, and where it faults.
-
-**Observed.**
-
-- In the V73 simulator, the emitted two-group HMX convolution matches a scalar C model of its integer contract: 0 of
-  12,288 mismatches in each byte plane, in every configuration tried
-  ([record](docs/results/generator60x-16bit-kernels-sim-20261007.md)).
-- On the phone, the decoder's output equals the V73 simulator's byte for byte, 163,840 bytes
-  ([record](docs/results/decoder-sm8550-20261009.md)).
-- On the phone, an HMX activation read faults when its two croutons lie in different pages of the VTCM mapping, and
-  the pages depend on the grant: as modelled, the request rounded up to 256 KiB and mapped from its base in the largest
-  4 MiB, 1 MiB or 256 KiB page that fits. The model predicted 12 of 12 outcomes, including where the fault begins and
-  that a 4 MiB grant removes the 1 MiB fault ([record](docs/results/hmx-vtcm-pages-sm8550-20261113.md),
-  `Run -Case hmx-vtcm-pages`). The simulator's 1 MiB rule ([decoder](docs/results/decoder-sm8550-20261009.md)) is the
-  same rule with 1 MiB pages. The page structure is inferred from where faults fall; QuRT's mapping is not read. The
-  fault belongs to the read's whole two-crouton window: a kernel-1 conv, whose taps never use the second crouton,
-  faults at the same tile.
-- On SM8550, requests for a separate HMX clock are refused (-3)
-  ([record](docs/results/dsp-power-votes-sm8550-20261028.md)).
-- HMX streams activation-and-weight pairs at about 9.4 core cycles each, behind a fixed latency of about 40 to 59
-  cycles that does not depend on how many pairs a group accumulated. The core issues pairs at HMX's rate, and holds a
-  load to a stored crouton until the whole crouton lands
-  ([record](docs/results/hmx-timing-reduction-sm8550-20261113.md)).
-- The FP16 path reduces as a chain, not a tree: products join the accumulator 4 at a time in ascending input-channel
-  order, with a 24-bit significand, rounded to odd on the grid of the largest operand. That model predicts 156 of 160
-  fingerprint rows bit for bit (same record).
-
-**What "byte-identical to the layer reference" shows.** Both jobs run on the same phone, with the same HMX kernels,
-the same int8 weights and the same supplied AdaIN constants (exported by a layer-job run); only the schedule differs.
-The match shows that the depth-first schedule computes what the layer schedule computes. It says nothing about what HMX
-does inside, because HMX is on both sides. And in integer arithmetic that never overflows, the same sums taken in a
-different order give the same bytes, so the match is what the arithmetic predicts. Against stock Kokoro's
-floating-point PCM the same job measures 29.43 dB, not identity.
-
-**Independent bearings.** The V73 simulator is Qualcomm's model, not this repository's; the phone is checked against
-it, and the simulator against the C model. The C model was written here to state the contract; whether it was written
-independently of the simulator's behaviour is not recorded. The generator's output does respond to perturbed inputs
-([propagation](docs/results/generator-propagation-sm8550-20261020.md)), but the equivalence checks themselves record no
-one-bit control.
-
-**Not known.**
-
-- Whether HMX's chained reduction is laid out in space (a systolic array, partial sums passed cell to cell) or is one
-  4-wide unit reused in time: the two give the same numbers and the same timing.
-- The int8 path's accumulator width and order, and whether it saturates or wraps beyond the ranges exercised; only the
-  FP16 path has been fingerprinted.
-- How the FP16 running total is rounded between groups (4 of 160 fingerprint rows).
-- Whether each equivalence check would fail on a one-bit change.
-- Whether the read's window is checked before the read or both croutons are always fetched. (Weight reads and output
-  stores are single aligned croutons, so they cannot span a page.)
-
-**Observations that would answer them.**
-
-- A one-bit control for each equivalence case: change one weight by one step and confirm the PCM hash changes.
-- The int8 path's order: inputs whose partial sums overflow part-way through but whose final sum fits. If the
-  accumulator saturates or wraps, the output depends on the order and reveals it.
-- Space against time: something that scales with the chain's physical extent rather than its arithmetic, such as power
-  or behaviour under contention from a second HMX context.
-
-## Status
-
-| | |
-|---|---|
-| Depth-first generator with its source on the DSP; kept settings are the defaults, with VTCM fallbacks | Measured; byte-identical to the layer reference |
-| Decoder and generator at any length with supplied normalization | Measured (11.775 s in one pass); decoder chunks byte-identical across chunk sizes |
-| Supplied (voice-base) normalization against each utterance's own | Measured: loudness envelope correlation 0.958; log-spectral distance 8.81 dB against 3.33 dB between two seeds of the same render ([record](docs/results/stock-end-to-end-sm8550-20261027.md)) |
-| DDR workspace bounded by the span (tensors held as rings, not whole length) | Next |
-| The span loop with resident source sections (code size independent of length) | Next |
-| Front end on the phone's CPU | In progress: the port's SIMD workers need the portable vector API, which needs a PSLowering update |
-| Student producing durations, F0 and N from unseen text | In progress ([stage 1](docs/results/student-stage1-audition-sm8550-20261025.md)) |
-| Streaming PCM while later text is still being processed; time to first audio | Not yet built or measured |
-| SM8635 | Not yet run |
-
-## Development
-
-PowerShell 7.7.0-preview.5, the version CI pins:
+Start with the repository's pinned PowerShell development environment and the required original model/reference assets. The commands below reproduce the **emitted generator library** for the November 19 exact-PCM candidate; a complete phone benchmark also requires the recorded fixture, diagnostic host, and authorized SM8550 device.
 
 ```powershell
+git clone https://github.com/MansfieldPlumbing/Kokoroku.git
+Set-Location Kokoroku
+
+# Read project status without accessing the phone.
 pwsh -NoProfile -File ./Invoke-KokoroDevelopment.ps1
+
+# Run repository verification.
 pwsh -NoProfile -File ./Invoke-KokoroDevelopment.ps1 Verify
-pwsh -NoProfile -Command "& ./Invoke-KokoroDevelopment.ps1 Run -Case generator-tile-equivalence -Parameters @{Joint='WholeSource'}"
+
+# Reconstruct the exact-PCM experiment in a detached worktree.
+New-Item -ItemType Directory -Path build -Force | Out-Null
+$tools = (Resolve-Path tools/experiments/generator-throughput-20261119).Path
+$tree  = Join-Path (Resolve-Path build) 'repro-front-pack'
+& "$tools/New-ExperimentCheckout.ps1" -Variant section-front-pack -Destination $tree
+& "$tools/Export-ExperimentGenerator.ps1" -Checkout $tree -OutputDirectory "$tree/build/emission"
 ```
 
-The default command reports repository state and available commands without touching a phone. `Verify` runs the
-same checks as CI. `generator-tile-equivalence` runs a depth-first job and its layer reference on the phone and
-compares them section by section and in PCM; with no options it uses the kept depth-first settings
-(`Invoke-KokoroGeneratorDepthFirstEmission`). Its joints are:
+The emitted library is `libkokoro_generator_tail_skel.so`. For the complete run procedure, including expected PCM SHA-256 and timing controls, follow [the experiment report](docs/results/generator-depth-first-throughput-sm8550-20261119.md). `Verify` is not a substitute for on-device qualification. Development/reference tooling may use additional dependencies; the **device generator** does not use PyTorch, QNN, or ONNX Runtime.
 
-| Joint | Scope |
-|---|---|
-| `Section` | One section |
-| `Front` | The 256-channel front and section |
-| `Whole` | The whole generator with supplied sources |
-| `WholeSource` | The whole generator with its source on the DSP |
-| `Spans` | Long input, compared across span sizes |
+## Current research
 
-The speech renderer (`New-KokoroSpeechRenderer`) runs the decoder and generator on the phone from an aligned encoding,
-F0 and N, with exported or voice-base normalization.
+**Qualified or demonstrated**
 
-Dependencies are pinned by hash; generated artifacts stay under the ignored `build/` directory. Phone commands run
-only against an attached, authorized device, and results from different phone models are kept separate.
+- Depth-first Hexagon generator with DSP-side harmonic source and exact integer-reference output.
+- On-phone SM8550 benchmarking, matrix instruction observations, simulator comparisons, and byte-level correctness checks.
+- A decoder path using bounded chunks and supplied AdaIN coefficients.
+- PowerShell-authored ELF emission and hardware-specific scheduling experiments.
 
-Machine-specific locations come from environment variables:
+**Under development or not yet qualified**
 
-| Variable | Used for |
-|---|---|
-| `KOKORO_ADB` (or `adb` on `PATH`) | Phone commands |
-| `KOKORO_PYTHON` | Stock reference captures |
-| `KOKORO_STOCK_SOURCE` | The pinned Kokoro source |
-| `HEXAGON_SDK_TOOLS` | The optional assembler check |
+- A procedural Student replacing stock front-end and potentially decoder computations.
+- A fourth, weightless output phase, with procedural high-frequency air and 48 kHz realization.
+- Native Opus output and its end-to-end DSP timing.
+- A streamlined public build/distribution and broader device qualification.
 
-## Layout
+The current **48 kHz FM-air examples are offline auditions**, derived from the measured 24 kHz baseband. They are *not* evidence that native 48 kHz generation or Opus encoding has already reached the reported DSP throughput.
 
-Each subsystem is one file of declared records and steps, reached through `Invoke-KokoroDevelopment.ps1`:
+## Repository map
 
-| File | Subsystem |
-|---|---|
-| `Invoke-HexagonDevelopment.ps1` | Hexagon instruction records, encoder, packet grouping, kernels and emission |
-| `src/jobs/Kokoro.Generator60x16Run.ps1` | The generator job: layer reference, depth-first schedules, spans, fronts, source sections, DMA ledger |
-| `src/jobs/Kokoro.DecoderRun16.ps1` | The decoder job and its normalization modes |
-| `Invoke-KokoroDevelopment.ps1` | Commands, phone runs, the speech renderer and the depth-first defaults |
-| `student/Invoke-Student.ps1` | The Student: text corpus, pronunciations, syllabus and training |
-| `phonemizer/Invoke-EnglishPhonemizer.ps1` | The English phonemizer and its compiled driver |
-| `tools/Invoke-KokoroPrecomputedDecoder.ps1` | The lowered host port of stock Kokoro: front end, decoder and generator reference |
+| Location | Purpose |
+| --- | --- |
+| [`Invoke-KokoroDevelopment.ps1`](Invoke-KokoroDevelopment.ps1) | Main development, verification, emission, and device-run entry point |
+| [`Invoke-HexagonDevelopment.ps1`](Invoke-HexagonDevelopment.ps1) | Hexagon instruction representation, encoding, packets, and ELF emission |
+| [`src/jobs/Kokoro.Generator60x16Run.ps1`](src/jobs/Kokoro.Generator60x16Run.ps1) | Generator schedules, weights, buffers, and source/residual sections |
+| [`src/jobs/Kokoro.DecoderRun16.ps1`](src/jobs/Kokoro.DecoderRun16.ps1) | DSP decoder |
+| [`phonemizer/Invoke-EnglishPhonemizer.ps1`](phonemizer/Invoke-EnglishPhonemizer.ps1) | English phonemizer |
+| [`student/Invoke-Student.ps1`](student/Invoke-Student.ps1) | Procedural Student research |
+| [`tools/experiments/generator-throughput-20261119`](tools/experiments/generator-throughput-20261119) | Reconstructible optimization candidates and per-invocation timing |
+| [`docs/results`](docs/results) | Measurements, failures, and hardware investigations |
 
-Kernels and jobs under `src/` are being folded into the Hexagon file. Result records, one per measurement, are in
-[`docs/results`](docs/results).
+## Research integrity
 
-## Published comparisons
+Every throughput number needs a **device, input duration, timing boundary, implementation, and audio-quality contract**. Generator-only measurements cannot be ranked directly against full text-to-speech timings on other systems. A faster variant that changes the waveform is reported as such, not folded into the exact-PCM result.
 
-Speed is audio duration divided by synthesis time. Each row keeps its published device and timing scope; these are
-reference points, not a matched ranking. The other projects' figures were checked on October 10, 2026.
-
-| Build | Device | Timed scope | Speed |
-|---|---|---|---:|
-| Kokoro-Hexagon, depth-first ([record](docs/results/generator-source-on-dsp-sm8550-20261024.md)) | SM8550 | Harmonic source and generator from x and F0; DSP only; 1.625 s audio | **41.0×** |
-| Kokoro-Hexagon, decoder and generator ([record](docs/results/stock-end-to-end-sm8550-20261027.md)) | SM8550 | Decoder, harmonic source and generator from the aligned encoding, F0 and N; voice-base normalization; DSP only; 11.775 s audio | 37.4× |
-| [laishere/kokoro-coreml](https://github.com/laishere/kokoro-coreml#ios), comparison `484907d` | iPhone 16 Pro | Warm phonemes-to-PCM chain; six passages; G2P and load excluded | 16.9× mean |
-| [Soniqo speech-swift](https://github.com/soniqo/speech-swift/blob/main/docs/benchmarks/ios-coreml.md) | iPhone 16 Pro | Core ML Kokoro, warm release benchmark | 12.5× |
-| [kokoro-offline-tts-android](https://github.com/cedgeremek/kokoro-offline-tts-android#real-device-demo) | S24 Ultra / SM8650 | QNN HTP generator; separately reports 306 ms warm request-to-first-audio | 3.78× |
-
-The kokoro-coreml figures cover phonemes to PCM, including the text encoder and predictors. Ours cover the DSP stages
-only: the front end (stock port or Student) is not yet timed on the phone.
-
-## Provenance
-
-This repository's code is released under the Apache-2.0 license (`LICENSE`, `NOTICE`). Kokoro-82M is developed by
-hexgrad and released under the Apache-2.0 license. PowerShell and .NET are developed by Microsoft and released under the
-MIT license. We acknowledge both with respect; this project is not affiliated with or endorsed by either.
-
-This repository contains no Kokoro weights, voices or model-derived data. Model inputs come from the upstream Kokoro
-release, pinned by hash; everything generated from them stays in the ignored `build/` directory and is not distributed.
-
-All code in this repository, including the Hexagon instruction encoder, the DSP kernels, the phonemizer and the text
-front end, is written independently in PowerShell. It does not copy, translate or port code from other Kokoro
-implementations.
+Kokoroku is an independent project built around the [upstream Kokoro model](https://github.com/hexgrad/kokoro); it is not an official Qualcomm or Kokoro release. Hardware behavior attributed to HMX is derived from documented external measurements unless explicitly verified otherwise.
