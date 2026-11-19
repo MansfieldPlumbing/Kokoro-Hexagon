@@ -99,3 +99,9 @@ Here $capture is the local experiment output directory and $offline is the local
 ## Procedural student question
 
 The rejected main-section experiment discarded activation precision inside the generator. The Student frontend was not in that timed region. Its result therefore says little about whether a Student can supply a correction. An experiment that isolates that question would keep the accepted reference fixed, collect paired tensors at the first diverging stage, and measure whether a causal Student can predict the missing contribution from its available controls. Inject the reference contribution first to establish what that one intervention can recover. Then audition the predicted contribution on unseen text and another noise seed, including its compute and transfer costs in the rate.
+
+## Direct calls in the DSP emitter
+
+The section-direct-call experiment builds on section-front-pack. At 6,509 internal call sites, the target is known during emission and fits a V73 PC-relative call. Emitting one instruction in place of five removed 104,144 bytes from the generator code. Dynamically selected worker entries still use indirect calls. The control ELF dynamic table contains zero DT_NEEDED entries. Its 14 undefined dynamic symbols cover power voting, compute resources, HVX/HMX ownership, and QuRT thread lifetime.
+
+The SM8550 candidate/control/candidate warm DSP medians were 108.930, 109.778, and 108.245 ms. Both candidate trials matched reference PCM on one cold and twelve warm invocations each. All five second-seed invocations matched their own reference. These candidate medians correspond to 108.10× and 108.78× for the 11.775-second fixture. The candidate library SHA-256 is A1035392A2E40707EA221AA5E46AC76453F50A84A0EA8F9E508271514D9F2F75. Use section-direct-call with New-ExperimentCheckout.ps1 to reproduce it.

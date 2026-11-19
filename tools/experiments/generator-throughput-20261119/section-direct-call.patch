@@ -1,0 +1,52 @@
+diff --git a/Invoke-HexagonDevelopment.ps1 b/Invoke-HexagonDevelopment.ps1
+index 4524597..9cd9d60 100644
+--- a/Invoke-HexagonDevelopment.ps1
++++ b/Invoke-HexagonDevelopment.ps1
+@@ -34,6 +34,7 @@ $script:Instructions = @(
+     @{ Op='hi';             Pattern='01110010ii1xxxxxPPiiiiiiiiiiiiii'; Rule='Raw'; Asm='r{x}.h = #{i}'; Source='PRM p.145' }
+     @{ Op='eq';             Pattern='11110010-00sssssPP-ttttt---000dd'; Asm='p{d} = cmp.eq(r{s},r{t})'; Source='PRM p.157' }
+     @{ Op='gtu';            Pattern='11110010-11sssssPP-ttttt---000dd'; Asm='p{d} = cmp.gtu(r{s},r{t})'; Source='PRM p.157' }
++    @{ Op='call-direct'; Pattern='0101101iiiiiiiiiPPiiiiiiiiiiiii0'; Rule='Branch'; Asm='call {Label}'; Source='Hexagon J2_call' }
+     @{ Op='jump-p';         Pattern='01011100ii0iiiiiPPi00-uuiiiiiii-'; Rule='Branch'; Asm='if (p{u}) jump:nt {Label}'; Source='PRM p.163' }
+     @{ Op='loop0-r';        Pattern='01100000000sssssPP-iiiii---ii---'; Rule='LoopStart'; Asm='loop0({Label},r{s})'; Source='PRM pp.146,195' }
+     @{ Op='loop1-r';        Pattern='01100000001sssssPP-iiiii---ii---'; Rule='LoopStart'; Asm='loop1({Label},r{s})'; Source='PRM pp.146,195' }
+@@ -599,8 +600,13 @@ class HexagonEncoder {
+         }
+         elseif ($kind -eq 12) {
+             [long] $delta = $Target - $Pc
++            if ($Step.Op -eq 'call-direct') {
++                if ($delta % 4L -ne 0L -or $delta -lt -8388608L -or $delta -gt 8388604L) {throw 'Direct call out of range'}
++                $fields.Set('i', ([long]($delta / 4L)) -band 4194303L)
++            } else {
+             if ($delta % 4L -ne 0L -or $delta -lt -65536L -or $delta -gt 65532L) { throw 'Branch out of range' }
+             $fields.Set('i', ([long]($delta / 4L)) -band 32767L)
++            }
+         }
+         elseif ($kind -eq 13) {
+             if ($Step.ContainsKey('r')) { $fields.Set('x', [long]$Step.r) }
+diff --git a/src/jobs/Kokoro.Generator60x16Run.ps1 b/src/jobs/Kokoro.Generator60x16Run.ps1
+index 98a25c7..7a1c93b 100644
+--- a/src/jobs/Kokoro.Generator60x16Run.ps1
++++ b/src/jobs/Kokoro.Generator60x16Run.ps1
+@@ -2068,6 +2068,21 @@ function New-KokoroGenerator60x16RunSteps {
+         $s.Add(@{Op='load';d=4;s=12;Offset=48}); $s.Add(@{Op='addi';d=4;s=4;i=1}); $s.Add(@{Op='store';s=12;t=4;Offset=48})
+         $s.Add(@{Op='dealloc-return'})
+     }
++    $byPc=@{}
++    foreach($record in $calls){$byPc[$record.pc]=$record}
++    $compact=[Collections.Generic.List[hashtable]]::new()
++    $converted=0
++    for($index=0;$index -lt $s.Count;$index++){
++        $start=$s[$index]
++        $record=$byPc[$start]
++        if($record -and $index+4 -lt $s.Count -and $start.d -eq 14 -and $s[$index+1] -eq $record.low -and $s[$index+2] -eq $record.high -and $s[$index+3].Op -eq 'add' -and $s[$index+3].d -eq 14 -and $s[$index+3].s -eq 14 -and $s[$index+3].t -eq 15 -and $s[$index+4].Op -eq 'callr' -and $s[$index+4].s -eq 14){
++            $compact.Add(@{Op='call-direct';Label=$record.label})
++            $index+=4
++            $converted++
++        }else{$compact.Add($start)}
++    }
++    Write-Host "Direct call sites: $converted"
++    $s=$compact
+     $labels=@{};$pcs=[Collections.Generic.Dictionary[object,long]]::new();$pc=0L;$isa=Get-InstructionSet
+     foreach($step in $s){if($step.Op -eq 'label'){if($labels.ContainsKey($step.Name)){throw "Duplicate label $($step.Name)"};$labels[$step.Name]=$pc};$pcs[$step]=$pc;$pc+=& $isa.Length $step}
+     foreach($c in $calls){$delta=[long]([uint32](($labels[$c.label]-$pcs[$c.pc]) -band 0xffffffffL));$c.low.i=$delta -band 65535;$c.high.i=$delta -shr 16}
