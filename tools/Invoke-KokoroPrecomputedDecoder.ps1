@@ -658,6 +658,19 @@ class OfflineDenseWorker {
     }
 }
 
+class OfflineAttentionWorker {
+    [float[]] $Query
+    [float[]] $Key
+    [float[]] $Value
+    [float[]] $Context
+    [int] $Rows
+    [int] $FirstHead
+    [int] $LastHead
+
+    [void] Run() {
+        [OfflineUpstreamMath]::AttentionHeads($this.Query, $this.Key, $this.Value, $this.Rows, 12, 768, $this.Context, $this.FirstHead, $this.LastHead)
+    }
+}
 class OfflineLstmWorker {
     [float[]] $Values
     [float[]] $InputWeights
@@ -1264,12 +1277,18 @@ class OfflineUpstreamMath {
         return $y
     }
     static [float[]] SelfAttention([float[]] $query, [float[]] $key, [float[]] $value, [int] $rows, [int] $heads, [int] $width) {
+        $context = [float[]]::new($rows * $width)
+        [OfflineUpstreamMath]::AttentionHeads($query, $key, $value, $rows, $heads, $width, $context, 0, $heads)
+        return $context
+    }
+
+    static [void] AttentionHeads([float[]] $query, [float[]] $key, [float[]] $value, [int] $rows, [int] $heads, [int] $width, [float[]] $context, [int] $firstHead, [int] $lastHead) {
         # Unmasked scaled dot-product attention per head (a single unpadded utterance).
         $headWidth = [int]($width / $heads)
         if ($query.Length -ne $rows * $width -or $key.Length -ne $query.Length -or $value.Length -ne $query.Length -or $headWidth * $heads -ne $width) { throw [ArgumentException]::new('Attention shape mismatch.') }
-        $context = [float[]]::new($rows * $width); $scores = [double[]]::new($rows)
+        $scores = [double[]]::new($rows)
         $scale = [double]1 / [Math]::Sqrt([double]$headWidth)
-        for ($h = 0; $h -lt $heads; $h++) {
+        for ($h = $firstHead; $h -lt $lastHead; $h++) {
             $offset = $h * $headWidth
             for ($i = 0; $i -lt $rows; $i++) {
                 $maximum = [double]::NegativeInfinity
@@ -1288,7 +1307,7 @@ class OfflineUpstreamMath {
                 }
             }
         }
-        return $context
+
     }
     static [float[]] Lstm([float[]] $x, [int] $rows, [int] $inputs, [int] $hidden, [float[]] $inputWeights, [float[]] $hiddenWeights, [float[]] $inputBias, [float[]] $hiddenBias, [float[]] $y, [int] $firstDirection, [int] $lastDirection) {
         # Bidirectional single-layer nn.LSTM, gate order i, f, g, o. Weights hold the forward
@@ -1480,6 +1499,7 @@ $workerType = $assembly.GetType('OfflineConvolutionWorker', $true)
 $mathType = $assembly.GetType('OfflineRenderMath', $true)
 $upstreamMath = $assembly.GetType('OfflineUpstreamMath', $true)
 $directConvolution = $assembly.GetType('OfflineDirectConvolutionWorker', $true)
+$attentionWorker = $assembly.GetType('OfflineAttentionWorker', $false)
 $denseWorker = $assembly.GetType('OfflineDenseWorker', $true)
 $lstmWorker = $assembly.GetType('OfflineLstmWorker', $true)
 $adaInWorkerType = $assembly.GetType('OfflineAdaInWorker', $false)
@@ -2179,7 +2199,22 @@ function Invoke-OfflineAlbert([int[]] $Ids) {
         $query = Invoke-OfflineLinear $h $t ($layer + 'attention.query')
         $key = Invoke-OfflineLinear $h $t ($layer + 'attention.key')
         $value = Invoke-OfflineLinear $h $t ($layer + 'attention.value')
-        $context = $upstreamMath::SelfAttention($query, $key, $value, $t, 12, 768)
+        if ($null -eq $attentionWorker -or $t -lt 32 -or $Dense -eq 'Scalar') {
+            $context = $upstreamMath::SelfAttention($query, $key, $value, $t, 12, 768)
+        } else {
+            $context = [float[]]::new($t * 768)
+            $count = [Math]::Min($Threads, 12)
+            $tasks = [Threading.Tasks.Task[]]::new($count)
+            for ($i = 0; $i -lt $count; $i++) {
+                $worker = [Activator]::CreateInstance($attentionWorker)
+                $worker.Query = $query; $worker.Key = $key; $worker.Value = $value
+                $worker.Context = $context; $worker.Rows = $t
+                $worker.FirstHead = [int][Math]::Floor(12 * $i / $count)
+                $worker.LastHead = [int][Math]::Floor(12 * ($i + 1) / $count)
+                $tasks[$i] = [Threading.Tasks.Task]::Run($attentionWorker.GetMethod('Run').CreateDelegate([Action], $worker))
+            }
+            [Threading.Tasks.Task]::WaitAll($tasks)
+        }
         $projected = Invoke-OfflineLinear $context $t ($layer + 'attention.dense')
         $attention = $upstreamMath::LayerNorm($upstreamMath::Add($h, $projected), $t, 768,
             (Read-OfflineWeight ($layer + 'attention.LayerNorm.weight')), (Read-OfflineWeight ($layer + 'attention.LayerNorm.bias')), [double]1e-12)

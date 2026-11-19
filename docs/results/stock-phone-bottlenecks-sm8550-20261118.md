@@ -191,3 +191,9 @@ The hybrid passed the lighthouse quality check. Compared with the clean all-floa
 PhoneSpeech used the utterance-selected voice row in the frontend but reused the generator fixture's style affine in all 48 generator AdaIN sites. The fix projects the current acoustic style through each site's trained parameters and updates the Q22 Ka and Mb records before host coefficient packing. The voice-base normalization ratios, convolution weights, decoder, excitation and DSP library stayed fixed in the controlled comparison.
 
 On the lighthouse passage the style change moved excess envelope modulation from +6.90 to −1.77 dB and envelope correlation from 0.47 to 0.98 against the clean reference. The corrected signal was 3.95 LU louder than the reference. Host and DSP coefficient calculation gave the same corrected PCM across four phone renders. On the shipping host-coefficient library the warm generator DSP time was 237.12 ms and text-to-PCM took 5.179 s for 11.775 s of speech. Both sessions completed playback with zero underruns. These runs verify the measured flutter regression on this passage.
+
+### Parallel ALBERT attention on SM8550
+
+Split the 12 independent attention heads across the existing frontend workers. Each worker owns its score buffer and writes its assigned output channels. Accumulation order within each head stays the same. Inputs shorter than 32 tokens use the serial implementation.
+
+On the flutter-corrected lighthouse passage, parallel and serial attention ran in separate launches on the same handset with the same eight-worker frontend and DSP generator. Each launch rendered four times. Across the three warm runs, median frontend time fell from 4,923.3 to 3,927.1 ms. Median text-to-PCM time fell from 5,283.5 to 4,280.8 ms for 11.775 seconds of speech, raising throughput from 2.23× to 2.75× real time. All eight PCM hashes matched the corrected baseline. Playback recorded zero underruns.
