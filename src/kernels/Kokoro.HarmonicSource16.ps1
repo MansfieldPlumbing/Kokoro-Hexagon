@@ -72,14 +72,18 @@ function New-KokoroSourcePhaseSteps {
     $s.Add(@{Op='addi';d=0;s=0;i=4})
     & $incOf 0
     $s.Add(@{Op='asr-i';d=10;s=8;i=1}); $s.Add(@{Op='add';d=11;s=9;t=10})   # r11 = P_k + inc / 2
-    $s.Add(@{Op='imm';d=15;i=150})
+    # Ten row pairs share three base-address calculations and one loop branch.
+    $s.Add(@{Op='imm';d=15;i=15})
     $s.Add(@{Op='label';Name=(& $lbl 'pair')})
-    $s.Add(@{Op='add';d=10;s=2;t=14}); $s.Add(@{Op='store';s=10;t=11;Offset=0})
-    $s.Add(@{Op='add';d=11;s=11;t=8})
-    $s.Add(@{Op='add';d=10;s=3;t=14}); $s.Add(@{Op='store';s=10;t=11;Offset=0})
-    $s.Add(@{Op='add';d=11;s=11;t=8})
-    $s.Add(@{Op='add';d=10;s=4;t=5}); $s.Add(@{Op='add';d=10;s=10;t=14}); $s.Add(@{Op='store';s=10;t=12;Offset=0})
-    $s.Add(@{Op='addi';d=14;s=14;i=4}); $s.Add(@{Op='addi';d=15;s=15;i=-1}); $s.Add(@{Op='gtu';d=0;s=15;t=13}); $s.Add(@{Op='jump-p';u=0;Label=(& $lbl 'pair')})
+    $s.Add(@{Op='add';d=6;s=2;t=14}); $s.Add(@{Op='add';d=10;s=3;t=14})
+    $s.Add(@{Op='add';d=13;s=4;t=5}); $s.Add(@{Op='add';d=13;s=13;t=14})
+    for ($word = 0; $word -lt 10; $word++) {
+        $offset = 4 * $word
+        $s.Add(@{Op='store';s=6;t=11;Offset=$offset}); $s.Add(@{Op='add';d=11;s=11;t=8})
+        $s.Add(@{Op='store';s=10;t=11;Offset=$offset}); $s.Add(@{Op='add';d=11;s=11;t=8})
+        $s.Add(@{Op='store';s=13;t=12;Offset=$offset})
+    }
+    $s.Add(@{Op='imm';d=13;i=0}); $s.Add(@{Op='addi';d=14;s=14;i=40}); $s.Add(@{Op='addi';d=15;s=15;i=-1}); $s.Add(@{Op='gtu';d=0;s=15;t=13}); $s.Add(@{Op='jump-p';u=0;Label=(& $lbl 'pair')})
     # P_(k+1) = P_k + 300 inc_(k+1).
     $s.Add(@{Op='imm';d=11;i=300}); $s.Add(@{Op='mpy-d';d=10;s=8;t=11}); $s.Add(@{Op='add';d=9;s=9;t=10})
     $s.Add(@{Op='addi';d=1;s=1;i=-1}); $s.Add(@{Op='gtu';d=0;s=1;t=13}); $s.Add(@{Op='jump-p';u=0;Label=(& $lbl 'segment')})
@@ -111,11 +115,14 @@ function New-KokoroSourceVoicingSteps {
     $s.Add(@{Op='label';Name="${LabelPrefix}_frame"})
     $s.Add(@{Op='load';d=10;s=0;Offset=0}); $s.Add(@{Op='sub';d=10;s=7;t=10}); $s.Add(@{Op='asr-i';d=10;s=10;i=31})   # r10 uv word
     $s.Add(@{Op='and';d=11;s=10;t=8}); $s.Add(@{Op='imm';d=12;i=-1}); $s.Add(@{Op='xor';d=12;s=10;t=12}); $s.Add(@{Op='and';d=12;s=12;t=9}); $s.Add(@{Op='or';d=11;s=11;t=12})   # r11 amp word
-    $s.Add(@{Op='imm';d=15;i=150})
+    $s.Add(@{Op='imm';d=15;i=15})
+    $s.Add(@{Op='add';d=12;s=14;t=5}); $s.Add(@{Op='add';d=12;s=12;t=5})
     $s.Add(@{Op='label';Name="${LabelPrefix}_pair"})
-    $s.Add(@{Op='store';s=14;t=10;Offset=0})
-    $s.Add(@{Op='add';d=12;s=14;t=5}); $s.Add(@{Op='add';d=12;s=12;t=5}); $s.Add(@{Op='store';s=12;t=11;Offset=0})
-    $s.Add(@{Op='addi';d=14;s=14;i=4}); $s.Add(@{Op='addi';d=15;s=15;i=-1}); $s.Add(@{Op='gtu';d=0;s=15;t=13}); $s.Add(@{Op='jump-p';u=0;Label="${LabelPrefix}_pair"})
+    for ($word = 0; $word -lt 10; $word++) {
+        $s.Add(@{Op='store';s=14;t=10;Offset=(4*$word)})
+        $s.Add(@{Op='store';s=12;t=11;Offset=(4*$word)})
+    }
+    $s.Add(@{Op='addi';d=14;s=14;i=40}); $s.Add(@{Op='addi';d=12;s=12;i=40}); $s.Add(@{Op='addi';d=15;s=15;i=-1}); $s.Add(@{Op='gtu';d=0;s=15;t=13}); $s.Add(@{Op='jump-p';u=0;Label="${LabelPrefix}_pair"})
     $s.Add(@{Op='addi';d=0;s=0;i=4}); $s.Add(@{Op='addi';d=1;s=1;i=-1}); $s.Add(@{Op='gtu';d=0;s=1;t=13}); $s.Add(@{Op='jump-p';u=0;Label="${LabelPrefix}_frame"})
     if (-not $NoReturn) { $s.Add(@{Op='return'}) }
     $s.ToArray()

@@ -143,7 +143,9 @@ function Add-KokoroHarmonicSource16JobSteps {
 }
 
 function Get-KokoroHarmonicSource16Bodies {
-    param([Parameter(Mandatory)][long]$PlaneStride,[switch]$SeededNoise,[switch]$Chunked)
+    param([Parameter(Mandatory)][long]$PlaneStride,[switch]$SeededNoise,[switch]$Chunked,[switch]$VectorPackets)
+    $merge = @(New-KokoroSourceMergeSteps)
+    if ($VectorPackets) { $merge = Group-HexagonPackets $merge }
     $noise=@(); if($SeededNoise){ $noise=@(,@('body_source_noise',@(New-KokoroSourceNoiseSteps))) }
     if($Chunked){
         foreach($part in 'Head','Segments','Tail'){ $noise+=@(,@("body_source_phase_$($part.ToLower())",@(New-KokoroSourcePhaseSteps -Part $part -LabelPrefix "sourcephase$($part.ToLower())"))) }
@@ -152,7 +154,7 @@ function Get-KokoroHarmonicSource16Bodies {
     @(
         @('body_source_phase',@(New-KokoroSourcePhaseSteps)),
         @('body_source_voicing',@(New-KokoroSourceVoicingSteps)),
-        @('body_source_merge',@(New-KokoroSourceMergeSteps)),
+        @('body_source_merge',$merge),
         @('body_source_reflect',@(New-KokoroSourceReflectSteps))) + $noise + @(Get-KokoroHarmonicStft16Bodies -PlaneStride $PlaneStride)
 }
 

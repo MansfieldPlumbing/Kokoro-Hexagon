@@ -1931,15 +1931,20 @@ function New-KokoroGenerator60x16RunSteps {
     elseif($Front){
         $bodies.Add(@('body_conv_front_noise',@(New-KokoroHmxConvPlanesSteps -InputChannels 64 -OutputChannels 128 -Kernel 3 -Dilation 1 -WeightPlanes 2 -PlaneStride $planeStride -LabelPrefix 'g16fn')))
         $bodies.Add(@('body_conv_front_up',@(New-KokoroHmxConvPlanesSteps -InputChannels 256 -OutputChannels 256 -Kernel 3 -Dilation 1 -WeightPlanes 2 -PlaneStride $planeStride -LabelPrefix 'g16fu')))
-        $bodies.Add(@('body_combine_conv256',@(New-KokoroPlaneCombineSteps -Mode Conv -Channels 256 -Groups 3 -Group3Shifts -PlaneStride $planeStride -LabelPrefix 'combine256')))
-        $bodies.Add(@('body_front_interleave',@(New-KokoroFrontInterleaveSteps)))
-        $bodies.Add(@('body_front_add',@(New-KokoroFrontAddSteps)))
+        $bodies.Add(@('body_combine_conv256',@(& $packets @(New-KokoroPlaneCombineSteps -Mode Conv -Channels 256 -Groups 3 -Group3Shifts -PlaneStride $planeStride -LabelPrefix 'combine256'))))
+        $bodies.Add(@('body_front_interleave',@(& $packets @(New-KokoroFrontInterleaveSteps))))
+        $bodies.Add(@('body_front_add',@(& $packets @(New-KokoroFrontAddSteps))))
     }
-    if($Tail){ foreach($pair in (Get-KokoroGeneratorTail16Bodies -PlaneStride $tailLayout.PlaneStride)){ $bodies.Add($pair) } }
+    if($Tail){
+        foreach($pair in (Get-KokoroGeneratorTail16Bodies -PlaneStride $tailLayout.PlaneStride)){
+            if($VectorPackets -and $pair[0] -in 'body_leaky','body_combine','body_spectrum'){ $pair[1]=Group-HexagonPackets $pair[1] }
+            $bodies.Add($pair)
+        }
+    }
     }
     if($Decoder){ foreach($pair in (Get-KokoroDecoder16Bodies -Job $decJob)){ $bodies.Add($pair) } }
     if($Source){
-        foreach($pair in (Get-KokoroHarmonicSource16Bodies -PlaneStride $sourceLayout.Stft.PlaneStride -SeededNoise:$SeededNoise -Chunked:($chunkTilesOfSource -gt 0))){ $bodies.Add($pair) }
+        foreach($pair in (Get-KokoroHarmonicSource16Bodies -PlaneStride $sourceLayout.Stft.PlaneStride -SeededNoise:$SeededNoise -Chunked:($chunkTilesOfSource -gt 0) -VectorPackets:$VectorPackets)){ $bodies.Add($pair) }
         $bodies.Add(@('body_har_phase_major',@(New-KokoroHarPhaseMajor16Steps -Phases 6)))
         $bodies.Add(@('body_har_phase_major_tiles',@(New-KokoroHarPhaseMajor16Steps -Phases 6 -TileBatch -LabelPrefix 'harphasemajor16tiles')))
         $bodies.Add(@('body_har_phase_major_last',@(New-KokoroHarPhaseMajor16Steps -Phases 1 -LabelPrefix 'harphasemajor16last')))

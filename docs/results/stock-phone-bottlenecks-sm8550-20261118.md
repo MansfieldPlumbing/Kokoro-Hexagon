@@ -197,3 +197,9 @@ On the lighthouse passage the style change moved excess envelope modulation from
 Split the 12 independent attention heads across the existing frontend workers. Each worker owns its score buffer and writes its assigned output channels. Accumulation order within each head stays the same. Inputs shorter than 32 tokens use the serial implementation.
 
 On the flutter-corrected lighthouse passage, parallel and serial attention ran in separate launches on the same handset with the same eight-worker frontend and DSP generator. Each launch rendered four times. Across the three warm runs, median frontend time fell from 4,923.3 to 3,927.1 ms. Median text-to-PCM time fell from 5,283.5 to 4,280.8 ms for 11.775 seconds of speech, raising throughput from 2.23× to 2.75× real time. All eight PCM hashes matched the corrected baseline. Playback recorded zero underruns.
+
+### Generator packet scheduling and remaining listening discrepancy
+
+On the SM8550 lighthouse input, the previous generator took 235.49 ms DSP time (median of seven warm calls after one warmup). Grouping ten phase and voicing word pairs per source loop gave 234.64 ms. Adding vector packet scheduling to the harmonic merge gave 234.98 ms. Extending packet scheduling to the 128-channel front combine, interleave and add, and the tail activation, combine and spectrum gave 227.39 ms. These separate launches used the same host-supplied utterance style. The final WAV hash matched the previous generator (2DF730C2CB2BEFB5550E40B594F0F5257398252C4E434092B06F76FCB6159072).
+
+The listener still suspects flutter. On that exact WAV, a PowerShell check of the 31 half-second windows admitted by the reference activity gate found a maximum 10–30 Hz excess of 0.10 dB. The maximum excess was 0.19 dB at 32–60 Hz, 0.67 dB at 62–100 Hz and 0.58 dB at 102–160 Hz. These envelope measurements do not resolve the listening discrepancy or cover the excluded windows.
