@@ -34,7 +34,10 @@ twice, or written as a scratch script, is a missing command: add it here.
                               Build a test case's job input from stock captures; prints which inputs match the reference.
   Capture  -Path [-Pattern]   List a stock capture's tensors: name, shape, bytes, hash prefix, and its capture spec.
   MeasureAudio -Path         Read a WAV or folder of WAVs; return typed BS.1770-4 loudness, true peak and RMS measurements.
+  Check -Kernel ControllerClock    Exercise procedural control timing across generator tiles on the host.
+  MeasureAudio -Path <mono.wav> -Pattern Modulation   Measure periodic amplitude variation in active half-second windows.
                               PCM16/float32, mono/stereo, native sample rate. No phone access or audio writes.
+  CompareAudio -Reference -Path -Pattern SpeechQuality   Check aligned 24 kHz mono speech against a clean render.
   CompareAudio -Reference -Path [-OutputDirectory] [-Parameters @{Yardstick=<wav>}]
                               Compare two mono WAVs: waveform SNR, multi-resolution magnitude SNR and log-spectral
                               distance, mel-cepstral distortion, loudness envelope, YIN f0 and voicing, HNR; with
@@ -2136,6 +2139,11 @@ function Invoke-KokoroPhoneSpeech {
         ReferenceXSHA256=[Convert]::ToHexString([Security.Cryptography.SHA256]::HashData([byte[]]$decoded.XCroutons))
         OtherScheduleXIdentical=$(if($other){[Linq.Enumerable]::SequenceEqual([byte[]]$decoded.XCroutons,[byte[]]$other.XCroutons)})
         DecoderBase=$decoderBasePath;GeneratorBase=$generatorBasePath;GeneratorLibrarySHA256=$generator.Emission.LibrarySHA256;Lines=$lines}
+    if($Text.Trim() -ceq 'When the evening came, the old keeper climbed the narrow stairs of the lighthouse, lit the great lamp, and watched the ships pass slowly along the dark and quiet coast until the morning light returned.'){
+        $quality=if($ticks -ne 942){[pscustomobject]@{Passed=$false;ExpectedTicks=942;ActualTicks=$ticks}}else{Compare-KokoroSpeechQuality -Reference (Join-Path $Root 'tools/fixtures/lighthouse-af_heart-float.wav') -Candidate $phoneWave}
+        $result | Add-Member -NotePropertyName SpeechQuality -NotePropertyValue $quality
+        if(-not $quality.Passed){Write-Warning "Lighthouse audio regression. See SpeechQuality in the receipt."}
+    }
     $result | Export-Clixml -LiteralPath (Join-Path $out 'phone-speech.clixml') -Depth 6
     $result
 }
@@ -4941,6 +4949,41 @@ function Open-KokoroCorpus([string] $Path) {
 if ($MyInvocation.InvocationName -eq '.') { return }
 
 switch ($Command) {
+    { $_ -eq 'Run' -and $Case -eq 'retained-generator-profile' } {
+        $client = Get-Adb
+        $devices = @(& $client devices -Api | Where-Object { $_.IsAccessible -or $_.Connected } |
+            Where-Object { (& $client shell -Api -Device ([string]$_.Index) 'getprop ro.soc.model').Stdout.Trim() -eq $Soc })
+        if ($devices.Count -ne 1) { throw "Expected one attached $Soc phone." }
+        $index = [string]$devices[0].Index
+        $Package = 'dev.mansfieldplumbing.kokoro'
+        $folder = Join-Path $Build ('retained-profile-{0:yyyyMMddTHHmmssfff}' -f [DateTime]::UtcNow)
+        [void][IO.Directory]::CreateDirectory($folder)
+        foreach ($name in 'spec.txt','pmu-layout.json','speech-pack.json','receipt.txt','KokoroGeneratorTailProbe.ps1') {
+            $result = & $client shell -Api -Device $index "run-as $Package cat files/kokoro/generator-tail/$name"
+            if ($result.ExitCode) { throw "Cannot inspect retained $name." }
+            [IO.File]::WriteAllText((Join-Path $folder $name),[string]$result.Stdout)
+        }
+        $folder
+        $layout = ConvertFrom-StringData ([IO.File]::ReadAllText((Join-Path $folder 'spec.txt')))
+        foreach ($key in 'Tiles','OutputBytes','PcmOffset','Samples','InputBytes') {
+            if ([long]$layout[$key] -lt 1) { throw "Missing retained extent: $key" }
+        }
+        $layout | ConvertTo-Json | Set-Content -LiteralPath (Join-Path $folder 'runner-layout.json')
+        foreach ($name in 'libkokoro_generator_tail_skel.so','tables.bin','activations.bin','weights.bin') {
+            $source = if ($name.EndsWith('.so')) { "files/kokoro/dsp/$name" } else { "files/kokoro/generator-tail/$name" }
+            $digest = & $client shell -Api -Device $index "run-as $Package sha256sum $source"
+            $expected = ([string]$digest.Stdout).Trim().Split(' ')[0]
+            if ($digest.ExitCode -or $expected -notmatch '^[a-fA-F0-9]{64}$') { throw "Missing retained $name" }
+            $retrievedFile = Join-Path $folder $name
+            [IO.File]::WriteAllBytes($retrievedFile,[byte[]](& $client exec-out -Api -Device $index "run-as $Package cat $source"))
+            if ((Get-FileHash $retrievedFile).Hash -ine $expected) { throw "Transfer mismatch: $name" }
+        }
+        if ((Get-Item (Join-Path $folder 'activations.bin')).Length -ne [long]$layout.InputBytes) { throw 'Input extent mismatch.' }
+        $job = Invoke-KokoroDeviceJob -EmissionDirectory $folder -InputDirectory $folder -Soc $Soc -Runs 7 -Package $Package
+        $job.Runs | Export-Csv -LiteralPath (Join-Path $folder 'timings.csv')
+        $job.Runs
+        break
+    }
     'ObserveStock' {
         if(-not $Parameters){throw 'ObserveStock requires typed Language and Voice objects and a resident ReferenceModule in -Parameters.'}
         Invoke-KokoroStockObservation @Parameters
@@ -4958,6 +5001,12 @@ switch ($Command) {
     'CompareAudio' {
         if (-not $Reference -or -not $Path) { throw 'CompareAudio needs -Reference and -Path (mono WAVs at one rate).' }
         Import-Module (Join-Path $Root 'tools/Kokoro.AudioMeasurement.psm1')
+        if ($Pattern -ceq 'SpeechQuality') {
+            $quality = Compare-KokoroSpeechQuality -Reference $Reference -Candidate $Path
+            $quality
+            if (-not $quality.Passed) { throw 'Speech quality regression against the aligned clean reference.' }
+            return
+        }
         $yardstick=if ($Parameters -and $Parameters.Yardstick) { [string]$Parameters.Yardstick } else { $null }
         Compare-KokoroAudio -Reference $Reference -Candidate $Path -Yardstick $yardstick -ImageDirectory $OutputDirectory
     }
@@ -4970,7 +5019,8 @@ switch ($Command) {
     'MeasureAudio' {
         if (-not $Path) { throw 'MeasureAudio needs -Path (a WAV file or folder).' }
         Import-Module (Join-Path $Root 'tools/Kokoro.AudioMeasurement.psm1')
-        Measure-KokoroAudio -Path $Path
+        if ($Pattern -eq 'Modulation') { Measure-KokoroEnvelopeModulation -Path $Path }
+        else { Measure-KokoroAudio -Path $Path }
     }
     'CopySynthesis' {
         if(-not $OutputDirectory){throw 'CopySynthesis needs a fresh -OutputDirectory under this worktree build/.'}
@@ -5082,6 +5132,30 @@ switch ($Command) {
             'Test-DspQueueLayout' = {
                 $output = & $pwsh -NoProfile -File (Join-Path $Root 'tools/Test-DspQueueLayout.ps1') 2>&1 | Out-String
                 if ($LASTEXITCODE -ne 0) { throw "Test-DspQueueLayout exited ${LASTEXITCODE}: $output" }
+            }
+            'delayed-decoder-handoff' = {
+                Import-Module (Join-Path $Root 'tools/Kokoro.CaptureKernels.psm1')
+                $rng = [Random]::new(41)
+                foreach ($ticks in 2,30,32,34,942) {
+                    foreach ($delay in 0,2,20,32,34) {
+                        $source = [byte[]]::new(7 + 32768 * [int][Math]::Ceiling(($ticks + $delay) / 32))
+                        $rng.NextBytes($source)
+                        $actual = ConvertFrom-KokoroDelayedCroutons $source 7 $ticks $delay
+                        $expected = [uint16[]]::new(16384 * [int][Math]::Ceiling($ticks / 32))
+                        [Array]::Fill($expected,[uint16]0x8000)
+                        for ($tick = 0; $tick -lt $ticks; $tick += 2) {
+                            $from = $tick + $delay
+                            for ($block = 0; $block -lt 16; $block++) {
+                                $src = 7 + 32768 * ($from -shr 5) + 2048 * $block + 64 * ($from -band 31)
+                                $dst = 32768 * ($tick -shr 5) + 2048 * $block + 64 * ($tick -band 31)
+                                [Buffer]::BlockCopy($source,$src,$expected,$dst,128)
+                            }
+                        }
+                        $bytes = [byte[]]::new($expected.Length * 2)
+                        [Buffer]::BlockCopy($expected,0,$bytes,0,$bytes.Length)
+                        if (![Linq.Enumerable]::SequenceEqual[byte]($bytes,$actual)) { throw "Handoff mismatch: ticks=$ticks delay=$delay" }
+                    }
+                }
             }
             'Test-SplitBreathGroups' = {
                 $output = & $pwsh -NoProfile -File (Join-Path $Root 'tools/Test-SplitBreathGroups.ps1') 2>&1 | Out-String
@@ -5201,6 +5275,29 @@ switch ($Command) {
         $e
     }
     'Check' {
+        if ($Kernel -eq 'SourceNoiseCounter') {
+            # The changed input to lowbias32 is a wrapping uint32 word. Check
+            # both consecutive hash inputs before the unchanged xor with seed.
+            $stride = 0x9E3779B9L
+            $mask = 0xFFFFFFFFL
+            foreach ($first in 0L,1L,3136L,282599L,2147483646L) {
+                $word = ((2L*$first -band $mask)*[uint64]$stride) -band $mask
+                for ($j = 0; $j -lt 4096; $j++) {
+                    $index = (2L*$first+$j) -band $mask
+                    $expected = ([uint64]$index*[uint64]$stride) -band $mask
+                    if ($word -ne $expected) { throw "Noise counter differs at $first + $j" }
+                    $word = ($word+$stride) -band $mask
+                }
+            }
+            Import-Evaluator
+            Invoke-KokoroEmission -Kernel KokoroHarmonicSource16Run -Parameters @{ResBlockFrames=1921;SourceSeededNoise=$true} | Select-Object Path,LibrarySHA256
+            break
+        }
+        if ($Kernel -eq 'ControllerClock') {
+            . (Join-Path $Root 'src/jobs/Kokoro.Generator60x16Run.ps1')
+            Test-KokoroGeneratorControlClock
+            break
+        }
         if (-not $Kernel) { throw 'Check needs -Kernel.' }
         Import-Evaluator
         Test-KokoroKernel -Kernel $Kernel -Parameters $(if ($Parameters) { $Parameters } else { @{} })

@@ -49,6 +49,12 @@ in `src/jobs/Kokoro.DecoderRun16.ps1` and marked so.
 
 ## Task 4: style moves with the voice row
 
+### Host check of a procedural control transition (November 18)
+
+`Check -Kernel ControllerClock` exercises the active rows of the residual stages. The synthetic controller increments its value every speech tick and adds a step at tick 37. The reference writes the values in speech order. The candidate traverses spans and tiles in execution order and reuses a control up to the next tick or tile edge. Every active row matched for both section clocks, three branch kernels, six stages and span sizes of 2, 4 and 60 tiles (108 configurations). This checks address arithmetic on the host. The DSP controller implementation still reads one word per tile.
+
+At 10 rows per tick, kernel 3 stage 0 applied 120 constant runs to 960 active rows. At 60 rows per tick, kernel 11 stage 5 applied 276 runs to 5,760 active rows. Its marked boundary fell at execution row 2,310. A vector implementation must also handle the two rows of one packed pair straddling a tick edge. These run counts measure opportunities for reuse. They exclude pad and drain behavior and give no DSP timing. [Local check output](../../build/controller-clock.log)
+
 Stock takes the style from `pack[len(phonemes) - 1]`: the whole utterance's phoneme count. For three voices, 19 rows
 from 1 to 510, every site's `1 + gamma` and `beta` from the port's own `ApplyLevels` (`style-by-length.csv`). Gain
 change per channel about its mean over rows, RMS over channels and rows; offset in units of the channel's mean gain:

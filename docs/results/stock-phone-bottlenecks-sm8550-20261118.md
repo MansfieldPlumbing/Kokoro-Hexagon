@@ -55,13 +55,27 @@ The calls fell from 7,536 to 960. The median warm paired saving was 2.05 ms, wit
 
 ## Listening observation
 
+The speech handoff now uses the grouped copy described above. It fills encoded zero only in unused row pairs of the last tile. At 942 ticks its temporary padding array is 1,152 bytes, down from 983,040 bytes. Verify compares all output bytes with a row-pair reference for 25 length and delay combinations. The production change has been checked on the host. The earlier phone probe measured grouping with the original fill.
+
 Scott reported a fan-like tremble during playback. Both batches logged zero AAudio underruns. Changing the CPU handoff produced identical samples. These checks establish repeatability and correct transfer in this test. They do not measure the audibility or cause of the tremble.
 
 The baseline phone WAV and the reference driven by the PC front end share the same integer DSP backend and voice-base conditioning. The measured pitch tracks agree on jointly voiced frames, voicing classifications agree throughout, and 95% of active 10 ms windows differ by at most 0.0004 dB in RMS level (5 ms hop, both windows above −45 dBFS). This comparison gives little evidence of a flutter introduced specifically by moving the front end onto the phone. A shared synthesis effect or playback effect would survive the comparison.
 
 A separate [float host render](../../build/bottleneck-stock-20261118T163854/lighthouse-float-utterance.wav) uses the same 193-phoneme passage, voice, nominal seed 1 and output length. It uses the host port's float decoder and generator with utterance normalization. It differs in multiple ways from the [phone render](../../build/evaluator/emit/KokoroGenerator60x16Run-8C8FAEF3744AE7D0/speech-SM8550-9b213e8a1783460caf87546f4fcda1f6.wav), including arithmetic, normalization and source implementation. The median absolute difference of the active short-time levels is 4.65 dB. The RMS-envelope difference did not identify a specific tremble rate (only seven continuously active, overlapping 0.4 s windows at the selected threshold). A listener-marked interval and a same-input comparison changing one of source, normalization or integer processing at a time would distinguish those effects. No component or control policy has yet been assigned as the cause.
 
+The host float ExcitationPair run on the lighthouse text reused one decoder output, acoustic style, F0 and random draws. For the second generator run it zeroed the nine harmonic noise draws at samples whose source tick exceeded the existing 10 Hz voiced threshold. Both WAVs last 11.775 s. In 19 qualifying windows per render, the 24 Hz median moved from 1.31 to 1.28 dB and the 80 Hz median from 0.46 to 0.48 dB. The full-passage loudness difference was 0.009 LU and envelope correlation 0.99989. Removing voiced excitation noise had little effect on those measures in this float renderer. Listening comparison is pending. The phone uses different arithmetic, noise generation and normalization. [Host baseline](../../build/flutter-pair-01/baseline.wav) and [voiced noise off](../../build/flutter-pair-01/voiced-noise-off.wav).
+
 ## PCM return and weight-panel reuse on the same passage
+
+Scott subsequently heard all three float lighthouse renders (full, half and zero voiced noise) as clean. The half-gain run reproduced the full-gain control WAV byte for byte. These results provide no reason to suppress voiced noise.
+
+The host float speech renderer previously generated a second full set of random draws on each render to check repeatability. The seeded diagnostic retains that check. On the second PC, six warm pairs at 282,600 samples alternated the checked and single-generation order. Median draw preparation fell from 185.4 ms to 90.3 ms. Both output WAVs from the excitation comparison matched the prior renders byte for byte. This times host draw preparation only. [Paired timings](../../build/flutter-draw-speed/draw-times.csv)
+
+### Offline follow-up on the reported flutter
+
+On the second development PC the phone's retained speech WAV decoded to the original PCM16 hash. Scott heard the flutter throughout this saved file on playback away from the phone. The samples therefore carry the reported effect. The PowerShell MeasureAudio command measured −28.60 LUFS integrated and −9.60 dBTP true peak. The final waveform has headroom. Internal saturation remains possible.
+
+Run `MeasureAudio -Path build/recovered.wav -Pattern Modulation` through the development entry point to examine periodic level variation. The analysis uses 2 ms RMS bins and half-second windows with at least half their bins above −50 dBFS. In 13 qualifying windows the median log-envelope amplitudes at 22, 24 and 26 Hz were 3.02, 3.47 and 1.97 dB. At 78, 80 and 82 Hz they were 0.52, 0.38 and 0.50 dB. The control clock at 80 Hz has no local peak in this measure. Natural speech can produce the broad low-frequency variation. A known modulated carrier and a steady carrier exercise the detector in Verify. No matched intervention has established a perceptual flutter rate or identified a responsible stage.
 
 The speech generator's managed return now keeps 565,200 bytes of PCM from the 123,560,128-byte RPC workspace and reuses the existing PCM hash. The RPC still allocates and passes the full workspace. The decoder and diagnostic jobs still return their first full result. In one process, after a warmup, the phone repeated compact/full/full/compact three times. All 13 renders matched the earlier PCM hash and the WAV matched byte for byte. Returning just the samples removes 122,994,928 bytes of copying per render.
 
@@ -80,6 +94,14 @@ The panel experiment kept one 720,896-byte HMX-ready panel in a reserved VTCM sl
 The saved transfers produced no measurable DSP speedup on this schedule. This tests reuse of one already-packed panel. A different disk representation that eliminates a conversion or changes the compute schedule is a separate experiment. The resident-panel variant is confined to the experiment directory. [Control receipt](../../build/pcm-return-20261118T115942/control.log) · [Panel receipt](../../build/pcm-return-20261118T115942/panel.log) · [Emitter change](../../build/pcm-return-20261118T115942/panel-variant.diff)
 
 ## Hardware counters on the lighthouse generator
+
+### Host float timing on the second PC, November 19
+
+RenderTiming rendered the 11.775 s lighthouse passage four times on the i5-4310U (two cores, four logical processors), with four convolution workers. Zira distillation ran concurrently. Each render called the phonemizer and recomputed the text features. The generator timer includes the seeded draws. Text-to-PCM excludes loading the checkpoint and compiled libraries, WAV writes and comparison. Run 0 took 56.585 s total and 27.435 s in the generator. Runs 1–3 took 39.352–40.081 s total (median 39.857 s, RTF 3.385) and 24.383–24.918 s in the generator (median 24.455 s, RTF 2.077). The baseline WAV matched the listener-confirmed clean host render and all repeats matched in memory. This batch measures the float host on this PC under load. [Per-run timings](../../build/lighthouse-rtf-4t/render-times.csv)
+
+The host float generator now windows each 20-sample harmonic STFT frame once and reuses those samples across its 11 frequency bins. Eight alternating warm pairs on the same lighthouse excitation gave median STFT times of 76.25 ms before and 58.63 ms after. All spectra compared equal, and both full baseline and voiced-noise-off WAVs matched their prior files byte for byte. [Stage timings](../../build/flutter-stft-speed/stft-times.csv)
+
+The DSP seeded harmonic-source candidate initializes its multiplicative counter from the chunk's absolute first sample and advances it by addition. It removes two multiplies and one add from each sample iteration and adds two setup instructions per chunk. `Check -Kernel SourceNoiseCounter` checked 20,480 wrapping counter inputs and emitted the seeded source job. This is a host arithmetic check and emission only. The distinguishing phone run is the same retained generator input and coefficients through both libraries, checking the generated source and final PCM, then comparing harmonic-source ticks and whole-generator time.
 
 The instrumented stock kernel ran three times on the same real generator input. All three PCM hashes matched. In the last call the DSP region took 279.76 ms. The lockstep regions accounted for 107.27 ms. Within those regions the four workers each spent 68.18–69.81 ms filling AdaIN/Snake inputs, 17.14–18.06 ms combining outputs and 1.03–3.22 ms waiting for the HMX lock. These workers run concurrently. Their time also falls inside the lockstep region.
 
@@ -110,3 +132,17 @@ The fill now extracts the fractional turns for both time rows with equal shifts 
 On the SM8550, the new generator ran first and the a930ffb control second, each on the same stock lighthouse speech input. After one warmup, median generator DSP time over ten calls fell from 244.82 to 236.16 ms (3.5%). The observed intervals were 242.11–246.95 and 234.22–238.27 ms respectively. Median host invoke time was 299.32 and 283.61 ms. All 22 PCM hashes matched. In the last instrumented call, the four lockstep workers spent 61.83–63.20 ms apiece filling windows, compared with 68.10–69.70 ms in the earlier control profile. The worker times overlap.
 
 A host arithmetic check covered every signed 16-bit output value in each row and all 65,536 fractional lanes at Q22 and Q24. The kernel emitted for both supported channel counts, both precisions, controller contact on and off, and ordinary and mirrored stores. Phone timings used stock conditioning on one passage. [Control](../../build/pcm-return-20261118T115942/snake-ab-har-vector.log) · [Candidate](../../build/pcm-return-20261118T115942/snake-ab-snake-pack.log) · [Hardware profile](../../build/pcm-return-20261118T115942/snake-pack-pmu.log)
+
+### November 19 lighthouse quality regression
+
+Run `./Invoke-KokoroDevelopment.ps1 CompareAudio -Pattern SpeechQuality -Reference tools/fixtures/lighthouse-af_heart-float.wav -Path <phone-wav>` on the same aligned lighthouse passage. The check measures integrated loudness loss and excess 10–30 Hz envelope modulation independently. The regression thresholds are 2 LU and 3 dB respectively.
+
+| Phone condition | Level loss (LU) | Excess modulation (dB) |
+| --- | ---: | ---: |
+| Stock | 3.10 | 6.90 |
+| Supplied excitation noise | 3.07 | 6.95 |
+| Float decoder features quantized into the phone generator input | 3.23 | 6.72 |
+
+Gain-only and 24 Hz amplitude-modulated controls each triggered their corresponding check alone. Substituting float decoder features leaves both symptoms. The generator input quantization and downstream path remain candidates.
+
+On SM8550, converting 282,600 returned PCM samples took 0.30 ms versus 23.05 ms previously (paired warm medians, identical samples). Four warm stock renders of 11.775 s of audio took a median 5.086 s end to end, including 4.749 s in the frontend. DSP generator time was approximately 235 ms.

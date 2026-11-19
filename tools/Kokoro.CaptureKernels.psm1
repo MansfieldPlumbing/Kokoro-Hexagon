@@ -636,12 +636,25 @@ function ConvertFrom-KokoroDelayedCroutons {
     # Ticks in the last tile hold the zero fill.
     param([Parameter(Mandatory)][byte[]]$Output, [Parameter(Mandatory)][long]$Offset, [Parameter(Mandatory)][int]$Ticks, [Parameter(Mandatory)][ValidateRange(0, 4096)][int]$DelayTicks)
     if ($DelayTicks % 2 -or $Ticks % 2) { throw 'Delayed x moves by whole row pairs: ticks and delay must be even.' }
-    $x = [byte[]]::new([long][math]::Ceiling($Ticks / 32) * 32768); $zero = [uint16[]]::new($x.Length / 2); [Array]::Fill($zero, [uint16]0x8000); [Buffer]::BlockCopy($zero, 0, $x, 0, $x.Length)
+    $x = [byte[]]::new([long][math]::Ceiling($Ticks / 32) * 32768)
     $shift = $DelayTicks / 2
     if ($Offset + 32768L * [math]::Ceiling(($Ticks / 2 + $shift) / 16) -gt $Output.Length) { throw 'The decoder output is shorter than its delayed x.' }
-    for ($pair = 0; $pair -lt $Ticks / 2; $pair++) { $q = $pair + $shift
+    $pairCount = [int]($Ticks / 2)
+    for ($pair = 0; $pair -lt $pairCount; $pair += $count) {
+        $q = $pair + $shift
+        $count = [Math]::Min($pairCount - $pair, [Math]::Min(16 - ($pair -band 15), 16 - ($q -band 15)))
         for ($block = 0; $block -lt 16; $block++) {
-            [Array]::Copy($Output, $Offset + 32768L * ($q -shr 4) + 2048L * $block + 128L * ($q -band 15), $x, 32768L * ($pair -shr 4) + 2048L * $block + 128L * ($pair -band 15), 128) } }
+            [Array]::Copy($Output, $Offset + 32768L * ($q -shr 4) + 2048L * $block + 128L * ($q -band 15), $x, 32768L * ($pair -shr 4) + 2048L * $block + 128L * ($pair -band 15), 128L * $count)
+        }
+    }
+    $used = $pairCount -band 15
+    if ($used) {
+        $pad = [uint16[]]::new((16 - $used) * 64)
+        [Array]::Fill($pad, [uint16]0x8000)
+        for ($block = 0; $block -lt 16; $block++) {
+            [Buffer]::BlockCopy($pad, 0, $x, $x.Length - 32768 + 2048 * $block + 128 * $used, 2 * $pad.Length)
+        }
+    }
     , $x
 }
 function ConvertTo-KokoroDecoderStepInput {
@@ -735,7 +748,19 @@ function ConvertFrom-KokoroPcm16 {
     # A job's int16 PCM (at -Offset in its output buffer) as float samples in [-1, 1).
     param([Parameter(Mandatory)][byte[]]$Output, [Parameter(Mandatory)][long]$Offset, [Parameter(Mandatory)][int]$Samples)
     $values = [int16[]]::new($Samples); [Buffer]::BlockCopy($Output, [int]$Offset, $values, 0, 2 * $Samples)
-    $pcm = [float[]]::new($Samples); for ($i = 0; $i -lt $Samples; $i++) { $pcm[$i] = $values[$i] / 32768.0 }
+    if (-not $script:Kernels.ContainsKey('Pcm16ToFloat')) {
+        $source = [Expression]::Parameter([int16[]], 'source')
+        $destination = [Expression]::Parameter([float[]], 'destination')
+        $index = [Expression]::Variable([int], 'index')
+        $sample = [Expression]::Convert([Expression]::ArrayIndex($source, $index), [float])
+        $normalized = [Expression]::Multiply($sample, [Expression]::Constant([float](1 / 32768)))
+        $write = [Expression]::Assign([Expression]::ArrayAccess($destination, $index), $normalized)
+        $loop = New-For $index (New-Int 0) ([Expression]::ArrayLength($source)) $write
+        $body = [Expression]::Block([ParameterExpression[]]@($index), [Expression[]]@($loop))
+        $script:Kernels.Pcm16ToFloat = [Expression]::Lambda([Action[int16[],float[]]], $body, [ParameterExpression[]]@($source,$destination)).Compile()
+    }
+    $pcm = [float[]]::new($Samples)
+    $script:Kernels.Pcm16ToFloat.Invoke($values, $pcm)
     , $pcm
 }
 

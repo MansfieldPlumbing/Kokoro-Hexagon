@@ -255,10 +255,10 @@ function Read-KokoroAudioBytes {
             $align -ne $channels*($bits/8) -or $byteRate -ne $rate*$align -or $dataOffset -lt 0 -or $dataLength -eq 0 -or $dataLength%$align -ne 0) {
             throw 'WAV must contain complete nonempty mono/stereo PCM16 or IEEE float32 frames at a positive rate.'
         }
-        $audio=[KokoroAudioData]::new(); $audio.SampleRate=[int]$rate; $audio.Channels=$channels
-        $audio.Samples=[double[]]::new($dataLength/($bits/8))
-        (Get-KokoroAudioKernels).Decode.Invoke($Bytes,$dataOffset,$format,$audio.Samples)
-        return $audio
+        $Audio=[KokoroAudioData]::new(); $Audio.SampleRate=[int]$rate; $Audio.Channels=$channels
+        $Audio.Samples=[double[]]::new($dataLength/($bits/8))
+        (Get-KokoroAudioKernels).Decode.Invoke($Bytes,$dataOffset,$format,$Audio.Samples)
+        return $Audio
     } finally { $reader.Dispose(); $stream.Dispose() }
 }
 
@@ -284,12 +284,73 @@ function Measure-KokoroAudio {
     [CmdletBinding()]
     param([Parameter(Mandatory)][ValidateNotNullOrEmpty()][string]$Path)
     $item=Get-Item -LiteralPath $Path
-    $files=if ($item.PSIsContainer) { @(Get-ChildItem -LiteralPath $item.FullName -File -Filter '*.wav' | Sort-Object Name) } else { @($item) }
+    [IO.FileInfo[]]$files=@(if ($item.PSIsContainer) { @(Get-ChildItem -LiteralPath $item.FullName -File -Filter '*.wav' | Sort-Object Name) } else { $item })
     if ($files.Count -eq 0) { throw 'The folder contains no WAV files (only immediate children are measured).' }
     foreach ($file in $files) {
         if ($file.Extension -ine '.wav') { throw 'MeasureAudio requires a WAV file or a folder of WAV files.' }
         try { Measure-KokoroAudioData -Audio (Read-KokoroAudioBytes ([IO.File]::ReadAllBytes($file.FullName))) -Path $file.FullName }
         catch { throw "Cannot measure '$($file.FullName)': $($_.Exception.Message)" }
+    }
+}
+
+class KokoroEnvelopeModulation {
+    [double]$FrequencyHz
+    [double]$MedianAmplitudeDb
+    [int]$Windows
+}
+
+function Measure-KokoroEnvelopeModulation {
+    param([Parameter(Mandatory)][string]$Path)
+    $Audio = Read-KokoroAudioBytes ([IO.File]::ReadAllBytes((Get-Item -LiteralPath $Path).FullName))
+    Measure-KokoroEnvelopeData -Audio $Audio
+}
+
+function Measure-KokoroEnvelopeData {
+    param([Parameter(Mandatory)][KokoroAudioData]$Audio)
+    if ($Audio.Channels -ne 1) { throw 'Envelope modulation requires mono audio.' }
+    # Measure log RMS in 2 ms bins. Within each complete half-second window,
+    # remove the weighted mean and project onto Hann-windowed sinusoids.
+    $bin = [Math]::Max(1, [int][Math]::Round($Audio.SampleRate / 500.0))
+    $rate = $Audio.SampleRate / [double]$bin
+    $length = [int][Math]::Round($rate / 2)
+    $levels = [double[]]::new([int][Math]::Floor($Audio.Samples.Length / $bin))
+    for ($i = 0; $i -lt $levels.Length; $i++) {
+        $power = 0.0
+        for ($j = 0; $j -lt $bin; $j++) {
+            $sample = $Audio.Samples[$i * $bin + $j]
+            $power += $sample * $sample
+        }
+        $levels[$i] = 10 * [Math]::Log10([Math]::Max(1e-8, $power / $bin))
+    }
+    for ($hz = 4; $hz -le [Math]::Min(100,$rate/2-1); $hz += 2) {
+        $amplitudes = [Collections.Generic.List[double]]::new()
+        for ($offset = 0; $offset + $length -le $levels.Length; $offset += $length) {
+            $real = $imag = $mean = $sum = $cosSum = $sinSum = 0.0
+            $active = 0
+            for ($j = 0; $j -lt $length; $j++) {
+                $level = $levels[$offset + $j]
+                if ($level -gt -50) { $active++ }
+                $weight = 0.5 - 0.5 * [Math]::Cos(2 * [Math]::PI * $j / $length)
+                $phase = 2 * [Math]::PI * $hz * $j / $rate
+                $c = $weight * [Math]::Cos($phase)
+                $s = $weight * [Math]::Sin($phase)
+                $real += $level * $c
+                $imag += $level * $s
+                $cosSum += $c
+                $sinSum += $s
+                $mean += $level * $weight
+                $sum += $weight
+            }
+            if ($active -lt $length / 2) { continue }
+            $real -= $cosSum * $mean / $sum
+            $imag -= $sinSum * $mean / $sum
+            $amplitudes.Add(2 * [Math]::Sqrt($real*$real + $imag*$imag) / $sum)
+        }
+        if (!$amplitudes.Count) { throw 'No complete half-second window contains enough active speech.' }
+        $amplitudes.Sort()
+        $mid = [int][Math]::Floor($amplitudes.Count / 2)
+        $lower = [int][Math]::Floor(($amplitudes.Count - 1) / 2)
+        [KokoroEnvelopeModulation]@{ FrequencyHz=$hz; Windows=$amplitudes.Count; MedianAmplitudeDb=($amplitudes[$mid]+$amplitudes[$lower])/2 }
     }
 }
 
@@ -316,6 +377,18 @@ function Test-KokoroAudioMeasurement {
     # as the public command. Throws immediately: never continue to real audio on failure.
     [CmdletBinding()]
     param()
+    # A 1 kHz carrier completes two cycles in each 2 ms RMS bin at 24 kHz.
+    $tone = Read-KokoroAudioBytes (New-KokoroAudioTestWave -Rate 24000 -Amplitude 0.2 -Frequency 1000 -Seconds 1)
+    $flat = Measure-KokoroEnvelopeData $tone | Sort-Object MedianAmplitudeDb -Descending | Select-Object -First 1
+    if ($flat.MedianAmplitudeDb -gt 0.001) { throw 'Steady carrier produced envelope modulation.' }
+    for ($i = 0; $i -lt $tone.Samples.Length; $i++) {
+        $db = 3 * [Math]::Sin(2 * [Math]::PI * 24 * $i / $tone.SampleRate)
+        $tone.Samples[$i] *= [Math]::Pow(10, $db / 20)
+    }
+    $peak = Measure-KokoroEnvelopeData $tone | Sort-Object MedianAmplitudeDb -Descending | Select-Object -First 1
+    if ($peak.FrequencyHz -ne 24 -or [Math]::Abs($peak.MedianAmplitudeDb - 3) -gt 0.1) {
+        throw 'Failed to recover the 24 Hz, 3 dB envelope modulation.'
+    }
     foreach ($rate in 24000,48000) {
         foreach ($amplitude in 1.0,0.5,0.1) {
             $tone=Measure-KokoroAudioData (Read-KokoroAudioBytes (New-KokoroAudioTestWave $rate $amplitude)) 'synthetic.wav'
@@ -736,4 +809,52 @@ function Compare-KokoroAudio {
     $result
 }
 
-Export-ModuleMember -Function Measure-KokoroAudio,Test-KokoroAudioMeasurement,Compare-KokoroAudio
+# Compare aligned performances of the same passage. The reference selects speech windows
+# for both signals, so attenuation cannot silently remove an affected window.
+function Compare-KokoroSpeechQuality {
+    param([Parameter(Mandatory)][string]$Reference,[Parameter(Mandatory)][string]$Candidate)
+    $signals=@(foreach($file in $Reference,$Candidate){Read-KokoroAudioBytes ([IO.File]::ReadAllBytes((Get-Item -LiteralPath $file).FullName))})
+    $ref=$signals[0]; $test=$signals[1]
+    if($ref.Channels -ne 1 -or $test.Channels -ne 1 -or $ref.SampleRate -ne 24000 -or $test.SampleRate -ne 24000 -or $ref.Samples.Length -ne $test.Samples.Length){throw 'Speech quality comparison requires aligned 24 kHz mono renders of equal length.'}
+    $loud=@(foreach($signal in $signals){(Measure-KokoroAudioData -Audio $signal).IntegratedLufs})
+    $levelLoss=$loud[0]-$loud[1]
+    $envelopes=@(for($side=0;$side -lt 2;$side++){
+        $samples=$signals[$side].Samples
+        $gain=if($side -and [double]::IsFinite($levelLoss)){[math]::Pow(10,$levelLoss/10)}else{1}
+        $bins=[double[]]::new([int][math]::Floor($samples.Length/48))
+        for($i=0;$i -lt $bins.Length;$i++){
+            $power=0.0
+            for($j=0;$j -lt 48;$j++){ $v=$samples[48*$i+$j]; $power+=$v*$v }
+            $bins[$i]=10*[math]::Log10(1e-8+$gain*$power/48)
+        }
+        ,$bins
+    })
+    $size=250; $window=[double[]]::new($size); $weight=0.0
+    for($i=0;$i -lt $size;$i++){ $window[$i]=0.5-0.5*[math]::Cos(2*[math]::PI*$i/($size-1)); $weight+=$window[$i] }
+    $scores=@([Collections.Generic.List[double]]::new(),[Collections.Generic.List[double]]::new())
+    for($offset=0;$offset+$size -le $envelopes[0].Length;$offset+=125){
+        $active=0; for($i=0;$i -lt $size;$i++){if($envelopes[0][$offset+$i] -gt -45){$active++}}
+        if($active -le 0.7*$size){continue}
+        for($side=0;$side -lt 2;$side++){
+            $bins=$envelopes[$side]; $mean=0.0
+            for($i=0;$i -lt $size;$i++){$mean+=$bins[$offset+$i]*$window[$i]/$weight}
+            $energy=0.0
+            # Goertzel power in the 10..30 Hz bins, normalized to dB of modulation.
+            for($k=5;$k -le 15;$k++){
+                $factor=2*[math]::Cos(2*[math]::PI*$k/$size); $a=$b=0.0
+                for($i=0;$i -lt $size;$i++){ $v=($bins[$offset+$i]-$mean)*$window[$i]+$factor*$a-$b; $b=$a; $a=$v }
+                $energy+=[math]::Max(0,$a*$a+$b*$b-$factor*$a*$b)
+            }
+            $scores[$side].Add(2*[math]::Sqrt($energy)/$weight)
+        }
+    }
+    $n=$scores[0].Count
+    if($n -lt 3){throw 'Too few active reference windows for the modulation comparison.'}
+    $medians=@(foreach($list in $scores){$list.Sort(); ($list[($n-1) -shr 1]+$list[$n -shr 1])/2})
+    $excess=$medians[1]-$medians[0]
+    $tooQuiet= -not [double]::IsFinite($loud[1]) -or $levelLoss -gt 2
+    $modulated=$excess -gt 3
+    [pscustomobject]@{Passed=(-not ($tooQuiet -or $modulated));TooQuiet=$tooQuiet;ExcessModulation=$modulated;Windows=$n
+        ReferenceLufs=$loud[0];CandidateLufs=$loud[1];LevelLossLu=$levelLoss;ReferenceModulationDb=$medians[0];CandidateModulationDb=$medians[1];ExcessModulationDb=$excess}
+}
+Export-ModuleMember -Function Compare-KokoroSpeechQuality,Measure-KokoroAudio,Test-KokoroAudioMeasurement,Compare-KokoroAudio,Measure-KokoroEnvelopeModulation

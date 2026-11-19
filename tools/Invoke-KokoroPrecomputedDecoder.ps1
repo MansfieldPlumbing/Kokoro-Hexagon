@@ -9,6 +9,13 @@ Admit checks compiled SIMD workers; Nodes compares 25 dog intermediates;
 Levels checks exact normalization replay; Gate measures ten Supplied renders;
 Seeded renders the capture inputs with deterministic noise; Join runs the bank experiment.
 Speech runs our compiled phonemizer and the lowered teacher from Text in process.
+ExcitationPair reuses a single decoded utterance and seeded excitation draws for
+two host float renders. The second scales only the voiced harmonic noise term.
+Pass Text and DriverReceiptPath for the local phonemizer build.
+RenderTiming takes the same text and driver receipt. Each run recomputes text to
+float PCM. GeneratorSeconds includes the seeded draws. Timers exclude driver
+and numeric assembly loading, WAV writing and repeat-output checks. Run zero
+includes first-use initialization; compare subsequent runs as warm.
 CompareConvolution checks every returned teacher boundary against the previous convolution.
 Kernels checks short spans, phase tails, output padding and dilation against the previous kernel.
 FrontEnd runs ALBERT, bert_encoder, the predictor and the text encoder on the phonemes of every stored stock capture
@@ -69,7 +76,11 @@ Show help without compiling, loading weights or rendering.
 using namespace System.Runtime.Intrinsics
 [CmdletBinding()]
 param(
-    [ValidateSet('Admit','Nodes','Levels','Gate','Seeded','Join','Library','Speech','Kernels','FrontEnd')][string] $Mode = 'Gate',
+    [ValidateSet('Admit','Nodes','Levels','Gate','Seeded','Join','Library','Speech','ExcitationPair','RenderTiming','Kernels','FrontEnd')][string] $Mode = 'Gate',
+    [string] $DriverReceiptPath,
+    [ValidateRange(0.0,1.0)][double] $VoicedNoiseGain = 0,
+    [switch] $BenchmarkDraws,
+    [string] $CompareStftAssembly,
     [ValidateRange(2,64)][int] $Threads = [Environment]::ProcessorCount,
     [ValidateRange(1,10)][int] $Runs = 10,
     [ValidateSet('','dog','peach')][string] $CaseName = '',
@@ -1049,13 +1060,17 @@ class OfflineRenderMath {
             $window[$i] = [float]([float]0.5 * [float]([float]1 - [MathF]::Cos([float]([float]0.3141592653589793 * [float]$i))))
             for ($k = 0; $k -lt 11; $k++) { $angle = [double]6.283185307179586 * [double]$k * [double]$i / [double]20; $cosine[$k * 20 + $i] = [float][Math]::Cos($angle); $sine[$k * 20 + $i] = [float][Math]::Sin($angle) }
         }
+        $windowed = [float[]]::new(20)
         for ($t = 0; $t -lt $frames; $t++) {
+            for ($i = 0; $i -lt 20; $i++) {
+                $at = $t * 5 + $i - 10
+                if ($at -lt 0) { $at = -$at }; if ($at -ge $values.Length) { $at = 2 * $values.Length - 2 - $at }
+                $windowed[$i] = [float]($values[$at] * $window[$i])
+            }
             for ($k = 0; $k -lt 11; $k++) {
                 $real = [float]0; $imaginary = [float]0
                 for ($i = 0; $i -lt 20; $i++) {
-                    $at = $t * 5 + $i - 10
-                    if ($at -lt 0) { $at = -$at }; if ($at -ge $values.Length) { $at = 2 * $values.Length - 2 - $at }
-                    $v = [float]($values[$at] * $window[$i]); $real = [float]($real + [float]($v * $cosine[$k * 20 + $i])); $imaginary = [float]($imaginary - [float]($v * $sine[$k * 20 + $i]))
+                    $v = $windowed[$i]; $real = [float]($real + [float]($v * $cosine[$k * 20 + $i])); $imaginary = [float]($imaginary - [float]($v * $sine[$k * 20 + $i]))
                 }
                 # A real even-length FFT has real DC and Nyquist bins. Do not
                 # let rounded sine coefficients create an imaginary residue
@@ -1423,6 +1438,8 @@ $finishedOutputs = switch ($Mode) {
     'Seeded' { 'dog-seeded-pcm.f32'; 'peach-seeded-pcm.f32' }
     'Join' { 'store-size.clixml' }
     'Speech' { 'speech.clixml'; 'speech.wav' }
+    'ExcitationPair' { 'baseline.wav'; 'voiced-noise-off.wav'; 'voiced-noise-scaled.wav'; 'excitation-pair.clixml' }
+    'RenderTiming' { 'render-times.csv'; 'timed.wav' }
     'FrontEnd' { 'frontend.clixml' }
 }
 foreach ($finishedOutput in $finishedOutputs) {
@@ -2309,10 +2326,12 @@ function Invoke-OfflineSpeech {
     } finally { $script:OfflineObservationSink=$previousObservationSink }
 }
 $script:OfflineTextEncoder = $null
-function New-OfflineDraws([int] $SampleCount) {
+function New-OfflineDraws([int] $SampleCount, [switch] $VerifyRepeat) {
     $flat = $draws.Invoke($Seed, $SampleCount)
-    $repeated = $draws.Invoke($Seed, $SampleCount)
-    if (-not [Linq.Enumerable]::SequenceEqual[float]($flat, $repeated)) { throw 'Seeded draws are not reproducible.' }
+    if ($VerifyRepeat) {
+        $repeated = $draws.Invoke($Seed, $SampleCount)
+        if (-not [Linq.Enumerable]::SequenceEqual[float]($flat, $repeated)) { throw 'Seeded draws are not reproducible.' }
+    }
     $uniform = [float[]]::new(9); $gaussian = [float[]]::new(9 * $SampleCount); $extraNoise = [float[]]::new($SampleCount)
     [Array]::Copy($flat, 0, $uniform, 0, 9); [Array]::Copy($flat, 9, $gaussian, 0, $gaussian.Length)
     [Array]::Copy($flat, 9 + $gaussian.Length, $extraNoise, 0, $SampleCount)
@@ -2571,6 +2590,94 @@ function Invoke-OfflineJoinExperiment {
     return $measurements.ToArray()
 }
 if ($Mode -eq 'Library') { return }
+if ($Mode -in 'ExcitationPair','RenderTiming') {
+    if (!$Text -or !$DriverReceiptPath) { throw "$Mode requires Text and DriverReceiptPath." }
+    $receipt = Import-PowerShellDataFile -LiteralPath $DriverReceiptPath
+    $driver = Join-Path (Split-Path $DriverReceiptPath) ([IO.Path]::GetFileName($receipt.Output))
+    if ((Get-FileHash -LiteralPath $driver).Hash -cne $receipt.AssemblySha256) { throw 'Driver receipt mismatch.' }
+    $phonemize = [Reflection.Assembly]::LoadFrom((Resolve-Path $driver).Path).GetType('CoreDriver').GetMethod('Run').CreateDelegate([Func[string,object]])
+    if ($Mode -eq 'RenderTiming') {
+        for ($run = 0; $run -lt $Runs; $run++) {
+            $profile.Clear()
+            $total = [Diagnostics.Stopwatch]::StartNew()
+            $phones = $phonemize.Invoke($Text)
+            if (!$phones.Complete) { throw 'Incomplete pronunciation.' }
+            $decoded = Invoke-OfflineSpeech -Phonemes $phones.KokoroPhones -Voice $Voice -Speed $Speed -SkipGenerator -RecomputeText
+            $generator = [Diagnostics.Stopwatch]::StartNew()
+            $sourceDraws = New-OfflineDraws ($decoded.F0.Length * 300)
+            $pcm = Invoke-OfflineGenerator $decoded.Features $decoded.AcousticStyle $decoded.F0 $sourceDraws.Uniform $sourceDraws.Harmonic $sourceDraws.Extra
+            $generator.Stop()
+            $total.Stop()
+            $duration = $pcm.Length / 24000.0
+            if ($run -eq 0) {
+                $referencePcm = $pcm
+                Write-OfflineWave (Join-Path $output 'timed.wav') $pcm
+            } elseif (![Linq.Enumerable]::SequenceEqual[float]($referencePcm,$pcm)) { throw 'Repeat render differs.' }
+            $row = [pscustomobject]@{ Run=$run; AudioSeconds=$duration; Threads=$Threads; GeneratorSeconds=$generator.Elapsed.TotalSeconds; TotalSeconds=$total.Elapsed.TotalSeconds; GeneratorRTF=$generator.Elapsed.TotalSeconds/$duration; TotalRTF=$total.Elapsed.TotalSeconds/$duration }
+            $row | Export-Csv -Append -LiteralPath (Join-Path $output 'render-times.csv')
+            $row
+        }
+        return
+    }
+    $phones = $phonemize.Invoke($Text)
+    if (!$phones.Complete) { throw 'Incomplete pronunciation.' }
+    $decoded = Invoke-OfflineSpeech -Phonemes $phones.KokoroPhones -Voice $Voice -Speed $Speed -SkipGenerator
+    if ($BenchmarkDraws) {
+        $drawSampleCount = $decoded.F0.Length * 300
+        $bench = foreach ($pair in 0..6) {
+            foreach ($arm in 0,1) {
+                $verify = ($pair + $arm) % 2 -eq 0
+                $watch = [Diagnostics.Stopwatch]::StartNew()
+                $result = New-OfflineDraws $drawSampleCount -VerifyRepeat:$verify
+                $watch.Stop()
+                if ($pair -gt 0) {
+                    [pscustomobject]@{Pair=$pair; VerifyRepeat=$verify; Samples=$drawSampleCount; Milliseconds=$watch.Elapsed.TotalMilliseconds}
+                }
+            }
+        }
+        $bench | Export-Csv -NoTypeInformation -LiteralPath (Join-Path $output 'draw-times.csv')
+    }
+    $sourceDraws = New-OfflineDraws ($decoded.F0.Length * 300)
+    if ($CompareStftAssembly) {
+        $controlAssembly = [Reflection.Assembly]::Load([IO.File]::ReadAllBytes((Resolve-Path $CompareStftAssembly).Path))
+        $controlStft = $controlAssembly.GetType('OfflineRenderMath',$true).GetMethod('Stft').CreateDelegate([Func[float[],float[]]])
+        $excitation = $harmonic.Invoke($decoded.F0,$sourceDraws.Uniform,$sourceDraws.Harmonic,$sourceDraws.Extra,(Read-OfflineWeight 'decoder.module.generator.m_source.l_linear.weight'),(Read-OfflineWeight 'decoder.module.generator.m_source.l_linear.bias'))
+        $timings = foreach ($pair in 0..8) {
+            foreach ($arm in 0,1) {
+                $candidate = ($arm + $pair) % 2 -eq 1
+                $transform = if ($candidate) { $stft } else { $controlStft }
+                $watch = [Diagnostics.Stopwatch]::StartNew()
+                $spectrum = $transform.Invoke($excitation)
+                $watch.Stop()
+                if ($pair -eq 0 -and !$candidate) { $referenceSpectrum = $spectrum }
+                if (![Linq.Enumerable]::SequenceEqual[float]($spectrum,$referenceSpectrum)) { throw 'Harmonic spectrum mismatch.' }
+                if ($pair -gt 0) { [pscustomobject]@{Pair=$pair; Candidate=$candidate; Milliseconds=$watch.Elapsed.TotalMilliseconds} }
+            }
+        }
+        $timings | Export-Csv -NoTypeInformation -LiteralPath (Join-Path $output 'stft-times.csv')
+    }
+    $candidateName = if ($VoicedNoiseGain -eq 0) { 'voiced-noise-off' } else { 'voiced-noise-scaled' }
+    foreach ($variant in 'baseline',$candidateName) {
+        if ($variant -eq $candidateName) {
+            for ($tick = 0; $tick -lt $decoded.F0.Length; $tick++) {
+                if ($decoded.F0[$tick] -gt 10) {
+                    $start = $tick * 2700
+                    if ($VoicedNoiseGain -eq 0) { [Array]::Clear($sourceDraws.Harmonic, $start, 2700) }
+                    else {
+                        for ($i = $start; $i -lt $start + 2700; $i++) {
+                            $sourceDraws.Harmonic[$i] *= $VoicedNoiseGain
+                        }
+                    }
+                }
+            }
+        }
+        $pcm = Invoke-OfflineGenerator $decoded.Features $decoded.AcousticStyle $decoded.F0 $sourceDraws.Uniform $sourceDraws.Harmonic $sourceDraws.Extra
+        Write-OfflineWave (Join-Path $output "$variant.wav") $pcm
+    }
+    [pscustomobject]@{Text=$Text; Phonemes=$phones.KokoroPhones; Voice=$Voice; Speed=$Speed; Seed=$Seed; Ticks=$decoded.F0.Length; DriverSHA256=$receipt.AssemblySha256; VoicedNoiseGain=$VoicedNoiseGain} |
+        Export-Clixml -LiteralPath (Join-Path $output 'excitation-pair.clixml')
+    return
+}
 if ($Mode -eq 'Join') { Invoke-OfflineJoinExperiment; return }
 if ($Mode -eq 'Kernels') {
     $kernelCases = @(
@@ -2761,7 +2868,7 @@ foreach ($case in $captures.Cases) {
     $asr = $align.Invoke($textEncoder, $durations); $f0 = Read-OfflineReference $case 'f0'; $noise = Read-OfflineReference $case 'n'; $style = Read-OfflineReference $case 'acoustic'
     $draw0 = Read-OfflineReference $case 'draw0-rand'; $draw1 = Read-OfflineReference $case 'draw1-randn_like'; $draw2 = Read-OfflineReference $case 'draw2-randn_like'; $expectedPcm = Read-OfflineReference $case 'pcm'
     if ($Mode -eq 'Seeded') {
-        $seededDraws = New-OfflineDraws ($f0.Length * 300)
+        $seededDraws = New-OfflineDraws ($f0.Length * 300) -VerifyRepeat
         $draw0 = $seededDraws.Uniform; $draw1 = $seededDraws.Harmonic; $draw2 = $seededDraws.Extra
     }
     if ($Mode -eq 'Levels') {

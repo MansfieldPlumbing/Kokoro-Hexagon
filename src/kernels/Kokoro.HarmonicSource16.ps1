@@ -185,21 +185,23 @@ function New-KokoroSourceNoiseSteps {
     $s=[Collections.Generic.List[hashtable]]::new()
     $imm={param([int]$r,[long]$v) $u=[long]([uint32]($v -band 0xffffffffL)); $s.Add(@{Op='lo';x=$r;i=($u -band 65535)}); $s.Add(@{Op='hi';x=$r;i=($u -shr 16)}) }
     & $imm 10 0x9E3779B9L; & $imm 11 0x7FEB352DL; & $imm 12 0x846CA68BL; & $imm 13 131070; & $imm 15 65535; $s.Add(@{Op='imm';d=14;i=0})
-    # Hash of index register $index into register $out (r8 and r9 as temporaries).
+    # r4 walks the prescaled counter modulo 2^32. Initialize from the absolute
+    # first sample so overlapping chunks produce identical noise.
+    $s.Add(@{Op='add';d=4;s=4;t=4}); $s.Add(@{Op='mpyi';d=4;s=4;t=10})
     $hash={param([int]$index,[int]$out)
-        $s.Add(@{Op='mpyi';d=$out;s=$index;t=10}); $s.Add(@{Op='xor';d=$out;s=$out;t=2})
+        $s.Add(@{Op='xor';d=$out;s=$index;t=2})
         $s.Add(@{Op='lsr-i';d=9;s=$out;i=16}); $s.Add(@{Op='xor';d=$out;s=$out;t=9}); $s.Add(@{Op='mpyi';d=$out;s=$out;t=11})
         $s.Add(@{Op='lsr-i';d=9;s=$out;i=15}); $s.Add(@{Op='xor';d=$out;s=$out;t=9}); $s.Add(@{Op='mpyi';d=$out;s=$out;t=12})
         $s.Add(@{Op='lsr-i';d=9;s=$out;i=16}); $s.Add(@{Op='xor';d=$out;s=$out;t=9}) }
     $loop="${LabelPrefix}_sample"
     $s.Add(@{Op='label';Name=$loop})
-    $s.Add(@{Op='add';d=5;s=4;t=4}); & $hash 5 6
-    $s.Add(@{Op='addi';d=5;s=5;i=1}); & $hash 5 7
+    & $hash 4 6
+    $s.Add(@{Op='add';d=5;s=4;t=10}); & $hash 5 7
     $s.Add(@{Op='and';d=8;s=6;t=15}); $s.Add(@{Op='lsr-i';d=9;s=6;i=16}); $s.Add(@{Op='add';d=8;s=8;t=9})
     $s.Add(@{Op='and';d=9;s=7;t=15}); $s.Add(@{Op='add';d=8;s=8;t=9}); $s.Add(@{Op='lsr-i';d=9;s=7;i=16}); $s.Add(@{Op='add';d=8;s=8;t=9})
     $s.Add(@{Op='sub';d=8;s=8;t=13}); $s.Add(@{Op='mpyi';d=8;s=8;t=3}); $s.Add(@{Op='asr-i';d=8;s=8;i=16})
     $s.Add(@{Op='store-h';s=0;t=8;Offset=0})
-    $s.Add(@{Op='addi';d=0;s=0;i=2}); $s.Add(@{Op='addi';d=4;s=4;i=1}); $s.Add(@{Op='addi';d=1;s=1;i=-1})
+    $s.Add(@{Op='addi';d=0;s=0;i=2}); $s.Add(@{Op='add';d=4;s=5;t=10}); $s.Add(@{Op='addi';d=1;s=1;i=-1})
     $s.Add(@{Op='gtu';d=0;s=1;t=14}); $s.Add(@{Op='jump-p';u=0;Label=$loop})
     $s.Add(@{Op='return'})
     $s.ToArray()

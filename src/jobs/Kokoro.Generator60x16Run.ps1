@@ -36,6 +36,51 @@ function Get-KokoroGenerator60x16Layout {
     [pscustomobject]@{Frames=$Frames;Tiles=$tiles;TensorBytes=$bytes;BatchTiles=$BatchTiles;Regions=$regions;Small=$small;VtcmBytes=$at;PlaneStride=([long]$BatchTiles*$tileBytes);Channels=$Channels;TileBytes=$tileBytes;RecordBytes=$record}
 }
 
+function Test-KokoroGeneratorControlClock {
+    # Host model of a tick-rate Student. v changes at every tick, with a marked
+    # onset at tick 37. Row zero of the fast section reflects row one.
+    foreach ($rowsPerTick in 10,60) {
+        $pad = [int]($rowsPerTick -eq 60)
+        $ticks = 96
+        foreach ($kernelSize in 3,7,11) {
+            foreach ($stage in 0..5) {
+                $pair = $stage -shr 1
+                $reach = (1 + 2*$pair) * (($kernelSize - 1) -shr 1)
+                $lag = 32*$pair + ($stage % 2)*$reach
+                $first = $lag + $pad
+                $end = $first + $ticks*$rowsPerTick
+                $expected = [int[]]::new($end)
+                for ($tick = 0; $tick -lt $ticks; $tick++) {
+                    $value = $tick + 8192*[int]($tick -ge 37)
+                    [Array]::Fill($expected,$value,$first + $tick*$rowsPerTick,$rowsPerTick)
+                }
+                foreach ($spanTiles in 2,4,60) {
+                    $actual = [int[]]::new($end)
+                    $loads = 0
+                    for ($span = 0; $span -lt $end; $span += 32*$spanTiles) {
+                        $spanEnd = [Math]::Min($end,$span + 32*$spanTiles)
+                        for ($tile = $span; $tile -lt $spanEnd; $tile += 32) {
+                            $row = [Math]::Max($tile,$first)
+                            $tileEnd = [Math]::Min($tile+32,$spanEnd)
+                            while ($row -lt $tileEnd) {
+                                $position = $row - $first
+                                $tick = [int][Math]::Floor($position / $rowsPerTick)
+                                $count = [Math]::Min($tileEnd-$row,$rowsPerTick-($position % $rowsPerTick))
+                                $control = $tick + 8192*[int]($tick -ge 37)
+                                [Array]::Fill($actual,$control,$row,$count)
+                                $row += $count
+                                $loads++
+                            }
+                        }
+                    }
+                    if (![Linq.Enumerable]::SequenceEqual[int]($expected,$actual)) { throw 'Tile scheduler shifted the control trajectory.' }
+                    [pscustomobject]@{PSTypeName='Kokoro.ControllerClockCheck'; RowsPerTick=$rowsPerTick; Kernel=$kernelSize; Stage=$stage; SpanTiles=$spanTiles; BoundaryRow=$first+37*$rowsPerTick; ActiveRows=$end-$first; ControlRuns=$loads}
+                }
+            }
+        }
+    }
+}
+
 function New-KokoroGenerator60x16RunSteps {
     param([ValidateRange(2,1048576)][int]$Frames=7801,[ValidateRange(1,64)][int]$BatchTiles=22,[ValidateRange(1,4)][int]$HvxThreads=4,
         [ValidateSet('Accumulate','Export','Constants')][string]$AdaInMode='Accumulate',
