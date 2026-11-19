@@ -236,32 +236,46 @@ try {
             for ($run = 0; $run -lt $runs; $run++) {
                 $total = [Diagnostics.Stopwatch]::StartNew()
                 $clock.Restart(); $phonemes = [string]$phonemize.Invoke($text).KokoroPhones; $phonemizeMs = $clock.Elapsed.TotalMilliseconds
-                $clock.Restart(); $front = Invoke-OfflineSpeech -Phonemes $phonemes -Voice $pack.Voice -SkipDecoder; $frontMs = $clock.Elapsed.TotalMilliseconds
-                $speechTicks = 2 * [int](([int[]]$front.Durations | Measure-Object -Sum).Sum)
-                if ($speechTicks -ne [int]$pack.Ticks) { throw "The front end gave $speechTicks ticks; this generator library renders $($pack.Ticks)." }
-                $clock.Restart()
-                # Span decoder (DecoderDelayTicks > 0): one job for the whole text, x moved back by its output delay.
-                if ([int]$pack.DecoderDelayTicks -gt 0) {
-                    $decoderInput = ConvertTo-KokoroDecoderInput -Aligned ([float[]]$front.Aligned) -Pitch ([float[]]$front.F0) -Energy ([float[]]$front.N) -Capacity $pack.DecoderCapacity -Tiles $pack.DecoderTiles -InputBytes $pack.DecoderInputBytes -FramesOffset $pack.DecoderFramesOffset -AsrScales ([double[]]$pack.AsrScales) -F0CurveScale $pack.F0CurveScale -NCurveScale $pack.NCurveScale -Coefficients $coefficients -CoefficientsOffset $pack.DecoderCoefficientsOffset
-                    $decoderJob = & $runJob $decoderHandle $pack.DecoderTiles $decoderInput $decoderWeights $decoderTables $pack.DecoderOutputBytes $pack.DecoderPcmOffset $pack.DecoderSamples 1
-                    if (-not $decoderJob.Ok) { throw "Decoder job failed: $($decoderJob.Lines -join ' ')" }
-                    $decoded = [pscustomobject]@{ XCroutons = (ConvertFrom-KokoroDelayedCroutons -Output $decoderJob.Output -Offset $pack.DecoderOutputOffset -Ticks $speechTicks -DelayTicks ([int]$pack.DecoderDelayTicks)); DspMs = $decoderJob.MedianMs; Chunks = 1 }
+                if ($pack['FloatSynthesis']) {
+                    $clock.Restart()
+                    $floatSpeech = Invoke-OfflineSpeech -Phonemes $phonemes -Voice $pack.Voice
+                    $pcm = [float[]]$floatSpeech.Pcm
+                    if ($pcm.Length -ne $samples) { throw "Float synthesis returned $($pcm.Length) samples, expected $samples." }
+                    $speechTicks = $floatSpeech.F0.Length
+                    $frontMs = 0; $decoderMs = 0; $generatorMs = 0
+                    $decoded = @{ DspMs=0; Chunks=0 }; $generatorJob = @{ MedianMs=0 }
+                    $pcmBytes = [byte[]]::new($pcm.Length * 4)
+                    [Buffer]::BlockCopy($pcm, 0, $pcmBytes, 0, $pcmBytes.Length)
+                    $hash = [Convert]::ToHexString([Security.Cryptography.SHA256]::HashData($pcmBytes))
+                    $lines.Add("FloatSynthesisMs=$($clock.Elapsed.TotalMilliseconds.ToString('F1', $inv)) Run=$run")
                 } else {
-                $decoded = Invoke-KokoroDecoderChunks -Aligned ([float[]]$front.Aligned) -Pitch ([float[]]$front.F0) -Energy ([float[]]$front.N) -Capacity $pack.DecoderCapacity -RunChunk {
-                    param([float[]]$ChunkAligned, [float[]]$ChunkPitch, [float[]]$ChunkEnergy)
-                    $chunkInput = ConvertTo-KokoroDecoderInput -Aligned $ChunkAligned -Pitch $ChunkPitch -Energy $ChunkEnergy -Capacity $pack.DecoderCapacity -Tiles $pack.DecoderTiles -InputBytes $pack.DecoderInputBytes -FramesOffset $pack.DecoderFramesOffset -AsrScales ([double[]]$pack.AsrScales) -F0CurveScale $pack.F0CurveScale -NCurveScale $pack.NCurveScale -Coefficients $coefficients -CoefficientsOffset $pack.DecoderCoefficientsOffset
-                    $chunkJob = & $runJob $decoderHandle $pack.DecoderTiles $chunkInput $decoderWeights $decoderTables $pack.DecoderOutputBytes $pack.DecoderPcmOffset $pack.DecoderSamples 1
-                    if (-not $chunkJob.Ok) { throw "Decoder job failed: $($chunkJob.Lines -join ' ')" }
-                    [pscustomobject]@{ Output = $chunkJob.Output; OutputOffset = $pack.DecoderOutputOffset; DspMs = $chunkJob.MedianMs } }
+                    $clock.Restart(); $front = Invoke-OfflineSpeech -Phonemes $phonemes -Voice $pack.Voice -SkipDecoder; $frontMs = $clock.Elapsed.TotalMilliseconds
+                    $speechTicks = 2 * [int](([int[]]$front.Durations | Measure-Object -Sum).Sum)
+                    if ($speechTicks -ne [int]$pack.Ticks) { throw "The front end gave $speechTicks ticks; this generator library renders $($pack.Ticks)." }
+                    $clock.Restart()
+                    # Span decoder (DecoderDelayTicks > 0): one job for the whole text, x moved back by its output delay.
+                    if ([int]$pack.DecoderDelayTicks -gt 0) {
+                        $decoderInput = ConvertTo-KokoroDecoderInput -Aligned ([float[]]$front.Aligned) -Pitch ([float[]]$front.F0) -Energy ([float[]]$front.N) -Capacity $pack.DecoderCapacity -Tiles $pack.DecoderTiles -InputBytes $pack.DecoderInputBytes -FramesOffset $pack.DecoderFramesOffset -AsrScales ([double[]]$pack.AsrScales) -F0CurveScale $pack.F0CurveScale -NCurveScale $pack.NCurveScale -Coefficients $coefficients -CoefficientsOffset $pack.DecoderCoefficientsOffset
+                        $decoderJob = & $runJob $decoderHandle $pack.DecoderTiles $decoderInput $decoderWeights $decoderTables $pack.DecoderOutputBytes $pack.DecoderPcmOffset $pack.DecoderSamples 1
+                        if (-not $decoderJob.Ok) { throw "Decoder job failed: $($decoderJob.Lines -join ' ')" }
+                        $decoded = [pscustomobject]@{ XCroutons = (ConvertFrom-KokoroDelayedCroutons -Output $decoderJob.Output -Offset $pack.DecoderOutputOffset -Ticks $speechTicks -DelayTicks ([int]$pack.DecoderDelayTicks)); DspMs = $decoderJob.MedianMs; Chunks = 1 }
+                    } else {
+                    $decoded = Invoke-KokoroDecoderChunks -Aligned ([float[]]$front.Aligned) -Pitch ([float[]]$front.F0) -Energy ([float[]]$front.N) -Capacity $pack.DecoderCapacity -RunChunk {
+                        param([float[]]$ChunkAligned, [float[]]$ChunkPitch, [float[]]$ChunkEnergy)
+                        $chunkInput = ConvertTo-KokoroDecoderInput -Aligned $ChunkAligned -Pitch $ChunkPitch -Energy $ChunkEnergy -Capacity $pack.DecoderCapacity -Tiles $pack.DecoderTiles -InputBytes $pack.DecoderInputBytes -FramesOffset $pack.DecoderFramesOffset -AsrScales ([double[]]$pack.AsrScales) -F0CurveScale $pack.F0CurveScale -NCurveScale $pack.NCurveScale -Coefficients $coefficients -CoefficientsOffset $pack.DecoderCoefficientsOffset
+                        $chunkJob = & $runJob $decoderHandle $pack.DecoderTiles $chunkInput $decoderWeights $decoderTables $pack.DecoderOutputBytes $pack.DecoderPcmOffset $pack.DecoderSamples 1
+                        if (-not $chunkJob.Ok) { throw "Decoder job failed: $($chunkJob.Lines -join ' ')" }
+                        [pscustomobject]@{ Output = $chunkJob.Output; OutputOffset = $pack.DecoderOutputOffset; DspMs = $chunkJob.MedianMs } }
+                    }
+                    $decoderMs = $clock.Elapsed.TotalMilliseconds
+                    $clock.Restart()
+                    $generatorInput = ConvertTo-KokoroGeneratorInput -XCroutons $decoded.XCroutons -Pitch ([float[]]$front.F0) -Ticks $speechTicks -InputBytes ([long]$kv.InputBytes) -NoiseOffset $pack.NoiseOffset -Seed $pack.Seed -NoiseScale $pack.NoiseScale
+                    $generatorJob = & $runJob $handle $tiles $generatorInput $generatorWeights $generatorTables $outputBytes $pcmOffset $samples 1 -PcmOnly
+                    if (-not $generatorJob.Ok) { throw "Generator job failed: $($generatorJob.Lines -join ' ')" }
+                    $pcm = ConvertFrom-KokoroPcm16 -Output $generatorJob.Output -Offset 0 -Samples $samples
+                    $generatorMs = $clock.Elapsed.TotalMilliseconds
+                    $hash = $generatorJob.PcmSHA256
                 }
-                $decoderMs = $clock.Elapsed.TotalMilliseconds
-                $clock.Restart()
-                $generatorInput = ConvertTo-KokoroGeneratorInput -XCroutons $decoded.XCroutons -Pitch ([float[]]$front.F0) -Ticks $speechTicks -InputBytes ([long]$kv.InputBytes) -NoiseOffset $pack.NoiseOffset -Seed $pack.Seed -NoiseScale $pack.NoiseScale
-                $generatorJob = & $runJob $handle $tiles $generatorInput $generatorWeights $generatorTables $outputBytes $pcmOffset $samples 1 -PcmOnly
-                if (-not $generatorJob.Ok) { throw "Generator job failed: $($generatorJob.Lines -join ' ')" }
-                $pcm = ConvertFrom-KokoroPcm16 -Output $generatorJob.Output -Offset 0 -Samples $samples
-                $generatorMs = $clock.Elapsed.TotalMilliseconds
-                $hash = $generatorJob.PcmSHA256
                 $totalMs = $total.Elapsed.TotalMilliseconds
                 if ($run -eq 0) { $speechHash = $hash; $speechPcm = $pcm; Write-OfflineWave $wave $pcm }
                 elseif ($hash -cne $speechHash) { $allOk = $false }

@@ -43,7 +43,7 @@ twice, or written as a scratch script, is a missing command: add it here.
                               distance, mel-cepstral distortion, loudness envelope, YIN f0 and voicing, HNR; with
                               -OutputDirectory also spectrogram, difference, pitch and envelope PNGs; with a yardstick
                               (a render the same by construction, e.g. another seed) the same measures for scale.
-  PhoneSpeech -Parameters @{Text=<sentence>; Runs=3} [-Soc] [-OutputDirectory] [-Reference <clean WAV>]
+  PhoneSpeech -Parameters @{Text=<sentence>; Runs=3; FloatSynthesis=$true} [-Soc] [-OutputDirectory] [-Reference <clean WAV>]
                               Text to WAV on the phone in one process: our phonemizer and the stock front end on the CPU,
                               the decoder and the generator on the DSP (each on its voice base); per-stage times, the WAV,
                               and a comparison with the same text rendered from the host front end.
@@ -2054,7 +2054,7 @@ function Invoke-KokoroGeneratorScore {
 function Invoke-KokoroPhoneSpeech {
     param([Parameter(Mandatory)][string]$Text,[string]$OutputDirectory,[string]$Soc='SM8550',[string]$Package='dev.mansfieldplumbing.kokoro',[ValidateRange(1,20)][int]$Runs=3,
         # The voice bases (a decoder constants table, DecoderVoiceBase; generator constants, VoiceBase); by default the newest under build/.
-        [string]$DecoderBase,[string]$GeneratorBase,[string]$QualityReference,
+        [string]$DecoderBase,[string]$GeneratorBase,[string]$QualityReference,[switch]$FloatSynthesis,
         [string]$Phonemizer='build/phonemizer/english/driver/340D763896245937C41417BF7D3D197B6FE407AC750130B9299062E4D3152348-library-dll',
         # The decoder on the phone and in the reference: Spans (the span decoder in one job, up to the renderer's span
         # capacity; longer text falls back) or Chunks (the layer job in overlap-save chunks). The reference is also
@@ -2105,6 +2105,7 @@ function Invoke-KokoroPhoneSpeech {
     [IO.File]::WriteAllText((Join-Path $pack 'speech-text.txt'),$Text)
     $decoderLayout=$decoderEmission.Layout
     [ordered]@{Voice='af_heart';Ticks=$ticks;DecoderCapacity=$(if($spans){$renderer.DecoderSpanCapacity}else{$renderer.Capacity});DecoderTiles=[int]$decoderLayout.Tiles;DecoderInputBytes=[long]$decoderLayout.InputBytes
+        FloatSynthesis=[bool]$FloatSynthesis
         DecoderFramesOffset=[long]$decoderLayout.FramesOffset;DecoderCoefficientsOffset=[long]$(if($spans){$renderer.DecoderSpanLayout.Input.KmDeltas}else{$renderer.DecoderLayout.Input.KmDeltas});DecoderOutputBytes=[int]$decoderLayout.OutputBytes
         DecoderSchedule=$DecoderSchedule;DecoderDelayTicks=$(if($spans){[int]$decoderLayout.OutputDelayTicks}else{0})
         DecoderPcmOffset=[int]$decoderLayout.PcmOffset;DecoderSamples=[int]$decoderLayout.Samples;DecoderOutputOffset=[long]$decoderLayout.OutputOffset
@@ -2132,7 +2133,7 @@ function Invoke-KokoroPhoneSpeech {
         [pscustomobject]$row })
     Import-Module (Join-Path $Root 'tools/Kokoro.AudioMeasurement.psm1')
     $comparison=Compare-KokoroAudio -Reference $referenceWave -Candidate $phoneWave -ImageDirectory (Join-Path $out 'compare')
-    $result=[pscustomobject]@{PSTypeName='Kokoro.PhoneSpeech';Text=$Text;Phonemes=$phonemes.Length;Ticks=$ticks;AudioSeconds=$ticks/80.0;Runs=$speechRuns
+    $result=[pscustomobject]@{PSTypeName='Kokoro.PhoneSpeech';Text=$Text;Synthesis=$(if($FloatSynthesis){'Float'}else{'DSP'});Phonemes=$phonemes.Length;Ticks=$ticks;AudioSeconds=$ticks/80.0;Runs=$speechRuns
         LoadMs=$(if($receiptText -match '(?m)^SpeechLoadMs=(\S+)'){[double]$Matches[1]}); PhoneWave=$phoneWave;ReferenceWave=$referenceWave
         ReferenceDecoderDspMs=$decoded.DspMs;ReferenceGeneratorDspMs=$rendering.DspMs;Comparison=$comparison
         DecoderSchedule=$DecoderSchedule;DecoderLibrarySHA256=$decoderEmission.LibrarySHA256;OtherSchedule=$otherSchedule;OtherDecoderDspMs=$(if($other){$other.DspMs})

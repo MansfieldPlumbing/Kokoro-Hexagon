@@ -175,3 +175,7 @@ Kept the 60-tile span and four HVX threads, reduced the resident batch from four
 ### AdaIN/Snake post-increment address experiment
 
 Replaced the three explicit 128-byte pointer advances per row pair with HVX post-increment vector accesses. The candidate kept the 60-tile span and four-tile batch. All five phone PCM hashes matched the four-tile control, and playback completed with zero underruns. The four warm DSP calls ranged from 234.29 to 237.80 ms, with a median of 236.58 ms versus 235.90 ms in the earlier control. The timing ranges overlap. The existing packetizer treats post-increment memory operations as packet boundaries, so removing scalar instructions alone need not reduce cycles. The candidate was reverted.
+
+### Clean float phone output
+
+`PhoneSpeech -Parameters @{Text=<sentence>; Runs=1; FloatSynthesis=$true}` uses the float decoder and generator in the phone process and plays the resulting WAV through the same output path. The diagnostic float render of the lighthouse passage passed both quality checks. Excess modulation was 0 dB, loudness differed by less than 0.000001 LU, and waveform SNR against the clean reference was 110.99 dB with zero lag. The phone played all 282,600 samples with zero underruns. Synthesis took 27.731 seconds for 11.775 seconds of audio (0.42× real time). The fixed-point DSP route remains the default and still produces the affected waveform.
