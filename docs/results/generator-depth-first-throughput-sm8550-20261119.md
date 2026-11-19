@@ -1,6 +1,6 @@
 # SM8550 depth-first generator throughput
 
-**Current exact-baseband generator throughput is 106.93–107.02× DSP realtime (RTF about 0.00935).** The candidate ran at 110.027 and 110.119 ms around a 116.378 ms control on SM8550. Host invocation was 145.721 and 146.407 ms (80.4–80.8×); frontend work is outside the measurement. The initial short trial reached 108.97×. All 26 confirmation invocations matched the reference PCM, as did all five runs against a second seed's separate reference.
+**The section-front-pack checkpoint measured 106.93–107.02× DSP realtime (RTF about 0.00935).** The candidate ran at 110.027 and 110.119 ms around a 116.378 ms control on SM8550. Host invocation was 145.721 and 146.407 ms (80.4–80.8×); frontend work is outside the measurement. The initial short trial reached 108.97×. All 26 confirmation invocations matched the reference PCM, as did all five runs against a second seed's separate reference.
 
 The section-front-pack candidate parallelizes the 256-channel front add and splits the 128-channel front interleave at complete tile boundaries. Each worker writes disjoint output tiles, and the controller handles the partial tile. It also retains section state across span segments and combines and packs output on the same worker. Candidate library SHA-256 is 2124DCDE4B7BB6D442D0FAA0660DDF81A71879FF4A36AB308622ECC9D33203DA.
 
@@ -105,3 +105,9 @@ The rejected main-section experiment discarded activation precision inside the g
 The section-direct-call experiment builds on section-front-pack. At 6,509 internal call sites, the target is known during emission and fits a V73 PC-relative call. Emitting one instruction in place of five removed 104,144 bytes from the generator code. Dynamically selected worker entries still use indirect calls. The control ELF dynamic table contains zero DT_NEEDED entries. Its 14 undefined dynamic symbols cover power voting, compute resources, HVX/HMX ownership, and QuRT thread lifetime.
 
 The SM8550 candidate/control/candidate warm DSP medians were 108.930, 109.778, and 108.245 ms. Both candidate trials matched reference PCM on one cold and twelve warm invocations each. All five second-seed invocations matched their own reference. These candidate medians correspond to 108.10× and 108.78× for the 11.775-second fixture. The candidate library SHA-256 is A1035392A2E40707EA221AA5E46AC76453F50A84A0EA8F9E508271514D9F2F75. Use section-direct-call with New-ExperimentCheckout.ps1 to reproduce it.
+
+## Fused HVX shift and add
+
+The section-shift-acc experiment starts from section-direct-call. In the AdaIN/Snake activation kernel each row shifts a signed 32-bit correction and adds it to the phase accumulator. The Hexagon V6_vasrw_acc instruction performs both operations with the same shift count. Its packet description treats the destination as a read and a write.
+
+On SM8550 the warm median DSP times for candidate, direct-call control, and candidate were 107.317, 108.374, and 107.558 ms. The candidate generated 282,600 valid samples at 24 kHz, equivalent to 109.72× and 109.48× DSP realtime. All 26 candidate invocations matched the full reference PCM and five additional invocations matched the second-seed reference. The confirmed candidate library SHA-256 is C3303BA559AB1DD0730DC511EDC21C08A9A2B7DD384A943385F516A1B7D72394.

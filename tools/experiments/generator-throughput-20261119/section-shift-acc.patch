@@ -1,0 +1,35 @@
+diff --git a/Invoke-HexagonDevelopment.ps1 b/Invoke-HexagonDevelopment.ps1
+index 9cd9d60..7bdc56d 100644
+--- a/Invoke-HexagonDevelopment.ps1
++++ b/Invoke-HexagonDevelopment.ps1
+@@ -86,6 +86,7 @@ $script:Instructions = @(
+     @{ Op='lsr-i';          Pattern='10001100000sssssPP0iiiii001ddddd'; Rule='Unsigned'; Min=0; Max=31; Message='Word shift out of range'; Asm='r{d} = lsr(r{s},#{i})'; Source='SDK 6.4.0.2' }
+     @{ Op='asl-i';          Pattern='10001100000sssssPP0iiiii010ddddd'; Rule='Unsigned'; Min=0; Max=31; Message='Word shift out of range'; Asm='r{d} = asl(r{s},#{i})'; Source='SDK 6.4.0.2' }
+     @{ Op='asr-d-i';        Pattern='10000000000sssssPPiiiiii000ddddd'; Rule='PairShift'; Pairs='ds'; Min=0; Max=63; Message='Integer register pair must be even and 0..30'; Asm='r{d1}:{d} = asr(r{s1}:{s},#{i})'; Source='SDK 6.4.0.2' }
++    @{ Op='vasr-w-acc'; Pattern='00011001011tttttPP1sssss101ddddd'; Asm='v{d}.w += vasr(v{s}.w,r{t})'; Source='Hexagon V6_vasrw_acc' }
+     @{ Op='vasr-w';         Pattern='00011001011tttttPP0sssss101ddddd'; Asm='v{d}.w = vasr(v{s}.w,r{t})'; Source='SDK 6.4.0.2' }
+     @{ Op='vasl-w';         Pattern='00011001011tttttPP0sssss111ddddd'; Asm='v{d}.w = vasl(v{s}.w,r{t})'; Source='SDK 6.4.0.2' }
+     @{ Op='vmax-w';         Pattern='00011111001tttttPP0sssss000ddddd'; Asm='v{d}.w = vmax(v{s}.w,v{t}.w)'; Source='SDK 6.4.0.2' }
+@@ -756,7 +757,7 @@ $script:PacketClasses = @{}
+ foreach ($op in 'vload') { $script:PacketClasses[$op] = @{ Kind='VLoad'; Slots=@(1,0) } }
+ foreach ($op in 'vstore') { $script:PacketClasses[$op] = @{ Kind='VStore'; Slots=@(0) } }
+ foreach ($op in 'vmpyo-w-h-rnd','vmpy-h-rnd-sat','vmpye-w-uh','vmpyo-acc-w-h-rnd-sat-shift','vmpyie-w-uh') { $script:PacketClasses[$op] = @{ Kind='Mpy'; Slots=@(3,2) } }
+-foreach ($op in 'vasl-w','vasr-w','vlsr-uw','vasl-h') { $script:PacketClasses[$op] = @{ Kind='Shift'; Slots=@(3,2,1,0) } }
++foreach ($op in 'vasr-w-acc','vasl-w','vasr-w','vlsr-uw','vasl-h') { $script:PacketClasses[$op] = @{ Kind='Shift'; Slots=@(3,2,1,0) } }
+ foreach ($op in 'vsplat') { $script:PacketClasses[$op] = @{ Kind='Alu'; Slots=@(3,2) } }
+ foreach ($op in 'vshuffo-b','vsat-h-w','vadd-w','vadd-h','vadd-h-sat','vsub-h','vand','vor','vxor','vmax-w','vmin-w','vabs-h-sat') { $script:PacketClasses[$op] = @{ Kind='Alu'; Slots=@(3,2,1,0) } }
+ foreach ($op in 'addi','add','sub','imm','lo','hi') { $script:PacketClasses[$op] = @{ Kind='Scalar'; Slots=@(3,2,1,0) } }
+diff --git a/src/kernels/Kokoro.AdaInSnakeTurns.ps1 b/src/kernels/Kokoro.AdaInSnakeTurns.ps1
+index 5378197..c46ecd0 100644
+--- a/src/kernels/Kokoro.AdaInSnakeTurns.ps1
++++ b/src/kernels/Kokoro.AdaInSnakeTurns.ps1
+@@ -102,8 +102,7 @@ function New-KokoroAdaInSnakeTurnsSteps {
+         $s.Add(@{Op='vmpy-ww-h-h';d=8;s=7;t=22})
+         foreach ($p in @(@(8,3),@(9,4))) {
+ 
+-            $s.Add(@{Op='vasr-w';d=$p[0];s=$p[0];t=$sh.Cos})
+-            $s.Add(@{Op='vadd-w';d=$p[1];s=$p[1];t=$p[0]})
++            $s.Add(@{Op='vasr-w-acc';d=$p[1];s=$p[0];t=$sh.Cos})
+         }
+         foreach ($p in @(@(10,3),@(11,4))) {                    # out = V*S >> 31, clamped to int16
+             $s.Add(@{Op='vmpye-w-uh';d=$p[0];s=$p[1];t=16})
