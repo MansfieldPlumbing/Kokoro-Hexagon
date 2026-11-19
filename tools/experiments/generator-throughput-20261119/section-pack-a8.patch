@@ -1,0 +1,42 @@
+--- a/src/kernels/Kokoro.HmxConvPlanes.ps1
++++ b/src/kernels/Kokoro.HmxConvPlanes.ps1
+@@ -92,6 +92,7 @@
+         if($compact -and $g -gt 0){break}
+         $gw = $g * $Kernel * $cb * 2048
+         foreach ($group in 0..($accGroups - 1)) {
++            if($group -gt 0 -and $WeightPlanes -eq 1 -and $LabelPrefix -like 'g16b_b*'){continue}
+             $s.Add(@{Op='mxclracc'})
+             if ($group -eq 0) {
+                 & $imm 15 $gw; $s.Add(@{Op='add'; d=13; s=2; t=15}); & $macs 0 13
+@@ -190,6 +191,7 @@
+     $s.Add(@{Op='imm'; d=6; i=$groups})
+     $s.Add(@{Op='label'; Name="${LabelPrefix}_group"})
+     foreach ($group in 0..($accGroups - 1)) {
++            if($group -gt 0 -and $WeightPlanes -eq 1 -and $LabelPrefix -like 'g16b_b*'){continue}
+         $s.Add(@{Op='mxclracc'})
+         if ($group -eq 0) { & $macs 0 7 }
+         elseif ($group -eq 1) {
+--- a/src/kernels/Kokoro.PlaneCombine.ps1
++++ b/src/kernels/Kokoro.PlaneCombine.ps1
+@@ -70,9 +70,12 @@
+         $innerStart=$s.Count
+         $s.Add(@{Op='vload';d=0;s=0;Offset=0})
+         $s.Add(@{Op='add';d=11;s=0;t=10}); $s.Add(@{Op='vload';d=1;s=11;Offset=0})
++        $highOnly=$Groups -eq 2 -and $LabelPrefix -match '^(combineconv|combineresidualseparate)_(c|n)(128|256)$'
++        if($highOnly){ $pairs=,@(0,1) } else {
+         $s.Add(@{Op='add';d=11;s=11;t=10}); $s.Add(@{Op='vload';d=2;s=11;Offset=0})
+         $s.Add(@{Op='add';d=11;s=11;t=10}); $s.Add(@{Op='vload';d=3;s=11;Offset=0})
+         $pairs = @(@(0,1),@(2,3))
++        }
+         if ($Groups -eq 3) {
+             # Low x low group: only its low plane (r0+5S) is read; the byte is its whole signed window.
+             $s.Add(@{Op='add';d=11;s=11;t=10}); $s.Add(@{Op='add';d=11;s=11;t=10}); $s.Add(@{Op='vload';d=6;s=11;Offset=0})
+@@ -83,7 +86,7 @@
+             $s.Add(@{Op='vshuffo-b';d=$g[0];s=$g[0];t=$g[1]})
+             $s.Add(@{Op='vxor';d=$g[0];s=$g[0];t=29})                 # signed window
+         }
+-        $s.Add(@{Op='vadd-h-sat';d=4;s=0;t=2})                        # value, int16
++        if($highOnly){$s.Add(@{Op='vor';d=4;s=0;t=0})}else{$s.Add(@{Op='vadd-h-sat';d=4;s=0;t=2})} # value, int16
+         if ($Groups -eq 3) { $s.Add(@{Op='vadd-h-sat';d=4;s=4;t=6}) }
+         if ($Mode -eq 'Residual') {
+             $s.Add(@{Op='vmpy-h-rnd-sat';d=4;s=4;t=($ratioBase+$b)})          # O = v * ratio_c

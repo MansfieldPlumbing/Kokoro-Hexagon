@@ -1,0 +1,15 @@
+{
+  "output-four-lanes": "base",
+  "output-pack-fused": "output-four-lanes",
+  "output-pack-overlap": "output-pack-fused",
+  "section-fused-pack": "output-pack-fused",
+  "section-front-pack": "section-fused-pack",
+  "section-pack-tail32": "section-fused-pack",
+  "section-pack-snake5": "section-fused-pack",
+  "section-pack-a8": "section-fused-pack",
+  "section-pack-round-a8": "section-pack-a8",
+  "section-pack-main128-a8": "section-pack-round-a8",
+  "section-main-a8-snake5": "section-pack-round-a8",
+  "span-direct-pack": "output-pack-fused",
+  "source-direct-both": "base"
+}

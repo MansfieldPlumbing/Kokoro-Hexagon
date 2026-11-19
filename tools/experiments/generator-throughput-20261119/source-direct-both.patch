@@ -1,0 +1,77 @@
+--- a/src/jobs/Kokoro.Generator60x16Run.ps1
++++ b/src/jobs/Kokoro.Generator60x16Run.ps1
+@@ -1606,6 +1606,7 @@
+         $F=$spanFront; $n=$c1-$c0; $harTile=if($Channels -eq 256){16384L}else{4096L}
+         & $wsCheck "Source$Channels.Input" $span.Index 'Write' $c0 $c1
+         & $dma 18 $F.Weights 21 $sec.ConvWeights $(if($Channels -eq 256){393216L}else{49152L}); & $dma 18 $F.Tables 22 $sec.ConvTables $(if($Channels -eq 256){163840L}else{65536L})
++        & $fill $F.Sum $n 0x80008000L
+         for($start=$c0;$start -lt $c1;$start+=$batch){
+             $count=[math]::Min($batch,$c1-$start); $first=[math]::Max(0,$start-1); $last=[math]::Min($tiles,$start+$count+1)
+             if($start -eq 0){ & $fillVectors $F.Window ($harTile/128) 0x80008000L; & $fillVectors $F.WindowLow ($harTile/128) 0 }
+@@ -1784,6 +1785,29 @@
+         }
+         for($spanAt=$u1;$spanAt -lt $spans.Count;$spanAt++){ . $emitSpan $spans[$spanAt] }
+         $spanLoop=[pscustomobject]@{First=$u0;End=$u1}
++    }
++    $spanJob={
++        if($WorkspaceWindows -or !$Whole -or !$Source){throw 'Section experiment requires full workspace and computed sources.'}
++        $sourceBase=25
++        foreach ($level in 0,1) {
++            . $bindSpan $sourceSectionOf[$level] 0
++            $sourceAt=$finalOffset
++            foreach($span in $spans){
++                if($level -eq 0){ & $spanNoise $span.C0 $span.C1 } else { & $spanNoise $span.G0 $span.G1 }
++            }
++            $stepsAtLevel=if($level -eq 0){$slowSteps}else{$fastSteps}
++            $sourceAt=$r0Slot
++            . $bindSpan $level 0
++            if($level -eq 1){$chainOffset=$slowMean}
++            foreach($span in $spans){
++                if($level -eq 0){ & $spanFront0 $span.D0 $span.D1 }else{ & $spanFront1 $span.S0 $span.S1 }
++            }
++            . $sectionInit
++            . $sectionRun 0 $stepsAtLevel "_smain"
++            if($level -eq 0){$slowMean=$finalOffset}
++        }
++        foreach($span in $spans){ & $tailRange $span.T0 $span.T1 }
++        $spanLoop=[pscustomobject]@{First=$spans.Count;End=$spans.Count}
+     }
+     for($section=0;$section -lt $sections.Count;$section++){
+     if($section -gt 0){ $chainOffset=$finalOffset; $chainTiles=$tiles; . $bind $section }
+@@ -1924,7 +1948,7 @@
+         # This section's thread programs (body_lockstep_t<k><suffix>_s<run>).
+         if($sectionSchedule -eq 'Backward'){ foreach($pair in $lockstepBodies){ if($pair[0] -cmatch "^body_lockstep_t\d+$([regex]::Escape($sfx))_s"){ $bodies.Add($pair) } } }
+         # A computed source's noise_convs convolves both weight planes: its sum is the three-group combine.
+-        if($sec.Source){ $bodies.Add(@("body_combine_noise$sfx",@(& $packets @(New-KokoroPlaneCombineSteps -Mode Residual -Channels $Channels -Groups 3 -Group3Shifts -PlaneStride $planeStride -ZeroResidual -LabelPrefix "combinenoise$sfx")))) }
++        if($sec.Source){ $bodies.Add(@("body_combine_noise$sfx",@(& $packets @(New-KokoroPlaneCombineSteps -Mode Residual -Channels $Channels -Groups 3 -Group3Shifts -PlaneStride $planeStride -LabelPrefix "combinenoise$sfx")))) }
+         # A body over three branches: the inner body for branch 0 with the caller's r0 to r5, then for branches 1 and 2
+         # with each argument advanced by its branch stride (bytes; 0 keeps it). Arguments live in the frame between calls.
+         $branchBodies={param([string]$name,[string]$inner,[long[]]$strides)
+--- a/src/kernels/Kokoro.PlaneCombine.ps1
++++ b/src/kernels/Kokoro.PlaneCombine.ps1
+@@ -24,9 +24,7 @@
+         [string] $LabelPrefix = 'planecombine',
+         [switch] $NoReturn,
+         # Residual: read R from r5 instead of the output tiles r1 (the residual of another ring, written to r1).
+-        [switch] $FirstBlockOnly, [switch] $SeparateResidual,
+-        # The noise convolution starts with R = 0. Its destination can be written directly.
+-        [switch] $ZeroResidual
++        [switch] $FirstBlockOnly, [switch] $SeparateResidual
+     )
+     if ($PlaneStride % 2048 -ne 0) { throw 'Plane stride must keep 2 KB tile alignment' }
+     if ($FirstBlockOnly -and ($Mode -ne 'Conv' -or $Channels -ne 64)) { throw 'FirstBlockOnly expects a 64-channel convolution output.' }
+@@ -87,11 +85,9 @@
+         if ($Groups -eq 3) { $s.Add(@{Op='vadd-h-sat';d=4;s=4;t=6}) }
+         if ($Mode -eq 'Residual') {
+             $s.Add(@{Op='vmpy-h-rnd-sat';d=4;s=4;t=($ratioBase+$b)})          # O = v * ratio_c
+-            if (!$ZeroResidual) {
+-                $s.Add(@{Op='vload';d=5;s=$(if ($SeparateResidual) { 5 } else { 1 });Offset=0})
+-                $s.Add(@{Op='vxor';d=5;s=5;t=29})
+-                $s.Add(@{Op='vadd-h-sat';d=4;s=5;t=4})                    # R + O
+-            }
++            $s.Add(@{Op='vload';d=5;s=$(if ($SeparateResidual) { 5 } else { 1 });Offset=0})
++            $s.Add(@{Op='vxor';d=5;s=5;t=29})
++            $s.Add(@{Op='vadd-h-sat';d=4;s=5;t=4})                    # R + O
+         }
+         $s.Add(@{Op='vxor';d=4;s=4;t=29})
+         $s.Add(@{Op='vstore';s=1;t=4;Offset=0})

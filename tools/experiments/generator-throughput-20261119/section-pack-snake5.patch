@@ -1,0 +1,34 @@
+--- a/src/kernels/Kokoro.AdaInSnakeTurns.ps1
++++ b/src/kernels/Kokoro.AdaInSnakeTurns.ps1
+@@ -30,10 +30,7 @@
+     # Shift registers: fraction of both rows (right, QT-16) and (1-cos)/(2 pi)
+     # from Q30 to QT (right, 30-QT); r9 = 8, r11 = 6.
+     $sh = if ($TurnsBits -eq 24) { @{ Fraction = 9; Cos = 11 } } else { @{ Fraction = 11; Cos = 9 } }
+-    $q14 = foreach ($k in 1..5) {
+-        $f = 1.0; for ($i = 1; $i -le 2 * $k - 1; $i++) { $f *= $i }
+-        [int][math]::Round([math]::Pow(-1, $k - 1) * [math]::Pow([math]::PI / 2, 2 * $k - 1) / $f * 16384)
+-    }
++    $q14 = @(25728,-10520,1177)
+     $s = [Collections.Generic.List[hashtable]]::new()
+     $imm = { param([int]$r,[long]$v) $u=[long]([uint32]($v -band 0xffffffffL)); $s.Add(@{Op='lo';x=$r;i=($u -band 65535)}); $s.Add(@{Op='hi';x=$r;i=($u -shr 16)}) }
+     $splat = { param([int]$v,[long]$value) & $imm 13 $value; $s.Add(@{Op='vsplat';d=$v;s=13}) }
+@@ -45,7 +42,7 @@
+     & $splat 31 0x80008000L                     # u16 bias
+     & $splat 29 0xFF00FF00L                     # high byte of each packed output
+     & $splat 28 (& $half 16384)                 # 1.0 in Q14
+-    for ($k = 0; $k -lt 5; $k++) { & $splat (23 + $k) (& $half $q14[$k]) }   # v23 = h0 ... v27 = h4
++    for ($k = 0; $k -lt 3; $k++) { & $splat (23 + $k) (& $half $q14[$k]) }   # v23 = h0 ... v27 = h4
+     & $splat 22 (& $half 10430)                           # round(2^16 / (2*pi)) in each even halfword
+     foreach ($kv in @(@(8,16),@(9,8),@(10,1),@(11,6),@(7,0))) { $s.Add(@{Op='imm';d=$kv[0];i=$kv[1]}) }
+     $s.Add(@{Op='imm';d=12;i=($Channels/32)})
+@@ -94,8 +91,8 @@
+         $s.Add(@{Op='vsub-h';d=5;s=5;t=28})
+         $s.Add(@{Op='vasl-h';d=5;s=5;t=10})                     # u = 4g - 1, Q15
+         $s.Add(@{Op='vmpy-h-rnd-sat';d=6;s=5;t=5})              # z = u^2
+-        $s.Add(@{Op='vmpy-h-rnd-sat';d=7;s=27;t=6}); $s.Add(@{Op='vadd-h';d=7;s=7;t=26})
+-        foreach ($c in 25,24,23) { $s.Add(@{Op='vmpy-h-rnd-sat';d=7;s=7;t=6}); $s.Add(@{Op='vadd-h';d=7;s=7;t=$c}) }
++        $s.Add(@{Op='vmpy-h-rnd-sat';d=7;s=25;t=6}); $s.Add(@{Op='vadd-h';d=7;s=7;t=24})
++        foreach ($c in 23) { $s.Add(@{Op='vmpy-h-rnd-sat';d=7;s=7;t=6}); $s.Add(@{Op='vadd-h';d=7;s=7;t=$c}) }
+         $s.Add(@{Op='vmpy-h-rnd-sat';d=7;s=7;t=5})              # sin(pi/2 u), Q14
+         $s.Add(@{Op='vadd-h-sat';d=7;s=7;t=28})                 # 1 - cos, Q14
+         # Back to words per row, scale (1 - cos)/(2 pi) into QT turns, add to P.

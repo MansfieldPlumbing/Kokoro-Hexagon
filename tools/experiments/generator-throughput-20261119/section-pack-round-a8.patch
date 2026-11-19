@@ -1,0 +1,13 @@
+--- a/src/kernels/Kokoro.AdaInSnakeTurns.ps1
++++ b/src/kernels/Kokoro.AdaInSnakeTurns.ps1
+@@ -112,6 +112,10 @@
+         # Interleave the clamped rows once. The high plane flips the sign bit;
+         # the halfword shift places each low byte directly in its window lane.
+         $s.Add(@{Op='vsat-h-w';d=10;s=11;t=10})
++        if($LabelPrefix -match '^adainsnaketurns(mirror)?_(c|n)(128|256)$'){
++            $s.Add(@{Op='vlsr-uw';d=12;s=31;t=9})
++            $s.Add(@{Op='vadd-h-sat';d=10;s=10;t=12})
++        }
+         $s.Add(@{Op='vand';d=12;s=10;t=29}); $s.Add(@{Op='vxor';d=12;s=12;t=31})
+         $s.Add(@{Op='vstore';s=6;t=12;Offset=0})
+         if ($MirrorDelta) { $s.Add(@{Op='add';d=17;s=6;t=18}); $s.Add(@{Op='vstore';s=17;t=12;Offset=0}) }

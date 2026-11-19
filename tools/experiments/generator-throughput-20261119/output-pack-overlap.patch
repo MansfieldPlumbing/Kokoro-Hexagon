@@ -1,0 +1,90 @@
+--- a/src/jobs/Kokoro.Generator60x16Run.ps1
++++ b/src/jobs/Kokoro.Generator60x16Run.ps1
+@@ -758,12 +758,12 @@
+             $s.Add(@{Op='label';Name=$done})
+         }
+     }
+-    $parallel={param([string]$body,[object[]]$off,[bool[]]$perTile,[int]$count,[switch]$Moments,[long[]]$Strides)
++    $parallel={param([string]$body,[object[]]$off,[bool[]]$perTile,[int]$count,[switch]$Moments,[long[]]$Strides,[scriptblock]$DuringWorkers)
+         $n=$off.Count
+         if($HvxThreads -eq 1 -or $count -lt 2){ for($i=0;$i -lt $n;$i++){ & $ptr $i 18 $off[$i] }; & $imm $n $count; & $call $body; return }
+-        $chunk=[int][math]::Ceiling($count/$HvxThreads)
++        $chunk=[int][math]::Ceiling($count/($HvxThreads-[int][bool]$DuringWorkers))
+         for($k=1;$k -lt $HvxThreads;$k++){
+-            $o=$k*$chunk; $c=[math]::Max(0,[math]::Min($chunk,$count-$o))
++            $o=($k-[int][bool]$DuringWorkers)*$chunk; $c=[math]::Max(0,[math]::Min($chunk,$count-$o))
+             if($c -gt 0 -and $Moments){ & $ptr 4 18 $privateMoments[$k]; $s.Add(@{Op='vxor';d=0;s=0;t=0}); for($v=0;$v -lt $momentVectors;$v++){$s.Add(@{Op='vstore';s=4;t=0;Offset=(128*($v%8))}); if($v%8 -eq 7 -and $v -lt $momentVectors-1){$s.Add(@{Op='addi';d=4;s=4;i=1024})}} }
+             & $ptr 6 25 ($poolOffset+64*$k)
+             if($c -gt 0){
+@@ -785,7 +785,7 @@
+             & $imm 0 $c; $s.Add(@{Op='store';s=6;t=0;Offset=48})
+         }
+         & $wake
+-        for($i=0;$i -lt $n;$i++){ & $ptr $i 18 $off[$i] }; & $imm $n ([math]::Min($chunk,$count)); & $call $body
++        if($DuringWorkers){ & $DuringWorkers } else { for($i=0;$i -lt $n;$i++){ & $ptr $i 18 $off[$i] }; & $imm $n ([math]::Min($chunk,$count)); & $call $body }
+         & $join
+         if($Moments){
+             for($k=1;$k -lt $HvxThreads;$k++){
+@@ -1513,7 +1513,7 @@
+     $tailSteps={
+         & $mark 'Boundary' 'Tail'
+         & $mark 'Unmarked' -site 51; & $sync
+-        Add-KokoroGeneratorTail16JobSteps -EmitParallel $parallelEmitter -Steps $s -Calls $calls -Frames $Frames -InputBase 25 -InputOffset $finalOffset -WeightsBase 21 -WeightsOffset $tailWeightOffset -TablesBase 22 -TablesOffset $tailParameterOffset -PcmBase 23 -PcmOffset $pcmOffset
++        Add-KokoroGeneratorTail16JobSteps -EmitOverlap $overlapEmitter -EmitParallel $parallelEmitter -Steps $s -Calls $calls -Frames $Frames -InputBase 25 -InputOffset $finalOffset -WeightsBase 21 -WeightsOffset $tailWeightOffset -TablesBase 22 -TablesOffset $tailParameterOffset -PcmBase 23 -PcmOffset $pcmOffset
+         & $mark 'Tail' 'Exit'
+     }
+     $lockstepBodies=[Collections.Generic.List[object]]::new()
+@@ -1630,11 +1630,12 @@
+         }
+     }
+     # The tail over output tiles t0 .. t1 - 1 of the bound section's final tensor.
++    $overlapEmitter={param($body,$offsets,$strides,$workCount,$otherWork) & $parallel $body $offsets @() $workCount -Strides $strides -DuringWorkers $otherWork}
+     $tailRange={param([int]$t0,[int]$t1)
+         # The tail reads two tiles of halo each side (Add-KokoroGeneratorTail16JobSteps: conv_post and the spectrum).
+         & $wsCheck 'Main128.Final' $span.Index 'Read' ([math]::Max(0,$t0-2)) ([math]::Min($tiles,$t1+2))
+         & $mark 'Boundary' 'Tail'; & $sync
+-        Add-KokoroGeneratorTail16JobSteps -EmitParallel $parallelEmitter -Steps $s -Calls $calls -Frames $Frames -InputBase 25 -InputOffset $finalOffset -WeightsBase 21 -WeightsOffset $tailWeightOffset -TablesBase 22 -TablesOffset $tailParameterOffset -PcmBase 23 -PcmOffset $pcmOffset -FirstTile $t0 -EndTile $t1 -LabelPrefix "t16r$t0"
++        Add-KokoroGeneratorTail16JobSteps -EmitOverlap $overlapEmitter -EmitParallel $parallelEmitter -Steps $s -Calls $calls -Frames $Frames -InputBase 25 -InputOffset $finalOffset -WeightsBase 21 -WeightsOffset $tailWeightOffset -TablesBase 22 -TablesOffset $tailParameterOffset -PcmBase 23 -PcmOffset $pcmOffset -FirstTile $t0 -EndTile $t1 -LabelPrefix "t16r$t0"
+     }
+     # Spans ($spans): per span the 256-channel front and section, then the 128-channel front, section and tail. A
+     # section's first steps start from its initial state; later ones restore the state its previous steps saved.
+--- a/src/jobs/Kokoro.GeneratorTail16Run.ps1
++++ b/src/jobs/Kokoro.GeneratorTail16Run.ps1
+@@ -49,7 +49,7 @@
+         # Diagnosis: DMA the 16-bit logits (64-channel croutons) to DumpBase + DumpOffset after conv_post, then the
+         # spectrum high and low planes ((tiles + 2) * 4096 bytes each, halo tiles included) after them.
+         [int]$DumpBase=-1,[long]$DumpOffset=0,
+-        [scriptblock]$EmitParallel)
++        [scriptblock]$EmitParallel,[scriptblock]$EmitOverlap)
+     $layout=Get-KokoroGeneratorTail16Layout -Frames $Frames -BatchTiles $BatchTiles
+     $tiles=$layout.Tiles; $batch=$BatchTiles; $reg=$layout.Regions
+     if($EndTile -lt 0){ $EndTile=$tiles }
+@@ -156,11 +156,24 @@
+         if($startTile+$count+1 -gt $tiles){ & $fill (& $spectrumAt 0 $tiles $base) 32 0x80008000L; & $fill (& $spectrumAt 1 $tiles $base) 32 0; & $spectrumDump $tiles $base 1 }
+         $s.Add(@{Op='syncht'})
+         # iSTFT, then PCM to DDR.
+-        & $ptr 0 18 (& $spectrumAt 0 $startTile $base); & $ptr 1 18 (& $spectrumAt 1 $startTile $base); & $ptr 2 18 ($reg.Weights.Offset+114688); & $ptr 3 18 ($reg.Tables.Offset+4096); & $imm 4 $count; & $ptr 5 18 $reg.Planes.Offset
+-        & $call 'body_conv_istft'
+-        $s.Add(@{Op='syncht'})
++        $runIstft={param([int]$tileOffset,[int]$tileCount)
++            & $ptr 0 18 (& $spectrumAt 0 ($startTile+$tileOffset) $base)
++            & $ptr 1 18 (& $spectrumAt 1 ($startTile+$tileOffset) $base)
++            & $ptr 2 18 ($reg.Weights.Offset+114688)
++            & $ptr 3 18 ($reg.Tables.Offset+4096)
++            & $imm 4 $tileCount
++            & $ptr 5 18 ($reg.Planes.Offset+4096*$tileOffset)
++            & $call 'body_conv_istft'
++            $s.Add(@{Op='syncht'})
++        }
++        $firstGroup=if($EmitOverlap -and $count -ge 4){[int][math]::Floor($count/2)}else{0}
++        if($firstGroup){
++            & $runIstft 0 $firstGroup
++            $remainingTiles=$count-$firstGroup; $secondGroup={ & $runIstft $firstGroup $remainingTiles }
++            & $EmitOverlap 'body_pcm_combine_pack' @($reg.Planes.Offset,$reg.Pcm.Offset,$reg.Input.Offset) @(4096,4096,320) $firstGroup $secondGroup
++        } else { & $runIstft 0 $count }
+         if($EmitParallel){
+-            & $EmitParallel 'body_pcm_combine_pack' @($reg.Planes.Offset,$reg.Pcm.Offset,$reg.Input.Offset) @(4096,4096,320) $count
++            & $EmitParallel 'body_pcm_combine_pack' @(($reg.Planes.Offset+4096*$firstGroup),($reg.Pcm.Offset+4096*$firstGroup),($reg.Input.Offset+320*$firstGroup)) @(4096,4096,320) ($count-$firstGroup)
+         } else {
+             & $ptr 0 18 $reg.Planes.Offset; & $ptr 1 18 $reg.Pcm.Offset; & $imm 3 $count
+             & $call 'body_pcm_combine'

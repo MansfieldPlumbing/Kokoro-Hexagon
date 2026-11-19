@@ -1,0 +1,20 @@
+--- a/src/jobs/Kokoro.Generator60x16Run.ps1
++++ b/src/jobs/Kokoro.Generator60x16Run.ps1
+@@ -1661,7 +1661,7 @@
+         if($Source){
+             . $bindSpan $sourceSectionOf[0] $span.Index; $sourceAt=$finalOffset; $sourceBase=25; & $mark 'Boundary' 'Noise256'
+             if($span.C1 -gt $span.C0){ & $spanNoise $span.C0 $span.C1; if($StopAfterSpanStage -eq 'Noise256'){ $spanStopped=$true; return } }
+-            . $sourceSpan $span.C0 $span.C0 $span.R0 $span.R1 $slowSteps; if($span.R1 -gt $span.R0 -and $StopAfterSpanStage -eq 'Source256'){ $spanStopped=$true; return }
++            $sourceAt=$r0Slot
+         }
+         else { $sourceBase=20; $sourceAt=$sourceStreams[0].InputOffset }
+         . $bindSpan 0 $span.Index; $slowMean=$finalOffset
+@@ -1677,7 +1677,7 @@
+         if($Source){
+             . $bindSpan $sourceSectionOf[1] $span.Index; $sourceAt=$finalOffset; $sourceBase=25; & $mark 'Boundary' 'Noise128'
+             if($span.G1 -gt $span.G0){ & $spanNoise $span.G0 $span.G1; if($StopAfterSpanStage -eq 'Noise128'){ $spanStopped=$true; return } }
+-            . $sourceSpan $span.G0 $span.G0 $span.H0 $span.H1 $fastSteps; if($span.H1 -gt $span.H0 -and $StopAfterSpanStage -eq 'Source128'){ $spanStopped=$true; return }
++            $sourceAt=$r0Slot
+         }
+         else { $sourceBase=20; $sourceAt=$sourceStreams[1].InputOffset }
+         . $bindSpan 1 $span.Index; $chainOffset=$slowMean

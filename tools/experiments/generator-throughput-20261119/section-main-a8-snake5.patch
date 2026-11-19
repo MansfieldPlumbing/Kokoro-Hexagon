@@ -1,0 +1,74 @@
+--- a/src/kernels/Kokoro.AdaInSnakeTurns.ps1
++++ b/src/kernels/Kokoro.AdaInSnakeTurns.ps1
+@@ -30,10 +30,7 @@
+     # Shift registers: fraction of both rows (right, QT-16) and (1-cos)/(2 pi)
+     # from Q30 to QT (right, 30-QT); r9 = 8, r11 = 6.
+     $sh = if ($TurnsBits -eq 24) { @{ Fraction = 9; Cos = 11 } } else { @{ Fraction = 11; Cos = 9 } }
+-    $q14 = foreach ($k in 1..5) {
+-        $f = 1.0; for ($i = 1; $i -le 2 * $k - 1; $i++) { $f *= $i }
+-        [int][math]::Round([math]::Pow(-1, $k - 1) * [math]::Pow([math]::PI / 2, 2 * $k - 1) / $f * 16384)
+-    }
++    $q14 = @(25728,-10520,1177)
+     $s = [Collections.Generic.List[hashtable]]::new()
+     $imm = { param([int]$r,[long]$v) $u=[long]([uint32]($v -band 0xffffffffL)); $s.Add(@{Op='lo';x=$r;i=($u -band 65535)}); $s.Add(@{Op='hi';x=$r;i=($u -shr 16)}) }
+     $splat = { param([int]$v,[long]$value) & $imm 13 $value; $s.Add(@{Op='vsplat';d=$v;s=13}) }
+@@ -45,7 +42,7 @@
+     & $splat 31 0x80008000L                     # u16 bias
+     & $splat 29 0xFF00FF00L                     # high byte of each packed output
+     & $splat 28 (& $half 16384)                 # 1.0 in Q14
+-    for ($k = 0; $k -lt 5; $k++) { & $splat (23 + $k) (& $half $q14[$k]) }   # v23 = h0 ... v27 = h4
++    for ($k = 0; $k -lt 3; $k++) { & $splat (23 + $k) (& $half $q14[$k]) }   # v23 = h0 ... v27 = h4
+     & $splat 22 (& $half 10430)                           # round(2^16 / (2*pi)) in each even halfword
+     foreach ($kv in @(@(8,16),@(9,8),@(10,1),@(11,6),@(7,0))) { $s.Add(@{Op='imm';d=$kv[0];i=$kv[1]}) }
+     $s.Add(@{Op='imm';d=12;i=($Channels/32)})
+@@ -94,8 +91,8 @@
+         $s.Add(@{Op='vsub-h';d=5;s=5;t=28})
+         $s.Add(@{Op='vasl-h';d=5;s=5;t=10})                     # u = 4g - 1, Q15
+         $s.Add(@{Op='vmpy-h-rnd-sat';d=6;s=5;t=5})              # z = u^2
+-        $s.Add(@{Op='vmpy-h-rnd-sat';d=7;s=27;t=6}); $s.Add(@{Op='vadd-h';d=7;s=7;t=26})
+-        foreach ($c in 25,24,23) { $s.Add(@{Op='vmpy-h-rnd-sat';d=7;s=7;t=6}); $s.Add(@{Op='vadd-h';d=7;s=7;t=$c}) }
++        $s.Add(@{Op='vmpy-h-rnd-sat';d=7;s=25;t=6}); $s.Add(@{Op='vadd-h';d=7;s=7;t=24})
++        foreach ($c in 23) { $s.Add(@{Op='vmpy-h-rnd-sat';d=7;s=7;t=6}); $s.Add(@{Op='vadd-h';d=7;s=7;t=$c}) }
+         $s.Add(@{Op='vmpy-h-rnd-sat';d=7;s=7;t=5})              # sin(pi/2 u), Q14
+         $s.Add(@{Op='vadd-h-sat';d=7;s=7;t=28})                 # 1 - cos, Q14
+         # Back to words per row, scale (1 - cos)/(2 pi) into QT turns, add to P.
+@@ -112,7 +109,7 @@
+         # Interleave the clamped rows once. The high plane flips the sign bit;
+         # the halfword shift places each low byte directly in its window lane.
+         $s.Add(@{Op='vsat-h-w';d=10;s=11;t=10})
+-        if($LabelPrefix -match '^adainsnaketurns(mirror)?_(c|n)(128|256)$'){
++        if($LabelPrefix -match '^adainsnaketurns(mirror)?_c(128|256)$'){
+             $s.Add(@{Op='vlsr-uw';d=12;s=31;t=9})
+             $s.Add(@{Op='vadd-h-sat';d=10;s=10;t=12})
+         }
+--- a/src/kernels/Kokoro.HmxConvPlanes.ps1
++++ b/src/kernels/Kokoro.HmxConvPlanes.ps1
+@@ -92,7 +92,7 @@
+         if($compact -and $g -gt 0){break}
+         $gw = $g * $Kernel * $cb * 2048
+         foreach ($group in 0..($accGroups - 1)) {
+-            if($group -gt 0 -and $WeightPlanes -eq 1 -and $LabelPrefix -like 'g16b_b*'){continue}
++            if($group -gt 0 -and $WeightPlanes -eq 1 -and $LabelPrefix -match '^g16b_b.*_c(128|256)$'){continue}
+             $s.Add(@{Op='mxclracc'})
+             if ($group -eq 0) {
+                 & $imm 15 $gw; $s.Add(@{Op='add'; d=13; s=2; t=15}); & $macs 0 13
+@@ -191,7 +191,7 @@
+     $s.Add(@{Op='imm'; d=6; i=$groups})
+     $s.Add(@{Op='label'; Name="${LabelPrefix}_group"})
+     foreach ($group in 0..($accGroups - 1)) {
+-            if($group -gt 0 -and $WeightPlanes -eq 1 -and $LabelPrefix -like 'g16b_b*'){continue}
++            if($group -gt 0 -and $WeightPlanes -eq 1 -and $LabelPrefix -match '^g16b_b.*_c(128|256)$'){continue}
+         $s.Add(@{Op='mxclracc'})
+         if ($group -eq 0) { & $macs 0 7 }
+         elseif ($group -eq 1) {
+--- a/src/kernels/Kokoro.PlaneCombine.ps1
++++ b/src/kernels/Kokoro.PlaneCombine.ps1
+@@ -70,7 +70,7 @@
+         $innerStart=$s.Count
+         $s.Add(@{Op='vload';d=0;s=0;Offset=0})
+         $s.Add(@{Op='add';d=11;s=0;t=10}); $s.Add(@{Op='vload';d=1;s=11;Offset=0})
+-        $highOnly=$Groups -eq 2 -and $LabelPrefix -match '^(combineconv|combineresidualseparate)_(c|n)(128|256)$'
++        $highOnly=$Groups -eq 2 -and $LabelPrefix -match '^(combineconv|combineresidualseparate)_c(128|256)$'
+         if($highOnly){ $pairs=,@(0,1) } else {
+         $s.Add(@{Op='add';d=11;s=11;t=10}); $s.Add(@{Op='vload';d=2;s=11;Offset=0})
+         $s.Add(@{Op='add';d=11;s=11;t=10}); $s.Add(@{Op='vload';d=3;s=11;Offset=0})

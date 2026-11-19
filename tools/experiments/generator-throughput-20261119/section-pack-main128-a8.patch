@@ -1,0 +1,42 @@
+--- a/src/kernels/Kokoro.AdaInSnakeTurns.ps1
++++ b/src/kernels/Kokoro.AdaInSnakeTurns.ps1
+@@ -112,7 +112,7 @@
+         # Interleave the clamped rows once. The high plane flips the sign bit;
+         # the halfword shift places each low byte directly in its window lane.
+         $s.Add(@{Op='vsat-h-w';d=10;s=11;t=10})
+-        if($LabelPrefix -match '^adainsnaketurns(mirror)?_(c|n)(128|256)$'){
++        if($LabelPrefix -match '^adainsnaketurns(mirror)?_c128$'){
+             $s.Add(@{Op='vlsr-uw';d=12;s=31;t=9})
+             $s.Add(@{Op='vadd-h-sat';d=10;s=10;t=12})
+         }
+--- a/src/kernels/Kokoro.HmxConvPlanes.ps1
++++ b/src/kernels/Kokoro.HmxConvPlanes.ps1
+@@ -92,7 +92,7 @@
+         if($compact -and $g -gt 0){break}
+         $gw = $g * $Kernel * $cb * 2048
+         foreach ($group in 0..($accGroups - 1)) {
+-            if($group -gt 0 -and $WeightPlanes -eq 1 -and $LabelPrefix -like 'g16b_b*'){continue}
++            if($group -gt 0 -and $WeightPlanes -eq 1 -and $LabelPrefix -like 'g16b_b*_c128'){continue}
+             $s.Add(@{Op='mxclracc'})
+             if ($group -eq 0) {
+                 & $imm 15 $gw; $s.Add(@{Op='add'; d=13; s=2; t=15}); & $macs 0 13
+@@ -191,7 +191,7 @@
+     $s.Add(@{Op='imm'; d=6; i=$groups})
+     $s.Add(@{Op='label'; Name="${LabelPrefix}_group"})
+     foreach ($group in 0..($accGroups - 1)) {
+-            if($group -gt 0 -and $WeightPlanes -eq 1 -and $LabelPrefix -like 'g16b_b*'){continue}
++            if($group -gt 0 -and $WeightPlanes -eq 1 -and $LabelPrefix -like 'g16b_b*_c128'){continue}
+         $s.Add(@{Op='mxclracc'})
+         if ($group -eq 0) { & $macs 0 7 }
+         elseif ($group -eq 1) {
+--- a/src/kernels/Kokoro.PlaneCombine.ps1
++++ b/src/kernels/Kokoro.PlaneCombine.ps1
+@@ -70,7 +70,7 @@
+         $innerStart=$s.Count
+         $s.Add(@{Op='vload';d=0;s=0;Offset=0})
+         $s.Add(@{Op='add';d=11;s=0;t=10}); $s.Add(@{Op='vload';d=1;s=11;Offset=0})
+-        $highOnly=$Groups -eq 2 -and $LabelPrefix -match '^(combineconv|combineresidualseparate)_(c|n)(128|256)$'
++        $highOnly=$Groups -eq 2 -and $LabelPrefix -match '^(combineconv|combineresidualseparate)_c128$'
+         if($highOnly){ $pairs=,@(0,1) } else {
+         $s.Add(@{Op='add';d=11;s=11;t=10}); $s.Add(@{Op='vload';d=2;s=11;Offset=0})
+         $s.Add(@{Op='add';d=11;s=11;t=10}); $s.Add(@{Op='vload';d=3;s=11;Offset=0})

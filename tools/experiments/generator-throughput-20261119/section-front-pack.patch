@@ -1,0 +1,45 @@
+--- a/src/jobs/Kokoro.Generator60x16Run.ps1
++++ b/src/jobs/Kokoro.Generator60x16Run.ps1
+@@ -1547,8 +1547,7 @@
+         if($ExportFrontTensors){ & $sync; & $dma 25 ($upsSlot+$t0*16384L) 18 $F.Target (($t1-$t0)*16384L) }
+         & $dma 18 $F.Sum $sourceBase ($sourceAt+$t0*16384L) (($t1-$t0)*16384L); & $sync
+         if(0 -notin $SuppliedSectionInputs){
+-            & $ptr 0 18 $F.Target; & $ptr 1 18 $F.Sum; & $ptr 2 18 ($F.Tables+149504); & $imm 3 ($t1-$t0)
+-            & $call 'body_front10_add'; & $mark 'Combine'
++            & $parallel 'body_front10_add' @($F.Target,$F.Sum,($F.Tables+149504)) @($true,$true,$false) ($t1-$t0) -Strides @(16384,16384,0); & $mark 'Combine'
+         }
+         if($t1 -eq $tiles){ & $padRows ($F.Sum+($tiles-1-$t0)*16384L) 0x8000 }
+         & $sync; & $dma 25 ($r0Slot+$t0*16384L) 18 $F.Sum (($t1-$t0)*16384L)
+@@ -1581,8 +1580,15 @@
+                 & $call $(if($c -lt 2){'body_conv_front_up_early'}else{'body_conv_front_up_late'}); & $mark 'HmxConv'; & $sync
+                 & $parallel 'body_combine_conv256' @($F.Planes,($F.Phase+$start*16384L),($F.Tables+53248+2048*$c-1024)) @($true,$true,$false) $count -Strides @(16384,16384,0); & $mark 'Combine'; & $sync
+             }
+-            & $ptr 0 18 $F.Phase; & $ptr 1 18 $F.Target; & $imm 2 $c; & $imm 3 $pairs
+-            & $call 'body_front_interleave'; & $mark 'Combine'; & $sync
++            $wholeTiles=[int][math]::Floor($pairs/16)
++            if($wholeTiles){
++                & $parallel "body_front_interleave_$c" @($F.Phase,$F.Target) @($true,$true) $wholeTiles -Strides @(16384,49152)
++            }
++            if($pairs%16){
++                & $ptr 0 18 ($F.Phase+16384L*$wholeTiles); & $ptr 1 18 ($F.Target+49152L*$wholeTiles)
++                & $imm 2 $c; & $imm 3 ($pairs%16); & $call 'body_front_interleave'
++            }
++            & $mark 'Combine'; & $sync
+         }
+         if($s0 -eq 0){
+             # Reflection: padded frame 0 is padded frame 2 (even halfwords of row pairs 0 and 1 of tile 0).
+@@ -1967,6 +1973,14 @@
+ 
+         $bodies.Add(@('body_conv_front_up_late',@(New-KokoroHmxConvPlanesSteps -LowByteOnlyGroup3 -InputChannels 256 -OutputChannels 256 -Kernel 3 -Dilation 1 -WeightPlanes 2 -PlaneStride $planeStride -ActivePanels (8..23) -LabelPrefix 'g16fu_late')))
+         $bodies.Add(@('body_combine_conv256',@(& $packets @(New-KokoroPlaneCombineSteps -Mode Conv -Channels 256 -Groups 3 -Group3Shifts -PlaneStride $planeStride -LabelPrefix 'combine256'))))
++        foreach($phasePair in 0..2){
++            $bodies.Add(@("body_front_interleave_$phasePair",@(
++                @{Op='asl-i';d=3;s=2;i=4}
++                @{Op='imm';d=2;i=$phasePair}
++                @{Op='eq';d=0;s=0;t=0}
++                @{Op='jump-p';u=0;Label='body_front_interleave'}
++            )))
++        }
+         $bodies.Add(@('body_front_interleave',@(& $packets @(New-KokoroFrontInterleaveSteps))))
+         $bodies.Add(@('body_front_add',@(& $packets @(New-KokoroFrontAddSteps))))
+     }
