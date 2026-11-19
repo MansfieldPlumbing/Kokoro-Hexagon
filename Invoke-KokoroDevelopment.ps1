@@ -2085,7 +2085,10 @@ function Invoke-KokoroPhoneSpeech {
         if($DecoderSchedule -eq 'Spans' -and $frames -gt $renderer.DecoderSpanCapacity){ $DecoderSchedule='Chunks' }
         $renderer.DecoderSchedule=$DecoderSchedule
         $spans=$DecoderSchedule -eq 'Spans'
-        $decoderEmission=if($spans){ $renderer.DecoderSpanEmission() }else{ $renderer.DecoderEmission('Direct') }; $generator=$renderer.GeneratorJob($ticks,$generatorBaseBytes)
+        $decoderEmission=if($spans){ $renderer.DecoderSpanEmission() }else{ $renderer.DecoderEmission('Direct') }
+        $packing = $renderer.GeneratorEmission($ticks, 'Constants').Layout.ConstantPacking
+        & $port { param($tables, $sites, $style) Set-OfflineGeneratorStyle $tables $sites $style } $generatorBaseBytes $packing.MomentSites $front.AcousticStyle
+        $generator=$renderer.GeneratorJob($ticks,$generatorBaseBytes)
         # Reference: the host front end's outputs through the renderer on the resident listener; x also on the other schedule.
         $decoded=$renderer.Decode([float[]]$front.Aligned,[float[]]$front.F0,[float[]]$front.N,$decoderBaseBytes,0)
         $otherSchedule=if($spans){'Chunks'}else{'Spans'}

@@ -1909,6 +1909,35 @@ function Invoke-OfflineSnake([float[]] $InputValues, [float[]] $alpha, [int] $Fr
     }
     return , $snake.Invoke($InputValues, $alpha, $Frames)
 }
+# Update the style-dependent fields of the Q22 generator records before packing K/M/S.
+function Set-OfflineGeneratorStyle([byte[]] $Tables, $Sites, [float[]] $AcousticStyle) {
+    foreach ($site in $Sites) {
+        $half = 1 + $site.Stage % 2
+        $pair = [int][Math]::Floor($site.Stage / 2)
+        $block = "decoder.module.generator.$($site.Module).$($site.Block)"
+        $prefix = "$block.adain$half.$pair"
+        $alpha = Read-OfflineWeight "$block.alpha$half.$pair"
+        $fc = Read-OfflineWeight "$prefix.fc.weight"
+        $bias = Read-OfflineWeight "$prefix.fc.bias"
+        $normWeight = if ($checkpoint.Tensors.Contains("$prefix.norm.weight")) { Read-OfflineWeight "$prefix.norm.weight" }
+        $normBias = if ($checkpoint.Tensors.Contains("$prefix.norm.bias")) { Read-OfflineWeight "$prefix.norm.bias" }
+        for ($channel = 0; $channel -lt $site.Width; $channel++) {
+            $gain = 1 + [double]$bias[$channel]
+            $offset = [double]$bias[$channel + $site.Width]
+            for ($j = 0; $j -lt $AcousticStyle.Length; $j++) {
+                $gain += [double]$fc[$channel * $AcousticStyle.Length + $j] * $AcousticStyle[$j]
+                $offset += [double]$fc[($channel + $site.Width) * $AcousticStyle.Length + $j] * $AcousticStyle[$j]
+            }
+            if ($normBias) { $offset += $gain * $normBias[$channel] }
+            if ($normWeight) { $gain *= $normWeight[$channel] }
+            $record = $site.RecordOffset + 32 * $channel
+            $ka = [long][Math]::Round($gain * $alpha[$channel] * [Math]::Pow(2, 37) / [Math]::PI)
+            $mb = [int][Math]::Round($offset * $alpha[$channel] * [Math]::Pow(2, 22) / [Math]::PI)
+            [BitConverter]::GetBytes($ka).CopyTo($Tables, $record)
+            [BitConverter]::GetBytes($mb).CopyTo($Tables, $record + 8)
+        }
+    }
+}
 function Invoke-OfflineGeneratorBlock([float[]] $InputValues, [int] $Frames, [float[]] $AcousticStyle, [string] $Name) {
     $channels = [int]($InputValues.Length / $Frames); $x = $InputValues
     $stages = $null
