@@ -1,0 +1,34 @@
+diff --git a/Invoke-HexagonDevelopment.ps1 b/Invoke-HexagonDevelopment.ps1
+index 7bdc56d..7b35e6f 100644
+--- a/Invoke-HexagonDevelopment.ps1
++++ b/Invoke-HexagonDevelopment.ps1
+@@ -87,6 +87,7 @@ $script:Instructions = @(
+     @{ Op='asl-i';          Pattern='10001100000sssssPP0iiiii010ddddd'; Rule='Unsigned'; Min=0; Max=31; Message='Word shift out of range'; Asm='r{d} = asl(r{s},#{i})'; Source='SDK 6.4.0.2' }
+     @{ Op='asr-d-i';        Pattern='10000000000sssssPPiiiiii000ddddd'; Rule='PairShift'; Pairs='ds'; Min=0; Max=63; Message='Integer register pair must be even and 0..30'; Asm='r{d1}:{d} = asr(r{s1}:{s},#{i})'; Source='SDK 6.4.0.2' }
+     @{ Op='vasr-w-acc'; Pattern='00011001011tttttPP1sssss101ddddd'; Asm='v{d}.w += vasr(v{s}.w,r{t})'; Source='Hexagon V6_vasrw_acc' }
++    @{ Op='vabs-w'; Pattern='0001111000000000PP0sssss010ddddd'; Asm='v{d}.w = vabs(v{s}.w)'; Source='Hexagon V6_vabsw' }
+     @{ Op='vasr-w';         Pattern='00011001011tttttPP0sssss101ddddd'; Asm='v{d}.w = vasr(v{s}.w,r{t})'; Source='SDK 6.4.0.2' }
+     @{ Op='vasl-w';         Pattern='00011001011tttttPP0sssss111ddddd'; Asm='v{d}.w = vasl(v{s}.w,r{t})'; Source='SDK 6.4.0.2' }
+     @{ Op='vmax-w';         Pattern='00011111001tttttPP0sssss000ddddd'; Asm='v{d}.w = vmax(v{s}.w,v{t}.w)'; Source='SDK 6.4.0.2' }
+@@ -759,7 +760,7 @@ foreach ($op in 'vstore') { $script:PacketClasses[$op] = @{ Kind='VStore'; Slots
+ foreach ($op in 'vmpyo-w-h-rnd','vmpy-h-rnd-sat','vmpye-w-uh','vmpyo-acc-w-h-rnd-sat-shift','vmpyie-w-uh') { $script:PacketClasses[$op] = @{ Kind='Mpy'; Slots=@(3,2) } }
+ foreach ($op in 'vasr-w-acc','vasl-w','vasr-w','vlsr-uw','vasl-h') { $script:PacketClasses[$op] = @{ Kind='Shift'; Slots=@(3,2,1,0) } }
+ foreach ($op in 'vsplat') { $script:PacketClasses[$op] = @{ Kind='Alu'; Slots=@(3,2) } }
+-foreach ($op in 'vshuffo-b','vsat-h-w','vadd-w','vadd-h','vadd-h-sat','vsub-h','vand','vor','vxor','vmax-w','vmin-w','vabs-h-sat') { $script:PacketClasses[$op] = @{ Kind='Alu'; Slots=@(3,2,1,0) } }
++foreach ($op in 'vshuffo-b','vsat-h-w','vabs-w','vadd-w','vadd-h','vadd-h-sat','vsub-h','vand','vor','vxor','vmax-w','vmin-w','vabs-h-sat') { $script:PacketClasses[$op] = @{ Kind='Alu'; Slots=@(3,2,1,0) } }
+ foreach ($op in 'addi','add','sub','imm','lo','hi') { $script:PacketClasses[$op] = @{ Kind='Scalar'; Slots=@(3,2,1,0) } }
+ 
+ function Get-HexagonStepRegisters {
+diff --git a/src/kernels/Kokoro.StftPolar16.ps1 b/src/kernels/Kokoro.StftPolar16.ps1
+index 8381559..0176cde 100644
+--- a/src/kernels/Kokoro.StftPolar16.ps1
++++ b/src/kernels/Kokoro.StftPolar16.ps1
+@@ -73,7 +73,7 @@ function New-KokoroStftPolar16Steps {
+             $s.Add(@{Op='imm';d=7;i=$i})
+             $s.Add(@{Op='vasr-w';d=6;s=2;t=7}); $s.Add(@{Op='vasr-w';d=7;s=3;t=7})
+             & $c 8 (11 + $i)
+-            $s.Add(@{Op='vxor';d=7;s=7;t=5}); $s.Add(@{Op='vsub-w';d=7;s=7;t=5}); $s.Add(@{Op='vadd-w';d=2;s=2;t=7})
++            $s.Add(@{Op='vabs-w';d=7;s=7}); $s.Add(@{Op='vadd-w';d=2;s=2;t=7})
+             $s.Add(@{Op='vxor';d=6;s=6;t=5}); $s.Add(@{Op='vsub-w';d=6;s=6;t=5}); $s.Add(@{Op='vsub-w';d=3;s=3;t=6})
+             $s.Add(@{Op='vxor';d=8;s=8;t=5}); $s.Add(@{Op='vsub-w';d=8;s=8;t=5}); $s.Add(@{Op='vadd-w';d=4;s=4;t=8})
+         }

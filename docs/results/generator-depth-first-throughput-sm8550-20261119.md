@@ -111,3 +111,9 @@ The SM8550 candidate/control/candidate warm DSP medians were 108.930, 109.778, a
 The section-shift-acc experiment starts from section-direct-call. In the AdaIN/Snake activation kernel each row shifts a signed 32-bit correction and adds it to the phase accumulator. The Hexagon V6_vasrw_acc instruction performs both operations with the same shift count. Its packet description treats the destination as a read and a write.
 
 On SM8550 the warm median DSP times for candidate, direct-call control, and candidate were 107.317, 108.374, and 107.558 ms. The candidate generated 282,600 valid samples at 24 kHz, equivalent to 109.72× and 109.48× DSP realtime. All 26 candidate invocations matched the full reference PCM and five additional invocations matched the second-seed reference. The confirmed candidate library SHA-256 is C3303BA559AB1DD0730DC511EDC21C08A9A2B7DD384A943385F516A1B7D72394.
+
+## Spectral CORDIC absolute value
+
+The section-cordic-abs variant builds on section-shift-acc. Each CORDIC iteration computes a signed right shift of y and then its magnitude. The shift preserves the sign for negative y. The non-saturating vector word absolute-value instruction therefore replaces the XOR and subtraction used to take that magnitude, including the two’s-complement minimum case.
+
+The candidate, shift-accumulate control, and candidate warm DSP medians were 107.132, 107.837, and 106.787 ms on the SM8550. The candidate medians were 109.91× and 110.27×. Each trial included one cold and twelve warm invocations. Every candidate PCM hash matched. Five further invocations matched the second seed. The candidate library SHA-256 is A2F62789957701CDBF08C07A69EAD98A378277D7F1C6EEB591D00F63C282757F. This version retains the control packetization policy for vector word subtraction. Enabling general word-subtraction packetization in a separate experiment changed the full waveform hash.

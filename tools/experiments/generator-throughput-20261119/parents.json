@@ -6,6 +6,7 @@
   "section-front-pack": "section-fused-pack",
   "section-direct-call": "section-front-pack",
   "section-shift-acc": "section-direct-call",
+  "section-cordic-abs": "section-shift-acc",
   "section-pack-tail32": "section-fused-pack",
   "section-pack-snake5": "section-fused-pack",
   "section-pack-a8": "section-fused-pack",
