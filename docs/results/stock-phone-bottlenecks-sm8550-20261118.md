@@ -171,3 +171,7 @@ The 120-tile configuration still measured 3.10 LU of level loss and 6.90 dB of e
 ### Two-tile generator batch on SM8550
 
 Kept the 60-tile span and four HVX threads, reduced the resident batch from four tiles to two, then ran the lighthouse passage through the pinned adb client. VTCM fell from 7,602,176 to 5,505,024 bytes. Scheduled weight transfers rose from 679.53 to 1,290.58 MB. After one warmup, the median of four DSP times was 350.01 ms versus 235.90 ms in the prior four-tile control, a 48% regression. The ranges did not overlap (348.66–351.42 ms versus 232.07–237.08 ms). PCM and WAV hashes matched the four-tile run, so both audio quality flags remain. Playback had zero underruns and startup restoration succeeded. The four-tile batch stays in production.
+
+### AdaIN/Snake post-increment address experiment
+
+Replaced the three explicit 128-byte pointer advances per row pair with HVX post-increment vector accesses. The candidate kept the 60-tile span and four-tile batch. All five phone PCM hashes matched the four-tile control, and playback completed with zero underruns. The four warm DSP calls ranged from 234.29 to 237.80 ms, with a median of 236.58 ms versus 235.90 ms in the earlier control. The timing ranges overlap. The existing packetizer treats post-increment memory operations as packet boundaries, so removing scalar instructions alone need not reduce cycles. The candidate was reverted.
