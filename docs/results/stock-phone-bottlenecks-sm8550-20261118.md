@@ -146,3 +146,5 @@ Run `./Invoke-KokoroDevelopment.ps1 CompareAudio -Pattern SpeechQuality -Referen
 Gain-only and 24 Hz amplitude-modulated controls each triggered their corresponding check alone. Substituting float decoder features leaves both symptoms. The generator input quantization and downstream path remain candidates.
 
 On SM8550, converting 282,600 returned PCM samples took 0.30 ms versus 23.05 ms previously (paired warm medians, identical samples). Four warm stock renders of 11.775 s of audio took a median 5.086 s end to end, including 4.749 s in the frontend. DSP generator time was approximately 235 ms.
+
+In the quantized float decoder handoff, 99 of 482,304 active values reached the upper 16-bit rail (0.021%). None reached the lower rail. This rules out widespread input saturation in that experiment. Internal generator scaling and the effect of the supplied normalization values on this passage remain open.

@@ -389,6 +389,19 @@ function Test-KokoroAudioMeasurement {
     if ($peak.FrequencyHz -ne 24 -or [Math]::Abs($peak.MedianAmplitudeDb - 3) -gt 0.1) {
         throw 'Failed to recover the 24 Hz, 3 dB envelope modulation.'
     }
+    $steady = Read-KokoroAudioBytes (New-KokoroAudioTestWave -Rate 24000 -Amplitude 0.2 -Frequency 1000 -Seconds 1)
+    $quiet = Read-KokoroAudioBytes (New-KokoroAudioTestWave -Rate 24000 -Amplitude 0.1 -Frequency 1000 -Seconds 1)
+    for ($i = 0; $i -lt $tone.Samples.Length; $i++) {
+        $db = 3 * [Math]::Sin(2 * [Math]::PI * 24 * $i / $tone.SampleRate)
+        $tone.Samples[$i] *= [Math]::Pow(10, $db / 20)
+    }
+    $cleanResult = Compare-KokoroSpeechQualityData @($steady, $steady)
+    $quietResult = Compare-KokoroSpeechQualityData @($steady, $quiet)
+    $modulatedResult = Compare-KokoroSpeechQualityData @($steady, $tone)
+    if (-not $cleanResult.Passed -or -not $quietResult.TooQuiet -or $quietResult.ExcessModulation -or
+        -not $modulatedResult.ExcessModulation -or $modulatedResult.TooQuiet) {
+        throw 'Speech quality comparison failed to distinguish steady, quiet, and modulated audio.'
+    }
     foreach ($rate in 24000,48000) {
         foreach ($amplitude in 1.0,0.5,0.1) {
             $tone=Measure-KokoroAudioData (Read-KokoroAudioBytes (New-KokoroAudioTestWave $rate $amplitude)) 'synthetic.wav'
@@ -814,6 +827,11 @@ function Compare-KokoroAudio {
 function Compare-KokoroSpeechQuality {
     param([Parameter(Mandatory)][string]$Reference,[Parameter(Mandatory)][string]$Candidate)
     $signals=@(foreach($file in $Reference,$Candidate){Read-KokoroAudioBytes ([IO.File]::ReadAllBytes((Get-Item -LiteralPath $file).FullName))})
+    Compare-KokoroSpeechQualityData $signals
+}
+
+function Compare-KokoroSpeechQualityData {
+    param([object[]]$signals)
     $ref=$signals[0]; $test=$signals[1]
     if($ref.Channels -ne 1 -or $test.Channels -ne 1 -or $ref.SampleRate -ne 24000 -or $test.SampleRate -ne 24000 -or $ref.Samples.Length -ne $test.Samples.Length){throw 'Speech quality comparison requires aligned 24 kHz mono renders of equal length.'}
     $loud=@(foreach($signal in $signals){(Measure-KokoroAudioData -Audio $signal).IntegratedLufs})
