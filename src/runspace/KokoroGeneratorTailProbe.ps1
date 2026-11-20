@@ -362,9 +362,29 @@ try {
     $mappingMs = 0.0
     if ($resident) {
         $mappingClock = [Diagnostics.Stopwatch]::StartNew()
+        $getPointer = $null
+        if ($managedResident -and [Runtime.CompilerServices.RuntimeFeature]::IsDynamicCodeSupported) {
+            $resourcePointer = [Reflection.Emit.DynamicMethod]::new(
+                'ResourcePointer', [IntPtr], [type[]]@([IO.UnmanagedMemoryStream]))
+            $il = $resourcePointer.GetILGenerator()
+            $il.Emit([Reflection.Emit.OpCodes]::Ldarg_0)
+            $il.Emit([Reflection.Emit.OpCodes]::Callvirt, [IO.UnmanagedMemoryStream].GetProperty('PositionPointer').GetMethod)
+            $il.Emit([Reflection.Emit.OpCodes]::Conv_I)
+            $il.Emit([Reflection.Emit.OpCodes]::Ret)
+            $getPointer = $resourcePointer.CreateDelegate([Func[IO.UnmanagedMemoryStream,IntPtr]])
+        }
         $mapResource = { param($name)
             $stream = $generator.GetMethod("Open$name").Invoke($null, $null)
-            try { & $abi.NewSharedPayload $native -Stream $stream } finally { $stream.Dispose() }
+            try {
+                $remaining = $stream.Length - $stream.Position
+                if ($null -ne $getPointer -and $stream -is [IO.UnmanagedMemoryStream] -and $remaining -gt 0 -and $remaining -le [int]::MaxValue) {
+                    # Keep the stream alive through the copy into the FastRPC allocation.
+                    $lines.Add("DirectManifestCopy=$name")
+                    & $abi.NewSharedPayload $native -Source ($getPointer.Invoke($stream)) -Length ([int]$remaining)
+                } else {
+                    & $abi.NewSharedPayload $native -Stream $stream
+                }
+            } finally { $stream.Dispose() }
         }
         $sharedWeights = if ($managedResident) { & $mapResource Weights } elseif ($null -ne $mappedWeights) { & $abi.NewSharedPayload $native $null ($mappedWeights.GetPointer()) $weightBytes } else { & $abi.NewSharedPayload $native $wts }
         $sharedPayloads.Add($sharedWeights)

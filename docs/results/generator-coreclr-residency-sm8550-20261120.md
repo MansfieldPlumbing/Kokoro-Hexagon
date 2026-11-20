@@ -107,3 +107,34 @@ primary result. It exceeds the 98.125 ms exact-PCM target by 1.743 ms.
 The resident assembly is a verified host-side latency improvement
 for that job. Direct history stores, even with balanced restoration
 and separate banks, did not recover DSP time on this schedule.
+
+## Direct manifest resource copy
+
+The managed resident probe now copies a memory-backed manifest resource
+directly to its FastRPC allocation. The probe keeps the stream open
+through the native copy and retains the buffered path for other stream
+types or runtimes without dynamic code. FastRPC maps the allocations
+once and the DSP reads the same packed weight and table bytes.
+
+The resident ELF stayed at `388F24CB7B96E00975AF97E2A3E6ED438E112722ECFE79F631A3B042B9FD6737`.
+Each trial below used one cold invocation and four warm invocations.
+Both seeds matched their reference PCM and startup restoration passed.
+
+| Trial | One-time copy and map ms | Warm DSP median ms | Warm host invoke median ms |
+| --- | ---: | ---: | ---: |
+| Direct A | 87.328 | 101.583 | 104.678 |
+| Buffered control | 106.165 | 101.684 | 104.663 |
+| Direct B | 71.879 | 101.737 | 104.698 |
+| Direct, second seed | 190.977 | 101.807 | 104.502 |
+
+The two primary direct trials saved 18.837 and 34.286 ms in the combined
+startup interval. That interval includes allocation, copy, and static
+mapping. The second seed shows the variability of the cold interval.
+The warm medians were close with the same DSP program.
+Receipts are under `build/residual-layout-20261120` with the
+`direct-resource` prefix.
+
+The tracked implementation was also run with both seeds. Ten additional
+invocations verified the direct copy for both resources, the expected
+PCM, and startup restoration. These receipts use the `direct-integrated`
+prefix.
