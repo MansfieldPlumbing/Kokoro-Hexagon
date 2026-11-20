@@ -104,3 +104,33 @@ The medians are from four warm invocations and have no intervening control.
 The first, third, fourth and fifth screens gave no clear incremental
 gain. The [screening receipts](../../tools/experiments/generator-throughput-20261119/exact-publication-hmx-screening-runs.csv)
 record both hashes and cold run zero.
+
+## Early HMX issue for branch zero
+
+The `section-early-branch-zero` experiment starts the first convolution
+after each worker fences its branch-zero tile and after the weight DMA
+wait. The controller fills branch zero before issuing HMX. Workers 1
+and 2 finish the controller's branch 1 and 2 fills in addition to their
+own, while worker 3 finishes its own tile. The join and the publication
+barrier still precede HMX reads of branches 1 and 2. The early path
+applies only to interior blocks of the four-thread, 256-channel
+three-branch chunked section with asynchronous weights.
+
+The candidate ELF SHA-256 was
+`EC859D987734AF4AAEA56844127084314357E8D3E3C4AFF594AE44617FA3B53E`.
+The primary screen matched reference PCM and measured 100.714 ms over
+four warm runs.
+
+The full primary comparison measured **100.430 / 100.309 / 100.269 ms**
+in candidate/control/candidate order. The second seed took 101.193 ms.
+Every run was exact and every trial restored startup. The primary
+medians straddled the fresh HMX group-loop control, so this particular
+overlap schedule has no confirmed speed gain.
+[Per-invocation results](../../tools/experiments/generator-throughput-20261119/exact-early-branch-zero-runs.csv).
+
+The remaining 1.743 ms in the best group-loop trial is DSP time. The
+sampled readiness interval is measurable, and starting the first HMX
+call there preserved PCM. Recovering time there depends on the cost
+of readiness polling, the finish time of the workers with an extra
+tile branch, and any contention while HMX and HVX execute together.
+The elapsed comparison does not assign costs among those effects.
