@@ -1,0 +1,10 @@
+diff --git a/src/jobs/Kokoro.Generator60x16Run.ps1 b/src/jobs/Kokoro.Generator60x16Run.ps1
+index 7a1c93b..3f3b60a 100644
+--- a/src/jobs/Kokoro.Generator60x16Run.ps1
++++ b/src/jobs/Kokoro.Generator60x16Run.ps1
+@@ -210,4 +210,4 @@ function New-KokoroGenerator60x16RunSteps {
+-    $fillPackets={ param([object[]]$Steps) $grouped=if($VectorPackets){Group-HexagonPackets $Steps -MaxInstructions 2}else{$Steps}; $grouped }
++    $fillPackets={ param([object[]]$Steps) $grouped=if($VectorPackets){Group-HexagonPackets $Steps -MaxInstructions 3}else{$Steps}; $grouped }
+     if($ControllerContact -and $Schedule -eq 'Layer'){ throw 'The controller contact is a backward schedule option.' }
+     if($SeededNoise -and -not $Source){ throw 'Seeded noise is a source option.' }
+     if(-not $PoolWait){ $PoolWait=if($Schedule -ne 'Layer'){'Spin'}else{'Futex'} }

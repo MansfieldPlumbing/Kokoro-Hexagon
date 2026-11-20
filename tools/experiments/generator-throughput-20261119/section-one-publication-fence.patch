@@ -1,0 +1,15 @@
+diff --git a/src/jobs/Kokoro.Generator60x16Run.ps1 b/src/jobs/Kokoro.Generator60x16Run.ps1
+index 4b180fe..d2e824c 100644
+--- a/src/jobs/Kokoro.Generator60x16Run.ps1
++++ b/src/jobs/Kokoro.Generator60x16Run.ps1
+@@ -1221,7 +1221,9 @@ function New-KokoroGenerator60x16RunSteps {
+         $s.Add(@{Op='hwticks';d=6}); & $ptr 8 25 ($lockstepTelemetryOffset+32*$thread); $s.Add(@{Op='load';d=9;s=8;Offset=28}); $s.Add(@{Op='sub';d=6;s=6;t=9})
+         $s.Add(@{Op='load';d=9;s=8;Offset=$slot}); $s.Add(@{Op='add';d=9;s=9;t=6}); $s.Add(@{Op='store';s=8;t=9;Offset=$slot}) }
+     $publish={param($block,[int]$thread,[int]$st)
+-        $s.Add(@{Op='syncht'}); & $progressValue 1 $block ($st+1); & $ptr 2 18 ($tileRegions.Progress+4*$thread); $s.Add(@{Op='store';s=2;t=1;Offset=0}) }
++        # The caller fences the window writes before the matrix-lock attempt.
++        # Lock acquisition does not write the window.
++        & $progressValue 1 $block ($st+1); & $ptr 2 18 ($tileRegions.Progress+4*$thread); $s.Add(@{Op='store';s=2;t=1;Offset=0}) }
+     # Thread k's tile of block j through every stage, the mean and its output.
+     $lockstepTile={param($block,[int]$parity,[int]$thread)
+         $w=$thread; $tile=if($null -eq $block){$null}else{$batch*$block+$w}

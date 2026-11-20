@@ -1,0 +1,22 @@
+diff --git a/src/kernels/Kokoro.AdaInSnakeTurns.ps1 b/src/kernels/Kokoro.AdaInSnakeTurns.ps1
+index bf8fc9d..3293c23 100644
+--- a/src/kernels/Kokoro.AdaInSnakeTurns.ps1
++++ b/src/kernels/Kokoro.AdaInSnakeTurns.ps1
+@@ -47,7 +47,7 @@ function New-KokoroAdaInSnakeTurnsSteps {
+     & $splat 28 (& $half 16384)                 # 1.0 in Q14
+     for ($k = 0; $k -lt 5; $k++) { & $splat (23 + $k) (& $half $q14[$k]) }   # v23 = h0 ... v27 = h4
+     & $splat 22 (& $half 10430)                           # round(2^16 / (2*pi)) in each even halfword
+-    foreach ($kv in @(@(8,16),@(9,8),@(10,1),@(11,6),@(7,($TurnsBits-16)))) { $s.Add(@{Op='imm';d=$kv[0];i=$kv[1]}) }
++    foreach ($kv in @(@(8,16),@(9,8),@(11,6),@(7,($TurnsBits-16)))) { $s.Add(@{Op='imm';d=$kv[0];i=$kv[1]}) }
+     $s.Add(@{Op='imm';d=12;i=($Channels/32)})
+     $s.Add(@{Op='label';Name="${LabelPrefix}_channel"})
+     $block=0
+@@ -92,7 +92,7 @@ function New-KokoroAdaInSnakeTurnsSteps {
+         $s.Add(@{Op='vasr-wh-r7';d=5;u=4;s=3})
+         $s.Add(@{Op='vabs-h-sat';d=5;s=5})                      # fold onto [0, 1/2) turn
+         $s.Add(@{Op='vsub-h';d=5;s=5;t=28})
+-        $s.Add(@{Op='vasl-h';d=5;s=5;t=10})                     # u = 4g - 1, Q15
++        $s.Add(@{Op='vadd-h';d=5;s=5;t=5})                     # wrapping double, u = 4g - 1 in Q15
+         $s.Add(@{Op='vmpy-h-rnd-sat';d=6;s=5;t=5})              # z = u^2
+         $s.Add(@{Op='vmpy-h-rnd-sat';d=7;s=27;t=6}); $s.Add(@{Op='vadd-h';d=7;s=7;t=26})
+         foreach ($c in 25,24,23) { $s.Add(@{Op='vmpy-h-rnd-sat';d=7;s=7;t=6}); $s.Add(@{Op='vadd-h';d=7;s=7;t=$c}) }

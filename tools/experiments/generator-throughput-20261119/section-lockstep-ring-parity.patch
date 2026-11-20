@@ -1,0 +1,69 @@
+diff --git a/src/jobs/Kokoro.Generator60x16Run.ps1 b/src/jobs/Kokoro.Generator60x16Run.ps1
+index 3f3b60a..4b180fe 100644
+--- a/src/jobs/Kokoro.Generator60x16Run.ps1
++++ b/src/jobs/Kokoro.Generator60x16Run.ps1
+@@ -1225,12 +1225,14 @@ function New-KokoroGenerator60x16RunSteps {
+     # Thread k's tile of block j through every stage, the mean and its output.
+     $lockstepTile={param($block,[int]$parity,[int]$thread)
+         $w=$thread; $tile=if($null -eq $block){$null}else{$batch*$block+$w}
++        # The mirrored slot and the two-batch ring share the same block parity.
++        $ringBlock = if ($null -eq $block -and $ringTiles -eq 2*$batch) { $parity } else { $block }
+         & $tickStart $thread
+         if($null -eq $block -or $tile -lt $tiles){
+             if($null -ne $block){ & $dma 18 ($tileRegions.Input+($tile % $ringTiles)*[long]$tileBytes) $r0Base ($r0Offset+$tile*[long]$tileBytes) $tileBytes }
+             else {
+                 $s.Add(@{Op='asl-i';d=1;s=17;i=$blockShift}); & $imm 15 ($r0Offset+$w*[long]$tileBytes); $s.Add(@{Op='add';d=1;s=1;t=15}); $s.Add(@{Op='add';d=1;s=1;t=$r0Base})
+-                & $tileAt 2 $tileRegions.Input $ringTiles $null $w
++                & $tileAt 2 $tileRegions.Input $ringTiles $ringBlock $w
+                 & $dmaRegisters $tileBytes
+             }
+         }
+@@ -1238,7 +1240,7 @@ function New-KokoroGenerator60x16RunSteps {
+         for($st=0;$st -lt 6;$st++){
+             $p=[int][math]::Floor($st/2); $half=$st % 2; $src=& $fillSource $st
+             $highBase=$fillAt["High.$st"]+$guardBytes; $lowBase=$fillAt["Low.$st"]+$guardBytes
+-            & $tileAt 0 $src[0] $ringTiles $block $w; & $tileAt 1 $highBase $ringTiles $block $w; & $tileAt 2 $lowBase $ringTiles $block $w
++            & $tileAt 0 $src[0] $ringTiles $ringBlock $w; & $tileAt 1 $highBase $ringTiles $ringBlock $w; & $tileAt 2 $lowBase $ringTiles $ringBlock $w
+             & $ptr 3 18 ($tileRegions.Kms+$st*$kmsBytes); $s.Add(@{Op='imm';d=4;i=1})
+             if($ControllerContact){ & $controllerPointer 5 $block 0 ($w-$p) }
+             & $tickStart $thread
+@@ -1262,7 +1264,7 @@ function New-KokoroGenerator60x16RunSteps {
+             $s.Add(@{Op='syncht'}); & $tickStart $thread; & $matrixLock; & $publish $block $thread $st; & $tickAdd $thread 0; & $tickStart $thread
+             for($branch=0;$branch -lt $branches;$branch++){
+                 $at=6*$branch+$st
+-                & $tileAt 0 ($highBase+$branch*$fillBytes) $ringTiles $block $w; & $tileAt 1 ($lowBase+$branch*$fillBytes) $ringTiles $block $w
++                & $tileAt 0 ($highBase+$branch*$fillBytes) $ringTiles $ringBlock $w; & $tileAt 1 ($lowBase+$branch*$fillBytes) $ringTiles $ringBlock $w
+                 & $ptr 2 18 $tileWeightAt[$at]; & $ptr 3 18 ($tileRegions.Records+$at*$recordBytes+$tablesAt); $s.Add(@{Op='imm';d=4;i=1}); & $ptr 5 18 ($tileRegions.Planes+$branch*$planesStride+$w*[long]$tileBytes)
+                 & $call "body_convB_b${branch}_s$st$sfx"
+             }
+@@ -1270,10 +1272,10 @@ function New-KokoroGenerator60x16RunSteps {
+             & $tickStart $thread
+             $rAt=$tileRegions.Records+$st*$recordBytes
+             & $ptr 0 18 ($tileRegions.Planes+$w*[long]$tileBytes); & $ptr 2 18 ($rAt+$ratiosAt); $s.Add(@{Op='imm';d=3;i=1})
+-            if($half -eq 0){ & $tileAt 1 ($tileRegions.Stage+[long]$branches*$p*$ringBytes) $ringTiles $block $w; & $call "body_combine_convB$sfx" }
++            if($half -eq 0){ & $tileAt 1 ($tileRegions.Stage+[long]$branches*$p*$ringBytes) $ringTiles $ringBlock $w; & $call "body_combine_convB$sfx" }
+             else {
+                 $residual=if($p -eq 0){@($tileRegions.Input,'shared')}else{@(($tileRegions.Levels+[long]$branches*($p-1)*$ringBytes),'branch')}
+-                & $tileAt 1 ($tileRegions.Levels+[long]$branches*$p*$ringBytes) $ringTiles $block $w; & $tileAt 5 $residual[0] $ringTiles $block ($w-1)
++                & $tileAt 1 ($tileRegions.Levels+[long]$branches*$p*$ringBytes) $ringTiles $ringBlock $w; & $tileAt 5 $residual[0] $ringTiles $ringBlock ($w-1)
+                 & $call "body_combine_residualB_$($residual[1])$sfx"
+                 if($null -ne $block){
+                     $lo=32*($tile-$p-1)
+@@ -1286,7 +1288,7 @@ function New-KokoroGenerator60x16RunSteps {
+         # The output tile (position m - 3): the three branches' mean, or one branch's last level.
+         & $tickStart $thread
+         if($branches -eq 3){
+-            for($branch=0;$branch -lt 3;$branch++){ & $tileAt $branch ($tileRegions.Levels+(6L+$branch)*$ringBytes) $ringTiles $block $w }
++            for($branch=0;$branch -lt 3;$branch++){ & $tileAt $branch ($tileRegions.Levels+(6L+$branch)*$ringBytes) $ringTiles $ringBlock $w }
+             & $ptr 3 18 ($tileRegions.Mean+$w*[long]$tileBytes); $s.Add(@{Op='imm';d=4;i=1}); & $call "body_mean$sfx"; $s.Add(@{Op='syncht'})
+         }
+         $outRing=$tileRegions.Levels+2L*$ringBytes
+@@ -1294,7 +1296,7 @@ function New-KokoroGenerator60x16RunSteps {
+             $outAt=if($branches -eq 3){$tileRegions.Mean+$w*[long]$tileBytes}else{$outRing+($tile % $ringTiles)*[long]$tileBytes}
+             if($tile-3 -ge 0 -and $tile-3 -lt $tiles){ & $dma 25 ($finalOffset+($tile-3)*[long]$tileBytes) 18 $outAt $tileBytes }
+         } else {
+-            if($branches -eq 3){ & $ptr 1 18 ($tileRegions.Mean+$w*[long]$tileBytes) } else { & $tileAt 1 $outRing $ringTiles $null $w }
++            if($branches -eq 3){ & $ptr 1 18 ($tileRegions.Mean+$w*[long]$tileBytes) } else { & $tileAt 1 $outRing $ringTiles $ringBlock $w }
+             $s.Add(@{Op='asl-i';d=2;s=17;i=$blockShift}); & $imm 15 ($finalOffset+($w-3L)*$tileBytes); $s.Add(@{Op='add';d=2;s=2;t=15}); $s.Add(@{Op='add';d=2;s=2;t=25})
+             & $dmaRegisters $tileBytes
+         }

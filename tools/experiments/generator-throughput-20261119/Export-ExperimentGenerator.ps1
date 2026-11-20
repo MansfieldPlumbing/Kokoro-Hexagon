@@ -3,7 +3,8 @@
 param(
     [Parameter(Mandatory)][string]$Checkout,
     [Parameter(Mandatory)][string]$OutputDirectory,
-    [switch]$ResidentPayloads
+    [switch]$ResidentPayloads,
+    [switch]$ProfileTiming
 )
 $ErrorActionPreference = 'Stop'
 if (Test-Path -LiteralPath $OutputDirectory) { throw 'Choose a new emission directory.' }
@@ -29,6 +30,7 @@ $options = @{
     VectorPackets = $true
     PowerVotes = @('HvxPower','CoreMax','HmxPower')
 }
+if ($ProfileTiming) { $options.PmuEvents = @(0,0,0,0,0,0,0,0) }
 $job = New-KokoroGenerator60x16RunSteps @options
 $steps = $job.Steps
 if ($ResidentPayloads) {
@@ -44,4 +46,7 @@ $null = Invoke-HexagonEmission -Kernel Definition -Definition $definition -Outpu
 $layout = [pscustomobject]$job.Layout | Select-Object PcmOffset,Tiles,OutputBytes,Samples,InputBytes,@{Name='Speech';Expression={'True'}},@{Name='Runs';Expression={9}}
 if ($ResidentPayloads) { $layout | Add-Member -NotePropertyName ResidentPayloads -NotePropertyValue $true }
 $layout | ConvertTo-Json | Set-Content (Join-Path $destination 'runner-layout.json')
+if ($ProfileTiming) {
+    $job.Layout.PmuProfile | ConvertTo-Json -Depth 5 | Set-Content (Join-Path $destination 'profile-layout.json')
+}
 Get-FileHash (Join-Path $destination $definition.Soname)
