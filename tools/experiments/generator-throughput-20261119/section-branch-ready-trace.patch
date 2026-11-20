@@ -1,0 +1,95 @@
+diff --git a/src/jobs/Kokoro.Generator60x16Run.ps1 b/src/jobs/Kokoro.Generator60x16Run.ps1
+index 4b180fe..1397bc4 100644
+--- a/src/jobs/Kokoro.Generator60x16Run.ps1
++++ b/src/jobs/Kokoro.Generator60x16Run.ps1
+@@ -727,6 +727,7 @@ function New-KokoroGenerator60x16RunSteps {
+     # + 65536 - 4096 + 16384*k. Futex, HVX lock and unlock are the libqurt.a trap stubs (SDK 6.4.0.2
+     # computev73 pic/libqurt.a 8e0ba5fd...); thread create/join/exit are imports.
+     $poolOffset=$scratchOffset+4096; $stackOffset=$scratchOffset+65536
++    $readyTraceOffset = $poolOffset + 4096
+     # Queued DMA (-AsyncWeights): up to four transfers' descriptor pairs (64 bytes each) below the stacks, untouched while
+     # in flight because the synchronous transfers use r24's slots.
+     $queueOffset=$scratchOffset+61184
+@@ -1123,6 +1124,7 @@ function New-KokoroGenerator60x16RunSteps {
+         if($HvxThreads -lt 3 -or $segments.Count -gt $HvxThreads){throw 'A segmented dispatch needs one HVX thread per segment, at least three.'}
+         $value={param([int]$r,$a)
+             if($a -is [hashtable] -and $a.ContainsKey('Register')){ $s.Add(@{Op='addi';d=$r;s=$a.Register;i=0}) }
++            elseif($a -is [hashtable] -and $a.ContainsKey('WorkspaceOffset')){ & $ptr $r 25 $a.WorkspaceOffset }
+             elseif($a -is [hashtable] -and $a.ContainsKey('RingTiles')){ & $tileAt $r $a.Base $a.RingTiles $a.Block $a.Delta }
+             elseif($a -is [hashtable] -and $a.Controller){ & $controllerPointer $r $a.Block $a.Delta $a.Within }
+             else { & $ptr $r 18 $a } }
+@@ -1180,6 +1182,7 @@ function New-KokoroGenerator60x16RunSteps {
+     }
+     # A step that needs any edge treatment, a partial input or output block, or a residual's padded rows is unrolled.
+     $edgeStep={param([int]$block)
++        if ($sectionSchedule -eq 'Chunked' -and $Channels -eq 256 -and !$sec.Source -and !$ControllerContact -and !$PmuEvents -and $batch -eq 4 -and $block -eq 8) { return $true }
+         if($batch*$block+$batch -gt $tiles -or $batch*$block -lt 3){ return $true }
+         for($w=0;$w -lt $batch;$w++){
+             for($st=0;$st -lt 6;$st++){ for($branch=0;$branch -lt $branches;$branch++){ if($null -ne (& $edgeFix ($batch*$block+$w) (& $stageRows $branch $st))){ return $true } } }
+@@ -1433,13 +1436,23 @@ function New-KokoroGenerator60x16RunSteps {
+             if(-not $AsyncWeights){ for($branch=0;$branch -lt $branches;$branch++){ & $dma 18 ($tileRegions.Weights+$streamAt[$branch]) 21 $tileStages[6*$branch+$st].WeightOffset $tileStages[6*$branch+$st].WeightBytes } }
+ 
+             $segments=[Collections.Generic.List[object]]::new()
++            $traceReady = $Channels -eq 256 -and !$sec.Source -and !$ControllerContact -and !$PmuEvents -and $batch -eq 4 -and $block -eq 8 -and $st -eq 0
+             for($w=0;$w -lt $batch;$w++){
+                 $segment=@{Count=1;Body="body_turnsB_$($src[1])$sfx";Arguments=@((& $tileArg $src[0] $block $w),(& $workAt 0 0 (2+$w)),(& $workAt 1 0 (2+$w)),($tileRegions.Kms+$st*$kmsBytes))}
++                if ($traceReady) {
++                    $segment.Body="body_turnsB_shared_trace$sfx"
++                    $segment.Extra=@{WorkspaceOffset=($readyTraceOffset+16*$w)}
++                }
+                 if($ControllerContact){ $segment.Extra=@{Controller=$true;Block=$block;Delta=0;Within=($w-$p)} }
+                 $segments.Add($segment)
+             }
+             for($worker=0;$worker -lt $segments.Count;$worker++){ $segments[$worker].Body=& $historyBody $segments[$worker].Body $st $worker $false }
+             & $dispatch $segments[0].Body $segments.ToArray(); & $mark 'AdaInSnake'
++            if ($traceReady) {
++                & $ptr 8 25 $readyTraceOffset
++                $s.Add(@{Op='sub';d=6;s=8;t=23}); $s.Add(@{Op='store';s=23;t=6;Offset=48})
++                $s.Add(@{Op='hwticks';d=6}); $s.Add(@{Op='store-d';s=8;t=6;Offset=64})
++            }
+             if($null -ne $block){
+                 for($w=0;$w -lt $batch;$w++){ for($branch=0;$branch -lt $branches;$branch++){
+                     $fx=& $edgeFix ($batch*$block+$w) (& $stageRows $branch $st); if($null -eq $fx){ continue }
+@@ -1449,6 +1462,10 @@ function New-KokoroGenerator60x16RunSteps {
+             }
+             & $sync
+             & $dmaWait
++            if ($traceReady) {
++                & $ptr 8 25 $readyTraceOffset
++                $s.Add(@{Op='hwticks';d=6}); $s.Add(@{Op='store-d';s=8;t=6;Offset=72})
++            }
+             for($branch=0;$branch -lt $branches;$branch++){
+                 $at=6*$branch+$st
+                 & $ptr 0 18 (& $workAt 0 $branch 2); & $ptr 1 18 (& $workAt 1 $branch 2)
+@@ -1930,7 +1947,7 @@ function New-KokoroGenerator60x16RunSteps {
+         if($sec.Source){ $bodies.Add(@("body_combine_noise$sfx",@(& $packets @(New-KokoroPlaneCombineSteps -Mode Residual -Channels $Channels -Groups 3 -Group3Shifts -PlaneStride $planeStride -ZeroResidual -LabelPrefix "combinenoise$sfx")))) }
+         # A body over three branches: the inner body for branch 0 with the caller's r0 to r5, then for branches 1 and 2
+         # with each argument advanced by its branch stride (bytes; 0 keeps it). Arguments live in the frame between calls.
+-        $branchBodies={param([string]$name,[string]$inner,[long[]]$strides)
++        $branchBodies={param([string]$name,[string]$inner,[long[]]$strides,[switch]$MeasureReady)
+             $w=[Collections.Generic.List[hashtable]]::new()
+             $w.Add(@{Op='allocframe';Bytes=32}); for($k=0;$k -lt 6;$k++){ $w.Add(@{Op='store';s=29;t=$k;Offset=(4*$k)}) }
+             for($b=0;$b -lt $branches;$b++){
+@@ -1942,6 +1959,12 @@ function New-KokoroGenerator60x16RunSteps {
+                 }
+                 $pc=@{Op='add-pc';d=14;i=0}; $lo=@{Op='lo';x=15;i=0}; $hi=@{Op='hi';x=15;i=0}
+                 $w.Add($pc); $w.Add($lo); $w.Add($hi); $w.Add(@{Op='add';d=14;s=14;t=15}); $w.Add(@{Op='callr';s=14}); $calls.Add(@{pc=$pc;low=$lo;high=$hi;label=$inner})
++                if ($MeasureReady -and ($b -eq 0 -or $b -eq $branches-1)) {
++                    if ($b -eq 0) { $w.Add(@{Op='syncht'}) }
++                    $w.Add(@{Op='hwticks';d=6})
++                    $w.Add(@{Op='load';d=8;s=29;Offset=20})
++                    $w.Add(@{Op='store-d';s=8;t=6;Offset=$(if ($b -eq 0) { 0 } else { 8 })})
++                }
+             }
+             $w.Add(@{Op='dealloc-return'})
+             , @($name,$w.ToArray())
+@@ -1949,6 +1972,9 @@ function New-KokoroGenerator60x16RunSteps {
+         # Fill: source ring tile, conv-input tiles (high, low), K/M/S, count, mirror delta; the input ring is shared by the
+         # branches (stride 0). Combines: planes, target ring tile, record, count, residual source.
+         if($sectionSchedule -eq 'Backward'){ $bodies.Add(@("body_turns_mirror$sfx",@(& $fillPackets @(New-KokoroAdaInSnakeTurnsSteps -TurnsBits 22 -Channels $Channels -LabelPrefix "adainsnaketurnsmirror$sfx" -ControllerContact:$ControllerContact -MirrorDelta (-$ringBytes))))) }
++        if ($sectionSchedule -eq 'Chunked' -and $Channels -eq 256 -and !$sec.Source -and !$ControllerContact -and !$PmuEvents -and $batch -eq 4) {
++            $bodies.Add((& $branchBodies "body_turnsB_shared_trace$sfx" "body_turns$sfx" @(0L,$fillBytes,$fillBytes,(6L*$kmsBytes),0L,0L) -MeasureReady))
++        }
+         $bodies.Add(@("body_combine_residual_separate$sfx",@(& $packets @(New-KokoroPlaneCombineSteps -Mode Residual -Channels $Channels @combineGroups -PlaneStride $planeStride -LabelPrefix "combineresidualseparate$sfx" -SeparateResidual))))
+         foreach($sharing in @(@('shared',0L),@('branch',$ringBytes))){
+             $bodies.Add((& $branchBodies "body_turnsB_$($sharing[0])$sfx" "body_turns$sfx" @($sharing[1],$fillBytes,$fillBytes,(6L*$kmsBytes),0L,0L)))

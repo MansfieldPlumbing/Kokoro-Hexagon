@@ -1,0 +1,39 @@
+diff --git a/src/kernels/Kokoro.HmxConvPlanes.ps1 b/src/kernels/Kokoro.HmxConvPlanes.ps1
+index 02cbce9..3748abe 100644
+--- a/src/kernels/Kokoro.HmxConvPlanes.ps1
++++ b/src/kernels/Kokoro.HmxConvPlanes.ps1
+@@ -85,9 +85,12 @@ function New-KokoroHmxConvPlanesSteps {
+         }
+     }
+     $compact=($groups -gt 1 -and -not $NoReturn)
+-    if($compact){ $s.Add(@{Op='allocframe';Bytes=8}); $s.Add(@{Op='store';s=29;t=28;Offset=0}) }
+     $s.Add(@{Op='label'; Name="${LabelPrefix}_tile"})
+-    if($compact){ $s.Add(@{Op='imm';d=28;i=$groups}); $s.Add(@{Op='label';Name="${LabelPrefix}_group"}) }
++    if($compact){
++        $s.Add(@{Op='imm';d=15;i=$groups})
++        $s.Add(@{Op='loop0-r';s=15;Label="${LabelPrefix}_group"})
++        $s.Add(@{Op='label';Name="${LabelPrefix}_group"})
++    }
+     for ($g = 0; $g -lt $groups; $g++) {
+         if($compact -and $g -gt 0){break}
+         $gw = $g * $Kernel * $cb * 2048
+@@ -118,9 +121,8 @@ function New-KokoroHmxConvPlanesSteps {
+     }
+     if($compact){
+         & $imm 15 ($Kernel*$cb*2048); $s.Add(@{Op='add';d=2;s=2;t=15})
+-        $s.Add(@{Op='addi';d=3;s=3;i=(1024*$tableStride)})
+-        $s.Add(@{Op='addi';d=5;s=5;i=4096})
+-        $s.Add(@{Op='addi';d=28;s=28;i=-1}); $s.Add(@{Op='gtu';d=0;s=28;t=11}); $s.Add(@{Op='jump-p';u=0;Label="${LabelPrefix}_group"})
++        $s.Add(@{Op='addi';d=3;s=3;i=(1024*$tableStride);Pack=2})
++        $s.Add(@{Op='addi';d=5;s=5;i=4096;Pack=0})
+         & $imm 15 (-$groups*$Kernel*$cb*2048); $s.Add(@{Op='add';d=2;s=2;t=15}); $s.Add(@{Op='addi';d=3;s=3;i=(-1024*$groups*$tableStride)})
+     }
+     if ($dy -le 32767) { $s.Add(@{Op='addi'; d=0; s=0; i=$dy}); $s.Add(@{Op='addi'; d=1; s=1; i=$dy}) }
+@@ -129,6 +131,6 @@ function New-KokoroHmxConvPlanesSteps {
+     $s.Add(@{Op='addi'; d=4; s=4; i=-1})
+     $s.Add(@{Op='gtu'; d=0; s=4; t=11})
+     $s.Add(@{Op='jump-p'; u=0; Label="${LabelPrefix}_tile"})
+-    if($compact){$s.Add(@{Op='load';d=28;s=29;Offset=0});$s.Add(@{Op='dealloc-return'})} elseif (-not $NoReturn) { $s.Add(@{Op='return'}) }
++    if (-not $NoReturn) { $s.Add(@{Op='return'}) }
+     $s.ToArray()
+ }
