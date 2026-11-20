@@ -1,0 +1,23 @@
+diff --git a/src/kernels/Kokoro.AdaInSnakeTurns.ps1 b/src/kernels/Kokoro.AdaInSnakeTurns.ps1
+index 8acea9c..96bbd62 100644
+--- a/src/kernels/Kokoro.AdaInSnakeTurns.ps1
++++ b/src/kernels/Kokoro.AdaInSnakeTurns.ps1
+@@ -47,7 +47,7 @@ function New-KokoroAdaInSnakeTurnsSteps {
+     & $splat 28 (& $half 16384)                 # 1.0 in Q14
+     for ($k = 0; $k -lt 5; $k++) { & $splat (23 + $k) (& $half $q14[$k]) }   # v23 = h0 ... v27 = h4
+     & $splat 22 (& $half 10430)                           # round(2^16 / (2*pi)) in each even halfword
+-    foreach ($kv in @(@(9,8),@(10,1),@(11,6),@(7,($TurnsBits-16)))) { $s.Add(@{Op='imm';d=$kv[0];i=$kv[1]}) }
++    foreach ($kv in @(@(9,8),@(8,7),@(11,6),@(7,($TurnsBits-16)))) { $s.Add(@{Op='imm';d=$kv[0];i=$kv[1]}) }
+     $s.Add(@{Op='imm';d=12;i=($Channels/32)})
+     $s.Add(@{Op='label';Name="${LabelPrefix}_channel"})
+     $block=0
+@@ -129,8 +129,7 @@ function New-KokoroAdaInSnakeTurnsSteps {
+                 $lanes=0..3
+                 foreach($step in $ops){
+                     if($LabelPrefix -notlike '*_c256' -and $step.Op -eq 'vand' -and $step.t -eq 29){
+-                        $s.Add(@{Op='vasr-h';d=4;s=28;t=11})
+-                        $s.Add(@{Op='vasr-h';d=4;s=4;t=10})
++                        $s.Add(@{Op='vasr-h';d=4;s=28;t=8})
+                         foreach($bank in $banks){
+                             $v=$bank[$map[10]]
+                             $s.Add(@{Op='vadd-h-sat';d=$v;s=$v;t=4})

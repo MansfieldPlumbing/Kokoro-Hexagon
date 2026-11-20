@@ -1,0 +1,50 @@
+diff --git a/src/jobs/Kokoro.Generator60x16Run.ps1 b/src/jobs/Kokoro.Generator60x16Run.ps1
+index 592fd5c..623a7c1 100644
+--- a/src/jobs/Kokoro.Generator60x16Run.ps1
++++ b/src/jobs/Kokoro.Generator60x16Run.ps1
+@@ -1912,7 +1912,7 @@ function New-KokoroGenerator60x16RunSteps {
+     $bodies=[Collections.Generic.List[object]]::new()
+     for($section=0;$section -lt $sections.Count;$section++){
+     if($sections.Count -gt 1){ . $bind $section }
+-    $bodies.Add(@("body_turns$sfx",@(& $fillPackets @(New-KokoroAdaInSnakeTurnsSteps -TurnsBits 22 -Channels $Channels -LabelPrefix "adainsnaketurns$sfx" -ControllerContact:$ControllerContact))))
++    $bodies.Add(@("body_turns$sfx",@(& $fillPackets @(New-KokoroAdaInSnakeTurnsSteps -HighPlaneOnly:($WeightPlanes -eq 1 -and $sfx -notlike '*_c256') -TurnsBits 22 -Channels $Channels -LabelPrefix "adainsnaketurns$sfx" -ControllerContact:$ControllerContact))))
+     if($AdaInMode -eq 'Constants'){
+         $bodies.Add(@("body_constant$sfx",@(New-KokoroAdaInConstantCoefficientsLoopSteps -Channels $Channels -Turns -LabelPrefix "turnsconstant$sfx")))
+     } else {
+@@ -1957,7 +1957,7 @@ function New-KokoroGenerator60x16RunSteps {
+         }
+         # Fill: source ring tile, conv-input tiles (high, low), K/M/S, count, mirror delta; the input ring is shared by the
+         # branches (stride 0). Combines: planes, target ring tile, record, count, residual source.
+-        if($sectionSchedule -eq 'Backward'){ $bodies.Add(@("body_turns_mirror$sfx",@(& $fillPackets @(New-KokoroAdaInSnakeTurnsSteps -TurnsBits 22 -Channels $Channels -LabelPrefix "adainsnaketurnsmirror$sfx" -ControllerContact:$ControllerContact -MirrorDelta (-$ringBytes))))) }
++        if($sectionSchedule -eq 'Backward'){ $bodies.Add(@("body_turns_mirror$sfx",@(& $fillPackets @(New-KokoroAdaInSnakeTurnsSteps -HighPlaneOnly:($WeightPlanes -eq 1 -and $sfx -notlike '*_c256') -TurnsBits 22 -Channels $Channels -LabelPrefix "adainsnaketurnsmirror$sfx" -ControllerContact:$ControllerContact -MirrorDelta (-$ringBytes))))) }
+         $bodies.Add(@("body_combine_residual_separate$sfx",@(& $packets @(New-KokoroPlaneCombineSteps -Mode Residual -Channels $Channels @combineGroups -PlaneStride $planeStride -LabelPrefix "combineresidualseparate$sfx" -SeparateResidual))))
+         foreach($sharing in @(@('shared',0L),@('branch',$ringBytes))){
+             $bodies.Add((& $branchBodies "body_turnsB_$($sharing[0])$sfx" "body_turns$sfx" @($sharing[1],$fillBytes,$fillBytes,(6L*$kmsBytes),0L,0L)))
+diff --git a/src/kernels/Kokoro.AdaInSnakeTurns.ps1 b/src/kernels/Kokoro.AdaInSnakeTurns.ps1
+index 8acea9c..551e24d 100644
+--- a/src/kernels/Kokoro.AdaInSnakeTurns.ps1
++++ b/src/kernels/Kokoro.AdaInSnakeTurns.ps1
+@@ -24,7 +24,7 @@ function New-KokoroAdaInSnakeTurnsSteps {
+     # with the Q31 multiply used for K * x; v = 0 leaves K and M exactly the base values. r16 is saved and restored.
+     # -MirrorDelta: nonzero, every output vector is also stored at its address plus this byte delta (the guard copy of a
+     # ring's last tiles). With either option r16 to r18 are saved and restored.
+-    param([ValidateSet(128,256)][int]$Channels=128,[ValidateSet(22,24)][int]$TurnsBits=24,[string]$LabelPrefix='adainsnaketurns',[switch]$NoReturn,[switch]$ControllerContact,[long]$MirrorDelta=0)
++    param([ValidateSet(128,256)][int]$Channels=128,[ValidateSet(22,24)][int]$TurnsBits=24,[string]$LabelPrefix='adainsnaketurns',[switch]$NoReturn,[switch]$ControllerContact,[long]$MirrorDelta=0,[switch]$HighPlaneOnly)
+     $frame = $ControllerContact -or $MirrorDelta -ne 0
+     if ($frame -and $NoReturn) { throw 'The controller contact and mirrored stores restore r16 to r18 on return.' }
+     # Shift registers: fraction of both rows (right, QT-16) and (1-cos)/(2 pi)
+@@ -113,9 +113,11 @@ function New-KokoroAdaInSnakeTurnsSteps {
+         $s.Add(@{Op='vand';d=12;s=10;t=29}); $s.Add(@{Op='vxor';d=12;s=12;t=31})
+         $s.Add(@{Op='vstore';s=6;t=12;Offset=0})
+         if ($MirrorDelta) { $s.Add(@{Op='add';d=17;s=6;t=18}); $s.Add(@{Op='vstore';s=17;t=12;Offset=0}) }
+-        $s.Add(@{Op='vasl-h';d=10;s=10;t=9})
+-        $s.Add(@{Op='vstore';s=13;t=10;Offset=0})
+-        if ($MirrorDelta) { $s.Add(@{Op='add';d=17;s=13;t=18}); $s.Add(@{Op='vstore';s=17;t=10;Offset=0}) }
++        if (!$HighPlaneOnly) {
++            $s.Add(@{Op='vasl-h';d=10;s=10;t=9})
++            $s.Add(@{Op='vstore';s=13;t=10;Offset=0})
++            if ($MirrorDelta) { $s.Add(@{Op='add';d=17;s=13;t=18}); $s.Add(@{Op='vstore';s=17;t=10;Offset=0}) }
++        }
+         # Generate the original row-pair operations once, then schedule four independent inputs.
+         if($width -eq 4){
+             $body=$s.GetRange($innerStart,$s.Count-$innerStart)
