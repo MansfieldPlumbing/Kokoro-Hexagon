@@ -19,6 +19,7 @@
   "section-hmx-group-loop": "section-one-publication-fence",
   "section-aligned-panel-span": "section-hmx-group-loop",
   "section-worker-timeline": "section-hmx-group-loop",
+  "section-snake-gather": "section-hmx-group-loop",
   "section-branch-ready-trace": "section-combine-hardware-loop",
   "section-early-branch-zero": "section-hmx-group-loop",
   "section-pack-tail32": "section-fused-pack",

@@ -230,3 +230,20 @@ Both sessions restored startup. The 125× and 130× DSP budgets are
 Phone access used `C:/Dev/pwsh/scripts/adb.ps1`. Raw artifacts are under
 `build/residual-layout-20261120`, with `operand-probe`,
 `operand-fresh-control` and `worker-timeline` prefixes.
+
+### Exact Snake lookup screen
+
+The [Snake gather variant](../../tools/experiments/generator-throughput-20261119/section-snake-gather.patch)
+builds a 64 KiB VTCM table with the control's rounded polynomial
+operations. Backward-section workers gather the folded-phase result
+and reload it from their unpublished activation tile. This screen
+includes table construction, gather and reload.
+
+The five primary invocations matched the reference PCM and restored
+startup. Four warm invocations measured **104.893 ms DSP** and
+**107.609 ms host invoke**, or **112.26× DSP realtime**. The variant
+was 2.873 ms slower than the fresh primary control. The second-seed
+verification remains on the retained control. The
+[per-invocation screen](../../tools/experiments/generator-throughput-20261119/snake-gather-runs.csv)
+records the ELF and PCM digests. Build with the experiment checkout
+and resident export scripts using `section-snake-gather`.
