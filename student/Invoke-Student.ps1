@@ -92,7 +92,6 @@ param(
     [switch] $MoreText,
     [string] $SourceIdentity = '',
     [string] $ImagePath = '',
-    [string] $PerceptSeedAssembly = '',
     [string] $RulebookPath = $env:KOKORO_PROSODY_RULEBOOK,
     [string] $Annotations = '',
     [ValidateRange(8, 256)][int] $AuditCount = 32,
@@ -3635,33 +3634,12 @@ function Save-StudentImage($Image, [string] $Path = '') {
         Percepts = $Image.Percepts.Count; Evidence = $Image.Evidence.Count; Performances = $Image.Performances.Count }
 }
 
-function Open-StudentImage([string] $Path, [string] $SeedAssembly = '') {
+function Open-StudentImage([string] $Path) {
     $image = New-StudentImage $Path
     if (-not (Test-Path -LiteralPath $Path)) {
         $root = New-StudentPercept $image 'Occurrence' 'Occurrence' ([float[]](0, 0, 0, 0))
         $null = New-StudentPercept $image 'Word' 'Word' ([float[]](1, 0, 0, 0)) $root
         $null = New-StudentPercept $image 'Boundary' 'Boundary' ([float[]](0, 1, 0, 0)) $root
-        if ($SeedAssembly) {
-            $assemblyPath = (Resolve-Path -LiteralPath $SeedAssembly).Path
-            $assembly = [Reflection.Assembly]::Load([IO.File]::ReadAllBytes($assemblyPath))
-            $seed = $assembly.GetType('Kokoro.Student.PerceptSeed', $true).GetMethod('Read').Invoke($null, $null)
-            foreach ($definition in $seed.Percepts) {
-                $parent = $null
-                if ($definition.Parent) {
-                    if (-not $image.Percepts.ContainsKey($definition.Parent)) { throw "Unknown seed parent: $($definition.Parent)" }
-                    $parent = $image.Percepts[$definition.Parent]
-                }
-                $null = New-StudentPercept $image $definition.Identity $definition.Kind $definition.Key $parent
-            }
-            foreach ($evidence in $seed.Evidence) {
-                $record = [pscustomobject]@{
-                    Identity = $evidence.Identity; Occurrence = $evidence.Occurrence
-                    Provenance = $evidence.Provenance; Condition = $evidence.Condition
-                    Measured = ConvertFrom-Json -InputObject $evidence.Measured.GetRawText() -NoEnumerate
-                }
-                $null = Add-StudentImageObservation $image $evidence.Percept $record Example
-            }
-        }
         return $image
     }
     $stream = [IO.File]::OpenRead($Path)
@@ -3736,10 +3714,9 @@ function Restore-StudentPerformance($Performance) {
 }
 
 function Invoke-StudentPercepts {
-    if ($PerceptSeedAssembly -and -not $ImagePath) { throw 'A managed seed needs an explicit writable -ImagePath.' }
     $path = if ($ImagePath) { [IO.Path]::GetFullPath($ImagePath) } else { Join-Path $script:StudentBuild 'student/image.clixml.gz' }
     if ($null -ne $State -and $State.PSObject.TypeNames -contains 'Kokoro.StudentImage') { $State.Owner = $ExecutionContext.SessionState.Module; return $State }
-    $image = Open-StudentImage $path $PerceptSeedAssembly
+    $image = Open-StudentImage $path
     if ($null -ne $State) {
         if (-not $State.PSObject.Properties['Words'] -or -not $State.PSObject.Properties['NativeRecording']) { throw 'Percepts -State needs a live image or an Alignment result.' }
         $performance = Restore-StudentPerformance (Import-Clixml -LiteralPath $State.NativeRecording)
