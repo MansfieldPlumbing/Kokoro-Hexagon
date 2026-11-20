@@ -11,6 +11,7 @@
   "section-snake-packed-fraction": "section-cordic-abs",
   "section-snake-packed-fraction-paired-args": "section-snake-packed-fraction",
   "section-snake-fill-three": "section-snake-packed-fraction",
+  "section-lockstep-ring-parity": "section-snake-fill-three",
   "section-pack-tail32": "section-fused-pack",
   "section-pack-snake5": "section-fused-pack",
   "section-pack-a8": "section-fused-pack",
