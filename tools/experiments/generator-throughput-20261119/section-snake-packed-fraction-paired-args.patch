@@ -1,0 +1,19 @@
+diff --git a/src/jobs/Kokoro.Generator60x16Run.ps1 b/src/jobs/Kokoro.Generator60x16Run.ps1
+index 7a1c93b..31e2361 100644
+--- a/src/jobs/Kokoro.Generator60x16Run.ps1
++++ b/src/jobs/Kokoro.Generator60x16Run.ps1
+@@ -1930,11 +1930,12 @@ function New-KokoroGenerator60x16RunSteps {
+         # with each argument advanced by its branch stride (bytes; 0 keeps it). Arguments live in the frame between calls.
+         $branchBodies={param([string]$name,[string]$inner,[long[]]$strides)
+             $w=[Collections.Generic.List[hashtable]]::new()
+-            $w.Add(@{Op='allocframe';Bytes=32}); for($k=0;$k -lt 6;$k++){ $w.Add(@{Op='store';s=29;t=$k;Offset=(4*$k)}) }
++            $w.Add(@{Op='allocframe';Bytes=32})
++            foreach($pair in 0,2,4){ $w.Add(@{Op='store-d';s=29;t=$pair;Offset=(4*$pair)}) }
+             for($b=0;$b -lt $branches;$b++){
+                 if($b -gt 0){
++                    foreach($pair in 0,2,4){ $w.Add(@{Op='load-d';d=$pair;s=29;Offset=(4*$pair)}) }
+                     for($k=0;$k -lt 6;$k++){
+-                        $w.Add(@{Op='load';d=$k;s=29;Offset=(4*$k)})
+                         if($strides[$k]){ $u=[long]([uint32](($b*$strides[$k]) -band 0xffffffffL)); $w.Add(@{Op='lo';x=15;i=($u -band 65535)}); $w.Add(@{Op='hi';x=15;i=($u -shr 16)}); $w.Add(@{Op='add';d=$k;s=$k;t=15}) }
+                     }
+                 }

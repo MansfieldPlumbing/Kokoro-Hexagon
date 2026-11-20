@@ -9,6 +9,7 @@
   "section-rounded-keep256": "section-cordic-abs",
   "section-cordic-abs": "section-shift-acc",
   "section-snake-packed-fraction": "section-cordic-abs",
+  "section-snake-packed-fraction-paired-args": "section-snake-packed-fraction",
   "section-pack-tail32": "section-fused-pack",
   "section-pack-snake5": "section-fused-pack",
   "section-pack-a8": "section-fused-pack",

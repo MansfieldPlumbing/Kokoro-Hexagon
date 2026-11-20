@@ -63,11 +63,33 @@ Repeat with the second seed and `-Runs 5`. On this host the two fixture
 directories were `build/lighthouse-60x-20261119T092441/fixture` and
 `build/rt80-1795102334443/second-seed-fixture` under the original checkout.
 
+## Paired branch arguments
+
+The earlier paired-args ELF and source were absent from the local build
+and archives searched. The reconstruction saves and restores r0–r5 in
+three doubleword pairs in the branch wrapper. It cuts another 600 bytes
+from the emitted code. The new variant is
+`section-snake-packed-fraction-paired-args` and its ELF SHA-256 is
+`5724B3C5524C7F0AB614E70D7BD1AA137D6AAF2432FCB298A8B61743AAEF4A5F`.
+
+| Trial | DSP median ms | DSP warm range ms | DSP realtime | Host invoke ms | Setup ms | Invoke outside DSP region ms | Output handling ms |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| Paired A | 104.592 | 103.404–105.225 | 112.58× | 144.066 | 3.019 | 39.445 | 1.143 |
+| Packed shift control | 104.941 | 103.574–105.247 | 112.21× | 145.375 | 3.120 | 40.221 | 1.219 |
+| Paired B | 104.624 | 103.627–105.135 | 112.55× | 145.686 | 2.786 | 41.065 | 1.132 |
+| Paired, second seed | 104.636 | 103.880–105.090 | 112.53× | 149.325 | 3.454 | 45.186 | 1.857 |
+
+The primary and second-seed PCM matched the same references on all 44
+invocations, and startup was restored after each trial. The shifted
+control had faster medians in the first comparison, so the overlapping
+timing ranges leave the incremental gain inconclusive. The
+[paired-argument per-invocation CSV](../../tools/experiments/generator-throughput-20261119/exact-packed-fraction-paired-args-runs.csv)
+records the second comparison.
+
 ## Remaining work
 
-The faster historical paired-args test remains ahead of the packed shift
-alone. Its original ELF and source were absent from the local build and
-archives searched. Earlier main-span instrumentation measured about 14 ms
+The fastest new trial remains 6.467 ms over budget and the 104.149 ms
+historical exact result remains faster. Earlier main-span instrumentation measured about 14 ms
 for activation fill and about 18 ms for HMX plus queue work on an older
 instrumented schedule. Those numbers motivate measuring the current fill,
 neighbor publication, matrix issue and DMA separately. They cannot
