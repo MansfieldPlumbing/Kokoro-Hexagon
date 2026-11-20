@@ -20,6 +20,9 @@ function Write-KokoroProbeStage {
 $Marshal = [Runtime.InteropServices.Marshal]; $native = [IntPtr]::Zero; $opened = $false; $handle = [uint64]0
 $pins = [Collections.Generic.List[object]]::new(); $allocations = [Collections.Generic.List[object]]::new()
 $passed = $false; $stream = $null; $audio = $null
+$workspace = [IntPtr]::Zero
+$workspaceLibc = [IntPtr]::Zero
+$managedResident = $false
 $sharedPayloads = [Collections.Generic.List[object]]::new()
 $managedProgram = $null
 $mappedWeights = $null
@@ -51,6 +54,8 @@ try {
         foreach ($key in 'Tiles','InputBytes','OutputBytes','PcmOffset','Samples') {
             $kv[$key] = $embedded.RootElement.GetProperty($key).GetInt64()
         }
+        $managedResident = $kv.ContainsKey('ResidentPayloads')
+        if ($managedResident -and !$embedded.RootElement.GetProperty('ResidentPayloads').GetBoolean()) { throw 'Embedded generator lacks resident payload entry.' }
         $embedded.Dispose()
         $readPayload = { param($name)
             $resource = $generator.GetMethod("Open$name").Invoke($null, $null)
@@ -60,10 +65,13 @@ try {
                 ,$bytes
             } finally { $resource.Dispose() }
         }
-        $wts = & $readPayload Weights
-        $tbl = & $readPayload Tables
+        if (!$managedResident) {
+            $wts = & $readPayload Weights
+            $tbl = & $readPayload Tables
+        }
         $loadTime.Stop()
-        $lines.Add("AndroidAssembly=$($assembly.GetName().Name) Program=$libraryName WeightBytes=$($wts.Length) TableBytes=$($tbl.Length) PrepareMs=$($loadTime.Elapsed.TotalMilliseconds)")
+        $payloadInfo = if ($managedResident) { "ManagedResident=True" } else { "WeightBytes=$($wts.Length) TableBytes=$($tbl.Length)" }
+        $lines.Add("AndroidAssembly=$($assembly.GetName().Name) Program=$libraryName $payloadInfo PrepareMs=$($loadTime.Elapsed.TotalMilliseconds)")
     }
     $tiles = [int]$kv.Tiles; $runs = [int]$kv.Runs; $outputBytes = [int]$kv.OutputBytes; $pcmOffset = [int]$kv.PcmOffset; $samples = [int]$kv.Samples
     # Serve=True: the resident job listener below instead of one job; each request carries its own job fields.
@@ -344,7 +352,7 @@ try {
         $lines.Add("WeightAssembly=True LaunchMapMs=$($mapClock.Elapsed.TotalMilliseconds.ToString('F3',$inv)) LaunchHashPasses=0")
     } else {
         if (!$kv.GeneratorAssembly) { $wts = [IO.File]::ReadAllBytes([IO.Path]::Combine($dir, 'weights.bin')) }
-        $weightBytes = $wts.Length
+        if (!$managedResident) { $weightBytes = $wts.Length }
     }
     if (!$kv.GeneratorAssembly) { $tbl = [IO.File]::ReadAllBytes([IO.Path]::Combine($dir, 'tables.bin')) }
     $inputBytes = if ($kv.InputBytes) { [long]$kv.InputBytes } else { $tiles * 8192L }
@@ -354,14 +362,19 @@ try {
     $mappingMs = 0.0
     if ($resident) {
         $mappingClock = [Diagnostics.Stopwatch]::StartNew()
-        $sharedWeights = if ($null -ne $mappedWeights) { & $abi.NewSharedPayload $native $null ($mappedWeights.GetPointer()) $weightBytes } else { & $abi.NewSharedPayload $native $wts }
+        $mapResource = { param($name)
+            $stream = $generator.GetMethod("Open$name").Invoke($null, $null)
+            try { & $abi.NewSharedPayload $native -Stream $stream } finally { $stream.Dispose() }
+        }
+        $sharedWeights = if ($managedResident) { & $mapResource Weights } elseif ($null -ne $mappedWeights) { & $abi.NewSharedPayload $native $null ($mappedWeights.GetPointer()) $weightBytes } else { & $abi.NewSharedPayload $native $wts }
         $sharedPayloads.Add($sharedWeights)
-        $sharedTables = & $abi.NewSharedPayload $native $tbl; $sharedPayloads.Add($sharedTables)
+        $weightBytes = $sharedWeights.Bytes
+        $sharedTables = if ($managedResident) { & $mapResource Tables } else { & $abi.NewSharedPayload $native $tbl }; $sharedPayloads.Add($sharedTables)
         $config = [byte[]]::new(20)
-        $fields = [uint32[]]@($tiles,$sharedWeights.RemoteAddress,$weightBytes,$sharedTables.RemoteAddress,$tbl.Length)
+        $fields = [uint32[]]@($tiles,$sharedWeights.RemoteAddress,$weightBytes,$sharedTables.RemoteAddress,$sharedTables.Bytes)
         [Buffer]::BlockCopy($fields,0,$config,0,20)
         $mappingClock.Stop(); $mappingMs = $mappingClock.Elapsed.TotalMilliseconds
-        $lines.Add("ResidentPayloads=True MappingMs=$($mappingMs.ToString('F3',$inv)) WeightsBytes=$weightBytes TablesBytes=$($tbl.Length) Allocation=RpcmemSystemUncached Mapping=RemoteMemMapStatic OncePerSession=True")
+        $lines.Add("ResidentPayloads=True MappingMs=$($mappingMs.ToString('F3',$inv)) WeightsBytes=$weightBytes TablesBytes=$($sharedTables.Bytes) Allocation=RpcmemSystemUncached Mapping=RemoteMemMapStatic OncePerSession=True")
     }
     $ticks = [Collections.Generic.List[long]]::new(); $pcmHash = $null; $allOk = $true; $pcm = $null
     $requestLifetime = $kv.ContainsKey('RequestLifetime')
@@ -378,14 +391,33 @@ try {
         $phaseClock = [Diagnostics.Stopwatch]::StartNew()
         $setupEntry = $phaseClock.ElapsedTicks
         if ($run -eq 0) {
-            $out = [byte[]]::new($outputBytes)
+            $useSharedWorkspace = $kv.ContainsKey('SharedWorkspace')
+            if ($useSharedWorkspace) {
+                if (!$resident -or !$kv.ContainsKey('CapturePcm') -or $outputBytes -lt 80 -or $pcmOffset -lt 0 -or $pcmOffset + 2L*$samples -gt $outputBytes) { throw 'Invalid shared workspace layout.' }
+                $out = [byte[]]::new([math]::Min(1024,$outputBytes))
+                $allocateWorkspace = & $abi.BindExport $native 'rpcmem_alloc' ([IntPtr]) ([type[]]@([int],[uint32],[int]))
+                $freeWorkspace = & $abi.BindExport $native 'rpcmem_free' ([void]) ([type[]]@([IntPtr]))
+                $workspace = $allocateWorkspace.Invoke(25, [uint32]0, $outputBytes)
+                if ($workspace -eq [IntPtr]::Zero) { throw 'Workspace allocation failed.' }
+                $workspaceLibc = [Runtime.InteropServices.NativeLibrary]::Load('libc.so')
+                $clearWorkspace = & $abi.BindExport $workspaceLibc 'memset' ([IntPtr]) ([type[]]@([IntPtr],[int],[UIntPtr]))
+                $null = $clearWorkspace.Invoke($workspace, 0, [UIntPtr]::new([uint64]$outputBytes))
+                $lines.Add("SharedWorkspaceBytes=$outputBytes PcmBytes=$(2 * $samples) HeaderBytes=$($out.Length)")
+            } else { $out = [byte[]]::new($outputBytes) }
             $bufs = if ($resident) { @($config,$act,$out) } else { @($config, $act, $wts, $tbl, $out) }
             $argBlock = $Marshal::AllocHGlobal(16 * $bufs.Count); $allocations.Add($argBlock)
-            for ($i = 0; $i -lt $bufs.Count; $i++) { $Marshal::WriteIntPtr($argBlock, 16 * $i, (& $pin $bufs[$i])); $Marshal::WriteInt64($argBlock, 16 * $i + 8, [long]$bufs[$i].Length) }
+            for ($i = 0; $i -lt $bufs.Count; $i++) {
+                $sharedOutput = $useSharedWorkspace -and $i -eq $bufs.Count - 1
+                $ptr = if ($sharedOutput) { $workspace } else { & $pin $bufs[$i] }
+                $length = if ($sharedOutput) { $outputBytes } else { $bufs[$i].Length }
+                $Marshal::WriteIntPtr($argBlock, 16 * $i, $ptr)
+                $Marshal::WriteInt64($argBlock, 16 * $i + 8, [long]$length)
+            }
         }
         if ($run -gt 0 -and !$requestLifetime) {
             # Preserve the original fresh-buffer contract, including the DSP workspace.
-            [Array]::Clear($out, 0, $out.Length)
+            if ($useSharedWorkspace) { $null = $clearWorkspace.Invoke($workspace, 0, [UIntPtr]::new([uint64]$outputBytes)) }
+            else { [Array]::Clear($out, 0, $out.Length) }
         }
         $scalars = if ($resident) { [uint32]0x03020100 } else { [uint32]0x02040100 }
         $invokeArguments = [object[]]@($handle, $scalars, $argBlock)
@@ -394,6 +426,7 @@ try {
         $rc = [int]$invoke.DynamicInvoke($invokeArguments)
         $sw.Stop()
         $invokeExit = $phaseClock.ElapsedTicks
+        if ($useSharedWorkspace) { $Marshal::Copy($workspace, $out, 0, $out.Length) }
         $stage = [BitConverter]::ToInt32($out, 36); $done = [BitConverter]::ToInt32($out, 44)
         $t0 = [BitConverter]::ToUInt64($out, 0); $t1 = [BitConverter]::ToUInt64($out, 8); $dt = [long]($t1 - $t0)
         if ($resident) {
@@ -402,15 +435,22 @@ try {
             $lines.Add("Run=$run SkelEntryTicks=$entryTick RegionStartTicks=$t0 RegionEndTicks=$t1 SkelReturnTicks=$returnTick EntryToRegionMs=$((($t0-$entryTick)/19200.0).ToString('F3',$inv)) RegionToReturnMs=$((($returnTick-$t1)/19200.0).ToString('F3',$inv))")
             if ($run -eq 0) { $lines.Add("FirstCallIncludingMappingMs=$(($mappingMs+$sw.Elapsed.TotalMilliseconds+($invokeEntry-$setupEntry)*1000.0/[Diagnostics.Stopwatch]::Frequency).ToString('F3',$inv))") }
         }
-        $pcmBytes = [byte[]]::new(2 * $samples); [Buffer]::BlockCopy($out, $pcmOffset, $pcmBytes, 0, $pcmBytes.Length)
+        $pcmBytes = [byte[]]::new(2 * $samples)
+        if ($useSharedWorkspace) { $Marshal::Copy([IntPtr]::Add($workspace,$pcmOffset), $pcmBytes, 0, $pcmBytes.Length) }
+        else { [Buffer]::BlockCopy($out, $pcmOffset, $pcmBytes, 0, $pcmBytes.Length) }
         $hash = [Convert]::ToHexString([Security.Cryptography.SHA256]::HashData($pcmBytes))
         if ($kv.ContainsKey('ExpectedPcmSHA256') -and $hash -cne $kv.ExpectedPcmSHA256) {
             throw 'Baseline PCM mismatch; stopping before playback.'
         }
         if ($run -eq 0) {
             $pcmHash = $hash
-            [IO.File]::WriteAllBytes([IO.Path]::Combine($dir, 'tail-output.bin'), $out)
-            $lines.Add('OutputSHA256=' + [Convert]::ToHexString([Security.Cryptography.SHA256]::HashData($out)))
+            if ($kv.ContainsKey('CapturePcm')) {
+                [IO.File]::WriteAllBytes([IO.Path]::Combine($dir, 'tail-pcm.bin'), $pcmBytes)
+                $lines.Add("CapturePcmSHA256=$hash")
+            } else {
+                [IO.File]::WriteAllBytes([IO.Path]::Combine($dir, 'tail-output.bin'), $out)
+                $lines.Add('OutputSHA256=' + [Convert]::ToHexString([Security.Cryptography.SHA256]::HashData($out)))
+            }
             $pcm = [int16[]]::new($samples); [Buffer]::BlockCopy($pcmBytes, 0, $pcm, 0, $pcmBytes.Length)
         }
         if ($rc -ne 0 -or $stage -ne 7 -or $done -ne 1 -or $hash -ne $pcmHash) { $allOk = $false }
@@ -418,7 +458,10 @@ try {
         $outputExit = $phaseClock.ElapsedTicks
         $tickMs = 1000.0 / [Diagnostics.Stopwatch]::Frequency
         $lines.Add("Run=$run SetupEntryTicks=$setupEntry InvokeEntryTicks=$invokeEntry InvokeExitTicks=$invokeExit OutputExitTicks=$outputExit StopwatchFrequency=$([Diagnostics.Stopwatch]::Frequency) SetupMs=$((($invokeEntry - $setupEntry) * $tickMs).ToString('F3', $inv)) OutputMs=$((($outputExit - $invokeExit) * $tickMs).ToString('F3', $inv))")
-        for ($i = 0; $i -lt $bufs.Count; $i++) { $lines.Add("Run=$run Buffer=$i Bytes=$($bufs[$i].Length) Allocation=PinnedManagedArray") }
+        for ($i = 0; $i -lt $bufs.Count; $i++) {
+            if ($useSharedWorkspace -and $i -eq $bufs.Count - 1) { $lines.Add("Run=$run Buffer=$i Bytes=$outputBytes Allocation=RpcmemSystemUncached") }
+            else { $lines.Add("Run=$run Buffer=$i Bytes=$($bufs[$i].Length) Allocation=PinnedManagedArray") }
+        }
         # Preserve the job-defined timer slots on every invocation. Their meaning
         # belongs to the emitted job; template 1 uses these for convolution only.
         $timer48 = if ($out.Length -ge 64) { [BitConverter]::ToUInt64($out, 48) } else { [uint64]0 }
@@ -506,6 +549,8 @@ finally {
     }
     if ($null -ne $mappedWeights) { $mappedWeights.Close() }
     if ($opened) { $null = $close.DynamicInvoke([object[]]@($handle)) }
+    if ($workspace -ne [IntPtr]::Zero) { $freeWorkspace.Invoke($workspace) }
+    if ($workspaceLibc -ne [IntPtr]::Zero) { [Runtime.InteropServices.NativeLibrary]::Free($workspaceLibc) }
     foreach ($g in $pins) { $g.Free() }
     foreach ($a in $allocations) { $Marshal::FreeHGlobal($a) }
     if ($native -ne [IntPtr]::Zero) { [Runtime.InteropServices.NativeLibrary]::Free($native) }

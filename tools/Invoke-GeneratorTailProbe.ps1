@@ -22,7 +22,9 @@ param(
     [ValidateRange(10, 600)][int] $TimeoutSeconds = 180,
     [pscustomobject] $EmissionArtifact,
     [ValidatePattern('^[0-9A-F]{64}$')][string] $ExpectedPcmSHA256,
+    [switch] $CapturePcm,
     [switch] $AttributeBuffers,
+    [switch] $SharedWorkspace,
     [switch] $ResidentPayloads,
     [switch] $RequestLifetime,
     # Start the resident job listener (src/runspace/KokoroGeneratorTailProbe.ps1 Serve mode) instead of one job: wait
@@ -84,8 +86,12 @@ $id = [Guid]::NewGuid().ToString('N')
 $spec = Join-Path $emission "tail-spec-$id.txt"
 if (!$GeneratorAssembly) { [IO.File]::WriteAllLines($spec, @("Tiles=$($layout.Tiles)", "Runs=$Runs", "OutputBytes=$($layout.OutputBytes)", "PcmOffset=$($layout.PcmOffset)", "Samples=$($layout.Samples)", "InputBytes=$($layout.InputBytes)")) }
 if ($GeneratorAssembly) {
-    if ($Serve -or $Speech -or $WeightAssembly -or $ResidentPayloads) { throw 'GeneratorAssembly currently supports the whole-generator fixture probe.' }
+    if ($Serve -or $Speech -or $WeightAssembly) { throw 'GeneratorAssembly currently supports the whole-generator fixture probe.' }
     [IO.File]::WriteAllLines($spec, @("GeneratorAssembly=$id","Runs=$Runs"))
+}
+if ($CapturePcm) {
+    if ($Serve -or $Speech) { throw 'CapturePcm requires a fixture invocation.' }
+    [IO.File]::AppendAllText($spec, "CapturePcm=True`n")
 }
 if ($ExpectedPcmSHA256) { [IO.File]::AppendAllText($spec, "ExpectedPcmSHA256=$ExpectedPcmSHA256`n") }
 if ($Serve) { [IO.File]::AppendAllText($spec, "Serve=True`n") }
@@ -93,8 +99,12 @@ if ($Speech) { [IO.File]::AppendAllText($spec, "Speech=True`n") }
 $ready = if ($Serve) { '(?m)^(Listening|Passed)=' } else { '(?m)^Passed=' }
 if ($AttributeBuffers) { [IO.File]::AppendAllText($spec, "AttributeBuffers=True`n") }
 if ($ResidentPayloads) {
-    if ($AttributeBuffers -or -not $layout.ResidentPayloads) { throw 'Resident payloads require the admitted adapter and no buffer probe.' }
+    if ($AttributeBuffers -or (!$GeneratorAssembly -and -not $layout.ResidentPayloads)) { throw 'Resident payloads require the admitted adapter and no buffer probe.' }
     [IO.File]::AppendAllText($spec, "ResidentPayloads=True`n")
+}
+if ($SharedWorkspace) {
+    if (!$ResidentPayloads -or !$CapturePcm -or $Serve -or $Speech) { throw 'Shared workspace needs resident fixture PCM capture.' }
+    [IO.File]::AppendAllText($spec, "SharedWorkspace=True`n")
 }
 if ($null -ne $WeightAssembly) {
     if (-not $ResidentPayloads) { throw 'WeightAssembly requires ResidentPayloads.' }
@@ -197,6 +207,13 @@ try {
         [IO.File]::WriteAllBytes($outputPath, [byte[]](& $Adb exec-out -Api -Device $serial "run-as $Package cat $target/tail-output.bin"))
         if ((Get-FileHash -LiteralPath $outputPath).Hash -cne $hash.Groups[1].Value) { throw 'Retrieved device output integrity mismatch.' }
         "OutputPath=$outputPath"
+    }
+    if ($CapturePcm -and $receipt -match '(?m)^Passed=True\s*$') {
+        $pcmHash = [regex]::Match($receipt, '(?m)^CapturePcmSHA256=([0-9A-F]{64})')
+        $pcmPath = Join-Path $emission "device-pcm-$Soc-$id.bin"
+        [IO.File]::WriteAllBytes($pcmPath, [byte[]](& $Adb exec-out -Api -Device $serial "run-as $Package cat $target/tail-pcm.bin"))
+        if (!$pcmHash.Success -or (Get-FileHash -LiteralPath $pcmPath).Hash -cne $pcmHash.Groups[1].Value) { throw 'Retrieved PCM integrity mismatch.' }
+        "PcmPath=$pcmPath"
     }
     $wav = [regex]::Match($receipt, '(?m)^SpeechWav=speech\.wav SHA256=([0-9A-F]{64})')
     if ($wav.Success) {

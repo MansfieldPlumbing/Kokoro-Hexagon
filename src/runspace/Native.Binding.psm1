@@ -93,8 +93,13 @@ $bindExport = {
 }.GetNewClosure()
 
 $newSharedPayload = {
-    param([IntPtr]$Library, [byte[]]$Bytes, [IntPtr]$Source = [IntPtr]::Zero, [int]$Length = 0)
-    $payloadBytes = if ($null -ne $Bytes -and $Bytes.Length -gt 0) {
+    param([IntPtr]$Library, [byte[]]$Bytes, [IntPtr]$Source = [IntPtr]::Zero, [int]$Length = 0, [IO.Stream]$Stream = $null)
+    $payloadBytes = if ($null -ne $Stream) {
+        if ($null -ne $Bytes -or $Source -ne [IntPtr]::Zero -or $Length -ne 0) { throw 'Choose one shared payload source.' }
+        $remaining = $Stream.Length - $Stream.Position
+        if ($remaining -lt 1 -or $remaining -gt [int]::MaxValue) { throw 'Invalid resource extent.' }
+        [int]$remaining
+    } elseif ($null -ne $Bytes -and $Bytes.Length -gt 0) {
         if ($Source -ne [IntPtr]::Zero -or $Length -ne 0) { throw 'Choose bytes or an owned native source, not both.' }
         $Bytes.Length
     } else {
@@ -115,7 +120,14 @@ $newSharedPayload = {
     $remoteAddress = [uint64]0
     $mapped = $false
     try {
-        if ($Source -eq [IntPtr]::Zero) {
+        if ($null -ne $Stream) {
+            $chunk = [byte[]]::new([math]::Min(131072, $payloadBytes))
+            for ($offset = 0; $offset -lt $payloadBytes; $offset += $count) {
+                $count = [math]::Min($chunk.Length, $payloadBytes - $offset)
+                $Stream.ReadExactly($chunk, 0, $count)
+                [Runtime.InteropServices.Marshal]::Copy($chunk, 0, [IntPtr]::Add($pointer, $offset), $count)
+            }
+        } elseif ($Source -eq [IntPtr]::Zero) {
             [Runtime.InteropServices.Marshal]::Copy($Bytes, 0, $pointer, $payloadBytes)
         } else {
             # Bionic string.h: void* memcpy(void*, const void*, size_t). The

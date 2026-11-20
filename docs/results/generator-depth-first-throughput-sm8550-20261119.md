@@ -145,3 +145,9 @@ The Android PowerShell runspace loads Kokoroku.dll and calls its four managed me
 | DSP writes telemetry and PCM | Android validates hashes, archives run zero, and plays PCM | The full output hash and diagnostic capture run on the first invocation. Every invocation copies the PCM slice and hashes it. These operations and audio conversion, playback and receipt I/O are outside DSP timing. |
 
 The same control ELF with one reused workspace returned exact PCM on all 13 invocations. The twelve warm medians were 106.540 ms DSP and 146.466 ms host invoke. Median host setup moved from 1.287 to 3.057 ms with explicit clearing. The memory reduction follows from the allocation counts. Single batches do not establish a stable latency gain. The measured host calls into a native FastRPC export. PSC's reverse COM roadmap describes an application implementing native callback vtables. No such callback appears at this generator invocation boundary.
+
+## Rounded activations with full precision in the 256-channel main section
+
+The `section-rounded-keep256` variant produced 11.775 seconds of 24 kHz PCM in 97.684 and 97.705 ms on the SM8550 (120.5× DSP real time). The second seed took 96.680 ms. The listener reported that the primary fixture sounded identical to the reference. The samples differ, with sample-aligned SNR of 15.16 dB and 15.05 dB for the two seeds.
+
+Use the reproduction commands above with variant `section-rounded-keep256`. The DSP library SHA-256 is `ED59D70C2733FF35F9DBFDB2D7E4415B78AF50E1A117AEC3633434DB5F1F7722`. The primary and second-seed PCM hashes are `44064819B5BC7F2FF04F481A4CB0CD39A563679ED1D8B9CCAAEE3FACE8CD87B1` and `E6532C58EBCEF890C6317BAE86FEDD6449465EC224673045354DE966A1465641`.

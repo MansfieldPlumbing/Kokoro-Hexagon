@@ -2,7 +2,8 @@
 [CmdletBinding()]
 param(
     [Parameter(Mandatory)][string]$Checkout,
-    [Parameter(Mandatory)][string]$OutputDirectory
+    [Parameter(Mandatory)][string]$OutputDirectory,
+    [switch]$ResidentPayloads
 )
 $ErrorActionPreference = 'Stop'
 if (Test-Path -LiteralPath $OutputDirectory) { throw 'Choose a new emission directory.' }
@@ -29,12 +30,18 @@ $options = @{
     PowerVotes = @('HvxPower','CoreMax','HmxPower')
 }
 $job = New-KokoroGenerator60x16RunSteps @options
+$steps = $job.Steps
+if ($ResidentPayloads) {
+    . (Join-Path $Checkout 'src/jobs/Kokoro.ResidentPayload.ps1')
+    $steps = Add-KokoroResidentPayloadEntry -Steps $steps -Layout $job.Layout
+}
 $definition = @{
-    Steps = $job.Steps
+    Steps = $steps
     Symbol = 'kokoro_generator_tail_skel_handle_invoke'
     Soname = 'libkokoro_generator_tail_skel.so'
 }
 $null = Invoke-HexagonEmission -Kernel Definition -Definition $definition -OutputDirectory $destination
-[pscustomobject]$job.Layout | Select-Object PcmOffset,Tiles,OutputBytes,Samples,InputBytes,@{Name='Speech';Expression={'True'}},@{Name='Runs';Expression={9}} |
-    ConvertTo-Json | Set-Content (Join-Path $destination 'runner-layout.json')
+$layout = [pscustomobject]$job.Layout | Select-Object PcmOffset,Tiles,OutputBytes,Samples,InputBytes,@{Name='Speech';Expression={'True'}},@{Name='Runs';Expression={9}}
+if ($ResidentPayloads) { $layout | Add-Member -NotePropertyName ResidentPayloads -NotePropertyValue $true }
+$layout | ConvertTo-Json | Set-Content (Join-Path $destination 'runner-layout.json')
 Get-FileHash (Join-Path $destination $definition.Soname)
