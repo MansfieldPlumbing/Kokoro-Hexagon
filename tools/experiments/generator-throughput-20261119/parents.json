@@ -17,6 +17,7 @@
   "section-combine-hardware-loop": "section-lockstep-ring-shuffle",
   "section-one-publication-fence": "section-combine-hardware-loop",
   "section-hmx-group-loop": "section-one-publication-fence",
+  "section-aligned-panel-span": "section-hmx-group-loop",
   "section-branch-ready-trace": "section-combine-hardware-loop",
   "section-early-branch-zero": "section-hmx-group-loop",
   "section-pack-tail32": "section-fused-pack",

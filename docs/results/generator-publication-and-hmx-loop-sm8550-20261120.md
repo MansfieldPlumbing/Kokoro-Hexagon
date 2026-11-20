@@ -134,3 +134,30 @@ call there preserved PCM. Recovering time there depends on the cost
 of readiness polling, the finish time of the workers with an extra
 tile branch, and any contention while HMX and HVX execute together.
 The elapsed comparison does not assign costs among those effects.
+
+## Aligned activation panel span
+
+The `section-aligned-panel-span` experiment replaces the four
+128-channel input-panel issues of an aligned tap with one pair using
+the existing `activation.ub` and `weight.b :deep` forms and an
+8 KiB range. The other taps keep the existing `:single` reads.
+This tests which panels that particular paired instruction consumes.
+It retains both accumulator windows and their output and combine code.
+
+The SM8550 candidate completed its first DSP region but failed the
+primary PCM check. The probe stopped before playback and verified
+startup restoration. The candidate ELF SHA-256 was
+`682DC480FDE47ABDC24042F69C48A8F46F4AEF0BFDBA77E834AAEDBD65868258`.
+There is no qualifying warm measurement for this variant. The fresh
+managed resident control matched the reference at **101.849 ms DSP**
+and **104.138 ms host invoke** over twelve warm runs. The 125× target
+is 94.200 ms for 11.775 seconds of audio. Receipts are under
+`build/residual-layout-20261120` with the `aligned-range` and
+`target125-control` prefixes.
+
+The failure leaves the operand range and weight pairing semantics
+unresolved. For a standalone follow-up, populate each input panel and
+both output halves with different values. Compare the reference
+`:single` issue sequence against candidate issue forms before
+changing the generator. Probe a wrapped activation window and dense
+64-row `:cm` packing independently, with both conversions checked.

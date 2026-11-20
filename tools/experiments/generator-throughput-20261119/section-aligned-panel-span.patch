@@ -1,0 +1,45 @@
+--- a/src/jobs/Kokoro.Generator60x16Run.ps1
++++ b/src/jobs/Kokoro.Generator60x16Run.ps1
+@@ -1958,7 +1958,7 @@
+             $bodies.Add((& $branchBodies "body_combine_residualB_$($sharing[0])$sfx" "body_combine_residual_separate$sfx" @($planesStride,$ringBytes,(6L*$recordBytes),0L,0L,$sharing[1])))
+         }
+         $bodies.Add((& $branchBodies "body_combine_convB$sfx" "body_combine_conv$sfx" @($planesStride,$ringBytes,(6L*$recordBytes),0L,0L,0L)))
+-        for($branch=0;$branch -lt $branches;$branch++){ for($st=0;$st -lt 6;$st++){ $bodies.Add(@("body_convB_b${branch}_s$st$sfx",@(New-KokoroHmxConvPlanesSteps -LowByteOnlyGroup3 -InputChannels $Channels -OutputChannels $Channels -Kernel $sectionKernels[$branch] -Dilation $(if($st % 2){1}else{1+$st}) @convPlanes -PlaneStride $planeStride -TapDelay (& $tapDelay $branch $st) -LabelPrefix "g16b_b${branch}_s$st$sfx"))) } }
++        for($branch=0;$branch -lt $branches;$branch++){ for($st=0;$st -lt 6;$st++){ $bodies.Add(@("body_convB_b${branch}_s$st$sfx",@(New-KokoroHmxConvPlanesSteps -LowByteOnlyGroup3 -InputChannels $Channels -OutputChannels $Channels -Kernel $sectionKernels[$branch] -Dilation $(if($st % 2){1}else{1+$st}) @convPlanes -PlaneStride $planeStride -AlignedPanelSpan:($Channels -eq 128 -and $WeightPlanes -eq 1) -TapDelay (& $tapDelay $branch $st) -LabelPrefix "g16b_b${branch}_s$st$sfx"))) } }
+     }
+     $bodies.Add(@("body_mean$sfx",@(& $packets @(New-KokoroBranchMean16Steps -Channels $Channels -LabelPrefix "branchmean16$sfx"))))
+     for($b=0;$b -lt $branches;$b++){foreach($d in 1,3,5){$bodies.Add(@("body_conv_b${b}_d$d$sfx",@(New-KokoroHmxConvPlanesSteps -LowByteOnlyGroup3 -InputChannels $Channels -OutputChannels $Channels -Kernel $sectionKernels[$b] -Dilation $d @convPlanes -PlaneStride $planeStride -LabelPrefix "g16_b${b}_d$d$sfx")))}}
+--- a/src/kernels/Kokoro.HmxConvPlanes.ps1
++++ b/src/kernels/Kokoro.HmxConvPlanes.ps1
+@@ -35,7 +35,7 @@
+         # Rows every tap reads before the centred position: output row m then reads input rows m - TapDelay - reach to
+         # m - TapDelay + reach, so with TapDelay >= reach the convolution reads only rows at or before m (backward).
+         # Each product retains its original weight panel; output row m is the centred output at row m - TapDelay.
+-        [switch] $LowByteOnlyGroup3, [switch] $FirstOutputBlockOnly,
++        [switch] $AlignedPanelSpan, [switch] $LowByteOnlyGroup3, [switch] $FirstOutputBlockOnly,
+         [int[]] $ActivePanels, [ValidateRange(0, 32)][int] $TapDelay = 0
+     )
+     [int]$cb = $InputChannels / 32; [int]$ob = $OutputChannels / 32; [int]$groups = $OutputChannels / 64
+@@ -56,8 +56,22 @@
+     # One MAC sequence: activation base register, weight base register.
+     $macs = { param([int]$act,[int]$wt)
+         # Visit neighboring taps in each input crouton. Weight panels retain their original offsets.
++        $alignedTaps = @()
++        if ($AlignedPanelSpan) {
++            $alignedTaps = @(0..($Kernel-1) | Where-Object {
++                ($Dilation*($_-$half)-$TapDelay) % 32 -eq 0
++            })
++            foreach ($k in $alignedTaps) {
++                $tile = [int](($Dilation*($k-$half)-$TapDelay)/32)
++                $s.Add(@{Op='addi';d=8;s=$act;i=($tile*$dy)})
++                & $imm 15 ($k*$dy); $s.Add(@{Op='add';d=12;s=$wt;t=15})
++                $s.Add(@{Op='imm';d=7;i=($dy-1)})
++                $s.Add(@{Op='hmx-pair';Act='act-ub';Wt='wt-b-deep';s=8;t=7;u=12;v=7})
++            }
++        }
+         $stream=[Collections.Generic.List[hashtable]]::new()
+         for($c=0;$c -lt $cb;$c++){
+             for($k=0;$k -lt $Kernel;$k++){
++                if ($k -in $alignedTaps) { continue }
+                 $shift=$Dilation*($k-$half)-$TapDelay
+                 $tile=[int][Math]::Floor($shift/32);$row=$shift-32*$tile
