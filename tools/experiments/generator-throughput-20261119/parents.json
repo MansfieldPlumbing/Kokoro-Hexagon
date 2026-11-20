@@ -13,6 +13,7 @@
   "section-snake-fill-three": "section-snake-packed-fraction",
   "section-lockstep-ring-parity": "section-snake-fill-three",
   "section-lockstep-ring-double": "section-lockstep-ring-parity",
+  "section-lockstep-ring-shuffle": "section-lockstep-ring-double",
   "section-pack-tail32": "section-fused-pack",
   "section-pack-snake5": "section-fused-pack",
   "section-pack-a8": "section-fused-pack",

@@ -1,0 +1,33 @@
+diff --git a/Invoke-HexagonDevelopment.ps1 b/Invoke-HexagonDevelopment.ps1
+index 23e64db..3e446ec 100644
+--- a/Invoke-HexagonDevelopment.ps1
++++ b/Invoke-HexagonDevelopment.ps1
+@@ -763,5 +763,5 @@ foreach ($op in 'vmpyo-w-h-rnd','vmpy-h-rnd-sat','vmpye-w-uh','vmpyo-acc-w-h-rnd
+ foreach ($op in 'vasr-w-acc','vasl-w','vasr-w','vlsr-uw','vasl-h') { $script:PacketClasses[$op] = @{ Kind='Shift'; Slots=@(3,2,1,0) } }
+ $script:PacketClasses['vasr-wh-r7'] = @{ Kind='Shift'; Slots=@(3,2) }
+ foreach ($op in 'vsplat') { $script:PacketClasses[$op] = @{ Kind='Alu'; Slots=@(3,2) } }
+-foreach ($op in 'vshuffo-b','vsat-h-w','vabs-w','vadd-w','vadd-h','vadd-h-sat','vsub-h','vand','vor','vxor','vmax-w','vmin-w','vabs-h-sat') { $script:PacketClasses[$op] = @{ Kind='Alu'; Slots=@(3,2,1,0) } }
++foreach ($op in 'vshuffo-b','vshuffe-h','vsat-h-w','vabs-w','vadd-w','vadd-h','vadd-h-sat','vsub-h','vand','vor','vxor','vmax-w','vmin-w','vabs-h-sat') { $script:PacketClasses[$op] = @{ Kind='Alu'; Slots=@(3,2,1,0) } }
+ foreach ($op in 'addi','add','sub','imm','lo','hi') { $script:PacketClasses[$op] = @{ Kind='Scalar'; Slots=@(3,2,1,0) } }
+diff --git a/src/kernels/Kokoro.AdaInSnakeTurns.ps1 b/src/kernels/Kokoro.AdaInSnakeTurns.ps1
+index 3293c23..ec198a9 100644
+--- a/src/kernels/Kokoro.AdaInSnakeTurns.ps1
++++ b/src/kernels/Kokoro.AdaInSnakeTurns.ps1
+@@ -47,7 +47,7 @@ function New-KokoroAdaInSnakeTurnsSteps {
+     & $splat 28 (& $half 16384)                 # 1.0 in Q14
+     for ($k = 0; $k -lt 5; $k++) { & $splat (23 + $k) (& $half $q14[$k]) }   # v23 = h0 ... v27 = h4
+     & $splat 22 (& $half 10430)                           # round(2^16 / (2*pi)) in each even halfword
+-    foreach ($kv in @(@(8,16),@(9,8),@(11,6),@(7,($TurnsBits-16)))) { $s.Add(@{Op='imm';d=$kv[0];i=$kv[1]}) }
++    foreach ($kv in @(@(9,8),@(11,6),@(7,($TurnsBits-16)))) { $s.Add(@{Op='imm';d=$kv[0];i=$kv[1]}) }
+     $s.Add(@{Op='imm';d=12;i=($Channels/32)})
+     $s.Add(@{Op='label';Name="${LabelPrefix}_channel"})
+     $block=0
+@@ -81,7 +81,7 @@ function New-KokoroAdaInSnakeTurnsSteps {
+         $innerStart=$s.Count
+         $s.Add(@{Op='vload';d=0;s=5;Offset=0})
+         $s.Add(@{Op='vxor';d=0;s=0;t=31})                       # signed halfwords
+-        $s.Add(@{Op='vasl-w';d=1;s=0;t=8})                      # even row x * 2^16
++        $s.Add(@{Op='vshuffe-h';d=1;s=0;t=0})                  # copy even row to the halfword vmpyo reads
+         # Both rows multiply a signed halfword by a Q31 constant. The old low
+         # partial product was exact because the activation word had 16 zero low bits.
+         $s.Add(@{Op='vmpyo-w-h-rnd';d=3;s=14;t=1})

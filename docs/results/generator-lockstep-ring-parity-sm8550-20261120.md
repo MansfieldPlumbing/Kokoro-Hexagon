@@ -78,3 +78,46 @@ The same 13/13/13/5 invocation protocol verified both PCM hashes, the
 `section-lockstep-ring-double` using the same commands. Its ELF SHA-256
 was `60F03A2FE578584B3FBE9B253CFD05A7824C761A8E0002A56D2045F12D6ECD3F`.
 [Per-invocation timing and verification](../../tools/experiments/generator-throughput-20261119/exact-ring-double-runs.csv).
+
+## Even-row halfword selection
+
+The even row fed to the signed odd-halfword multiply originally moved
+into position through a word shift. An even-halfword shuffle with two
+identical inputs places that same signed value in the high halfword.
+The multiply consumes only the high halfword, so the duplicated low
+halfword cannot affect it. The packetizer admits the shuffle as a vector
+ALU operation. The static standalone body has 201 instructions across
+108 packets.
+
+| Trial | Warm DSP median ms | Warm DSP range ms | DSP realtime | Host invoke ms | Host setup ms | Invoke outside region ms | Output handling ms |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| Candidate A | 102.295 | 101.115–103.281 | 115.11× | 151.920 | 2.973 | 49.249 | 1.236 |
+| Wrapping-double control | 102.868 | 101.578–103.648 | 114.47× | 149.079 | 3.256 | 46.517 | 1.158 |
+| Candidate B | 102.228 | 101.171–103.880 | 115.18× | 146.917 | 2.938 | 44.328 | 1.290 |
+| Candidate, second seed | 101.729 | 101.241–102.403 | 115.75× | 145.597 | 2.817 | 43.775 | 2.003 |
+
+The candidate medians led by 0.573 and 0.640 ms around the control.
+The 102.228 ms primary median is 4.103 ms above the 120× budget. The
+same 13/13/13/5 invocation protocol confirmed both reference PCM hashes
+and startup restoration. Rebuild `section-lockstep-ring-shuffle`.
+Its ELF SHA-256 was
+`6FC34DBF963CBE0688A1F383CD0F97929F625A2F4659F98941EB18CF784717DE`.
+[Per-invocation timing and verification](../../tools/experiments/generator-throughput-20261119/exact-ring-shuffle-runs.csv).
+
+## Screening results
+
+A progress-counter variant computed the same interior block base once per
+tile and reused it for all six stages. It produced exact PCM and ran at
+105.100 ms in a four-warm screen. A low-plane variant replaced the
+halfword shift with an even-byte shuffle using the existing mask's zero
+bytes. It preserved PCM and measured 102.848 ms when added to the
+wrapping-double control, close to the control's 102.868 ms median. Neither
+screen gave a clear gain. The
+[screening CSV](../../tools/experiments/generator-throughput-20261119/exact-ring-screening-runs.csv)
+includes the corresponding ELF hashes, cold runs and restoration checks.
+
+The remaining 4.103 ms is on DSP. Prior instrumentation points to repeated
+fill and combine work and to the chunked 256-channel section. The next
+profile can check those costs in the current binary after the instruction
+substitutions. Lock wait, producer readiness and execution under the
+matrix lock should remain separate measurements.
