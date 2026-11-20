@@ -51,3 +51,30 @@ Use the existing probe and fixture commands from the
 [packed-fraction experiment](generator-exact-packed-fraction-sm8550-20261120.md).
 The [per-invocation CSV](../../tools/experiments/generator-throughput-20261119/exact-ring-parity-runs.csv)
 includes cold run zero.
+
+## Wrapping halfword doubling
+
+The following trial added one change to the ring-parity variant. Snake's
+folded halfword argument uses a wrapping left shift by one. A non-saturating
+halfword add of the value to itself produces the same low 16 bits for
+every input. The candidate uses the add and drops the redundant scalar
+shift constant. This reduces demand for shift issue inside the four-way
+unrolled fill. The static non-mirrored body at either channel width has
+202 instructions across 108 packet records, compared with 203 across 107
+before. The timing gain cannot be explained by a smaller static packet
+count alone.
+
+| Trial | Warm DSP median ms | Warm DSP range ms | DSP realtime | Host invoke ms | Host setup ms | Invoke outside region ms | Output handling ms |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| Candidate A | 102.695 | 101.404–103.560 | 114.66× | 145.980 | 3.300 | 43.910 | 1.133 |
+| Ring-parity control | 104.112 | 103.000–104.595 | 113.10× | 149.996 | 3.298 | 45.522 | 1.327 |
+| Candidate B | 103.007 | 101.849–103.527 | 114.31× | 150.455 | 2.989 | 47.487 | 1.321 |
+| Candidate, second seed | 102.711 | 102.023–103.661 | 114.64× | 146.539 | 3.588 | 44.246 | 1.530 |
+
+The candidate medians improved by 1.417 and 1.104 ms against the fresh
+ring-parity control. The faster result leaves 4.570 ms to reach 120×.
+The same 13/13/13/5 invocation protocol verified both PCM hashes, the
+282,600-sample duration and startup restoration again. Rebuild
+`section-lockstep-ring-double` using the same commands. Its ELF SHA-256
+was `60F03A2FE578584B3FBE9B253CFD05A7824C761A8E0002A56D2045F12D6ECD3F`.
+[Per-invocation timing and verification](../../tools/experiments/generator-throughput-20261119/exact-ring-double-runs.csv).
