@@ -1,0 +1,86 @@
+--- a/src/jobs/Kokoro.Generator60x16Run.ps1
++++ b/src/jobs/Kokoro.Generator60x16Run.ps1
+@@ -1225,6 +1225,11 @@
+         # Lock acquisition does not write the window.
+         & $progressValue 1 $block ($st+1); & $ptr 2 18 ($tileRegions.Progress+4*$thread); $s.Add(@{Op='store';s=2;t=1;Offset=0}) }
+     # Thread k's tile of block j through every stage, the mean and its output.
++    if($PmuEvents){throw 'Worker timeline uses the PMU scratch area.'}
++    $traceTick={
++        param([int]$offset)
++        $s.Add(@{Op='hwticks';d=26}); $s.Add(@{Op='store-d';s=22;t=26;Offset=$offset})
++    }
+     $lockstepTile={param($block,[int]$parity,[int]$thread)
+         $w=$thread; $tile=if($null -eq $block){$null}else{$batch*$block+$w}
+         # The mirrored slot and the two-batch ring share the same block parity.
+@@ -1245,6 +1250,12 @@
+             & $tileAt 0 $src[0] $ringTiles $ringBlock $w; & $tileAt 1 $highBase $ringTiles $ringBlock $w; & $tileAt 2 $lowBase $ringTiles $ringBlock $w
+             & $ptr 3 18 ($tileRegions.Kms+$st*$kmsBytes); $s.Add(@{Op='imm';d=4;i=1})
+             if($ControllerContact){ & $controllerPointer 5 $block 0 ($w-$p) }
++            # 48 records at scratch+256, all beneath the pool at +4096.
++            $traceIndex = 24*[int]($Channels -eq 256) + 6*$thread + $st
++            & $ptr 22 25 ($scratchOffset + 256 + 64*$traceIndex)
++            & $imm 15 0x31584d48
++            $s.Add(@{Op='store';s=22;t=15;Offset=56})
++            & $traceTick 0
+             & $tickStart $thread
+             & $call $(if($parity -and $w -ge $batch-2){"body_turnsB_$($src[1])_mirror$sfx"}else{"body_turnsB_$($src[1])$sfx"})
+             & $tickAdd $thread 12
+@@ -1263,14 +1274,21 @@
+             # The next tile's residual comes from an earlier stage, already complete at publication.
+             # The lock serializes HMX while workers combine disjoint output tiles.
+             & $tickStart $thread; & $waitNeighbor $block $thread $st; & $tickAdd $thread 8
+-            $s.Add(@{Op='syncht'}); & $tickStart $thread; & $matrixLock; & $publish $block $thread $st; & $tickAdd $thread 0; & $tickStart $thread
++            $s.Add(@{Op='syncht'}); & $traceTick 8; & $matrixLock; & $traceTick 16
++            $s.Add(@{Op='imm';d=15;i=0}); $s.Add(@{Op='store';s=22;t=15;Offset=24})
++            & $publish $block $thread $st
+             for($branch=0;$branch -lt $branches;$branch++){
+                 $at=6*$branch+$st
+                 & $tileAt 0 ($highBase+$branch*$fillBytes) $ringTiles $ringBlock $w; & $tileAt 1 ($lowBase+$branch*$fillBytes) $ringTiles $ringBlock $w
+                 & $ptr 2 18 $tileWeightAt[$at]; & $ptr 3 18 ($tileRegions.Records+$at*$recordBytes+$tablesAt); $s.Add(@{Op='imm';d=4;i=1}); & $ptr 5 18 ($tileRegions.Planes+$branch*$planesStride+$w*[long]$tileBytes)
+                 & $call "body_convB_b${branch}_s$st$sfx"
+             }
+-            & $matrixUnlock; & $tickAdd $thread 4; $s.Add(@{Op='syncht'})
++            & $matrixUnlock
++            # The last branch's final wrapping plane, last output crouton.
++            $traceLast = $tileRegions.Planes+($branches-1)*$planesStride+$w*[long]$tileBytes
++            & $ptr 14 18 ($traceLast + (2*$WeightPlanes+1)*$planeStride + $tileBytes - 4)
++            $s.Add(@{Op='load';d=14;s=14;Offset=0})
++            $s.Add(@{Op='syncht'}); & $traceTick 32
+             & $tickStart $thread
+             $rAt=$tileRegions.Records+$st*$recordBytes
+             & $ptr 0 18 ($tileRegions.Planes+$w*[long]$tileBytes); & $ptr 2 18 ($rAt+$ratiosAt); $s.Add(@{Op='imm';d=3;i=1})
+@@ -1284,7 +1302,7 @@
+                     if($lo -lt $Frames -and $lo+31 -ge $Frames){ for($branch=0;$branch -lt $branches;$branch++){ & $padRows ($tileRegions.Levels+([long]$branches*$p+$branch)*$ringBytes+($tile % $ringTiles)*[long]$tileBytes) 0x8000 ($Frames-$lo) 32 } }
+                 }
+             }
+-            & $tickAdd $thread 16
++            $s.Add(@{Op='syncht'}); & $traceTick 40
+ 
+         }
+         # The output tile (position m - 3): the three branches' mean, or one branch's last level.
+@@ -1958,7 +1976,24 @@
+             $bodies.Add((& $branchBodies "body_combine_residualB_$($sharing[0])$sfx" "body_combine_residual_separate$sfx" @($planesStride,$ringBytes,(6L*$recordBytes),0L,0L,$sharing[1])))
+         }
+         $bodies.Add((& $branchBodies "body_combine_convB$sfx" "body_combine_conv$sfx" @($planesStride,$ringBytes,(6L*$recordBytes),0L,0L,0L)))
+-        for($branch=0;$branch -lt $branches;$branch++){ for($st=0;$st -lt 6;$st++){ $bodies.Add(@("body_convB_b${branch}_s$st$sfx",@(New-KokoroHmxConvPlanesSteps -LowByteOnlyGroup3 -InputChannels $Channels -OutputChannels $Channels -Kernel $sectionKernels[$branch] -Dilation $(if($st % 2){1}else{1+$st}) @convPlanes -PlaneStride $planeStride -TapDelay (& $tapDelay $branch $st) -LabelPrefix "g16b_b${branch}_s$st$sfx"))) } }
++        for($branch=0;$branch -lt $branches;$branch++){ for($st=0;$st -lt 6;$st++){ $traceBody=@("body_convB_b${branch}_s$st$sfx",@(New-KokoroHmxConvPlanesSteps -LowByteOnlyGroup3 -InputChannels $Channels -OutputChannels $Channels -Kernel $sectionKernels[$branch] -Dilation $(if($st % 2){1}else{1+$st}) @convPlanes -PlaneStride $planeStride -TapDelay (& $tapDelay $branch $st) -LabelPrefix "g16b_b${branch}_s$st$sfx"))
++            if($branch -eq 0 -and $sectionSchedule -eq 'Backward'){
++                $traceSteps = [Collections.Generic.List[hashtable]]::new()
++                $traceSteps.AddRange([hashtable[]]$traceBody[1])
++                $first = $traceSteps.FindIndex({param($step) $step.Op -eq 'hmx-pair'})
++                if($first -lt 0){throw 'Worker HMX body has no issue packet.'}
++                $traceSteps.InsertRange($first,[hashtable[]]@(
++                    @{Op='load';d=26;s=22;Offset=24},
++                    @{Op='gtu-zero';d=0;s=26},
++                    @{Op='jump-p';u=0;Label="trace_ready_$($traceBody[0])"},
++                    @{Op='hwticks';d=26},
++                    @{Op='store-d';s=22;t=26;Offset=24},
++                    @{Op='label';Name="trace_ready_$($traceBody[0])"}
++                ))
++                $traceBody[1]=$traceSteps.ToArray()
++            }
++            $bodies.Add($traceBody)
++        } }
+     }
+     $bodies.Add(@("body_mean$sfx",@(& $packets @(New-KokoroBranchMean16Steps -Channels $Channels -LabelPrefix "branchmean16$sfx"))))
+     for($b=0;$b -lt $branches;$b++){foreach($d in 1,3,5){$bodies.Add(@("body_conv_b${b}_d$d$sfx",@(New-KokoroHmxConvPlanesSteps -LowByteOnlyGroup3 -InputChannels $Channels -OutputChannels $Channels -Kernel $sectionKernels[$b] -Dilation $d @convPlanes -PlaneStride $planeStride -LabelPrefix "g16_b${b}_d$d$sfx")))}}

@@ -161,3 +161,72 @@ both output halves with different values. Compare the reference
 `:single` issue sequence against candidate issue forms before
 changing the generator. Probe a wrapped activation window and dense
 64-row `:cm` packing independently, with both conversions checked.
+
+## SM8550 operand and worker timeline follow-up
+
+The [standalone V73 probe](../../tools/experiments/generator-throughput-20261119/Invoke-V73OperandProbe.ps1)
+uses four distinct activation panels and sparse weights with different
+coefficients in each output half. The four individual `:single` issues
+and their accumulated sum matched the scalar oracle for all 2,048
+output lanes. The probe recovers both accumulator halves with the
+generator's retained high-byte and releasing low-byte stores. Neither
+half saturates in this fixture.
+
+- A single `activation.ub` / `weight.b :deep` pair with 2, 4 or 8 KiB
+  ranges produced panel zero alone in both halves. Extending the range
+  on the `:single` weight operand also produced panel zero alone.
+  This accounts for the aligned-span PCM failure. Three dot-product
+  contributions were missing from each affected tap.
+- Plain `weight.b` gave panel zero in the first half and left the
+  second half at its bias-only value at all three ranges.
+- The 16-row shifted ring read matched the physically contiguous
+  poison continuation in both halves. The explicitly packed logical
+  wrap gave different results. The unmodified `:single` operand
+  therefore needs the mirrored data when crossing this ring boundary.
+
+The [raw-window comparison](../../tools/experiments/generator-throughput-20261119/v73-operand-windows.csv)
+records both half digests. The probe ELF was
+`C960AA2DE6F62A64BDCEFBBEABED87C2C6A1D4C53CA2B2BC5E455A4A62FFE1E2`.
+Dense `:cm` received no speed credit. A valid comparison still needs
+shifted 64-row input preparation and exact writeback for both windows.
+
+The [worker timeline variant](../../tools/experiments/generator-throughput-20261119/section-worker-timeline.patch)
+records the last observed stage per worker in each backward section.
+Activation ready is after the neighbor dependency and publication fence.
+First issue is sampled immediately before the first HMX pair. Last
+result visible is confirmed by reading the final wrapping-plane word
+after unlock, so that interval includes unlock and the confirmation
+load. The combine marker follows a fence. These are instrumented
+snapshots from one invocation. The chunked Main256 section is outside
+this trace.
+
+| Backward section | Fill start to ready µs | Ready to lock µs | Lock to first issue µs | First issue to visible µs | Visible to combine complete µs |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| Main128 | 14.349 | 1.536 | 0.182 | 2.656 | 2.188 |
+| Source256 | 6.068 | 0.625 | 0.104 | 3.021 | 1.875 |
+| Source128 | 6.849 | 1.016 | 0.052 | 1.458 | 0.964 |
+
+The table gives per-section medians over 24 worker-stage records.
+The [tick capture](../../tools/experiments/generator-throughput-20261119/worker-timeline-ticks.csv)
+contains the individual timelines. Build `section-worker-timeline`
+with the experiment checkout and resident export scripts, then run
+the managed fixture probe once with raw output capture. Extract the
+records with
+[read-worker-timeline.py](../../tools/experiments/generator-throughput-20261119/read-worker-timeline.py).
+The trace ELF `CB68C246D22BE9981DE703905FB8EA3BF51B7A5D8A20A55C9E0C2CA590CB3FD9`
+matched primary PCM and restored startup.
+
+The fresh direct-copy managed control
+`388F24CB7B96E00975AF97E2A3E6ED438E112722ECFE79F631A3B042B9FD6737`
+matched the reference on all 18 invocations across both seeds.
+Both sessions restored startup. The 125× and 130× DSP budgets are
+94.200 ms and 90.577 ms.
+
+| Control seed | Warm runs | DSP median ms | Host invoke median ms | DSP realtime |
+| --- | ---: | ---: | ---: | ---: |
+| Primary | 12 | 102.020 | 104.172 | 115.42× |
+| Second | 4 | 101.579 | 103.803 | 115.92× |
+
+Phone access used `C:/Dev/pwsh/scripts/adb.ps1`. Raw artifacts are under
+`build/residual-layout-20261120`, with `operand-probe`,
+`operand-fresh-control` and `worker-timeline` prefixes.
