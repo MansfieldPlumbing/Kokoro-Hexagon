@@ -383,7 +383,6 @@ class HuntReverie {
 }
 class HuntSession {
     [double] $FamilyAlpha = 0.00269979606326019 # two-sided normal 3-sigma reference; strict <
-    [int] $Epoch
     [bool] $Synthetic
     [System.Runtime.CompilerServices.ConditionalWeakTable[object, HuntSemanticAttachment]] $Attachments = [System.Runtime.CompilerServices.ConditionalWeakTable[object, HuntSemanticAttachment]]::new()
     [System.Collections.Generic.HashSet[string]] $Consumed = [System.Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
@@ -404,10 +403,6 @@ class HuntSession {
         }
         return $att
     }
-    [double] NextAlpha() {
-        $this.Epoch++
-        return $this.FamilyAlpha * [Math]::Pow(0.5, $this.Epoch)
-    }
 }
 
 function Initialize-HuntEts {
@@ -424,7 +419,6 @@ function Initialize-HuntEts {
         }
         $dormant = 0; foreach ($r in $this.Reveries) { if ($r.Status -eq 'DormantCooldown') { $dormant++ } }
         [pscustomobject]@{
-            Epoch            = $this.Epoch
             Synthetic        = $this.Synthetic
             TotalPatterns    = $this.Patterns.Count
             AdmittedOrNom    = $admitted
@@ -461,7 +455,7 @@ function Promote-HuntPatternToPsc {
 }
 
 # ==============================================================================
-# 4. Provenance Audit, Pattern Search, Sign Tail & Frozen Epoch Judgment
+# 4. Provenance Audit, Pattern Search, Sign Tail & Evidence Judgment
 # ==============================================================================
 function Assert-HuntCases {
     param([HuntCase[]]$Cases, [bool]$Synthetic)
@@ -631,8 +625,8 @@ function Ergo-HuntOutcome {
     return $o
 }
 
-class HuntEpoch {
-    [HuntSession] $Session; [int] $Number; [double] $Alpha; [HuntTrial[]] $Trials = @(); [HuntCase[]] $Inputs = @(); [bool] $Closed
+class HuntEvidenceReview {
+    [HuntSession] $Session; [double] $Alpha; [HuntTrial[]] $Trials = @(); [HuntCase[]] $Inputs = @(); [bool] $Closed
 }
 
 function Start-HuntJudgment {
@@ -663,34 +657,34 @@ function Start-HuntJudgment {
     }
     foreach ($id in $newBlocks) { $null = $Session.Consumed.Add($id) }
     foreach ($c in $Inputs) { $null = $Session.ConsumedOwners.Add($c.Block.Owner) }
-    $epoch = [HuntEpoch]::new(); $epoch.Session = $Session; $epoch.Alpha = $Session.NextAlpha(); $epoch.Number = $Session.Epoch; $epoch.Inputs = $Inputs
+    $review = [HuntEvidenceReview]::new(); $review.Session = $Session; $review.Alpha = $Session.FamilyAlpha; $review.Inputs = $Inputs
     $trials = [System.Collections.Generic.List[HuntTrial]]::new()
     foreach ($p in $Patterns) {
         $trial = [HuntTrial]::new(); $trial.Pattern = $p; $preds = [System.Collections.Generic.List[HuntPrediction]]::new()
         foreach ($c in $Inputs) { $pred = When-HuntPattern $p $c -Trial; if ($null -ne $pred) { $preds.Add($pred) } }
         $trial.Predictions = $preds.ToArray(); $trials.Add($trial); $Session.Trials.Add($trial)
     }
-    $epoch.Trials = $trials.ToArray(); return $epoch
+    $review.Trials = $trials.ToArray(); return $review
 }
 
 function Complete-HuntJudgment {
-    param([HuntEpoch]$Epoch, [HuntCase[]]$Holdout)
-    if ($Epoch.Closed) { throw 'Frozen epoch already judged' }
-    $Epoch.Closed = $true; $Session = $Epoch.Session
+    param([HuntEvidenceReview]$Review, [HuntCase[]]$Holdout)
+    if ($Review.Closed) { throw 'Evidence review already judged' }
+    $Review.Closed = $true; $Session = $Review.Session
     Assert-HuntCases $Holdout $Session.Synthetic
     $caseByRef = [System.Collections.Generic.Dictionary[object, HuntCase]]::new([System.Collections.Generic.ReferenceEqualityComparer]::Instance)
     foreach ($c in $Holdout) { if (!$caseByRef.TryAdd($c.Referent, $c)) { throw 'Ambiguous held-out coordinate; adapter must resolve observation identity' } }
-    if ($Holdout.Length -ne $Epoch.Inputs.Length) { throw 'Outcome cohort differs from frozen input cohort' }
-    foreach ($inputCase in $Epoch.Inputs) {
+    if ($Holdout.Length -ne $Review.Inputs.Length) { throw 'Outcome cohort differs from frozen input cohort' }
+    foreach ($inputCase in $Review.Inputs) {
         if (!$caseByRef.ContainsKey($inputCase.Referent)) { throw 'Frozen input missing from outcome cohort' }
         $observed = $caseByRef[$inputCase.Referent]
         if (![object]::ReferenceEquals($inputCase.Block, $observed.Block) -or ![object]::Equals($inputCase.Context, $observed.Context)) {
             throw 'Outcome provenance or context changed after freeze'
         }
     }
-    $family = $Epoch.Trials.Length
-    foreach ($trial in $Epoch.Trials) {
-        $p = $trial.Pattern; $j = [HuntJudgment]::new(); $j.Alpha = $Epoch.Alpha; $j.Reliance = [HuntReliance]::Insufficient
+    $family = $Review.Trials.Length
+    foreach ($trial in $Review.Trials) {
+        $p = $trial.Pattern; $j = [HuntJudgment]::new(); $j.Alpha = $Review.Alpha; $j.Reliance = [HuntReliance]::Insufficient
         $blocks = [System.Collections.Generic.Dictionary[HuntBlock, double[]]]::new([System.Collections.Generic.ReferenceEqualityComparer]::Instance)
         $families = [System.Collections.Generic.HashSet[object]]::new()
         $used = [System.Collections.Generic.List[HuntCase]]::new(); $outcomes = [System.Collections.Generic.List[HuntOutcome]]::new()
@@ -712,7 +706,7 @@ function Complete-HuntJudgment {
         $j.IndependentBlocks = $blocks.Count; $j.OriginFamilies = $families.Count
         $j.P = Get-HuntSignTail $j.Wins $j.Losses; $j.AdjustedP = [Math]::Min(1.0, $j.P * $family)
         $j.Evidence = $used.ToArray(); $j.MissingOutcomes = $missing
-        if ($missing -eq 0 -and $j.AdjustedP -lt $Epoch.Alpha -and $j.OriginFamilies -ge 3 -and $j.OutsideBound -eq 0) {
+        if ($missing -eq 0 -and $j.AdjustedP -lt $Review.Alpha -and $j.OriginFamilies -ge 3 -and $j.OutsideBound -eq 0) {
             $j.Reliance = if ($Session.Synthetic) { [HuntReliance]::SyntheticAdmitted } else { [HuntReliance]::Nominated }
             $j.Reason = 'Frozen held-out paired-loss sign test passed and observed residuals within declared bound; independent source judgment required in real mode'
             $null = $p.TryCompileAndVerifyLowered($used.ToArray())
@@ -736,8 +730,8 @@ function Invoke-HuntJudgment {
     if (!$Patterns.Length) { return }
     $inputs = [System.Collections.Generic.List[HuntCase]]::new()
     foreach ($c in $Holdout) { $v = $c; foreach ($p in $Patterns) { $v = New-HuntInput $v $p.OutputAxis }; $inputs.Add($v) }
-    $epoch = Start-HuntJudgment $Session $Patterns $inputs.ToArray()
-    Complete-HuntJudgment $epoch $Holdout
+    $review = Start-HuntJudgment $Session $Patterns $inputs.ToArray()
+    Complete-HuntJudgment $review $Holdout
 }
 
 function Reconsider-HuntPattern {
@@ -1101,8 +1095,8 @@ function Invoke-HuntCapturedClock {
     foreach ($test in @(@($spectrum,$holdout),@($waveform,$spectralHoldout))) {
         $pattern=$test[0]
         $checks=$test[1]
-        $epoch=Start-HuntJudgment ([HuntSession]::new()) @($pattern) @(foreach ($case in $checks) { New-HuntInput $case $pattern.OutputAxis $pattern.InputAxis })
-        $judged=Complete-HuntJudgment $epoch $checks
+        $review=Start-HuntJudgment ([HuntSession]::new()) @($pattern) @(foreach ($case in $checks) { New-HuntInput $case $pattern.OutputAxis $pattern.InputAxis })
+        $judged=Complete-HuntJudgment $review $checks
         $limits.Add($judged.Current)
         if ($judged.Current.Evidence.Count -ne $checks.Count -or $judged.Current.OutsideBound -or
             !$pattern.TryCompileAndVerifyLowered($checks)) { throw 'Held-out stock geometry or lowering parity failed.' }

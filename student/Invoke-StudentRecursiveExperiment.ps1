@@ -137,8 +137,8 @@ foreach ($cohort in $cohorts) {
             $projection
         })
         $input = @(foreach ($case in $observations) { New-HuntInput $case $pattern.OutputAxis $pattern.InputAxis })
-        $epoch = Start-HuntJudgment ([HuntSession]::new()) @($pattern) $input
-        $outcome = Complete-HuntJudgment $epoch $observations
+        $review = Start-HuntJudgment ([HuntSession]::new()) @($pattern) $input
+        $outcome = Complete-HuntJudgment $review $observations
         } catch {
             $failure = $_.Exception.GetType().FullName
             Write-Information "Investigation $key failed with $failure" -InformationAction Continue
