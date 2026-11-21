@@ -48,6 +48,63 @@ foreach ($spelling in $probes) {
     }
 }
 "humanTimingBearings=$($focus.HumanWordDurations.Count) unresolvedStressCases=$($focus.UnresolvedStress.Count) matchingWordDurations=$(($focus.UnresolvedStress | Measure-Object -Property {$_.AvailableWordDurations.Count} -Sum).Sum)"
+$timing=$focus.Timing
+if ($focus.UnresolvedStress.Count -ne 23 -or !$timing.Windows.Count -or !$timing.ContainmentCount -or !$timing.AcousticWindowCount) {
+    throw 'The retained stress questions or human timing evidence are missing.'
+}
+$all=@(foreach ($documentIndex in $timing.ByDocument.get_Values()) {
+    foreach ($wordList in $documentIndex.get_Values()) {
+        foreach ($bearing in $wordList) { $bearing }
+    }
+})
+if ($all.Count -ne $timing.ContainmentCount) { throw 'Temporal index lost candidate relationships.' }
+foreach ($bearing in $all) {
+    if ($bearing.WordIndex -notin $bearing.Anchor.CandidateTokens -or
+        ![object]::ReferenceEquals($bearing.Window.Utterance,$bearing.Anchor.Utterance) -or
+        ![object]::ReferenceEquals($bearing.Window.Recording,$bearing.Anchor.Utterance.Chapter.Wave) -or
+        $bearing.Window.FirstNativeSample -lt 0 -or
+        $bearing.Window.EndNativeSample -gt $bearing.Window.NativeCoverageEnd -or
+        $bearing.Window.FirstNativeSample -ge $bearing.Window.EndNativeSample) { throw 'Broken human temporal provenance.' }
+}
+$lateChapters=@($timing.Windows | ForEach-Object {$_.Utterance.Chapter} | Where-Object ChapterNumber -GT 6 | Sort-Object ChapterNumber -Unique)
+$queries=@(foreach ($query in @($focus.Hits)+@($focus.Dormant)) {
+    foreach ($chapter in $lateChapters) {
+        if ([object]::ReferenceEquals($chapter.Document,$query.Sentence.Document) -and
+            $query.WordIndex -ge $chapter.FirstToken -and $query.WordIndex -le $chapter.LastToken) { $query; break }
+    }
+})
+if (!$queries.Count) { throw 'No retained morphology questions in the later chapters.' }
+$exhaustive=[Collections.Generic.List[object]]::new()
+$watch=[Diagnostics.Stopwatch]::StartNew()
+foreach ($query in $queries) {
+    $scan=@(foreach ($bearing in $all) {
+        if ($bearing.WordIndex -eq $query.WordIndex -and
+            [object]::ReferenceEquals($bearing.Anchor.Utterance.Chapter.Document,$query.Sentence.Document)) { $bearing }
+    })
+    $exhaustive.Add($scan)
+}
+$scanMilliseconds=$watch.Elapsed.TotalMilliseconds
+$indexedResults=[Collections.Generic.List[object]]::new()
+$watch.Restart()
+foreach ($query in $queries) { $indexedResults.Add($timing.Find($query.Sentence.Document,$query.WordIndex)) }
+$lookupMilliseconds=$watch.Elapsed.TotalMilliseconds
+for ($q=0;$q -lt $queries.Count;$q++) {
+    if ($indexedResults[$q].Count -ne $exhaustive[$q].Count) { throw 'Indexed temporal retrieval differs from exhaustive retrieval.' }
+    for ($i=0;$i -lt $indexedResults[$q].Count;$i++) {
+        if (![object]::ReferenceEquals($indexedResults[$q][$i],$exhaustive[$q][$i])) { throw 'Temporal retrieval replaced canonical evidence.' }
+    }
+}
+$conversation=@($timing.ConversationDurations | Where-Object OrderedAlternatives -GT 0)
+foreach ($range in $conversation) {
+    if ($range.ShortestSamples -le 0 -or $range.LongestSamples -lt $range.ShortestSamples) { throw 'Invalid duration bounds.' }
+}
+"temporalWindows=$($timing.Windows.Count) rmsWindows=$($timing.AcousticWindowCount) containment=$($all.Count) unaligned=$($timing.UnalignedAnchors.Count) ambiguous=$($timing.AmbiguousAnchors.Count) unprojectable=$($timing.UnprojectableUtterances.Count) multiword=$($timing.MultiwordUtterances.Count)"
+"morphologyWithHumanTiming=$($timing.WordQuestionsWithTiming) morphologyWithBothContexts=$($timing.WordQuestionsWithBothContexts) unresolvedStressWithContainment=$(@($focus.UnresolvedStress | Where-Object AvailableTiming).Count)"
+"conversationWords=$($timing.ConversationDurations.Count) supportedRanges=$($conversation.Count) competingRanges=$(@($conversation | Where-Object OrderedAlternatives -GT 1).Count)"
+$same=@($timing.ProceduralChecks | Where-Object {$_.Matches()})
+if ($timing.ProceduralChecks.Count -ne 6) { throw 'The retained procedural histories were not all evaluated.' }
+"proceduralTransferTrials=$($timing.ProceduralChecks.Count) matchingExtents=$($same.Count) contradictoryExtents=$($timing.ProceduralChecks.Count-$same.Count)"
+"laterChapterQueries=$($queries.Count) exhaustiveVisits=$($queries.Count*$all.Count) indexedLookups=$($queries.Count) scanMs=$([math]::Round($scanMilliseconds,2)) lookupMs=$([math]::Round($lookupMilliseconds,2)) buildMs=$([math]::Round($timing.BuildMilliseconds,2)) buildAndLookupMs=$([math]::Round($timing.BuildMilliseconds+$lookupMilliseconds,2)) reconsiderationMs=$([math]::Round($timing.ReconsiderationMilliseconds,2))"
 "historicalRecall indexedLookups=$($probes.Count) exhaustiveVisits=$candidateVisits"
 foreach ($bearing in $focus.PronunciationBearings) {
     foreach ($anchor in $bearing.HumanCandidates) {

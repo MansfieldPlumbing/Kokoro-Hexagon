@@ -1144,6 +1144,8 @@ class HuntMorphologicalReading {
     [int] $WordIndex
     [string] $Spelling
     [object[]] $Parses
+    [HuntHumanContainment[]] $HumanTiming
+    [object[]] $TeacherContexts
 
     [bool] CompetingRules() {
         if ($this.Parses.Length -lt 2) { return $false }
@@ -1189,6 +1191,198 @@ class HuntUnresolvedStress : HuntReverie {
     [object] $Referent
     [type] $RequiredCoordinate = [HuntSyllableStressCoordinate]
     [HuntHumanWordDuration[]] $AvailableWordDurations
+    [HuntHumanContainment[]] $AvailableTiming
+}
+
+class HuntHumanUtteranceWindow {
+    [object] $Utterance
+    [object] $Recording
+    [long] $FirstNativeSample
+    [long] $EndNativeSample
+    [long] $NativeCoverageEnd
+    [int] $FirstRmsFrame
+    [int] $RmsFrameCount
+    [double] $MeanRms = [double]::NaN
+}
+
+class HuntHumanContainment {
+    [object] $Anchor
+    [int] $WordIndex
+    [HuntHumanUtteranceWindow] $Window
+}
+
+class HuntTemporalInvestigation {
+    [Collections.Generic.Dictionary[object,Collections.Generic.Dictionary[int,Collections.Generic.List[HuntHumanContainment]]]] $ByDocument =
+        [Collections.Generic.Dictionary[object,Collections.Generic.Dictionary[int,Collections.Generic.List[HuntHumanContainment]]]]::new([Collections.Generic.ReferenceEqualityComparer]::Instance)
+    [object[]] $UnalignedAnchors
+    [object[]] $AmbiguousAnchors
+    [object[]] $UnprojectableUtterances
+    [object[]] $MultiwordUtterances
+    [HuntHumanUtteranceWindow[]] $Windows
+    [int] $ContainmentCount
+    [int] $AcousticWindowCount
+    [int] $WordQuestionsWithTiming
+    [int] $WordQuestionsWithBothContexts
+    [double] $BuildMilliseconds
+    [double] $ReconsiderationMilliseconds
+    [HuntConversationDurationRange[]] $ConversationDurations
+    [HuntProceduralTimingCheck[]] $ProceduralChecks
+
+    [HuntHumanContainment[]] Find([object]$document,[int]$wordIndex) {
+        $words=$null
+        $matches=$null
+        if (!$document -or !$this.ByDocument.TryGetValue($document,[ref]$words) -or !$words.TryGetValue($wordIndex,[ref]$matches)) { return @() }
+        return $matches.ToArray()
+    }
+}
+
+class HuntConversationDurationRange {
+    [object] $Hypothesis
+    [Nullable[long]] $ShortestSamples
+    [Nullable[long]] $LongestSamples
+    [int] $OrderedAlternatives
+}
+
+class HuntProceduralTimingCheck {
+    [object] $Execution
+    [object] $GeneratorClock
+    [object] $WaveformClock
+    [int[]] $TokenStarts
+    [long] $PredictedSamples
+    [long] $ObservedSamples
+
+    [bool] Matches() {
+        return $this.PredictedSamples -eq $this.ObservedSamples -and
+            $this.TokenStarts[-1] -eq $this.GeneratorClock.FrameCount -and
+            $this.WaveformClock.FrameCount -eq $this.ObservedSamples
+    }
+}
+
+function Get-HuntProceduralTimingChecks([HuntPattern]$Candidate,[object[]]$Comparisons) {
+    foreach ($comparison in $Comparisons) {
+        $execution=$comparison.Teacher.ProceduralExecution
+        if (!$execution) { continue }
+        $check=[HuntProceduralTimingCheck]::new()
+        $check.Execution=$execution
+        $check.GeneratorClock=$execution.GeneratorInput.FrameClock()
+        $check.WaveformClock=$execution.Waveform.FrameClock()
+        if (!$check.GeneratorClock -or !$check.WaveformClock) { continue }
+        # This is a transfer trial outside the admitted stock recipe scope.
+        $check.PredictedSamples=[long][math]::Round($Candidate.EvaluateProjected($execution.GeneratorInput.Extent))
+        $check.ObservedSamples=$execution.Waveform.Read().Length
+        $check.TokenStarts=$execution.TokenTickStarts()
+        $check
+    }
+}
+
+function Get-HuntConversationDurations([object[]]$Readings) {
+    foreach ($reading in $Readings) {
+        if (!$reading.Onset -or !$reading.Release -or
+            ![object]::ReferenceEquals($reading.Onset.Annotation,$reading.Release.Annotation) -or
+            ![object]::ReferenceEquals($reading.Onset.Wave,$reading.Release.Wave)) {
+            throw 'Cannot compose conversation boundaries across different occurrences or clocks.'
+        }
+        $range=[HuntConversationDurationRange]::new()
+        $range.Hypothesis=$reading
+        foreach ($start in $reading.Onset.CandidateSamples) {
+            foreach ($end in $reading.Release.CandidateSamples) {
+                if ($end -le $start) { continue }
+                $duration=$end-$start
+                if (!$range.OrderedAlternatives -or $duration -lt $range.ShortestSamples) { $range.ShortestSamples=$duration }
+                if (!$range.OrderedAlternatives -or $duration -gt $range.LongestSamples) { $range.LongestSamples=$duration }
+                $range.OrderedAlternatives++
+            }
+        }
+        $range
+    }
+}
+
+function Invoke-HuntHumanTemporalInvestigation([object[]]$Anchors) {
+    $watch=[Diagnostics.Stopwatch]::StartNew()
+    $investigation=[HuntTemporalInvestigation]::new()
+    $windows=[Collections.Generic.Dictionary[object,HuntHumanUtteranceWindow]]::new([Collections.Generic.ReferenceEqualityComparer]::Instance)
+    $unaligned=[Collections.Generic.List[object]]::new()
+    $ambiguous=[Collections.Generic.List[object]]::new()
+    $invalid=[Collections.Generic.HashSet[object]]::new([Collections.Generic.ReferenceEqualityComparer]::Instance)
+    $seen=[Collections.Generic.HashSet[object]]::new([Collections.Generic.ReferenceEqualityComparer]::Instance)
+    $multi=[Collections.Generic.HashSet[object]]::new([Collections.Generic.ReferenceEqualityComparer]::Instance)
+    foreach ($anchor in $Anchors) {
+        $utterance=$anchor.Utterance
+        if (!$seen.Add($utterance)) { $null=$multi.Add($utterance) }
+        if (!$anchor.CandidateTokens.Count) { $unaligned.Add($anchor); continue }
+        if ($anchor.CandidateTokens.Count -gt 1) { $ambiguous.Add($anchor) }
+        if ($invalid.Contains($utterance)) { continue }
+        $window=$null
+        if (!$windows.TryGetValue($utterance,[ref]$window)) {
+            $recording=$utterance.Chapter.Wave
+            $source=$recording.Source
+            $startTicks=$utterance.DecodedStartTicks
+            $durationTicks=$utterance.DecodedDurationTicks
+            if ($recording.Rate -le 0 -or ($source.SampleRate -gt 0 -and $recording.Rate -ne $source.SampleRate) -or
+                $recording.Channels -le 0 -or $recording.Hop -le 0 -or
+                $startTicks -lt 0 -or $durationTicks -le 0 -or $startTicks -gt [long]::MaxValue-$durationTicks) {
+                $null=$invalid.Add($utterance)
+                continue
+            }
+            $endTicks=$startTicks+$durationTicks
+            $nativeScale=[decimal]$recording.Rate/[TimeSpan]::TicksPerSecond
+            $first=[decimal]::Floor($startTicks*$nativeScale)
+            $end=[decimal]::Ceiling($endTicks*$nativeScale)
+            # MP3 inventory entries can omit an exact sample count. The native capture
+            # verified every frame start, including the final frame's start.
+            $coverage=if ($source.SampleCount -gt 0) { $source.SampleCount } else {
+                ([long]($recording.Observations.Length/(5*$recording.Channels))-1)*$recording.Hop
+            }
+            if ($end -gt $coverage -or $first -ge $end) {
+                $null=$invalid.Add($utterance)
+                continue
+            }
+            $window=[HuntHumanUtteranceWindow]::new()
+            $window.Utterance=$utterance
+            $window.Recording=$recording
+            $window.FirstNativeSample=[long]$first
+            $window.EndNativeSample=[long]$end
+            $window.NativeCoverageEnd=$coverage
+            $wave=$recording.Prosody
+            if ($wave -and $wave.Rate -gt 0 -and $wave.Hop -gt 0 -and [object]::ReferenceEquals($wave.Source,$source)) {
+                # Only RMS frames wholly within the recognizer window are measured.
+                $denominator=[decimal]$wave.Hop*[TimeSpan]::TicksPerSecond
+                $firstRms=[decimal]::Ceiling([decimal]$startTicks*$wave.Rate/$denominator)
+                $endRms=[math]::Min($wave.Rms.Length,[decimal]::Floor([decimal]$endTicks*$wave.Rate/$denominator))
+                if ($endRms -gt $firstRms) {
+                    $window.FirstRmsFrame=[int]$firstRms
+                    $window.RmsFrameCount=[int]($endRms-$firstRms)
+                    $sum=0.0
+                    for ($i=$window.FirstRmsFrame;$i -lt $endRms;$i++) { $sum+=$wave.Rms[$i] }
+                    $window.MeanRms=$sum/$window.RmsFrameCount
+                    $investigation.AcousticWindowCount++
+                }
+            }
+            $windows.Add($utterance,$window)
+        }
+        $document=$utterance.Chapter.Document
+        $byWord=$null
+        if (!$investigation.ByDocument.TryGetValue($document,[ref]$byWord)) {
+            $byWord=[Collections.Generic.Dictionary[int,Collections.Generic.List[HuntHumanContainment]]]::new()
+            $investigation.ByDocument.Add($document,$byWord)
+        }
+        foreach ($word in $anchor.CandidateTokens) {
+            $bearing=[HuntHumanContainment]::new()
+            $bearing.Anchor=$anchor
+            $bearing.WordIndex=$word
+            $bearing.Window=$window
+            if (!$byWord.ContainsKey($word)) { $byWord.Add($word,[Collections.Generic.List[HuntHumanContainment]]::new()) }
+            $byWord[$word].Add($bearing)
+            $investigation.ContainmentCount++
+        }
+    }
+    $investigation.UnalignedAnchors=$unaligned.ToArray()
+    $investigation.AmbiguousAnchors=$ambiguous.ToArray()
+    $investigation.UnprojectableUtterances=@($invalid)
+    $investigation.MultiwordUtterances=@($multi)
+    $investigation.Windows=@($windows.get_Values())
+    $investigation.BuildMilliseconds=$watch.Elapsed.TotalMilliseconds
+    $investigation
 }
 
 function Get-HuntHumanWordDurations([object[]]$Anchors) {
@@ -1221,10 +1415,16 @@ function Get-HuntHumanWordDurations([object[]]$Anchors) {
     }
 }
 
-function Get-HuntUnresolvedStress([HuntPronunciationBearing[]]$Pronunciations,[HuntHumanWordDuration[]]$Durations) {
+function Get-HuntUnresolvedStress([HuntPronunciationBearing[]]$Pronunciations,[HuntHumanWordDuration[]]$Durations,[HuntTemporalInvestigation]$Timing) {
     foreach ($pronunciation in $Pronunciations) {
         $question=[HuntUnresolvedStress]::new()
         $question.Referent=$pronunciation
+        $question.AvailableTiming=$Timing.Find($pronunciation.Sentence.Document,$pronunciation.WordIndex)
+        $question.CooldownReason=if ($question.AvailableTiming.Count) {
+            'Recognizer containment does not establish syllable boundaries or stress.'
+        } else {
+            'No retained recognizer alignment places this occurrence in a human waveform interval.'
+        }
         $question.AvailableWordDurations=@($Durations | Where-Object {
             $_.WordIndex -eq $pronunciation.WordIndex -and
             [object]::ReferenceEquals($_.Anchor.Utterance.Chapter.Document,$pronunciation.Sentence.Document)
@@ -1295,6 +1495,7 @@ class HuntMorphologyInvestigation {
     [HuntPronunciationBearing[]] $PronunciationBearings
     [HuntHumanWordDuration[]] $HumanWordDurations
     [HuntUnresolvedStress[]] $UnresolvedStress
+    [HuntTemporalInvestigation] $Timing
     [int] $Examined
     [Collections.Generic.HashSet[string]] $WithheldSpellings = [Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
 

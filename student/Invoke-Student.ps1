@@ -3999,7 +3999,23 @@ function Invoke-StudentEvidenceHunt($Image, [string]$BankPath) {
         Get-HuntPronunciationBearings $document $comparisons $humanAnchors $lexemes $dictionary $lexicalAlternatives
     })
     $focus.HumanWordDurations=@(Get-HuntHumanWordDurations $humanAnchors)
-    $focus.UnresolvedStress=@(Get-HuntUnresolvedStress $focus.PronunciationBearings $focus.HumanWordDurations)
+    $focus.Timing=Invoke-HuntHumanTemporalInvestigation $humanAnchors
+    $timingWatch=[Diagnostics.Stopwatch]::StartNew()
+    $focus.UnresolvedStress=@(Get-HuntUnresolvedStress $focus.PronunciationBearings $focus.HumanWordDurations $focus.Timing)
+    foreach ($reading in @($focus.Hits)+@($focus.Dormant)) {
+        $document=$reading.Sentence.Document
+        $reading.HumanTiming=$focus.Timing.Find($document,$reading.WordIndex)
+        if (!$reading.HumanTiming.Count) { continue }
+        $focus.Timing.WordQuestionsWithTiming++
+        $reading.TeacherContexts=@($comparisons | Where-Object {
+            [object]::ReferenceEquals($_.Teacher.Document,$document) -and $reading.WordIndex -in $_.Teacher.WordOccurrenceIndices
+        })
+        if ($reading.TeacherContexts.Count) { $focus.Timing.WordQuestionsWithBothContexts++ }
+    }
+    $focus.Timing.ReconsiderationMilliseconds=$timingWatch.Elapsed.TotalMilliseconds
+    $conversation=Open-HuntSpeechView $script:StudentRoot $BankPath 'OpenYap/'
+    $focus.Timing.ConversationDurations=@(Get-HuntConversationDurations $conversation.ConversationReadings)
+    $focus.Timing.ProceduralChecks=@(Get-HuntProceduralTimingChecks $result.Pattern $comparisons)
     $Image.PSObject.Properties.Add([psnoteproperty]::new('MorphologicalInvestigation',$focus))
     $node
 }

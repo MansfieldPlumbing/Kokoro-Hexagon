@@ -83,7 +83,7 @@ foreach ($chapter in $investigation.HumanChapters) {
 }
 $investigation.HumanWordAnchors=@(foreach ($anchors in $wordAnchors.Values) { $anchors })
 $teacherRoot=Join-Path $BankPath 'paired-teachers'
-$investigation.Comparisons=@(if (Test-Path -LiteralPath $teacherRoot) {
+$investigation.Comparisons=@(if ($documents.Count -and (Test-Path -LiteralPath $teacherRoot)) {
     foreach ($directory in Get-ChildItem -LiteralPath $teacherRoot -Directory | Where-Object Name -NotLike '*.partial') {
         $r=[IO.BinaryReader]::new([IO.File]::OpenRead((Join-Path $directory.FullName 'observation.bin')))
         try {
