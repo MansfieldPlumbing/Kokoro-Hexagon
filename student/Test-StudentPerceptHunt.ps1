@@ -105,6 +105,26 @@ $same=@($timing.ProceduralChecks | Where-Object {$_.Matches()})
 if ($timing.ProceduralChecks.Count -ne 6) { throw 'The retained procedural histories were not all evaluated.' }
 "proceduralTransferTrials=$($timing.ProceduralChecks.Count) matchingExtents=$($same.Count) contradictoryExtents=$($timing.ProceduralChecks.Count-$same.Count)"
 "laterChapterQueries=$($queries.Count) exhaustiveVisits=$($queries.Count*$all.Count) indexedLookups=$($queries.Count) scanMs=$([math]::Round($scanMilliseconds,2)) lookupMs=$([math]::Round($lookupMilliseconds,2)) buildMs=$([math]::Round($timing.BuildMilliseconds,2)) buildAndLookupMs=$([math]::Round($timing.BuildMilliseconds+$lookupMilliseconds,2)) reconsiderationMs=$([math]::Round($timing.ReconsiderationMilliseconds,2))"
+$brackets=$timing.Brackets
+foreach ($trial in $brackets.Trials) {
+    if ([object]::ReferenceEquals($trial.Proposal.Earlier.Window,$trial.Withheld.Window) -or
+        [object]::ReferenceEquals($trial.Proposal.Later.Window,$trial.Withheld.Window) -or
+        ![object]::ReferenceEquals($trial.Proposal.Document,$trial.Withheld.Anchor.Utterance.Chapter.Document)) { throw 'Bracket judgment leaked an utterance or crossed documents.' }
+}
+$early=@($brackets.Trials | Where-Object {!$_.LaterChapter})
+$later=@($brackets.Trials | Where-Object LaterChapter)
+if (!$early.Count -or !$later.Count) { throw 'The two chapter cohorts have no bracket trials.' }
+"bracketsEarly=$($early.Count) outerHits=$(@($early | Where-Object OuterContains).Count) gapHits=$(@($early | Where-Object GapContains).Count)"
+$referenceSamples=0L
+$searchSamples=0L
+foreach ($trial in $later) {
+    $range=$brackets.SearchBounds($trial.Proposal)
+    if ($range.Count -ne 2) { continue }
+    $referenceSamples+=$trial.Withheld.Window.NativeCoverageEnd
+    $searchSamples+=$range[1]-$range[0]
+}
+"bracketsLater=$($later.Count) outerHits=$(@($later | Where-Object OuterContains).Count) gapHits=$(@($later | Where-Object GapContains).Count) calibratedHits=$(@($later | Where-Object CalibratedContains).Count) withheldWithoutBracket=$($brackets.WithheldWithoutBracket) stressSearchWindows=$(@($focus.UnresolvedStress | Where-Object NeighborTimingHypothesis).Count)"
+"calibratedSearchSamples=$searchSamples fullTrackSearchSamples=$referenceSamples calibrationRates=$($brackets.EarlyPaddingBySampleRate.Count)"
 "historicalRecall indexedLookups=$($probes.Count) exhaustiveVisits=$candidateVisits"
 foreach ($bearing in $focus.PronunciationBearings) {
     foreach ($anchor in $bearing.HumanCandidates) {

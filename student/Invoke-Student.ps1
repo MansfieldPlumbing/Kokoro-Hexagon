@@ -4000,6 +4000,7 @@ function Invoke-StudentEvidenceHunt($Image, [string]$BankPath) {
     })
     $focus.HumanWordDurations=@(Get-HuntHumanWordDurations $humanAnchors)
     $focus.Timing=Invoke-HuntHumanTemporalInvestigation $humanAnchors
+    $focus.Timing.Brackets=Invoke-HuntTimingBrackets $focus.Timing
     $timingWatch=[Diagnostics.Stopwatch]::StartNew()
     $focus.UnresolvedStress=@(Get-HuntUnresolvedStress $focus.PronunciationBearings $focus.HumanWordDurations $focus.Timing)
     foreach ($reading in @($focus.Hits)+@($focus.Dormant)) {

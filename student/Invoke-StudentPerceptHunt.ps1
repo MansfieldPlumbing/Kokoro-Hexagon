@@ -1192,6 +1192,7 @@ class HuntUnresolvedStress : HuntReverie {
     [type] $RequiredCoordinate = [HuntSyllableStressCoordinate]
     [HuntHumanWordDuration[]] $AvailableWordDurations
     [HuntHumanContainment[]] $AvailableTiming
+    [HuntTimingBracket] $NeighborTimingHypothesis
 }
 
 class HuntHumanUtteranceWindow {
@@ -1211,6 +1212,131 @@ class HuntHumanContainment {
     [HuntHumanUtteranceWindow] $Window
 }
 
+class HuntTimingBracket {
+    [object] $Document
+    [int] $WordIndex
+    [HuntHumanContainment] $Earlier
+    [HuntHumanContainment] $Later
+
+    [long[]] NativeBounds([long]$padding) {
+        if ($padding -lt 0) { throw 'Negative search padding.' }
+        return [long[]]@(
+            [Math]::Max(0L,$this.Earlier.Window.FirstNativeSample-$padding)
+            [Math]::Min($this.Later.Window.NativeCoverageEnd,$this.Later.Window.EndNativeSample+$padding)
+        )
+    }
+
+    [bool] Covers([HuntHumanUtteranceWindow]$observed,[bool]$gapOnly) {
+        if (![object]::ReferenceEquals($this.Earlier.Window.Recording,$observed.Recording)) { return $false }
+        $low=$this.Earlier.Window.FirstNativeSample
+        $high=$this.Later.Window.EndNativeSample
+        if ($gapOnly) {
+            $low=$this.Earlier.Window.EndNativeSample
+            $high=$this.Later.Window.FirstNativeSample
+        }
+        return $low -lt $high -and $low -le $observed.FirstNativeSample -and $high -ge $observed.EndNativeSample
+    }
+}
+
+class HuntTimingBracketTrial {
+    [HuntTimingBracket] $Proposal
+    [HuntHumanContainment] $Withheld
+    [bool] $LaterChapter
+    [bool] $OuterContains
+    [bool] $GapContains
+    [bool] $CalibratedContains
+}
+
+class HuntTimingBracketInvestigation {
+    [Collections.Generic.Dictionary[object,HuntHumanContainment[]]] $ByChapter =
+        [Collections.Generic.Dictionary[object,HuntHumanContainment[]]]::new([Collections.Generic.ReferenceEqualityComparer]::Instance)
+    [HuntTimingBracketTrial[]] $Trials
+    [int] $WithheldWithoutBracket
+    [Collections.Generic.Dictionary[int,long]] $EarlyPaddingBySampleRate =
+        [Collections.Generic.Dictionary[int,long]]::new()
+
+    [long[]] SearchBounds([HuntTimingBracket]$proposal) {
+        $rate=$proposal.Earlier.Window.Recording.Rate
+        if (!$this.EarlyPaddingBySampleRate.ContainsKey($rate)) { return @() }
+        return $proposal.NativeBounds($this.EarlyPaddingBySampleRate[$rate])
+    }
+
+    [HuntTimingBracket] Nominate([object]$document,[int]$wordIndex) {
+        foreach ($chapter in $this.ByChapter.Keys) {
+            if (![object]::ReferenceEquals($chapter.Document,$document) -or $wordIndex -lt $chapter.FirstToken -or $wordIndex -gt $chapter.LastToken) { continue }
+            $anchors=$this.ByChapter[$chapter]
+            $low=0
+            $high=$anchors.Length
+            while ($low -lt $high) {
+                $mid=$low+(($high-$low) -shr 1)
+                if ($anchors[$mid].WordIndex -lt $wordIndex) { $low=$mid+1 } else { $high=$mid }
+            }
+            if ($low -eq 0 -or $low -eq $anchors.Length -or $anchors[$low].WordIndex -eq $wordIndex) { return $null }
+            $earlier=$anchors[$low-1]
+            $later=$anchors[$low]
+            if ($earlier.Window.FirstNativeSample -gt $later.Window.FirstNativeSample -or
+                $earlier.Window.EndNativeSample -gt $later.Window.EndNativeSample) { return $null }
+            $proposal=[HuntTimingBracket]::new()
+            $proposal.Document=$document
+            $proposal.WordIndex=$wordIndex
+            $proposal.Earlier=$earlier
+            $proposal.Later=$later
+            return $proposal
+        }
+        return $null
+    }
+}
+
+function Invoke-HuntTimingBrackets([HuntTemporalInvestigation]$Timing) {
+    $study=[HuntTimingBracketInvestigation]::new()
+    $withheld=[Collections.Generic.List[HuntHumanContainment]]::new()
+    foreach ($words in $Timing.ByDocument.get_Values()) {
+        $eligible=@(foreach ($group in $words.get_Values()) {
+            if ($group.Count -eq 1 -and $group[0].Anchor.CandidateTokens.Count -eq 1) { $group[0] }
+        })
+        foreach ($chapter in $eligible | Group-Object { $_.Anchor.Utterance.Chapter.ChapterNumber }) {
+            $ordered=@($chapter.Group | Sort-Object WordIndex)
+            $training=[Collections.Generic.List[HuntHumanContainment]]::new()
+            $windowOrder=[Collections.Generic.Dictionary[object,int]]::new([Collections.Generic.ReferenceEqualityComparer]::Instance)
+            foreach ($anchor in $ordered) {
+                if (!$windowOrder.ContainsKey($anchor.Window)) { $windowOrder.Add($anchor.Window,$windowOrder.Count) }
+                if ($windowOrder[$anchor.Window]%5 -eq 2) { $withheld.Add($anchor) } else { $training.Add($anchor) }
+            }
+            $study.ByChapter.Add($ordered[0].Anchor.Utterance.Chapter,$training.ToArray())
+        }
+    }
+    $study.Trials=@(foreach ($target in $withheld) {
+        $chapter=$target.Anchor.Utterance.Chapter
+        $proposal=$study.Nominate($chapter.Document,$target.WordIndex)
+        if (!$proposal) { $study.WithheldWithoutBracket++; continue }
+        $trial=[HuntTimingBracketTrial]::new()
+        $trial.Proposal=$proposal
+        $trial.Withheld=$target
+        $trial.LaterChapter=$chapter.ChapterNumber -gt 6
+        $trial.OuterContains=$proposal.Covers($target.Window,$false)
+        $trial.GapContains=$proposal.Covers($target.Window,$true)
+        $trial
+    })
+    # Calibrate only in the first six chapters, without pooling unlike sample grids.
+    foreach ($trial in $study.Trials) {
+        if ($trial.LaterChapter) { continue }
+        $rate=$trial.Withheld.Window.Recording.Rate
+        $need=[Math]::Max(0L,[Math]::Max(
+            $trial.Proposal.Earlier.Window.FirstNativeSample-$trial.Withheld.Window.FirstNativeSample,
+            $trial.Withheld.Window.EndNativeSample-$trial.Proposal.Later.Window.EndNativeSample))
+        $padding=0L
+        $null=$study.EarlyPaddingBySampleRate.TryGetValue($rate,[ref]$padding)
+        $study.EarlyPaddingBySampleRate[$rate]=[Math]::Max($padding,$need)
+    }
+    foreach ($trial in $study.Trials) {
+        if (!$trial.LaterChapter) { continue }
+        $bounds=$study.SearchBounds($trial.Proposal)
+        $trial.CalibratedContains=$bounds.Length -eq 2 -and
+            $bounds[0] -le $trial.Withheld.Window.FirstNativeSample -and $bounds[1] -ge $trial.Withheld.Window.EndNativeSample
+    }
+    $study
+}
+
 class HuntTemporalInvestigation {
     [Collections.Generic.Dictionary[object,Collections.Generic.Dictionary[int,Collections.Generic.List[HuntHumanContainment]]]] $ByDocument =
         [Collections.Generic.Dictionary[object,Collections.Generic.Dictionary[int,Collections.Generic.List[HuntHumanContainment]]]]::new([Collections.Generic.ReferenceEqualityComparer]::Instance)
@@ -1227,6 +1353,7 @@ class HuntTemporalInvestigation {
     [double] $ReconsiderationMilliseconds
     [HuntConversationDurationRange[]] $ConversationDurations
     [HuntProceduralTimingCheck[]] $ProceduralChecks
+    [HuntTimingBracketInvestigation] $Brackets
 
     [HuntHumanContainment[]] Find([object]$document,[int]$wordIndex) {
         $words=$null
@@ -1420,8 +1547,13 @@ function Get-HuntUnresolvedStress([HuntPronunciationBearing[]]$Pronunciations,[H
         $question=[HuntUnresolvedStress]::new()
         $question.Referent=$pronunciation
         $question.AvailableTiming=$Timing.Find($pronunciation.Sentence.Document,$pronunciation.WordIndex)
+        if (!$question.AvailableTiming.Count -and $Timing.Brackets) {
+            $question.NeighborTimingHypothesis=$Timing.Brackets.Nominate($pronunciation.Sentence.Document,$pronunciation.WordIndex)
+        }
         $question.CooldownReason=if ($question.AvailableTiming.Count) {
             'Recognizer containment does not establish syllable boundaries or stress.'
+        } elseif ($question.NeighborTimingHypothesis) {
+            'Neighboring recognizer windows nominate a search interval without aligning this occurrence.'
         } else {
             'No retained recognizer alignment places this occurrence in a human waveform interval.'
         }
