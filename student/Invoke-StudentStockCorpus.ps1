@@ -280,7 +280,6 @@ try {
                 $w.Write([int]$state.Count)
                 $w.Dispose()
                 [IO.File]::Move($stage,(Join-Path $target $indexName))
-                [IO.File]::Delete($failurePath)
                 $made++
                 $samples=if ($frontStates) { $teacher.KokoroSamples } else { $speech.Pcm.Length }
                 "source=$id start=$($teacher.Start) samples=$samples tensors=$($state.Count) rawBytes=$($state.Raw) newCompressedBytes=$($state.Compressed) wallSeconds=$($clock.Elapsed.TotalSeconds)"

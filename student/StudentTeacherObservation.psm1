@@ -24,6 +24,13 @@ class StudentTeacherObservation {
     [StudentStockExecution] $StockExecution
     [StudentStockExecution] $ProceduralExecution
     [StudentResidualIntervention[]] $ResidualInterventions
+    [StudentUnresolvedProceduralPronunciation[]] $UnresolvedProceduralPronunciations
+}
+
+class StudentUnresolvedProceduralPronunciation {
+    [StudentTeacherObservation] $Teacher
+    [string] $Attempt
+    [string] $Reason
 }
 
 class StudentResidualIntervention {
@@ -450,6 +457,19 @@ function Open-StudentTeacherObservation {
         $item.StockExecution=Open-StudentStockExecution $item
         if ($item.StockExecution) { $item.StockExecution.FrontStateReplay=Open-StudentStockExecution $item 'front-state-replay.bin' }
         $item.ProceduralExecution=Open-StudentStockExecution $item 'procedural-execution.bin'
+        $failureLog=Join-Path $Directory 'procedural-execution.bin.failure.txt'
+        $item.UnresolvedProceduralPronunciations=@(if ([IO.File]::Exists($failureLog)) {
+            $attempt=''
+            foreach ($line in [IO.File]::ReadLines($failureLog)) {
+                if ($line -cmatch '^\d{4}-\d{2}-\d{2}T') { $attempt=$line }
+                if ($line -cne 'The phonemizer could not resolve -Text.') { continue }
+                $unresolved=[StudentUnresolvedProceduralPronunciation]::new()
+                $unresolved.Teacher=$item
+                $unresolved.Attempt=$attempt
+                $unresolved.Reason=$line
+                $unresolved
+            }
+        })
         $item.ResidualInterventions=@(if ($item.StockExecution) {
             foreach ($file in Get-ChildItem -LiteralPath $Directory -Filter 'intervention-*.bin' -File) {
                 $outcome=Open-StudentStockExecution $item $file.Name
