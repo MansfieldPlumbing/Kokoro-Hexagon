@@ -302,6 +302,8 @@ if ($workerLock) {
                 ($a.Checksum -cne $b.Checksum -or $a.Count -ne $b.Count -or $a.Extent -ne $b.Extent)) {
                 $opportunities.Enqueue(@{ Kind='ConditioningMeasurement'; Id=$opportunity.Id; First=$a; Second=$b },
                     -$opportunity.Second.Activations.Count)
+                $opportunities.Enqueue(@{ Kind='ConditioningShift'; Id=$opportunity.Id; First=$a; Second=$b },
+                    -$opportunity.Second.Activations.Count)
             }
         }
         if ($completed.Contains($key)) { continue }
@@ -341,6 +343,43 @@ if ($workerLock) {
                     $reason = 'GeneratorInputIdentical'
                 } else {
                     $reason = "GeneratorInputChanged/$($a.Extent)/$($b.Extent)"
+                }
+            } elseif ($opportunity.Kind -eq 'ConditioningShift') {
+                $short = $opportunity.First
+                $long = $opportunity.Second
+                if ($short.Extent -gt $long.Extent) { $short,$long = $long,$short }
+                $channels = [int][Math]::Floor($short.Count/[double]$short.Extent)
+                $reason = 'Reverie/UnresolvedConditioningLayout'
+                if ($short.Axes -cin 'channel,frame@80','channel,frame' -and $short.TypeCode -eq 1 -and
+                    $channels -ge 2 -and $short.Count -eq $channels*$short.Extent -and $long.Count -eq $channels*$long.Extent) {
+                    $envelopes = @(foreach ($activation in $short,$long) {
+                        $values = $activation.Read()
+                        $power = [double[]]::new(2*$activation.Extent)
+                        for ($c=0;$c -lt $channels;$c++) {
+                            $offset = ($c%2)*$activation.Extent
+                            for ($i=0;$i -lt $activation.Extent;$i++) {
+                                $value = [double]$values[$c*$activation.Extent+$i]
+                                $power[$offset+$i] += $value*$value
+                            }
+                        }
+                        ,$power
+                    })
+                    $best = [double[]]@([double]::PositiveInfinity,[double]::PositiveInfinity)
+                    $shift = [int[]]@(-1,-1)
+                    for ($lag=0;$lag -le $long.Extent-$short.Extent;$lag++) {
+                        $rows++
+                        for ($fold=0;$fold -lt 2;$fold++) {
+                            $errorSum = 0.0
+                            for ($i=0;$i -lt $short.Extent;$i++) {
+                                $delta = $envelopes[0][$fold*$short.Extent+$i] - $envelopes[1][$fold*$long.Extent+$lag+$i]
+                                $errorSum += $delta*$delta
+                            }
+                            if ($errorSum -lt $best[$fold]) { $best[$fold]=$errorSum; $shift[$fold]=$lag }
+                        }
+                    }
+                    $alternatives = $rows
+                    if ($shift[0] -ne $shift[1]) { $conflicts = 1 }
+                    $reason = "Reverie/ChannelSplitShift/$($shift[0])/$($shift[1])/SharedLineage"
                 }
             } elseif ($opportunity.Kind -eq 'ConditioningMeasurement') {
                 $a = $opportunity.First
