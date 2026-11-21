@@ -219,6 +219,20 @@ class StudentStockNormalization {
 
 enum StudentStockClockBasis { DeclaredAxis; ExecutionExtent }
 
+enum StudentStockProjectionStatus { DifferentInvocation; OutsideCapturedSupport; ExtentHypothesis; DeclaredGrid }
+
+class StudentStockClockProjection {
+    [StudentStockFrameClock] $Source
+    [StudentStockFrameClock] $Target
+    [int] $FirstSourceFrame
+    [int] $EndSourceFrame
+    [int] $FirstTargetFrame
+    [int] $EndTargetFrame
+    [long] $FirstSample
+    [long] $EndSample
+    [StudentStockProjectionStatus] $Status
+}
+
 class StudentStockFrameClock {
     [StudentStockActivation] $Owner
     [StudentStockClockBasis] $Basis
@@ -231,6 +245,32 @@ class StudentStockFrameClock {
     [long] SampleGridOffset([int] $Frame) {
         if ($Frame -lt 0 -or $Frame -ge $this.FrameCount) { throw 'Frame is outside the captured axis.' }
         return [long]$Frame*$this.SamplesPerFrame
+    }
+
+    [StudentStockClockProjection] ProjectWindow([int] $First, [int] $End, [StudentStockFrameClock] $Target) {
+        $projection=[StudentStockClockProjection]::new()
+        $projection.Source=$this
+        $projection.Target=$Target
+        $projection.FirstSourceFrame=$First
+        $projection.EndSourceFrame=$End
+        if (!$this.Owner.Execution -or !$Target -or
+            ![object]::ReferenceEquals($this.Owner.Execution,$Target.Owner.Execution) -or
+            $this.SampleRate -ne $Target.SampleRate) { return $projection }
+        $projection.Status=[StudentStockProjectionStatus]::OutsideCapturedSupport
+        if ($First -lt $this.ReflectedPrefixFrames -or $End -le $First -or $End -gt $this.FrameCount -or
+            $this.SamplesPerFrame -le 0 -or $Target.SamplesPerFrame -le 0) { return $projection }
+        $firstSample=[long]($First-$this.ReflectedPrefixFrames)*$this.SamplesPerFrame
+        $endSample=[long]($End-$this.ReflectedPrefixFrames)*$this.SamplesPerFrame
+        $covered=[long]($Target.FrameCount-$Target.ReflectedPrefixFrames)*$Target.SamplesPerFrame
+        if ($endSample -gt $covered) { return $projection }
+        $projection.FirstSample=$firstSample
+        $projection.EndSample=$endSample
+        $projection.FirstTargetFrame=$Target.ReflectedPrefixFrames+[long][Math]::Floor($firstSample/[double]$Target.SamplesPerFrame)
+        $projection.EndTargetFrame=$Target.ReflectedPrefixFrames+1L+[long][Math]::Floor(($endSample-1)/[double]$Target.SamplesPerFrame)
+        $projection.Status=if ($this.Basis -eq [StudentStockClockBasis]::DeclaredAxis -and
+            $Target.Basis -eq [StudentStockClockBasis]::DeclaredAxis) { [StudentStockProjectionStatus]::DeclaredGrid }
+            else { [StudentStockProjectionStatus]::ExtentHypothesis }
+        return $projection
     }
 }
 
