@@ -150,6 +150,15 @@ class StudentAlbertApplication {
     [StudentStockActivation] $Hidden
 }
 
+class StudentNormalizationClockBearing {
+    [StudentStockNormalization] $Scope
+    [StudentExecutionClockBearing] $TokenClock
+    [StudentStockFrameClock] $FrameClock
+    [int[]] $CapturedFrames
+    [StudentExecutionClockStatus] $Status
+    [int] $FirstConflictingToken = -1
+}
+
 class StudentStockNormalization {
     [StudentStockExecution] $Execution
     [string] $Site
@@ -163,6 +172,49 @@ class StudentStockNormalization {
     [int] ChannelCount() { return $this.Parameters.Extent }
     [int] ScopeFrameCount() { return $this.Input.Extent }
     [single] Epsilon() { return [single]0.00001 }
+
+    [StudentNormalizationClockBearing] ObserveTokenScope([StudentExecutionClockBearing] $TokenClock) {
+        $result=[StudentNormalizationClockBearing]::new()
+        $result.Scope=$this
+        $result.TokenClock=$TokenClock
+        if (!$this.Input) {
+            $result.Status=[StudentExecutionClockStatus]::MissingEndpoints
+            return $result
+        }
+        $result.FrameClock=$this.Input.FrameClock()
+        if (!$this.TokenFrames) {
+            $result.Status=[StudentExecutionClockStatus]::MissingTokenClock
+            return $result
+        }
+        if (!$result.FrameClock -or !$TokenClock -or ![object]::ReferenceEquals($TokenClock.Execution,$this.Execution) -or
+            $TokenClock.Status -ne [StudentExecutionClockStatus]::Agreement) {
+            $result.Status=[StudentExecutionClockStatus]::UnresolvedGrid
+            return $result
+        }
+        $generatorGrid=$this.Execution.GeneratorInput.FrameClock()
+        if (!$generatorGrid -or $generatorGrid.SampleRate -ne $result.FrameClock.SampleRate) {
+            $result.Status=[StudentExecutionClockStatus]::UnresolvedGrid
+            return $result
+        }
+        $result.CapturedFrames=[int[]]$this.TokenFrames.Read()
+        $result.Status=[StudentExecutionClockStatus]::Contradiction
+        if ($result.CapturedFrames.Length -ne $TokenClock.TokenTicks.Length-1) { return $result }
+        $sum=0L
+        for ($i=0;$i -lt $result.CapturedFrames.Length;$i++) {
+            $prefix=0
+            if ($i -eq 0) { $prefix=$result.FrameClock.ReflectedPrefixFrames }
+            $rows=$result.CapturedFrames[$i]
+            $ticks=$TokenClock.TokenTicks[$i+1]-$TokenClock.TokenTicks[$i]
+            if ($rows -lt $prefix -or [long]($rows-$prefix)*$result.FrameClock.SamplesPerFrame -ne
+                [long]$ticks*$generatorGrid.SamplesPerFrame) {
+                $result.FirstConflictingToken=$i
+                return $result
+            }
+            $sum+=$rows
+        }
+        if ($sum -eq $this.ScopeFrameCount()) { $result.Status=[StudentExecutionClockStatus]::Agreement }
+        return $result
+    }
 }
 
 enum StudentStockClockBasis { DeclaredAxis; ExecutionExtent }
