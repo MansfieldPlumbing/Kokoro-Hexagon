@@ -10,7 +10,7 @@ The baseline trace records 731 stage observations per stock run. The inventory c
 
 The generator input retains every float32 value in channel-major order at 80 ticks per second. Generator branches run at 800 and 4,800 frames per second, with a reflected left frame at the second upsampling stage. Source STFT uses a 20-sample window and five-sample hop on the 24 kHz source clock. Attention spans all query and key tokens in its invocation. Bidirectional recurrence and instance normalization introduce dependencies that can extend beyond any one phone interval.
 
-The AdaIN inventory is 12 predictor, 10 decoder and 48 generator sites. Retained parameters are field-major in this order: mean, variance, standard deviation, epsilon-adjusted standard deviation, projected gamma, beta, gamma including the identity offset, normalization weight and bias, and ideal affine scale and offset. Applying that ideal affine in one operation can change float rounding. The retained input, output and staged arithmetic are the replay evidence. The decoder moments reuse the measurements supplied to its original live normalization. For the other sites the observer reproduces the stock float32 accumulation order on the retained input.
+The AdaIN inventory is 12 predictor, 10 decoder and 48 generator sites. The field-major parameter order is mean, variance, standard deviation, epsilon-adjusted standard deviation, projected gamma, beta, gamma including the identity offset, normalization weight and bias, and ideal affine scale and offset. Applying that ideal affine in one operation can change float rounding. The retained input, output and staged arithmetic are the replay evidence. The decoder moments reuse the measurements supplied to its original live normalization. For the other sites the observer reproduces the stock float32 accumulation order on the retained input.
 
 ## Acquisition and verification
 
@@ -25,7 +25,29 @@ The runner resumes from published indexes. Each tensor points to a GZip blob key
 
 The first four stock runs covered two passages each from *Alice's Adventures in Wonderland* and *Word Study and English Grammar*. They retained 319,800 samples (13.325 seconds), 2,924 stage observations, 5,229,791,184 logical bytes and 4,365,117,567 new compressed bytes in a combined 274.42 seconds of per-passage execution. Those rates project about 111 GB for the original pool of 60 retained pairs (337.75 seconds), with variation across passages.
 
-The halved plan keeps existing traces and chooses additional passages by distance from the already chosen source offsets within each work. Its 18 *Alice* passages cover 81.825 stock seconds and its 12 *Word Study* passages cover 74.750 stock seconds. The projected stock buffer cost is about 51 GB, leaving space for procedural traces and interventions. The runner checks both the exact compressed store size and available volume space. `-PlanOnly` reports the selected scope without rendering. `-BufferDirectory` can place new buffers on a separate volume while retaining access to the original store.
+The completed half-corpus batch keeps the earlier traces and selects additional passages by their distance from already chosen source offsets within each work. Its 30 baselines total 156.575 stock seconds, 21,930 stage observations and 61,795,097,856 logical bytes. The accepted stock runs took 3,062.59 seconds of measured per-passage execution time, excluding startup and interrupted attempts.
+
+| Source | Baselines | Stock seconds | Word occurrences | Matched human chapters | Human anchor candidates |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| *Alice's Adventures in Wonderland* | 18 | 81.825 | 255 | 12 | 169 |
+| *Word Study and English Grammar* | 12 | 74.750 | 198 | 0 | 0 |
+
+The final buffer store contains 19,718 GZip blobs totaling 58,090,322,015 bytes. The entire on-disk source bank totals 59,996,098,711 bytes. The runner checks compressed store size and available volume space. `-PlanOnly` reports the selected scope without rendering. `-BufferDirectory` can place new buffers on a separate volume while retaining access to the original store.
+
+Fresh processes verified the typed values and checksums for all 30 baselines, all six procedural runs, the residual intervention and all 1,440 front-replay buffers. They checked original document ownership, execution ownership, token and sample clocks, convolution support and normalization geometry. The Student's `SpeechEvidence` entry point independently exposed the 512-channel input, normalization sites and ALBERT application references.
+
+The stock normalization geometry resolves as follows.
+
+| Module | Channels | Frames per second | Sites |
+| --- | ---: | ---: | ---: |
+| Predictor | 512 | 40 | 6 |
+| Predictor | 256 | 80 | 6 |
+| Decoder | 514 | 40 | 1 |
+| Decoder | 1,024 | 40 | 4 |
+| Decoder | 1,090 | 40 | 4 |
+| Decoder | 512 | 80 | 1 |
+| Generator | 256 | 800 | 24 |
+| Generator | 128 | 4,800 | 24 |
 
 A controlled run dropped only the final residual correction at `generator.resblocks.5.2` on the short *Word Study* passage. The run verified the same 12 upstream tensors, including the full generator input. Its 730 tensor descriptors added 4,573,698 compressed bytes in 56.86 seconds because shared buffers were reused. A fresh process found 34,800 of 34,800 float waveform samples changed, with a peak absolute difference of 0.330638 and a waveform SNR of 1.319459 dB relative to baseline. This intervention provides a local test of functional contribution for that invocation.
 
@@ -33,6 +55,6 @@ A controlled run dropped only the final residual correction at `generator.resblo
 
 `-Procedural` observes the earlier Student prosody controller's rule durations, replay ratios, target and running states, realized F0 and N, downstream activations and all 512 generator channels. The legacy corpus-backed inventory requires its original corpus input. `-ClockExperimentPath` accepts the retained clock experiment as historical input and reconstructs that three-passage training setup using its pinned phonemizer. Six source-linked runs cover four Alice passages and two *Word Study* passages, totaling 16.75 seconds. They contain 3,068 observations and added 5,302,312,094 compressed bytes in 551.47 seconds of per-passage execution. The historical phonemizer rejected Alice offsets 4182, 98122 and 143700. The bank exposes the retained failures as typed unresolved procedural pronunciations linked to the original teacher observation.
 
-`-FrontStates` enriches existing baselines through a front-end replay. The first two replays each retained 48 observations and reproduced all 11 original front-end tensors byte for byte. They retain all six recurrent stages' actual gates, cell states and hidden states by direction and step, plus additional pre- and post-normalization states. The two replays added 27,708,443 compressed bytes in 27.19 seconds, excluding startup.
+`-FrontStates` enriched all 30 baselines through a front-end replay. Each replay retained 48 observations and reproduced all 11 original front-end tensors byte for byte. The 1,440 observations cover the six recurrent stages' actual gates, cell states and hidden states by direction and step, alongside additional pre- and post-normalization states.
 
 Explicit linguistic candidate edges at activation granularity and some intermediate normalization and spectral transformations remain open. Attention, convolution geometry and complete normalization scopes are available, with source relationships through the original typed document, sentence owners and word occurrence indices. Full covariance and distribution calculations can use the retained arrays. The bank has no verified acquired percept or transferable executable capability from these captures yet.

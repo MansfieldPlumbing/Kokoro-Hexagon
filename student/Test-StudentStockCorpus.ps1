@@ -3,6 +3,7 @@ using module ./StudentTeacherObservation.psm1
 param(
     [string] $BankPath=(Join-Path $PSScriptRoot '../data/source-bank'),
     [string] $SourceIdentity='Gutenberg/11',
+    [int[]] $Offset,
     [switch] $VerifyBuffers
 )
 $ErrorActionPreference='Stop'
@@ -10,6 +11,7 @@ $field=& "$PSScriptRoot/Open-StudentSpeechInvestigation.ps1" -BankPath $BankPath
 $checked=[Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
 foreach ($comparison in $field.Comparisons) {
     $teacher=$comparison.Teacher
+    if ($null -ne $Offset -and $teacher.Start -notin $Offset) { continue }
     foreach ($execution in $teacher.StockExecution,$teacher.ProceduralExecution) {
         if (!$execution) { continue }
         if (![object]::ReferenceEquals($execution.Teacher,$teacher) -or
