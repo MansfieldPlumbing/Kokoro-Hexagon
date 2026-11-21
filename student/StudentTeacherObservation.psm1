@@ -45,6 +45,15 @@ class StudentResidualIntervention {
     [bool] ChangedWaveform() { return $this.Baseline.Waveform.Checksum -cne $this.Outcome.Waveform.Checksum }
 }
 
+enum StudentExecutionClockStatus { MissingEndpoints; MissingTokenClock; UnresolvedGrid; Contradiction; Agreement }
+
+class StudentExecutionClockBearing {
+    [StudentStockExecution] $Execution
+    [StudentStockActivation] $Durations
+    [int[]] $TokenTicks
+    [StudentExecutionClockStatus] $Status
+}
+
 class StudentStockExecution {
     [StudentTeacherObservation] $Teacher
     [string] $Recipe
@@ -56,18 +65,60 @@ class StudentStockExecution {
     [StudentStockActivation] $Waveform
     [StudentStockExecution] $FrontStateReplay
 
+    [StudentStockActivation] DurationActivation() {
+        foreach ($candidate in $this.Activations) {
+            if ($candidate.Stage -cin 'procedural.duration.realized','predictor.durations') { return $candidate }
+        }
+        return $null
+    }
+
+    [int[]] BuildTokenTickStarts([StudentStockActivation] $DurationActivation) {
+        if ([object]::ReferenceEquals($this,$this.Teacher.StockExecution)) { return $this.Teacher.StockTokenTickStarts }
+        if (!$DurationActivation) { return $null }
+        $durations=[int[]]$DurationActivation.Read()
+        $starts=[int[]]::new($durations.Length+1)
+        for ($i=0;$i -lt $durations.Length;$i++) { $starts[$i+1]=$starts[$i]+2*$durations[$i] }
+        return $starts
+    }
+
     [int[]] TokenTickStarts() {
         if ([object]::ReferenceEquals($this,$this.Teacher.StockExecution)) { return $this.Teacher.StockTokenTickStarts }
-        foreach ($candidate in $this.Activations) {
-            if ($candidate.Stage -cin 'procedural.duration.realized','predictor.durations') {
-                $durations=[int[]]$candidate.Read()
-                $starts=[int[]]::new($durations.Length+1)
-                for ($i=0;$i -lt $durations.Length;$i++) { $starts[$i+1]=$starts[$i]+2*$durations[$i] }
-                if ($starts[-1] -ne $this.GeneratorInput.Extent) { throw 'Execution token clock disagrees with the generator clock.' }
-                return $starts
+        $starts=$this.BuildTokenTickStarts($this.DurationActivation())
+        if (!$starts) { throw 'Execution has no retained durations.' }
+        if ($starts[-1] -ne $this.GeneratorInput.Extent) { throw 'Execution token clock disagrees with the generator clock.' }
+        return $starts
+    }
+
+    [StudentExecutionClockBearing] ObserveTokenClock() {
+        $result=[StudentExecutionClockBearing]::new()
+        $result.Execution=$this
+        if (!$this.GeneratorInput -or !$this.Waveform) {
+            $result.Status=[StudentExecutionClockStatus]::MissingEndpoints
+            return $result
+        }
+        $result.Durations=$this.DurationActivation()
+        $result.TokenTicks=$this.BuildTokenTickStarts($result.Durations)
+        if (!$result.TokenTicks) {
+            $result.Status=[StudentExecutionClockStatus]::MissingTokenClock
+            return $result
+        }
+        $grid=$this.GeneratorInput.FrameClock()
+        $wave=$this.Waveform.FrameClock()
+        if (!$grid -or !$wave -or $wave.SamplesPerFrame -ne 1 -or $grid.SampleRate -ne $wave.SampleRate) {
+            $result.Status=[StudentExecutionClockStatus]::UnresolvedGrid
+        } elseif ($result.TokenTicks[-1] -ne $grid.FrameCount -or
+            [long]$grid.FrameCount * $grid.SamplesPerFrame -ne $wave.FrameCount) {
+            $result.Status=[StudentExecutionClockStatus]::Contradiction
+        } else {
+            $result.Status=[StudentExecutionClockStatus]::Agreement
+            for ($i=1;$i -lt $result.TokenTicks.Length;$i++) {
+                if ($result.TokenTicks[$i] -lt $result.TokenTicks[$i-1]) {
+                    $result.Status=[StudentExecutionClockStatus]::Contradiction
+                    break
+                }
             }
         }
-        throw 'Execution has no retained durations.'
+        return $result
     }
 }
 
@@ -99,6 +150,15 @@ class StudentAlbertApplication {
     [StudentStockActivation] $Hidden
 }
 
+class StudentNormalizationClockBearing {
+    [StudentStockNormalization] $Scope
+    [StudentExecutionClockBearing] $TokenClock
+    [StudentStockFrameClock] $FrameClock
+    [int[]] $CapturedFrames
+    [StudentExecutionClockStatus] $Status
+    [int] $FirstConflictingToken = -1
+}
+
 class StudentStockNormalization {
     [StudentStockExecution] $Execution
     [string] $Site
@@ -112,10 +172,71 @@ class StudentStockNormalization {
     [int] ChannelCount() { return $this.Parameters.Extent }
     [int] ScopeFrameCount() { return $this.Input.Extent }
     [single] Epsilon() { return [single]0.00001 }
+
+    [StudentNormalizationClockBearing] ObserveTokenScope([StudentExecutionClockBearing] $TokenClock) {
+        $result=[StudentNormalizationClockBearing]::new()
+        $result.Scope=$this
+        $result.TokenClock=$TokenClock
+        if (!$this.Input) {
+            $result.Status=[StudentExecutionClockStatus]::MissingEndpoints
+            return $result
+        }
+        $result.FrameClock=$this.Input.FrameClock()
+        if (!$this.TokenFrames) {
+            $result.Status=[StudentExecutionClockStatus]::MissingTokenClock
+            return $result
+        }
+        if (!$result.FrameClock -or !$TokenClock -or ![object]::ReferenceEquals($TokenClock.Execution,$this.Execution) -or
+            $TokenClock.Status -ne [StudentExecutionClockStatus]::Agreement) {
+            $result.Status=[StudentExecutionClockStatus]::UnresolvedGrid
+            return $result
+        }
+        $generatorGrid=$this.Execution.GeneratorInput.FrameClock()
+        if (!$generatorGrid -or $generatorGrid.SampleRate -ne $result.FrameClock.SampleRate) {
+            $result.Status=[StudentExecutionClockStatus]::UnresolvedGrid
+            return $result
+        }
+        $result.CapturedFrames=[int[]]$this.TokenFrames.Read()
+        $result.Status=[StudentExecutionClockStatus]::Contradiction
+        if ($result.CapturedFrames.Length -ne $TokenClock.TokenTicks.Length-1) { return $result }
+        $sum=0L
+        for ($i=0;$i -lt $result.CapturedFrames.Length;$i++) {
+            $prefix=0
+            if ($i -eq 0) { $prefix=$result.FrameClock.ReflectedPrefixFrames }
+            $rows=$result.CapturedFrames[$i]
+            $ticks=$TokenClock.TokenTicks[$i+1]-$TokenClock.TokenTicks[$i]
+            if ($rows -lt $prefix -or [long]($rows-$prefix)*$result.FrameClock.SamplesPerFrame -ne
+                [long]$ticks*$generatorGrid.SamplesPerFrame) {
+                $result.FirstConflictingToken=$i
+                return $result
+            }
+            $sum+=$rows
+        }
+        if ($sum -eq $this.ScopeFrameCount()) { $result.Status=[StudentExecutionClockStatus]::Agreement }
+        return $result
+    }
+}
+
+enum StudentStockClockBasis { DeclaredAxis; ExecutionExtent }
+
+enum StudentStockProjectionStatus { DifferentInvocation; OutsideCapturedSupport; ExtentHypothesis; DeclaredGrid }
+
+class StudentStockClockProjection {
+    [StudentStockFrameClock] $Source
+    [StudentStockFrameClock] $Target
+    [int] $FirstSourceFrame
+    [int] $EndSourceFrame
+    [int] $FirstTargetFrame
+    [int] $EndTargetFrame
+    [long] $FirstSample
+    [long] $EndSample
+    [StudentStockProjectionStatus] $Status
 }
 
 class StudentStockFrameClock {
     [StudentStockActivation] $Owner
+    [StudentStockClockBasis] $Basis
+    [StudentStockActivation] $ExtentReference
     [int] $FrameCount
     [int] $SamplesPerFrame
     [int] $SampleRate = 24000
@@ -124,6 +245,32 @@ class StudentStockFrameClock {
     [long] SampleGridOffset([int] $Frame) {
         if ($Frame -lt 0 -or $Frame -ge $this.FrameCount) { throw 'Frame is outside the captured axis.' }
         return [long]$Frame*$this.SamplesPerFrame
+    }
+
+    [StudentStockClockProjection] ProjectWindow([int] $First, [int] $End, [StudentStockFrameClock] $Target) {
+        $projection=[StudentStockClockProjection]::new()
+        $projection.Source=$this
+        $projection.Target=$Target
+        $projection.FirstSourceFrame=$First
+        $projection.EndSourceFrame=$End
+        if (!$this.Owner.Execution -or !$Target -or
+            ![object]::ReferenceEquals($this.Owner.Execution,$Target.Owner.Execution) -or
+            $this.SampleRate -ne $Target.SampleRate) { return $projection }
+        $projection.Status=[StudentStockProjectionStatus]::OutsideCapturedSupport
+        if ($First -lt $this.ReflectedPrefixFrames -or $End -le $First -or $End -gt $this.FrameCount -or
+            $this.SamplesPerFrame -le 0 -or $Target.SamplesPerFrame -le 0) { return $projection }
+        $firstSample=[long]($First-$this.ReflectedPrefixFrames)*$this.SamplesPerFrame
+        $endSample=[long]($End-$this.ReflectedPrefixFrames)*$this.SamplesPerFrame
+        $covered=[long]($Target.FrameCount-$Target.ReflectedPrefixFrames)*$Target.SamplesPerFrame
+        if ($endSample -gt $covered) { return $projection }
+        $projection.FirstSample=$firstSample
+        $projection.EndSample=$endSample
+        $projection.FirstTargetFrame=$Target.ReflectedPrefixFrames+[long][Math]::Floor($firstSample/[double]$Target.SamplesPerFrame)
+        $projection.EndTargetFrame=$Target.ReflectedPrefixFrames+1L+[long][Math]::Floor(($endSample-1)/[double]$Target.SamplesPerFrame)
+        $projection.Status=if ($this.Basis -eq [StudentStockClockBasis]::DeclaredAxis -and
+            $Target.Basis -eq [StudentStockClockBasis]::DeclaredAxis) { [StudentStockProjectionStatus]::DeclaredGrid }
+            else { [StudentStockProjectionStatus]::ExtentHypothesis }
+        return $projection
     }
 }
 
@@ -140,11 +287,13 @@ class StudentStockActivation {
     [StudentStockFrameClock] FrameClock() {
         $hop=0
         $prefix=0
+        $reference=$null
         if ($this.Axes.Contains('sample@24000',[StringComparison]::Ordinal)) { $hop=1 }
         elseif ($this.Axes.Contains('frame@80',[StringComparison]::Ordinal)) { $hop=300 }
         elseif ($this.Axes.Contains('frame@40',[StringComparison]::Ordinal)) { $hop=600 }
         elseif ($this.Axes -ceq 'channel,frame' -and $this.Execution.GeneratorInput) {
-            $ticks=$this.Execution.GeneratorInput.Extent
+            $reference=$this.Execution.GeneratorInput
+            $ticks=$reference.Extent
             if ($this.Extent -eq $ticks) { $hop=300 }
             elseif (2*$this.Extent -eq $ticks) { $hop=600 }
             elseif ($this.Extent -eq 10*$ticks) { $hop=30 }
@@ -159,6 +308,10 @@ class StudentStockActivation {
         if (!$hop) { return $null }
         $clock=[StudentStockFrameClock]::new()
         $clock.Owner=$this
+        if ($reference) {
+            $clock.Basis=[StudentStockClockBasis]::ExecutionExtent
+            $clock.ExtentReference=$reference
+        }
         $clock.FrameCount=$this.Extent
         $clock.SamplesPerFrame=$hop
         $clock.ReflectedPrefixFrames=$prefix
