@@ -273,6 +273,18 @@ if ($workerLock) {
     foreach ($group in $crossTypeGroups.GetEnumerator()) {
         $opportunities.Enqueue(@{ Kind='CrossTypeBearing'; Id=$group.Key; Rows=$group.Value }, -$group.Value.Count)
     }
+    foreach ($comparison in $speech.Comparisons) {
+        $teacher = $comparison.Teacher
+        $baseline = $teacher.StockExecution
+        if (!$baseline) { continue }
+        $stages = [Collections.Generic.Dictionary[string,object]]::new([StringComparer]::Ordinal)
+        foreach ($activation in $baseline.Activations) { $stages.Add($activation.Stage,$activation) }
+        foreach ($alternate in @($baseline.FrontStateReplay,$teacher.ProceduralExecution) + @($teacher.ResidualInterventions.Outcome)) {
+            if (!$alternate -or ![object]::ReferenceEquals($baseline.Teacher,$alternate.Teacher)) { continue }
+            $id = "$($teacher.Document.Source.Id)/$($teacher.Start)/$($teacher.Length)/$($alternate.Recipe)"
+            $opportunities.Enqueue(@{ Kind='MatchedExecution'; Id=$id; Stages=$stages; First=$baseline; Second=$alternate }, -$alternate.Activations.Count)
+        }
+    }
     Write-Information ("{0:u} Aligned {1} shared referents across CLR types in {2} structural groups ({3} objects visited)." -f
         [datetime]::UtcNow,$crossType.AlignmentReferents.Count,$crossTypeGroups.Count,$crossType.ObjectsVisited) -InformationAction Continue
     Write-Information ("{0:u} Loaded {1} prior scope judgments and queued {2} follow-ups." -f
@@ -283,6 +295,15 @@ if ($workerLock) {
         $opportunity = $opportunities.Dequeue()
         $identity = "$pin/Followup1/$($opportunity.Kind)/$($opportunity.Id)"
         $key = [Convert]::ToHexString([Security.Cryptography.SHA256]::HashData([Text.Encoding]::UTF8.GetBytes($identity)))
+        if ($opportunity.Kind -eq 'MatchedExecution') {
+            $a = $opportunity.First.GeneratorInput
+            $b = $opportunity.Second.GeneratorInput
+            if ($a -and $b -and $a.Axes -ceq $b.Axes -and $a.TypeCode -eq $b.TypeCode -and
+                ($a.Checksum -cne $b.Checksum -or $a.Count -ne $b.Count -or $a.Extent -ne $b.Extent)) {
+                $opportunities.Enqueue(@{ Kind='ConditioningMeasurement'; Id=$opportunity.Id; First=$a; Second=$b },
+                    -$opportunity.Second.Activations.Count)
+            }
+        }
         if ($completed.Contains($key)) { continue }
         $trialWatch = [Diagnostics.Stopwatch]::StartNew()
         $allocated = [GC]::GetTotalAllocatedBytes($true)
@@ -303,6 +324,45 @@ if ($workerLock) {
                     }
                 }
                 $reason = if ($alternatives -gt 1) { 'DistinctAxes' } elseif ($conflicts) { 'DistinctSameAxisGeometry' } else { 'SameDeclaredGeometry' }
+            } elseif ($opportunity.Kind -eq 'MatchedExecution') {
+                foreach ($entry in $opportunity.Second.Activations) {
+                    $first = $opportunity.Stages[$entry.Stage]
+                    if (!$first) { continue }
+                    $rows++
+                    if ($entry.Axes -cne $first.Axes -or $entry.TypeCode -ne $first.TypeCode) { $conflicts++; continue }
+                    if ($entry.Checksum -cne $first.Checksum -or $entry.Extent -ne $first.Extent -or
+                        $entry.Count -ne $first.Count) { $alternatives++ }
+                }
+                $a = $opportunity.First.GeneratorInput
+                $b = $opportunity.Second.GeneratorInput
+                if (!$a -or !$b) { $reason = 'NoAlternateGeneratorInput' }
+                elseif ($a.Axes -cne $b.Axes -or $a.TypeCode -ne $b.TypeCode) { $reason = 'IncompatibleGeneratorAxes' }
+                elseif ($a.Checksum -ceq $b.Checksum -and $a.Count -eq $b.Count -and $a.Extent -eq $b.Extent) {
+                    $reason = 'GeneratorInputIdentical'
+                } else {
+                    $reason = "GeneratorInputChanged/$($a.Extent)/$($b.Extent)"
+                }
+            } elseif ($opportunity.Kind -eq 'ConditioningMeasurement') {
+                $a = $opportunity.First
+                $b = $opportunity.Second
+                # Compare channel power across each invocation's own support. This does not require phone alignment.
+                $channels = [int][Math]::Floor($a.Count/[double]$a.Extent)
+                if ($a.Axes -cnotin 'channel,frame@80','channel,frame' -or $a.TypeCode -ne 1 -or
+                    $a.Count -ne $channels*$a.Extent -or $b.Count -ne $channels*$b.Extent) {
+                    $reason = 'UnresolvedConditioningLayout'
+                } else {
+                    $first = $a.Read()
+                    $second = $b.Read()
+                    $rows = $channels
+                    $difference = 0.0
+                    for ($channel=0;$channel -lt $channels;$channel++) {
+                        $left = 0.0; $right = 0.0
+                        for ($i=0;$i -lt $a.Extent;$i++) { $value = [double]$first[$channel*$a.Extent+$i]; $left += $value*$value }
+                        for ($i=0;$i -lt $b.Extent;$i++) { $value = [double]$second[$channel*$b.Extent+$i]; $right += $value*$value }
+                        $difference += [Math]::Abs($left/$a.Extent-$right/$b.Extent)
+                    }
+                    $reason = ('MeanAbsoluteChannelPowerChange/{0:R}' -f ($difference/$channels))
+                }
             } elseif ($opportunity.Kind -eq 'CrossTypeBearing') {
                 foreach ($alignment in $opportunity.Rows) {
                     $rows++
