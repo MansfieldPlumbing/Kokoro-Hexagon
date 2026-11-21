@@ -4,7 +4,8 @@ using module ./StudentNativeSpeech.psm1
 using module ./StudentTeacherObservation.psm1
 using module ./StudentWaveEvidence.psm1
 #requires -Version 7.4
-param([string] $BankPath,[string] $SourceIdentity,[psmoduleinfo] $ZiraModule)
+param([string] $BankPath,[string] $SourceIdentity,[psmoduleinfo] $ZiraModule,
+    $Inventory)
 $ErrorActionPreference='Stop'
 
 class StudentSpeechComparison {
@@ -13,8 +14,15 @@ class StudentSpeechComparison {
     [StudentHumanWordAnchor[]] $HumanWordAnchors
 }
 
+class StudentActivationInterpretations {
+    [string] $PayloadDigest
+    [System.Collections.Generic.Dictionary[string, System.Collections.Generic.List[StudentStockActivation]]] $ByAxes =
+        [System.Collections.Generic.Dictionary[string, System.Collections.Generic.List[StudentStockActivation]]]::new([StringComparer]::Ordinal)
+}
+
 class StudentSpeechInvestigation {
     [StudentSourceInventory] $Inventory
+    [StudentTextEvidence[]] $Documents
     [StudentNativeSpeech[]] $Recordings
     [StudentHumanChapter[]] $HumanChapters
     [StudentHumanWordAnchor[]] $HumanWordAnchors
@@ -22,10 +30,15 @@ class StudentSpeechInvestigation {
     [StudentPerformanceInterval[]] $ConversationEvents
     [StudentTimingCue[]] $PrivateCues
     [StudentSpeechComparison[]] $Comparisons
+    [StudentStockExecution[]] $Executions
+    [System.Collections.Generic.Dictionary[string, StudentActivationInterpretations]] $ActivationInterpretations =
+        [System.Collections.Generic.Dictionary[string, StudentActivationInterpretations]]::new([StringComparer]::Ordinal)
 }
 
 $investigation=[StudentSpeechInvestigation]::new()
-$investigation.Inventory=Open-StudentSourceInventory (Join-Path $BankPath 'sources.bin')
+$investigation.Inventory=if ($Inventory) { $Inventory } else {
+    Open-StudentSourceInventory (Join-Path $BankPath 'sources.bin')
+}
 $investigation.Recordings=@(foreach ($source in $investigation.Inventory.Units.Values) {
     if ($source.Kind -cnotin 'OriginalHumanAudio','OriginalConversationChannel','PrivatePerformanceAudio') { continue }
     $documentSource=$null
@@ -53,7 +66,8 @@ foreach ($file in Get-ChildItem -LiteralPath (Join-Path $BankPath 'linguistic') 
         $documents.Add($doc.Source.Id,$doc)
     }
 }
-$investigation.HumanChapters=@(foreach ($doc in $documents.Values) {
+$investigation.Documents=@($documents.Values)
+$investigation.HumanChapters=@(foreach ($doc in $investigation.Documents) {
     if ($doc.Source.EvidenceGroup -ceq 'Gutenberg/11') { Join-StudentDramaticChapters $doc $investigation.Recordings }
 })
 $investigation.ConversationReadings=@(foreach ($wave in $investigation.Recordings) {
@@ -110,4 +124,31 @@ $investigation.Comparisons=@(if ($documents.Count -and (Test-Path -LiteralPath $
         $comparison
     }
 })
+$investigation.Executions=@(foreach ($comparison in $investigation.Comparisons) {
+    $teacher=$comparison.Teacher
+    if ($teacher.StockExecution) {
+        $teacher.StockExecution
+        if ($teacher.StockExecution.FrontStateReplay) { $teacher.StockExecution.FrontStateReplay }
+    }
+    if ($teacher.ProceduralExecution) { $teacher.ProceduralExecution }
+    foreach ($intervention in $teacher.ResidualInterventions) { $intervention.Outcome }
+})
+if (!$SourceIdentity) {
+    foreach ($execution in $investigation.Executions) {
+        foreach ($activation in $execution.Activations) {
+            $group=$null
+            if (!$investigation.ActivationInterpretations.TryGetValue($activation.Checksum,[ref]$group)) {
+                $group=[StudentActivationInterpretations]::new()
+                $group.PayloadDigest=$activation.Checksum
+                $investigation.ActivationInterpretations.Add($group.PayloadDigest,$group)
+            }
+            $bucket=$null
+            if (!$group.ByAxes.TryGetValue($activation.Axes,[ref]$bucket)) {
+                $bucket=[System.Collections.Generic.List[StudentStockActivation]]::new()
+                $group.ByAxes.Add($activation.Axes,$bucket)
+            }
+            $bucket.Add($activation)
+        }
+    }
+}
 $investigation
