@@ -20,6 +20,140 @@ class StudentTeacherObservation {
     [int[]] $Lengths
     [int[]] $StockTokenTickStarts
     [Collections.Generic.Dictionary[string,Array]] $Tensors
+    [StudentStockExecution] $StockExecution
+    [StudentStockExecution] $ProceduralExecution
+    [StudentResidualIntervention[]] $ResidualInterventions
+}
+
+class StudentResidualIntervention {
+    [StudentStockExecution] $Baseline
+    [StudentStockExecution] $Outcome
+    [string] $Site
+    [string] $Intention
+
+    [bool] ChangedWaveform() { return $this.Baseline.Waveform.Checksum -cne $this.Outcome.Waveform.Checksum }
+}
+
+class StudentStockExecution {
+    [StudentTeacherObservation] $Teacher
+    [string] $Recipe
+    [StudentStockActivation[]] $Activations
+    [StudentStockNormalization[]] $Normalizations
+    [StudentStockActivation] $GeneratorInput
+    [StudentStockActivation] $Waveform
+}
+
+class StudentStockNormalization {
+    [StudentStockExecution] $Execution
+    [string] $Site
+    [StudentStockActivation] $Input
+    [StudentStockActivation] $Output
+    [StudentStockActivation] $Parameters
+    [StudentStockActivation] $TokenAccumulators
+    [StudentStockActivation] $TokenFrames
+    [StudentStockActivation] $Geometry
+
+    [int] ChannelCount() { return $this.Parameters.Extent }
+    [int] ScopeFrameCount() { return $this.Input.Extent }
+    [single] Epsilon() { return [single]0.00001 }
+}
+
+class StudentStockActivation {
+    [StudentStockExecution] $Execution
+    [string] $Stage
+    [string] $Axes
+    [int] $Extent
+    [int] $Count
+    [byte] $TypeCode
+    [string] $Checksum
+    [string] $Path
+
+    [int[]] Shape() {
+        if ($this.Axes -ceq 'head,queryToken,keyToken') { return [int[]]@(12,$this.Extent,$this.Extent) }
+        if ($this.Axes -ceq 'harmonic-or-noise,sample@24000,harmonic') { return [int[]]@(2,$this.Extent,9) }
+        if ($this.Axes -ceq 'direction,channel,token') { return [int[]]@(2,256,$this.Extent) }
+        if ($this.Axes -ceq 'sample@24000,harmonic') { return [int[]]@($this.Extent,9) }
+        if ($this.Axes -ceq 'channel,frame' -or $this.Axes -ceq 'channel,token' -or $this.Axes -ceq 'channel,whole-invocation') {
+            return [int[]]@([int]($this.Count/$this.Extent),$this.Extent)
+        }
+        if ($this.Axes -ceq 'token,channel' -or $this.Axes -ceq 'frame@40,channel' -or $this.Axes -ceq 'styleRow,channel') {
+            return [int[]]@($this.Extent,[int]($this.Count/$this.Extent))
+        }
+        return [int[]]@($this.Count)
+    }
+
+    [Array] Read() {
+        $values = switch ($this.TypeCode) {
+            1 { , [single[]]::new($this.Count) }
+            2 { , [double[]]::new($this.Count) }
+            3 { , [int[]]::new($this.Count) }
+            default { throw 'Invalid stock tensor element type.' }
+        }
+        $bytes = [byte[]]::new([Buffer]::ByteLength($values))
+        $file = [IO.File]::OpenRead($this.Path)
+        try {
+            $gzip = [IO.Compression.GZipStream]::new($file,[IO.Compression.CompressionMode]::Decompress)
+            try {
+                $gzip.ReadExactly($bytes)
+                if ($gzip.ReadByte() -ne -1) { throw 'Unexpected tensor length.' }
+            } finally { $gzip.Dispose() }
+        } finally { $file.Dispose() }
+        if ([Convert]::ToHexString([Security.Cryptography.SHA256]::HashData($bytes)) -cne $this.Checksum) { throw 'Stock tensor hash mismatch.' }
+        [Buffer]::BlockCopy($bytes,0,$values,0,$bytes.Length)
+        return , $values
+    }
+}
+
+function Open-StudentStockExecution([StudentTeacherObservation] $Teacher,[string] $Name='stock-execution.bin') {
+    $path = Join-Path $Teacher.Directory $Name
+    if (![IO.File]::Exists($path)) { return }
+    $execution = [StudentStockExecution]::new()
+    $execution.Teacher = $Teacher
+    $buffers = Join-Path $Teacher.Directory '../../stock-activation-buffers'
+    $r = [IO.BinaryReader]::new([IO.File]::OpenRead($path))
+    try {
+        if ($r.ReadString() -cne 'StudentStockExecution/1' -or
+            $r.ReadString() -cne (Get-FileHash -LiteralPath (Join-Path $Teacher.Directory 'observation.bin')).Hash) {
+            throw 'Stock execution belongs to a different teacher observation.'
+        }
+        $execution.Recipe = $r.ReadString()
+        $count = $r.ReadInt32()
+        if ($count -lt 1 -or $count -gt 10000) { throw 'Invalid activation count.' }
+        $execution.Activations = [StudentStockActivation[]]::new($count)
+        $stages=[Collections.Generic.Dictionary[string,StudentStockActivation]]::new([StringComparer]::Ordinal)
+        for ($i=0; $i -lt $count; $i++) {
+            $a = [StudentStockActivation]::new()
+            $a.Execution = $execution
+            $a.Stage = $r.ReadString()
+            $a.Axes = $r.ReadString()
+            $a.Extent = $r.ReadInt32()
+            $a.Count = $r.ReadInt32()
+            $a.TypeCode = $r.ReadByte()
+            $a.Checksum = $r.ReadString()
+            if ($a.Checksum -cnotmatch '^[0-9A-F]{64}$' -or $a.Extent -le 0 -or $a.Count -le 0 -or $a.TypeCode -notin 1,2,3) { throw 'Invalid activation descriptor.' }
+            $a.Path = Join-Path $buffers ($a.Checksum + '.gz')
+            if (![IO.File]::Exists($a.Path)) { throw "Missing tensor $($a.Checksum)." }
+            $execution.Activations[$i] = $a
+            $stages.Add($a.Stage,$a)
+        }
+        if ($r.BaseStream.Position -ne $r.BaseStream.Length) { throw 'Unexpected execution index data.' }
+        $execution.GeneratorInput=$stages['decoder.generator_input']
+        $execution.Waveform=$stages['generator.waveform']
+        $execution.Normalizations=@(foreach ($a in $execution.Activations) {
+            if (!$a.Stage.EndsWith('.parameters',[StringComparison]::Ordinal)) { continue }
+            $site=[StudentStockNormalization]::new()
+            $site.Execution=$execution
+            $site.Site=$a.Stage.Substring(0,$a.Stage.Length-'.parameters'.Length)
+            $site.Parameters=$a
+            $site.Input=$stages[$site.Site+'.input']
+            $site.Output=$stages[$site.Site+'.output']
+            $site.Geometry=$stages[$site.Site+'.geometry']
+            $site.TokenAccumulators=$stages[$site.Site+'.accumulators']
+            $site.TokenFrames=$stages[$site.Site+'.token_frames']
+            $site
+        })
+        $execution
+    } finally { $r.Dispose() }
 }
 
 class StudentTeacherWaveEvidence {
@@ -154,7 +288,7 @@ function Open-StudentTeacherObservation {
             $item.Lengths[$i]=$length
             $extents.Add($name,$length)
             if ($integer -ne ($name -cin 'TokenIds','Durations')) { throw 'Stock tensor element type differs.' }
-            if ($LoadTensors) {
+            if ($LoadTensors -or $integer) {
                 $bytes=$r.ReadBytes(4*$length)
                 $vector=if ($integer) { ,([int[]]::new($length)) } else { ,([float[]]::new($length)) }
                 [Buffer]::BlockCopy($bytes,0,$vector,0,$bytes.Length)
@@ -172,18 +306,34 @@ function Open-StudentTeacherObservation {
             $extents.get_Item('AcousticStyle') -ne 128 -or $extents.get_Item('ProsodyStyle') -ne 128) {
             throw 'Stock observation shapes do not share the pinned token and frame clocks.'
         }
-        if ($LoadTensors) {
-            $durationFrames=0L
-            $durations=$item.Tensors['Durations']
-            $item.StockTokenTickStarts=[int[]]::new($durations.Length+1)
-            for ($i=0;$i -lt $durations.Length;$i++) {
-                $duration=$durations[$i]
-                if ($duration -lt 0) { throw 'Negative stock duration.' }
-                $durationFrames+=$duration
-                $item.StockTokenTickStarts[$i+1]=2*$durationFrames
-            }
-            if (2*$durationFrames -ne $ticks) { throw 'Durations fail the stock frame invariant.' }
+        $durationFrames=0L
+        $durations=$item.Tensors['Durations']
+        $item.StockTokenTickStarts=[int[]]::new($durations.Length+1)
+        for ($i=0;$i -lt $durations.Length;$i++) {
+            $duration=$durations[$i]
+            if ($duration -lt 0) { throw 'Negative stock duration.' }
+            $durationFrames+=$duration
+            $item.StockTokenTickStarts[$i+1]=2*$durationFrames
         }
+        if (2*$durationFrames -ne $ticks) { throw 'Durations fail the stock frame invariant.' }
+        $item.StockExecution=Open-StudentStockExecution $item
+        $item.ProceduralExecution=Open-StudentStockExecution $item 'procedural-execution.bin'
+        $item.ResidualInterventions=@(if ($item.StockExecution) {
+            foreach ($file in Get-ChildItem -LiteralPath $Directory -Filter 'intervention-*.bin' -File) {
+                $outcome=Open-StudentStockExecution $item $file.Name
+                $recipe=$outcome.Recipe -split "`n",3
+                if ($recipe.Count -ne 3 -or $file.BaseName -cne "intervention-$($recipe[1])" -or
+                    $outcome.GeneratorInput.Checksum -cne $item.StockExecution.GeneratorInput.Checksum) {
+                    throw 'Controlled residual capture does not match its stock baseline.'
+                }
+                $experiment=[StudentResidualIntervention]::new()
+                $experiment.Baseline=$item.StockExecution
+                $experiment.Outcome=$outcome
+                $experiment.Site=$recipe[1]
+                $experiment.Intention=$recipe[2]
+                $experiment
+            }
+        })
         $item
     } finally { $r.Dispose() }
 }

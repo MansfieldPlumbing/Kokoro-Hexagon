@@ -12,6 +12,7 @@ class KokoroTextEncoder {
     [float[]] $HiddenBias
     # Optional in-process convolution dispatcher; masked batches retain the scalar path.
     [System.Func[float[],int,int,float[]]] $Convolution
+    [System.Action[string,string,int,Array]] $Observation
 
     static [float[]] FoldWeightNorm([float[]] $values, [float[]] $gain) {
         if ($values.Length -ne 1310720 -or $gain.Length -ne 512) { throw [ArgumentException]::new('Convolution weight shape mismatch.') }
@@ -35,7 +36,11 @@ class KokoroTextEncoder {
                 for ($c = 0; $c -lt 512; $c++) { $x[$c * $tokens + $t] = $this.Embedding[$ids[$t] * 512 + $c] }
             }
         }
+        if (-not [object]::ReferenceEquals($null,$this.Observation)) { $this.Observation.Invoke('text_encoder.embedding', 'channel,token', $tokens, $x) }
         for ($layer = 0; $layer -lt 3; $layer++) {
+            $beforeName = 'text_encoder.cnn.0.pre_norm'; $afterName = 'text_encoder.cnn.0.post_activation'
+            if ($layer -eq 1) { $beforeName = 'text_encoder.cnn.1.pre_norm'; $afterName = 'text_encoder.cnn.1.post_activation' }
+            if ($layer -eq 2) { $beforeName = 'text_encoder.cnn.2.pre_norm'; $afterName = 'text_encoder.cnn.2.post_activation' }
             $y = [float[]]::new(512 * $tokens)
             if (-not [object]::ReferenceEquals($null, $this.Convolution) -and $length -eq $tokens) {
                 $y = $this.Convolution.Invoke($x, $tokens, $layer)
@@ -57,6 +62,7 @@ class KokoroTextEncoder {
                 }
             }
             }
+            if (-not [object]::ReferenceEquals($null,$this.Observation)) { $this.Observation.Invoke($beforeName, 'channel,token', $tokens, $y) }
             for ($t = 0; $t -lt $length; $t++) {
                 $mean = [float]0
                 for ($c = 0; $c -lt 512; $c++) { $mean = [float]($mean + $y[$c * $tokens + $t]) }
@@ -70,6 +76,7 @@ class KokoroTextEncoder {
                     $y[$c * $tokens + $t] = $value
                 }
             }
+            if (-not [object]::ReferenceEquals($null,$this.Observation)) { $this.Observation.Invoke($afterName, 'channel,token', $tokens, $y) }
             $x = $y
         }
         $output = [float[]]::new(512 * $tokens)
@@ -95,6 +102,7 @@ class KokoroTextEncoder {
                 }
             }
         }
+        if (-not [object]::ReferenceEquals($null,$this.Observation)) { $this.Observation.Invoke('text_encoder.recurrent', 'direction,channel,token', $tokens, $output) }
         return $output
     }
 

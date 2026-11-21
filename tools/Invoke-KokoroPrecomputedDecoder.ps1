@@ -663,12 +663,13 @@ class OfflineAttentionWorker {
     [float[]] $Key
     [float[]] $Value
     [float[]] $Context
+    [double[]] $Attention
     [int] $Rows
     [int] $FirstHead
     [int] $LastHead
 
     [void] Run() {
-        [OfflineUpstreamMath]::AttentionHeads($this.Query, $this.Key, $this.Value, $this.Rows, 12, 768, $this.Context, $this.FirstHead, $this.LastHead)
+        [OfflineUpstreamMath]::AttentionHeads($this.Query, $this.Key, $this.Value, $this.Rows, 12, 768, $this.Context, $this.FirstHead, $this.LastHead, $this.Attention)
     }
 }
 class OfflineLstmWorker {
@@ -971,6 +972,36 @@ class OfflineRenderMath {
         }
         return $output
     }
+    # Field-major order: mean, variance, stdev, epsilon-stdev, projected gamma,
+    # beta, gamma with identity offset, norm weight, norm bias, ideal scale, ideal offset.
+    static [float[]] ObserveAdaIn([float[]] $values, [int] $channels, [int] $frames, [float[]] $style, [float[]] $fc, [float[]] $bias, [float[]] $nw, [float[]] $nb, [double[]] $levels) {
+        $result = [float[]]::new(11 * $channels)
+        for ($c = 0; $c -lt $channels; $c++) {
+            $mean = [float]0; $variance = [float]0
+            if ([object]::ReferenceEquals($null,$levels)) {
+                for ($t = 0; $t -lt $frames; $t++) { $mean = [float]($mean + $values[$c * $frames + $t]) }
+                $mean = [float]($mean / [float]$frames)
+                for ($t = 0; $t -lt $frames; $t++) { $d = [float]($values[$c * $frames + $t] - $mean); $variance = [float]($variance + [float]($d * $d)) }
+                $variance = [float]($variance / [float]$frames)
+            } else { $mean = [float]$levels[$c]; $variance = [float]$levels[$channels + $c] }
+            $gamma = [float]0; $beta = [float]0
+            for ($j = 0; $j -lt $style.Length; $j++) {
+                $gamma = [float]($gamma + [float]($fc[$c * $style.Length + $j] * $style[$j]))
+                $beta = [float]($beta + [float]($fc[($c + $channels) * $style.Length + $j] * $style[$j]))
+            }
+            $projected = [float]($gamma + $bias[$c]); $gamma = [float]([float]1 + $projected)
+            $beta = [float]($beta + $bias[$channels + $c])
+            $denominator = [MathF]::Sqrt([float]($variance + [float]0.00001))
+            $scale = [float]([float]($nw[$c] * $gamma) / $denominator)
+            $result[$c] = $mean; $result[$channels + $c] = $variance
+            $result[2 * $channels + $c] = [MathF]::Sqrt($variance); $result[3 * $channels + $c] = $denominator
+            $result[4 * $channels + $c] = $projected; $result[5 * $channels + $c] = $beta; $result[6 * $channels + $c] = $gamma
+            $result[7 * $channels + $c] = $nw[$c]; $result[8 * $channels + $c] = $nb[$c]
+            $result[9 * $channels + $c] = $scale
+            $result[10 * $channels + $c] = [float]([float]($nb[$c] * $gamma) + $beta - [float]($mean * $scale))
+        }
+        return $result
+    }
     static [float[]] Leaky([float[]] $values, [float] $slope) {
         $output = [float[]]::new($values.Length)
         for ($i = 0; $i -lt $values.Length; $i++) { $value = $values[$i]; if ($value -lt [float]0) { $value = [float]($value * $slope) }; $output[$i] = $value }
@@ -1027,7 +1058,7 @@ class OfflineRenderMath {
         }
         return $output
     }
-    static [float[]] Harmonic([float[]] $f0, [float[]] $draw0, [float[]] $draw1, [float[]] $draw2, [float[]] $weight, [float[]] $bias) {
+    static [float[]] Harmonic([float[]] $f0, [float[]] $draw0, [float[]] $draw1, [float[]] $draw2, [float[]] $weight, [float[]] $bias, [float[]] $components) {
         $samples = 300 * $f0.Length
         if ($draw0.Length -ne 9 -or $draw1.Length -ne 9 * $samples -or $draw2.Length -ne $samples -or $weight.Length -ne 9 -or $bias.Length -ne 1) { throw [ArgumentException]::new('Harmonic source shape mismatch.') }
         $phase = [float[]]::new(9 * $f0.Length)
@@ -1058,7 +1089,9 @@ class OfflineRenderMath {
                 $angle = [float]([float]([float]([float]1 - $fraction) * $phase[$h * $f0.Length + $lower]) + [float]($fraction * $phase[$h * $f0.Length + $upper]))
                 $value = [float]0
                 if ($voiced) { $value = [float]([MathF]::Sin($angle) * [float]0.1) }
-                $value = [float]($value + [float]($noiseAmplitude * $draw1[$t * 9 + $h]))
+                $noise = [float]($noiseAmplitude * $draw1[$t * 9 + $h])
+                if (-not [object]::ReferenceEquals($null,$components)) { $components[$t * 9 + $h] = $value; $components[9 * $samples + $t * 9 + $h] = $noise }
+                $value = [float]($value + $noise)
                 $level = [float]($level + [float]($value * $weight[$h]))
             }
             $output[$t] = [MathF]::Tanh([float]($level + $bias[0]))
@@ -1276,13 +1309,13 @@ class OfflineUpstreamMath {
         }
         return $y
     }
-    static [float[]] SelfAttention([float[]] $query, [float[]] $key, [float[]] $value, [int] $rows, [int] $heads, [int] $width) {
+    static [float[]] SelfAttention([float[]] $query, [float[]] $key, [float[]] $value, [int] $rows, [int] $heads, [int] $width, [double[]] $attention) {
         $context = [float[]]::new($rows * $width)
-        [OfflineUpstreamMath]::AttentionHeads($query, $key, $value, $rows, $heads, $width, $context, 0, $heads)
+        [OfflineUpstreamMath]::AttentionHeads($query, $key, $value, $rows, $heads, $width, $context, 0, $heads, $attention)
         return $context
     }
 
-    static [void] AttentionHeads([float[]] $query, [float[]] $key, [float[]] $value, [int] $rows, [int] $heads, [int] $width, [float[]] $context, [int] $firstHead, [int] $lastHead) {
+    static [void] AttentionHeads([float[]] $query, [float[]] $key, [float[]] $value, [int] $rows, [int] $heads, [int] $width, [float[]] $context, [int] $firstHead, [int] $lastHead, [double[]] $attention) {
         # Unmasked scaled dot-product attention per head (a single unpadded utterance).
         $headWidth = [int]($width / $heads)
         if ($query.Length -ne $rows * $width -or $key.Length -ne $query.Length -or $value.Length -ne $query.Length -or $headWidth * $heads -ne $width) { throw [ArgumentException]::new('Attention shape mismatch.') }
@@ -1300,6 +1333,7 @@ class OfflineUpstreamMath {
                 }
                 $total = [double]0
                 for ($j = 0; $j -lt $rows; $j++) { $scores[$j] = [Math]::Exp($scores[$j] - $maximum); $total += $scores[$j] }
+                if (-not [object]::ReferenceEquals($null,$attention)) { for ($j = 0; $j -lt $rows; $j++) { $attention[($h * $rows + $i) * $rows + $j] = $scores[$j] / $total } }
                 for ($d = 0; $d -lt $headWidth; $d++) {
                     $sum = [double]0
                     for ($j = 0; $j -lt $rows; $j++) { $sum += $scores[$j] * [double]$value[$j * $width + $offset + $d] }
@@ -1537,7 +1571,7 @@ $snake = $mathType.GetMethod('Snake').CreateDelegate([Func[float[],float[],int,f
 $average3 = $mathType.GetMethod('Average3').CreateDelegate([Func[float[],float[],float[],float[]]])
 $reflectLeft = $mathType.GetMethod('ReflectLeft').CreateDelegate([Func[float[],int,int,float[]]])
 $draws = $mathType.GetMethod('Draws').CreateDelegate([Func[int,int,float[]]])
-$harmonic = $mathType.GetMethod('Harmonic').CreateDelegate([Func[float[],float[],float[],float[],float[],float[],float[]]])
+$harmonic = $mathType.GetMethod('Harmonic').CreateDelegate([Func[float[],float[],float[],float[],float[],float[],float[],float[]]])
 $stft = $mathType.GetMethod('Stft').CreateDelegate([Func[float[],float[]]])
 $inverseStft = $mathType.GetMethod('InverseStft').CreateDelegate([Func[float[],int,float[]]])
 $compare = $mathType.GetMethod('Compare').CreateDelegate([Func[float[],float[],double[]]])
@@ -1573,6 +1607,7 @@ $lstmCache = [Collections.Generic.Dictionary[string,object]]::new([StringCompare
 $profile = [Collections.Generic.List[object]]::new()
 $levelContext = $null
 $script:OfflineObservationSink = $null
+$script:OfflineTensorSink = $null
 $script:OfflineDecoderObservationSink = $null
 # Residual diagnostics Invoke-OfflineSpeech sets per call; null here so Library callers of Invoke-OfflineGenerator run
 # under strict mode.
@@ -1665,6 +1700,10 @@ function Invoke-OfflineConv {
         [string] $Module = 'decoder.module.')
     $conv = Get-OfflineConvolution $Name $Groups $Transpose.IsPresent $Module
     if ($InputValues.Length -ne $conv.InputChannels * $Frames) { throw "Convolution input shape: $Name" }
+    if ($null -ne $script:OfflineTensorSink) {
+        $script:OfflineTensorSink.Invoke("$Module$Name.geometry", 'inputFrames,inputChannels,outputChannels,kernel,stride,padding,dilation,groups,transpose,outputPadding', 1,
+            [int[]]@($Frames,$conv.InputChannels,$conv.OutputChannels,$conv.Kernel,$Stride,$Padding,$Dilation,$Groups,[int]$Transpose.IsPresent,$OutputPadding))
+    }
     $outFrames = [int][Math]::Floor(($Frames + 2 * $Padding - $Dilation * ($conv.Kernel - 1) - 1) / [double]$Stride) + 1
     if ($Transpose) { $outFrames = ($Frames - 1) * $Stride - 2 * $Padding + $Dilation * ($conv.Kernel - 1) + $OutputPadding + 1 }
     $result = [float[]]::new($conv.OutputChannels * $outFrames)
@@ -1716,6 +1755,7 @@ function Invoke-OfflineConv {
         }
         [Threading.Tasks.Task]::WaitAll($running.ToArray()); $watch.Stop()
         $profile.Add([pscustomobject]@{ Stage = $Name; Kind = 'DirectConvolution'; Milliseconds = $watch.Elapsed.TotalMilliseconds; Frames = $outFrames })
+    if ($null -ne $script:OfflineTensorSink) { $script:OfflineTensorSink.Invoke("$Module$Name", 'channel,frame', $outFrames, $result) }
         if($null -ne $script:OfflineDecoderObservationSink){$script:OfflineDecoderObservationSink.Invoke($MyInvocation.MyCommand,$result,$outFrames,[object[]]@(,$InputValues))}
         return , $result
     }
@@ -1739,6 +1779,7 @@ function Invoke-OfflineConv {
     }
     [Threading.Tasks.Task]::WaitAll($running.ToArray()); $watch.Stop()
     $profile.Add([pscustomobject]@{ Stage = $Name; Kind = 'Convolution'; Milliseconds = $watch.Elapsed.TotalMilliseconds; Frames = $outFrames })
+    if ($null -ne $script:OfflineTensorSink) { $script:OfflineTensorSink.Invoke("$Module$Name", 'channel,frame', $outFrames, $result) }
     if($null -ne $script:OfflineDecoderObservationSink){$script:OfflineDecoderObservationSink.Invoke($MyInvocation.MyCommand,$result,$outFrames,[object[]]@(,$InputValues))}
     return , $result
 }
@@ -1767,6 +1808,7 @@ function Invoke-OfflineAdaIn([float[]] $InputValues, [int] $Channels, [int] $Fra
         $adaInCache.Add($prefix, [pscustomobject]@{ Fc = $fc; Bias = $bias; NormWeight = $normWeight; NormBias = $normBias })
     }
     $watch = [Diagnostics.Stopwatch]::StartNew()
+    $record = $null
     $kind = 'LiveAdaIN'
     $part = if ($Name.StartsWith('generator.', [StringComparison]::Ordinal)) { 'Generator' } else { 'Decoder' }
     if ($null -ne $levelContext -and $levelContext.Part -ceq $part) {
@@ -1827,6 +1869,21 @@ function Invoke-OfflineAdaIn([float[]] $InputValues, [int] $Channels, [int] $Fra
     }
     $watch.Stop()
     $profile.Add([pscustomobject]@{ Stage = $Name; Kind = $kind; Milliseconds = $watch.Elapsed.TotalMilliseconds; Frames = $Frames })
+    if ($null -ne $script:OfflineTensorSink) {
+        $scope = 'channel,whole-invocation'
+        $stats = $null
+        if ($null -ne $record) {
+            $stats = $record.Statistics
+            $script:OfflineTensorSink.Invoke("$prefix.accumulators", 'mean,variance,token-sums,token-squares', $Channels, $stats)
+            $script:OfflineTensorSink.Invoke("$prefix.token_frames", 'token', $record.TokenFrames.Length, $record.TokenFrames)
+        }
+        $geometry = [int[]]@($Channels,$Frames,$FrameRate)
+        $script:OfflineTensorSink.Invoke("$prefix.geometry", 'channels,frames,declaredFramesPerSecond', 1, $geometry)
+        $script:OfflineTensorSink.Invoke("$prefix.input", 'channel,frame', $Frames, $InputValues)
+        $script:OfflineTensorSink.Invoke("$prefix.output", 'channel,frame', $Frames, $result)
+        $script:OfflineTensorSink.Invoke("$prefix.parameters", $scope, $Channels,
+            $mathType::ObserveAdaIn($InputValues,$Channels,$Frames,$AcousticStyle,$fc,$bias,$normWeight,$normBias,$stats))
+    }
     if($null -ne $script:OfflineObservationSink){$script:OfflineObservationSink.Invoke($MyInvocation,[psvariable[]]@(Get-Variable -Scope Local))}
     return , $result
 }
@@ -1858,6 +1915,7 @@ function Invoke-OfflineDecoderBlock([float[]] $InputValues, [int] $Frames, [floa
     }
     if ($cin -ne $cout) { $shortcut = Invoke-OfflineConv $shortcut $nextFrames ($Name + '.conv1x1') -Module $Module }
     $blockOutput=$residual.Invoke($next, $shortcut, [float]0.70710677)
+    if ($null -ne $script:OfflineTensorSink) { $script:OfflineTensorSink.Invoke("$Module$Name.residual_sum", 'channel,frame', $nextFrames, $blockOutput) }
     if($null -ne $script:OfflineDecoderObservationSink){$script:OfflineDecoderObservationSink.Invoke($residual.Method,$blockOutput,$nextFrames,[object[]]@($next,$shortcut))}
     return , $blockOutput
 }
@@ -1884,6 +1942,7 @@ function Invoke-OfflineDecoder {
         Test-OfflineNode ("dec.decode$block") $x
     }
     $result = [OfflineDecoderResult]::new(); $result.Features = $x; $result.Levels = $levelContext.Exported.ToArray()
+    if ($null -ne $script:OfflineTensorSink) { $script:OfflineTensorSink.Invoke('decoder.generator_input', 'channel,frame', $PitchCurve.Length, $x) }
     return $result
     } finally { $script:OfflineDecoderObservationSink=$previousDecoderSink }
 }
@@ -1989,15 +2048,18 @@ function Invoke-OfflineGeneratorBlock([float[]] $InputValues, [int] $Frames, [fl
         $st = $stages[$stage]
         $next = Invoke-OfflineAdaIn $x $channels $Frames $AcousticStyle $st.AdaIn1
         $next = Invoke-OfflineSnake $next $st.Alpha1 $Frames
+        if ($null -ne $script:OfflineTensorSink) { $script:OfflineTensorSink.Invoke("$($st.Pair).snake1", 'channel,frame', $Frames, $next) }
         $next = Invoke-OfflineConv $next $Frames $st.Conv1 -Dilation $st.Dilation -Padding $st.Padding1
         $next = Invoke-OfflineAdaIn $next $channels $Frames $AcousticStyle $st.AdaIn2
         $next = Invoke-OfflineSnake $next $st.Alpha2 $Frames
+        if ($null -ne $script:OfflineTensorSink) { $script:OfflineTensorSink.Invoke("$($st.Pair).snake2", 'channel,frame', $Frames, $next) }
         $next = Invoke-OfflineConv $next $Frames $st.Conv2 -Padding $st.Padding2
         $pair = $st.Pair
         if ($null -ne $script:OfflineResidualTrace) { $script:OfflineResidualTrace.Add([pscustomobject]@{ Pair = $pair; StreamRms = (Get-OfflineRms $x); CorrectionRms = (Get-OfflineRms $next) }) }
         if ($null -ne $script:OfflineResidualHook) { $replacement = & $script:OfflineResidualHook $pair $x $next $channels $Frames; if ($null -ne $replacement) { $next = [float[]]$replacement } }
         if ($null -ne $script:OfflineDroppedResiduals -and $script:OfflineDroppedResiduals.Contains($pair)) { continue }
         $x = $residual.Invoke($next, $x, [float]1)
+    if ($null -ne $script:OfflineTensorSink) { $script:OfflineTensorSink.Invoke("$pair.residual_sum", 'channel,frame', $Frames, $x) }
     }
     return , $x
 }
@@ -2034,14 +2096,25 @@ function Invoke-OfflineGenerator([float[]] $Features, [float[]] $AcousticStyle, 
         $levelContext = [OfflineLevelContext]@{ Part = 'Generator'; Mode = $LevelMode; Durations = $TokenDurations; Supplied = $SuppliedLevels; Exported = $exported; Policy = $MomentPolicy }
     }
     Test-OfflineNode 'gen.input_x' $Features
-    $source = $harmonic.Invoke($PitchCurve, $UniformDraw, $HarmonicDraw, $ExtraDraw, (Read-OfflineWeight 'decoder.module.generator.m_source.l_linear.weight'), (Read-OfflineWeight 'decoder.module.generator.m_source.l_linear.bias'))
+    $components = $null
+    if ($null -ne $script:OfflineTensorSink) {
+        $components = [float[]]::new(18 * 300 * $PitchCurve.Length)
+        $script:OfflineTensorSink.Invoke('generator.source.f0', 'frame@80', $PitchCurve.Length, $PitchCurve)
+        $script:OfflineTensorSink.Invoke('generator.source.uniform_draw', 'harmonic', 9, $UniformDraw)
+        $script:OfflineTensorSink.Invoke('generator.source.harmonic_draw', 'sample@24000,harmonic', $ExtraDraw.Length, $HarmonicDraw)
+        $script:OfflineTensorSink.Invoke('generator.source.extra_draw', 'sample@24000', $ExtraDraw.Length, $ExtraDraw)
+    }
+    $source = $harmonic.Invoke($PitchCurve, $UniformDraw, $HarmonicDraw, $ExtraDraw, (Read-OfflineWeight 'decoder.module.generator.m_source.l_linear.weight'), (Read-OfflineWeight 'decoder.module.generator.m_source.l_linear.bias'), $components)
+    if ($null -ne $script:OfflineTensorSink) { $script:OfflineTensorSink.Invoke('generator.source.components', 'harmonic-or-noise,sample@24000,harmonic', $source.Length, $components) }
     Test-OfflineNode 'gen.m_source.out0' $source
+    if ($null -ne $script:OfflineTensorSink) { $script:OfflineTensorSink.Invoke('generator.source.excitation', 'sample@24000', $source.Length, $source) }
     if ($Mode -eq 'Nodes') {
         $extra = $sourceExtra.Invoke($PitchCurve, $ExtraDraw); $noiseOutput = [float[]]::new($source.Length); $voicingOutput = [float[]]::new($source.Length)
         [Array]::Copy($extra, 0, $noiseOutput, 0, $source.Length); [Array]::Copy($extra, $source.Length, $voicingOutput, 0, $source.Length)
         Test-OfflineNode 'gen.m_source.out1' $noiseOutput; Test-OfflineNode 'gen.m_source.out2' $voicingOutput
     }
     $har = $stft.Invoke($source); $harFrames = [int]($har.Length / 22)
+    if ($null -ne $script:OfflineTensorSink) { $script:OfflineTensorSink.Invoke('generator.source.stft', 'channel,frame', $harFrames, $har) }
     if ($Mode -eq 'Nodes') {
         $spec = [float[]]::new(11 * $harFrames); $phase = [float[]]::new(11 * $harFrames)
         [Array]::Copy($har, 0, $spec, 0, $spec.Length); [Array]::Copy($har, $spec.Length, $phase, 0, $phase.Length)
@@ -2067,17 +2140,21 @@ function Invoke-OfflineGenerator([float[]] $Features, [float[]] $AcousticStyle, 
         if ($stage -eq 1) { $x = $reflectLeft.Invoke($x, $channels, $frames); $frames++ }
         if ($frames -ne $nextFrames) { throw 'Generator excitation alignment mismatch.' }
         $x = $residual.Invoke($x, $sourceFeatures, [float]1)
+    if ($null -ne $script:OfflineTensorSink) { $script:OfflineTensorSink.Invoke("generator.stage.$stage.excitation_add", 'channel,frame', $frames, $x) }
         $branches = [object[]]::new(3)
         for ($branch = 0; $branch -lt 3; $branch++) {
             $branches[$branch] = Invoke-OfflineGeneratorBlock $x $frames $AcousticStyle ('generator.resblocks.' + (3 * $stage + $branch))
             Test-OfflineNode ('gen.resblocks' + (3 * $stage + $branch)) $branches[$branch]
         }
         $x = $average3.Invoke($branches[0], $branches[1], $branches[2])
+    if ($null -ne $script:OfflineTensorSink) { $script:OfflineTensorSink.Invoke("generator.stage.$stage.branch_average", 'channel,frame', $frames, $x) }
     }
     $x = $leaky.Invoke($x, [float]0.01)
     $x = Invoke-OfflineConv $x $frames 'generator.conv_post' -Padding 3
     Test-OfflineNode 'gen.conv_post' $x
-    return , $inverseStft.Invoke($x, $frames)
+    $waveform = $inverseStft.Invoke($x, $frames)
+    if ($null -ne $script:OfflineTensorSink) { $script:OfflineTensorSink.Invoke('generator.waveform', 'sample@24000', $waveform.Length, $waveform) }
+    return , $waveform
 }
 function Invoke-OfflineLstm([float[]] $Rows, [int] $rowCount, [string] $Prefix) {
     $stageWatch = [Diagnostics.Stopwatch]::StartNew()
@@ -2120,6 +2197,12 @@ function Invoke-OfflineLstm([float[]] $Rows, [int] $rowCount, [string] $Prefix) 
         }
     }
     $profile.Add([pscustomobject]@{ Stage = $Prefix; Kind = 'Lstm'; Milliseconds = $stageWatch.Elapsed.TotalMilliseconds; Frames = $rowCount })
+    if ($null -ne $script:OfflineTensorSink) {
+        $label = $Prefix
+        if ($Prefix.StartsWith('bert.module.encoder.albert_layer_groups.', [StringComparison]::Ordinal)) { $label = "albert.$script:OfflineAlbertRepeat.$Prefix" }
+        $axis = if ($Prefix -ceq 'predictor.module.shared') { 'frame@40,channel' } elseif ($Prefix.EndsWith('.fc')) { 'styleRow,channel' } else { 'token,channel' }
+        $script:OfflineTensorSink.Invoke($label, $axis, $rowCount, $values)
+    }
     return , $values
 }
 function Invoke-OfflineLinear([float[]] $Rows, [int] $rowCount, [string] $Prefix) {
@@ -2185,6 +2268,12 @@ function Invoke-OfflineLinear([float[]] $Rows, [int] $rowCount, [string] $Prefix
         [Threading.Tasks.Task]::WaitAll($running.ToArray())
     }
     $profile.Add([pscustomobject]@{ Stage = $Prefix; Kind = 'Linear'; Milliseconds = $stageWatch.Elapsed.TotalMilliseconds; Frames = $rowCount })
+    if ($null -ne $script:OfflineTensorSink) {
+        $label = $Prefix
+        if ($Prefix.StartsWith('bert.module.encoder.albert_layer_groups.', [StringComparison]::Ordinal)) { $label = "albert.$script:OfflineAlbertRepeat.$Prefix" }
+        $axis = if ($Prefix -ceq 'predictor.module.shared') { 'frame@40,channel' } elseif ($Prefix.EndsWith('.fc')) { 'styleRow,channel' } else { 'token,channel' }
+        $script:OfflineTensorSink.Invoke($label, $axis, $rowCount, $values)
+    }
     return , $values
 }
 function Invoke-OfflineAlbert([int[]] $Ids) {
@@ -2192,15 +2281,19 @@ function Invoke-OfflineAlbert([int[]] $Ids) {
     $p = 'bert.module.'; $layer = $p + 'encoder.albert_layer_groups.0.albert_layers.0.'; $t = $Ids.Length
     $x = $upstreamMath::AlbertEmbeddings($Ids, (Read-OfflineWeight ($p + 'embeddings.word_embeddings.weight')),
         (Read-OfflineWeight ($p + 'embeddings.position_embeddings.weight')), (Read-OfflineWeight ($p + 'embeddings.token_type_embeddings.weight')), 128)
+    if ($null -ne $script:OfflineTensorSink) { $script:OfflineTensorSink.Invoke('albert.embedding_sum', 'token,channel', $t, $x) }
     $x = $upstreamMath::LayerNorm($x, $t, 128, (Read-OfflineWeight ($p + 'embeddings.LayerNorm.weight')), (Read-OfflineWeight ($p + 'embeddings.LayerNorm.bias')), [double]1e-12)
     $h = Invoke-OfflineLinear $x $t ($p + 'encoder.embedding_hidden_mapping_in')
+    if ($null -ne $script:OfflineTensorSink) { $script:OfflineTensorSink.Invoke('albert.embedding_normalized', 'token,channel', $t, $x) }
     for ($repeat = 0; $repeat -lt 12; $repeat++) {
         $script:OfflineAlbertRepeat = $repeat
         $query = Invoke-OfflineLinear $h $t ($layer + 'attention.query')
         $key = Invoke-OfflineLinear $h $t ($layer + 'attention.key')
         $value = Invoke-OfflineLinear $h $t ($layer + 'attention.value')
+        $attentionWeights = $null
+        if ($null -ne $script:OfflineTensorSink) { $attentionWeights = [double[]]::new(12 * $t * $t) }
         if ($null -eq $attentionWorker -or $t -lt 32 -or $Dense -eq 'Scalar') {
-            $context = $upstreamMath::SelfAttention($query, $key, $value, $t, 12, 768)
+            $context = $upstreamMath::SelfAttention($query, $key, $value, $t, 12, 768, $attentionWeights)
         } else {
             $context = [float[]]::new($t * 768)
             $count = [Math]::Min($Threads, 12)
@@ -2208,21 +2301,25 @@ function Invoke-OfflineAlbert([int[]] $Ids) {
             for ($i = 0; $i -lt $count; $i++) {
                 $worker = [Activator]::CreateInstance($attentionWorker)
                 $worker.Query = $query; $worker.Key = $key; $worker.Value = $value
-                $worker.Context = $context; $worker.Rows = $t
+                $worker.Context = $context; $worker.Rows = $t; $worker.Attention = $attentionWeights
                 $worker.FirstHead = [int][Math]::Floor(12 * $i / $count)
                 $worker.LastHead = [int][Math]::Floor(12 * ($i + 1) / $count)
                 $tasks[$i] = [Threading.Tasks.Task]::Run($attentionWorker.GetMethod('Run').CreateDelegate([Action], $worker))
             }
             [Threading.Tasks.Task]::WaitAll($tasks)
         }
+        if ($null -ne $script:OfflineTensorSink) { $script:OfflineTensorSink.Invoke("albert.$repeat.attention.weights", 'head,queryToken,keyToken', $t, $attentionWeights) }
         $projected = Invoke-OfflineLinear $context $t ($layer + 'attention.dense')
+    if ($null -ne $script:OfflineTensorSink) { $script:OfflineTensorSink.Invoke("albert.$repeat.attention.context", 'token,channel', $t, $context) }
         $attention = $upstreamMath::LayerNorm($upstreamMath::Add($h, $projected), $t, 768,
             (Read-OfflineWeight ($layer + 'attention.LayerNorm.weight')), (Read-OfflineWeight ($layer + 'attention.LayerNorm.bias')), [double]1e-12)
         $feedForward = $upstreamMath::GeluNew((Invoke-OfflineLinear $attention $t ($layer + 'ffn')))
+        if ($null -ne $script:OfflineTensorSink) { $script:OfflineTensorSink.Invoke("albert.$repeat.gelu", 'token,channel', $t, $feedForward) }
         $feedForward = Invoke-OfflineLinear $feedForward $t ($layer + 'ffn_output')
         $h = $upstreamMath::LayerNorm($upstreamMath::Add($feedForward, $attention), $t, 768,
             (Read-OfflineWeight ($layer + 'full_layer_layer_norm.weight')), (Read-OfflineWeight ($layer + 'full_layer_layer_norm.bias')), [double]1e-12)
         if ($null -ne $script:OfflineAlbertTrace) { $script:OfflineAlbertTrace.Add($h) }
+    if ($null -ne $script:OfflineTensorSink) { $script:OfflineTensorSink.Invoke("albert.$repeat.hidden", 'token,channel', $t, $h) }
     }
     $script:OfflineAlbertRepeat = -1
     return , $h
@@ -2260,9 +2357,12 @@ function Invoke-OfflineSpeech {
         [float[]] $SuppliedFeatures = $null, [switch] $TraceResiduals, [string[]] $DropResiduals = @(), [scriptblock] $ResidualHook = $null,
         [Action[Management.Automation.InvocationInfo,psvariable[]]] $ObservationSink=$null,
         [switch] $RecomputeText,
-        [Action[object,float[],int,object[]]] $DecoderObservationSink=$null)
+        [Action[object,float[],int,object[]]] $DecoderObservationSink=$null,
+        [Action[string,string,int,Array]] $TensorObservationSink=$null)
     $previousObservationSink=$script:OfflineObservationSink
     $script:OfflineObservationSink=$ObservationSink
+    $previousTensorSink=$script:OfflineTensorSink
+    $script:OfflineTensorSink=$TensorObservationSink
     try {
     # Assigned in the branches, not from an if expression: an empty collection written to the pipeline would be $null.
     $script:OfflineResidualTrace = $null; $script:OfflineDroppedResiduals = $null; $script:OfflineResidualHook = $ResidualHook
@@ -2271,14 +2371,17 @@ function Invoke-OfflineSpeech {
     $ids = [Collections.Generic.List[int]]::new(); $ids.Add(0)
     foreach ($symbol in $Phonemes.ToCharArray()) { $id = $referenceConfig.vocab[[string]$symbol]; if ($null -ne $id) { $ids.Add([int]$id) } }
     $ids.Add(0); $tokenIds = $ids.ToArray(); $t = $tokenIds.Length
+    if ($null -ne $script:OfflineTensorSink) { $script:OfflineTensorSink.Invoke('albert.token_ids', 'token', $t, $tokenIds) }
     if ($t -gt 512) { throw 'More than 510 phonemes; stock splits longer input.' }
     $style = Read-OfflineVoiceRow $Voice $Phonemes.Length
+    if ($null -ne $script:OfflineTensorSink) { $script:OfflineTensorSink.Invoke('speech.style', 'channel', 1, $style.Acoustic) }
+    if ($null -ne $script:OfflineTensorSink) { $script:OfflineTensorSink.Invoke('speech.prosody_style', 'channel', 1, $style.Prosody) }
     # With -SuppliedF0 every control is supplied. Without it, -SuppliedDurations (and -SuppliedN) replace the predictor's
     # durations (and N) while its F0 branch runs on those durations.
     $supplied = $null -ne $SuppliedF0
     # Retain exact token preparations up to the caller's capacity, keyed by the token sequence
     # (OfflineTokenSequence compares complete sequences). Experiments bypass it.
-    $reuse = $ReuseText -and -not $RecomputeText -and -not $supplied -and $null -eq $script:OfflineAlbertTrace -and $null -eq $script:OfflineAlbertFormat
+    $reuse = $ReuseText -and $null -eq $TensorObservationSink -and -not $RecomputeText -and -not $supplied -and $null -eq $script:OfflineAlbertTrace -and $null -eq $script:OfflineAlbertFormat
     $prepared = $null
     $textHit = $reuse -and $script:OfflineTextPreparations.TryGetValue([OfflineTokenSequence]::new($tokenIds),[ref]$prepared)
     if ($textHit) { $script:OfflineTextHits++ }
@@ -2306,8 +2409,10 @@ function Invoke-OfflineSpeech {
         & $endStage "predictor.text_encoder.$layer" $t
     }
     $durationFeatures = $x
+    if ($null -ne $script:OfflineTensorSink) { $script:OfflineTensorSink.Invoke('predictor.duration_features', 'token,channel', $t, $x) }
     $logits = Invoke-OfflineLinear (Invoke-OfflineLstm $durationFeatures $t 'predictor.module.lstm') $t 'predictor.module.duration_proj.linear_layer'
     $durations = $upstreamMath::Durations($logits, $t, 50, $Speed)
+    if ($null -ne $script:OfflineTensorSink) { $script:OfflineTensorSink.Invoke('predictor.durations', 'token', $t, $durations) }
     & $endStage 'predictor.duration' $t
     if ($null -ne $SuppliedDurations) {
         if ($SuppliedDurations.Length -ne $t) { throw "SuppliedDurations has $($SuppliedDurations.Length) values for $t token ids." }
@@ -2315,8 +2420,10 @@ function Invoke-OfflineSpeech {
     }
     $frames = 0; foreach ($duration in $durations) { $frames += $duration }
     $aligned = $upstreamMath::ExpandChannels($durationFeatures, $t, 640, $durations)
+    if ($null -ne $script:OfflineTensorSink) { $script:OfflineTensorSink.Invoke('predictor.aligned', 'channel,frame', $frames, $aligned) }
     $shared = Invoke-OfflineLstm ($upstreamMath::ChannelsToRows($aligned, 640, $frames)) $frames 'predictor.module.shared'
     $shared = $upstreamMath::RowsToChannels($shared, $frames, 512)
+    if ($null -ne $script:OfflineTensorSink) { $script:OfflineTensorSink.Invoke('predictor.shared_channels', 'channel,frame', $frames, $shared) }
     & $endStage 'predictor.shared' $frames
     $curves = @{}
     foreach ($curve in 'F0', 'N') {
@@ -2360,7 +2467,10 @@ function Invoke-OfflineSpeech {
             return , (Invoke-OfflineConv $Values $FrameCount "cnn.$LayerIndex.0" -Padding 2 -Module 'text_encoder.module.')
         }
     } else { $script:OfflineTextEncoder.Convolution = $null }
-    $textEncoding = if ($textHit) { , ([float[]]$prepared.TextEncoding.Clone()) } else { , ($script:OfflineTextEncoder.Run($tokenIds, $t)) }
+    $script:OfflineTextEncoder.Observation = $script:OfflineTensorSink
+    try {
+        $textEncoding = if ($textHit) { , ([float[]]$prepared.TextEncoding.Clone()) } else { , ($script:OfflineTextEncoder.Run($tokenIds, $t)) }
+    } finally { $script:OfflineTextEncoder.Observation = $null }
     if ($reuse -and -not $textHit) {
         $script:OfflineTextPreparation = [OfflineTextPreparation]@{
             TokenIds = [int[]]$tokenIds.Clone()
@@ -2374,6 +2484,7 @@ function Invoke-OfflineSpeech {
     $profile.Add([pscustomobject]@{ Stage = 'text_encoder'; Kind = 'TextEncoderTotal'; Milliseconds = $encoderWatch.Elapsed.TotalMilliseconds; Frames = $t })
     # Aligned: the decoder's asr input, [channel][frame] at the duration frames. -SkipDecoder stops here.
     $aligned = $align.Invoke($textEncoding, $durations)
+    if ($null -ne $script:OfflineTensorSink) { $script:OfflineTensorSink.Invoke('text_encoder.aligned', 'channel,frame', $frames, $aligned) }
     if ($SkipDecoder) {
         return [pscustomobject]@{ Phonemes = $Phonemes; Voice = $Voice; TokenIds = $tokenIds; Bert = $bert; BertEncoder = $durationInput; Durations = $durations; F0 = $curves.F0; N = $curves.N; TextEncoding = $textEncoding; Aligned = $aligned
             AcousticStyle = $style.Acoustic; ProsodyStyle = $style.Prosody }
@@ -2387,7 +2498,7 @@ function Invoke-OfflineSpeech {
     [pscustomobject]@{ Phonemes = $Phonemes; Voice = $Voice; Seed = $Seed; TokenIds = $tokenIds; Bert = $bert; BertEncoder = $durationInput; DurationFeatures = $durationFeatures
         Durations = $durations; F0 = $curves.F0; N = $curves.N; TextEncoding = $textEncoding; Aligned = $aligned
         AcousticStyle = $style.Acoustic; ProsodyStyle = $style.Prosody; Features = $decoded.Features; Pcm = $pcm }
-    } finally { $script:OfflineObservationSink=$previousObservationSink }
+    } finally { $script:OfflineObservationSink=$previousObservationSink; $script:OfflineTensorSink=$previousTensorSink }
 }
 $script:OfflineTextEncoder = $null
 function New-OfflineDraws([int] $SampleCount, [switch] $VerifyRepeat) {
@@ -2705,7 +2816,7 @@ if ($Mode -in 'ExcitationPair','RenderTiming') {
     if ($CompareStftAssembly) {
         $controlAssembly = [Reflection.Assembly]::Load([IO.File]::ReadAllBytes((Resolve-Path $CompareStftAssembly).Path))
         $controlStft = $controlAssembly.GetType('OfflineRenderMath',$true).GetMethod('Stft').CreateDelegate([Func[float[],float[]]])
-        $excitation = $harmonic.Invoke($decoded.F0,$sourceDraws.Uniform,$sourceDraws.Harmonic,$sourceDraws.Extra,(Read-OfflineWeight 'decoder.module.generator.m_source.l_linear.weight'),(Read-OfflineWeight 'decoder.module.generator.m_source.l_linear.bias'))
+        $excitation = $harmonic.Invoke($decoded.F0,$sourceDraws.Uniform,$sourceDraws.Harmonic,$sourceDraws.Extra,(Read-OfflineWeight 'decoder.module.generator.m_source.l_linear.weight'),(Read-OfflineWeight 'decoder.module.generator.m_source.l_linear.bias'), $null)
         $timings = foreach ($pair in 0..8) {
             foreach ($arm in 0,1) {
                 $candidate = ($arm + $pair) % 2 -eq 1
