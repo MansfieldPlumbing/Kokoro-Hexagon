@@ -2920,7 +2920,13 @@ if ($Mode -eq 'Speech') {
     $speechWatch = [Diagnostics.Stopwatch]::StartNew()
     $driverDirectory = Join-Path $root 'build/phonemizer/english/driver/D7B06FD52B900130E8702544D14BE2F662EC2E009EFCE6B33E3FC92BE8B70AD1-library-dll'
     $driverPin = '112DC0B565042184DF74FA5176F09F6E8294857693B44F0BBED456A43B3FEEF1'
-    $driverReceipt = Import-PowerShellDataFile (Join-Path $driverDirectory 'driver-receipt.psd1')
+    if ($DriverReceiptPath) {
+        $driverDirectory = Split-Path (Resolve-Path -LiteralPath $DriverReceiptPath).Path
+        $driverReceipt = Import-PowerShellDataFile -LiteralPath $DriverReceiptPath
+        $driverPin = $driverReceipt.AssemblySha256
+    } else {
+        $driverReceipt = Import-PowerShellDataFile (Join-Path $driverDirectory 'driver-receipt.psd1')
+    }
     $driverPath = Join-Path $driverDirectory ([IO.Path]::GetFileName($driverReceipt.Output))
     if ($driverReceipt.AssemblySha256 -cne $driverPin -or (Get-FileHash -LiteralPath $driverPath).Hash -cne $driverPin) { throw 'Compiled English phonemizer integrity mismatch.' }
     $driverAssembly = [Reflection.Assembly]::LoadFrom($driverPath)
