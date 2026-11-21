@@ -688,13 +688,14 @@ class OfflineLstmWorker {
     # direction; phase 1 runs that direction's recurrence. Both add in the same order as
     # OfflineUpstreamMath.Lstm (biases, then inputs, then hidden state) in double precision.
     [double[]] $Projection
+    [double[]] $RecurrenceTrace
     [int] $Phase
     [int] $FirstGate
     [int] $LastGate
     [void] Run() {
         if ($this.Phase -eq 0) { [OfflineUpstreamMath]::LstmProjection($this.Values, $this.Rows, $this.Inputs, $this.Hidden, $this.InputWeights, $this.InputBias, $this.HiddenBias, $this.Projection, $this.FirstDirection, $this.FirstGate, $this.LastGate); return }
-        if ($this.Phase -eq 1) { [OfflineUpstreamMath]::LstmRecurrence($this.Projection, $this.Rows, $this.Hidden, $this.HiddenWeights, $this.Output, $this.FirstDirection); return }
-        $completed = [OfflineUpstreamMath]::Lstm($this.Values, $this.Rows, $this.Inputs, $this.Hidden, $this.InputWeights, $this.HiddenWeights, $this.InputBias, $this.HiddenBias, $this.Output, $this.FirstDirection, $this.LastDirection)
+        if ($this.Phase -eq 1) { [OfflineUpstreamMath]::LstmRecurrence($this.Projection, $this.Rows, $this.Hidden, $this.HiddenWeights, $this.Output, $this.FirstDirection, $this.RecurrenceTrace); return }
+        $completed = [OfflineUpstreamMath]::Lstm($this.Values, $this.Rows, $this.Inputs, $this.Hidden, $this.InputWeights, $this.HiddenWeights, $this.InputBias, $this.HiddenBias, $this.Output, $this.FirstDirection, $this.LastDirection, $this.RecurrenceTrace)
     }
 }
 
@@ -1343,7 +1344,7 @@ class OfflineUpstreamMath {
         }
 
     }
-    static [float[]] Lstm([float[]] $x, [int] $rows, [int] $inputs, [int] $hidden, [float[]] $inputWeights, [float[]] $hiddenWeights, [float[]] $inputBias, [float[]] $hiddenBias, [float[]] $y, [int] $firstDirection, [int] $lastDirection) {
+    static [float[]] Lstm([float[]] $x, [int] $rows, [int] $inputs, [int] $hidden, [float[]] $inputWeights, [float[]] $hiddenWeights, [float[]] $inputBias, [float[]] $hiddenBias, [float[]] $y, [int] $firstDirection, [int] $lastDirection, [double[]] $trace) {
         # Bidirectional single-layer nn.LSTM, gate order i, f, g, o. Weights hold the forward
         # direction followed by the reverse direction. Output [rows x 2 hidden], forward first.
         $gates = 4 * $hidden
@@ -1373,6 +1374,7 @@ class OfflineUpstreamMath {
                     $cell[$j] = $forgetGate * $cell[$j] + $inputGate * $candidate
                     $state[$j] = $outputGate * [Math]::Tanh($cell[$j])
                     $y[$t * 2 * $hidden + $direction * $hidden + $j] = [float]$state[$j]
+                    if (-not [object]::ReferenceEquals($null,$trace)) { [OfflineUpstreamMath]::StoreLstmTrace($trace,$rows,$hidden,$direction,$t,$j,$inputGate,$forgetGate,$candidate,$outputGate,$cell[$j],$state[$j]) }
                 }
             }
         }
@@ -1392,7 +1394,7 @@ class OfflineUpstreamMath {
             }
         }
     }
-    static [void] LstmRecurrence([double[]] $projection, [int] $rows, [int] $hidden, [float[]] $hiddenWeights, [float[]] $y, [int] $direction) {
+    static [void] LstmRecurrence([double[]] $projection, [int] $rows, [int] $hidden, [float[]] $hiddenWeights, [float[]] $y, [int] $direction, [double[]] $trace) {
         $gates = 4 * $hidden
         $state = [double[]]::new($hidden); $cell = [double[]]::new($hidden); $pre = [double[]]::new($gates)
         for ($step = 0; $step -lt $rows; $step++) {
@@ -1413,8 +1415,18 @@ class OfflineUpstreamMath {
                 $cell[$j] = $forgetGate * $cell[$j] + $inputGate * $candidate
                 $state[$j] = $outputGate * [Math]::Tanh($cell[$j])
                 $y[$t * 2 * $hidden + $direction * $hidden + $j] = [float]$state[$j]
+                if (-not [object]::ReferenceEquals($null,$trace)) { [OfflineUpstreamMath]::StoreLstmTrace($trace,$rows,$hidden,$direction,$t,$j,$inputGate,$forgetGate,$candidate,$outputGate,$cell[$j],$state[$j]) }
             }
         }
+    }
+    static [void] StoreLstmTrace([double[]] $trace, [int] $rows, [int] $hidden, [int] $direction, [int] $row, [int] $unit, [double] $inputGate, [double] $forgetGate, [double] $proposal, [double] $outputGate, [double] $cell, [double] $hiddenState) {
+        $offset=(($direction*$rows+$row)*6)*$hidden+$unit
+        $trace[$offset]=$inputGate
+        $trace[$offset+$hidden]=$forgetGate
+        $trace[$offset+2*$hidden]=$proposal
+        $trace[$offset+3*$hidden]=$outputGate
+        $trace[$offset+4*$hidden]=$cell
+        $trace[$offset+5*$hidden]=$hiddenState
     }
     static [float[]] AppendStyle([float[]] $x, [int] $rows, [int] $columns, [float[]] $style) {
         $width = $columns + $style.Length
@@ -2171,8 +2183,10 @@ function Invoke-OfflineLstm([float[]] $Rows, [int] $rowCount, [string] $Prefix) 
     $parts = $lstmCache[$Prefix]
     $hidden = [int]($parts[2].Length / 8); $inputs = [int]($parts[0].Length / (8 * $hidden))
     $values = [float[]]::new($rowCount * 2 * $hidden)
+    $recurrenceTrace=$null
+    if ($null -ne $script:OfflineTensorSink) { $recurrenceTrace=[double[]]::new(12*$rowCount*$hidden) }
     if ($Dense -eq 'Scalar') {
-        [void]$upstreamMath::Lstm($Rows, $rowCount, $inputs, $hidden, $parts[0], $parts[1], $parts[2], $parts[3], $values, 0, 2)
+        [void]$upstreamMath::Lstm($Rows, $rowCount, $inputs, $hidden, $parts[0], $parts[1], $parts[2], $parts[3], $values, 0, 2, $recurrenceTrace)
     } else {
         # Input projections for every step first, split by gate across all threads; then one
         # recurrence per direction. Bit-identical to the single-pass scalar Lstm.
@@ -2187,7 +2201,7 @@ function Invoke-OfflineLstm([float[]] $Rows, [int] $rowCount, [string] $Prefix) 
                     $worker.Values = $Rows; $worker.Rows = $rowCount; $worker.Inputs = $inputs; $worker.Hidden = $hidden
                     $worker.InputWeights = $parts[0]; $worker.HiddenWeights = $parts[1]; $worker.InputBias = $parts[2]; $worker.HiddenBias = $parts[3]
                     $worker.Output = $values; $worker.FirstDirection = $direction; $worker.LastDirection = $direction + 1
-                    $worker.Projection = $projection; $worker.Phase = $phase
+                    $worker.Projection = $projection; $worker.Phase = $phase; $worker.RecurrenceTrace=$recurrenceTrace
                     $worker.FirstGate = [int][Math]::Floor($piece * $gateCount / [double]$pieces)
                     $worker.LastGate = [int][Math]::Floor(($piece + 1) * $gateCount / [double]$pieces)
                     $keepWorkers.Add($worker); $running.Add([Threading.Tasks.Task]::Run($lstmWorker.GetMethod('Run').CreateDelegate([Action], $worker)))
@@ -2195,6 +2209,10 @@ function Invoke-OfflineLstm([float[]] $Rows, [int] $rowCount, [string] $Prefix) 
             }
             [Threading.Tasks.Task]::WaitAll($running.ToArray())
         }
+    }
+    if ($null -ne $script:OfflineTensorSink) {
+        $axes=if ($Prefix -ceq 'predictor.module.shared') { 'direction,frame@40,gateOrState,channel' } else { 'direction,token,gateOrState,channel' }
+        $script:OfflineTensorSink.Invoke("$Prefix.state_trace",$axes,$rowCount,$recurrenceTrace)
     }
     $profile.Add([pscustomobject]@{ Stage = $Prefix; Kind = 'Lstm'; Milliseconds = $stageWatch.Elapsed.TotalMilliseconds; Frames = $rowCount })
     if ($null -ne $script:OfflineTensorSink) {
@@ -2311,12 +2329,17 @@ function Invoke-OfflineAlbert([int[]] $Ids) {
         if ($null -ne $script:OfflineTensorSink) { $script:OfflineTensorSink.Invoke("albert.$repeat.attention.weights", 'head,queryToken,keyToken', $t, $attentionWeights) }
         $projected = Invoke-OfflineLinear $context $t ($layer + 'attention.dense')
     if ($null -ne $script:OfflineTensorSink) { $script:OfflineTensorSink.Invoke("albert.$repeat.attention.context", 'token,channel', $t, $context) }
-        $attention = $upstreamMath::LayerNorm($upstreamMath::Add($h, $projected), $t, 768,
+        $attentionResidual = $upstreamMath::Add($h, $projected)
+        if ($null -ne $script:OfflineTensorSink) { $script:OfflineTensorSink.Invoke("albert.$repeat.attention.pre_norm",'token,channel',$t,$attentionResidual) }
+        $attention = $upstreamMath::LayerNorm($attentionResidual, $t, 768,
             (Read-OfflineWeight ($layer + 'attention.LayerNorm.weight')), (Read-OfflineWeight ($layer + 'attention.LayerNorm.bias')), [double]1e-12)
+        if ($null -ne $script:OfflineTensorSink) { $script:OfflineTensorSink.Invoke("albert.$repeat.attention.post_norm",'token,channel',$t,$attention) }
         $feedForward = $upstreamMath::GeluNew((Invoke-OfflineLinear $attention $t ($layer + 'ffn')))
         if ($null -ne $script:OfflineTensorSink) { $script:OfflineTensorSink.Invoke("albert.$repeat.gelu", 'token,channel', $t, $feedForward) }
         $feedForward = Invoke-OfflineLinear $feedForward $t ($layer + 'ffn_output')
-        $h = $upstreamMath::LayerNorm($upstreamMath::Add($feedForward, $attention), $t, 768,
+        $outputResidual = $upstreamMath::Add($feedForward, $attention)
+        if ($null -ne $script:OfflineTensorSink) { $script:OfflineTensorSink.Invoke("albert.$repeat.output.pre_norm",'token,channel',$t,$outputResidual) }
+        $h = $upstreamMath::LayerNorm($outputResidual, $t, 768,
             (Read-OfflineWeight ($layer + 'full_layer_layer_norm.weight')), (Read-OfflineWeight ($layer + 'full_layer_layer_norm.bias')), [double]1e-12)
         if ($null -ne $script:OfflineAlbertTrace) { $script:OfflineAlbertTrace.Add($h) }
     if ($null -ne $script:OfflineTensorSink) { $script:OfflineTensorSink.Invoke("albert.$repeat.hidden", 'token,channel', $t, $h) }
@@ -2405,7 +2428,9 @@ function Invoke-OfflineSpeech {
     for ($layer = 0; $layer -lt 3; $layer++) {
         $x = Invoke-OfflineLstm $x $t "predictor.module.text_encoder.lstms.$(2 * $layer)"
         $affine = Invoke-OfflineLinear $style.Prosody 1 "predictor.module.text_encoder.lstms.$(2 * $layer + 1).fc"
-        $x = $upstreamMath::AppendStyle($upstreamMath::AdaLayerNorm($x, $t, 512, $affine, [double]1e-5), $t, 512, $style.Prosody)
+        $normalized = $upstreamMath::AdaLayerNorm($x, $t, 512, $affine, [double]1e-5)
+        if ($null -ne $script:OfflineTensorSink) { $script:OfflineTensorSink.Invoke("predictor.text_encoder.$layer.post_norm",'token,channel',$t,$normalized) }
+        $x = $upstreamMath::AppendStyle($normalized, $t, 512, $style.Prosody)
         & $endStage "predictor.text_encoder.$layer" $t
     }
     $durationFeatures = $x
@@ -2486,7 +2511,7 @@ function Invoke-OfflineSpeech {
     $aligned = $align.Invoke($textEncoding, $durations)
     if ($null -ne $script:OfflineTensorSink) { $script:OfflineTensorSink.Invoke('text_encoder.aligned', 'channel,frame', $frames, $aligned) }
     if ($SkipDecoder) {
-        return [pscustomobject]@{ Phonemes = $Phonemes; Voice = $Voice; TokenIds = $tokenIds; Bert = $bert; BertEncoder = $durationInput; Durations = $durations; F0 = $curves.F0; N = $curves.N; TextEncoding = $textEncoding; Aligned = $aligned
+        return [pscustomobject]@{ Phonemes = $Phonemes; Voice = $Voice; TokenIds = $tokenIds; Bert = $bert; BertEncoder = $durationInput; DurationFeatures = $durationFeatures; Durations = $durations; F0 = $curves.F0; N = $curves.N; TextEncoding = $textEncoding; Aligned = $aligned
             AcousticStyle = $style.Acoustic; ProsodyStyle = $style.Prosody }
     }
     $decoded = Invoke-OfflineDecoder $aligned $curves.F0 $curves.N $style.Acoustic -TokenDurations $durations -ObservationSink $DecoderObservationSink

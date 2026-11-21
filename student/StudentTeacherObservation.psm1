@@ -5,6 +5,7 @@ using module ./StudentTextEvidence.psm1
 class StudentTeacherObservation {
     [StudentTextEvidence] $Document
     [StudentSentenceEvidence[]] $Sentences
+    [int[]] $WordOccurrenceIndices
     [int] $Start
     [int] $Length
     [string] $InputText
@@ -30,6 +31,9 @@ class StudentResidualIntervention {
     [StudentStockExecution] $Outcome
     [string] $Site
     [string] $Intention
+    [StudentStockActivation] $BaselineCorrection
+    [StudentStockActivation] $BaselineResidualSum
+    [StudentStockActivation] $WithheldCorrection
 
     [bool] ChangedWaveform() { return $this.Baseline.Waveform.Checksum -cne $this.Outcome.Waveform.Checksum }
 }
@@ -40,8 +44,10 @@ class StudentStockExecution {
     [StudentStockActivation[]] $Activations
     [StudentStockNormalization[]] $Normalizations
     [StudentAlbertApplication[]] $AlbertApplications
+    [StudentStockConvolution[]] $Convolutions
     [StudentStockActivation] $GeneratorInput
     [StudentStockActivation] $Waveform
+    [StudentStockExecution] $FrontStateReplay
 
     [int[]] TokenTickStarts() {
         if ([object]::ReferenceEquals($this,$this.Teacher.StockExecution)) { return $this.Teacher.StockTokenTickStarts }
@@ -55,6 +61,26 @@ class StudentStockExecution {
             }
         }
         throw 'Execution has no retained durations.'
+    }
+}
+
+class StudentStockConvolution {
+    [StudentStockActivation] $Geometry
+    [StudentStockActivation] $Output
+
+    [int[]] InputFramesForOutput([int] $Frame) {
+        if ($Frame -lt 0 -or $Frame -ge $this.Output.Extent) { throw 'Frame is outside the convolution output.' }
+        $dimensions=[int[]]$this.Geometry.Read()
+        $positions=[Collections.Generic.List[int]]::new()
+        for ($tap=0;$tap -lt $dimensions[3];$tap++) {
+            if ($dimensions[8]) {
+                $position=$Frame+$dimensions[5]-$tap*$dimensions[6]
+                if ($position%$dimensions[4]) { continue }
+                $position=[int]($position/$dimensions[4])
+            } else { $position=$Frame*$dimensions[4]-$dimensions[5]+$tap*$dimensions[6] }
+            if ($position -ge 0 -and $position -lt $dimensions[0]) { $positions.Add($position) }
+        }
+        return $positions.ToArray()
     }
 }
 
@@ -81,6 +107,19 @@ class StudentStockNormalization {
     [single] Epsilon() { return [single]0.00001 }
 }
 
+class StudentStockFrameClock {
+    [StudentStockActivation] $Owner
+    [int] $FrameCount
+    [int] $SamplesPerFrame
+    [int] $SampleRate = 24000
+    [int] $ReflectedPrefixFrames
+
+    [long] SampleGridOffset([int] $Frame) {
+        if ($Frame -lt 0 -or $Frame -ge $this.FrameCount) { throw 'Frame is outside the captured axis.' }
+        return [long]$Frame*$this.SamplesPerFrame
+    }
+}
+
 class StudentStockActivation {
     [StudentStockExecution] $Execution
     [string] $Stage
@@ -91,11 +130,42 @@ class StudentStockActivation {
     [string] $Checksum
     [string] $Path
 
+    [StudentStockFrameClock] FrameClock() {
+        $hop=0
+        $prefix=0
+        if ($this.Axes.Contains('sample@24000',[StringComparison]::Ordinal)) { $hop=1 }
+        elseif ($this.Axes.Contains('frame@80',[StringComparison]::Ordinal)) { $hop=300 }
+        elseif ($this.Axes.Contains('frame@40',[StringComparison]::Ordinal)) { $hop=600 }
+        elseif ($this.Axes -ceq 'channel,frame' -and $this.Execution.GeneratorInput) {
+            $ticks=$this.Execution.GeneratorInput.Extent
+            if ($this.Extent -eq $ticks) { $hop=300 }
+            elseif (2*$this.Extent -eq $ticks) { $hop=600 }
+            elseif ($this.Extent -eq 10*$ticks) { $hop=30 }
+            elseif ($this.Extent -eq 60*$ticks -or $this.Extent -eq 60*$ticks+1) {
+                $hop=5
+                if ($this.Extent -eq 60*$ticks+1 -and
+                    ($this.Stage.StartsWith('generator.stage.1.',[StringComparison]::Ordinal) -or
+                     $this.Stage -cmatch '^(decoder\.module\.)?generator\.resblocks\.[345]\.' -or
+                     $this.Stage -ceq 'decoder.module.generator.conv_post')) { $prefix=1 }
+            }
+        }
+        if (!$hop) { return $null }
+        $clock=[StudentStockFrameClock]::new()
+        $clock.Owner=$this
+        $clock.FrameCount=$this.Extent
+        $clock.SamplesPerFrame=$hop
+        $clock.ReflectedPrefixFrames=$prefix
+        return $clock
+    }
+
     [int[]] Shape() {
         if ($this.Axes -ceq 'head,queryToken,keyToken') { return [int[]]@(12,$this.Extent,$this.Extent) }
         if ($this.Axes -ceq 'harmonic-or-noise,sample@24000,harmonic') { return [int[]]@(2,$this.Extent,9) }
         if ($this.Axes -ceq 'direction,channel,token') { return [int[]]@(2,256,$this.Extent) }
         if ($this.Axes -ceq 'sample@24000,harmonic') { return [int[]]@($this.Extent,9) }
+        if ($this.Axes -cin 'direction,token,gateOrState,channel','direction,frame@40,gateOrState,channel') {
+            return [int[]]@(2,$this.Extent,6,[int]($this.Count/(12*$this.Extent)))
+        }
         if ($this.Axes -ceq 'channel,frame' -or $this.Axes -ceq 'channel,token' -or $this.Axes -ceq 'channel,whole-invocation') {
             return [int[]]@([int]($this.Count/$this.Extent),$this.Extent)
         }
@@ -176,6 +246,14 @@ function Open-StudentStockExecution([StudentTeacherObservation] $Teacher,[string
         if ($r.BaseStream.Position -ne $r.BaseStream.Length) { throw 'Unexpected execution index data.' }
         $execution.GeneratorInput=$stages['decoder.generator_input']
         $execution.Waveform=$stages['generator.waveform']
+        $execution.Convolutions=@(foreach ($a in $execution.Activations) {
+            if ($a.Axes -cne 'inputFrames,inputChannels,outputChannels,kernel,stride,padding,dilation,groups,transpose,outputPadding') { continue }
+            $conv=[StudentStockConvolution]::new()
+            $conv.Geometry=$a
+            $conv.Output=$stages[$a.Stage.Substring(0,$a.Stage.Length-'.geometry'.Length)]
+            if (!$conv.Output) { throw "Convolution lacks its observed output: $($a.Stage)." }
+            $conv
+        })
         $execution.AlbertApplications=@(foreach ($a in $execution.Activations) {
             if ($a.Stage -cnotmatch '^albert\.([0-9]+)\.attention\.weights$') { continue }
             $layer=[StudentAlbertApplication]::new()
@@ -280,6 +358,12 @@ function Open-StudentTeacherObservation {
         $item.Sentences=$Document.Interpretations[$first..$last]
         $source=[IO.File]::ReadAllText($Document.Source.Path)
         if ($item.Start -lt 0 -or $item.Length -le 0 -or $item.Start+$item.Length -gt $source.Length) { throw 'Invalid original text extent.' }
+        $item.WordOccurrenceIndices=@(
+            for ($index=$Document.Sentences[2*$first];$index -le $Document.Sentences[2*$last+1];$index++) {
+                $sourceStart=$Document.OriginalSpans[2*$index]
+                if ($Document.Tokens[4*$index] -eq 1 -and $sourceStart -ge $item.Start -and $sourceStart -lt $item.Start+$item.Length) { $index }
+            }
+        )
         $original=$source.Substring($item.Start,$item.Length)
         if (($original -replace '\r\n|\r|\n',' ') -cne $item.InputText) { throw 'Teacher input cannot be reconstructed from its original source.' }
         $item.InputSourceOffsets=[int[]]::new($item.InputText.Length+1)
@@ -364,6 +448,7 @@ function Open-StudentTeacherObservation {
         }
         if (2*$durationFrames -ne $ticks) { throw 'Durations fail the stock frame invariant.' }
         $item.StockExecution=Open-StudentStockExecution $item
+        if ($item.StockExecution) { $item.StockExecution.FrontStateReplay=Open-StudentStockExecution $item 'front-state-replay.bin' }
         $item.ProceduralExecution=Open-StudentStockExecution $item 'procedural-execution.bin'
         $item.ResidualInterventions=@(if ($item.StockExecution) {
             foreach ($file in Get-ChildItem -LiteralPath $Directory -Filter 'intervention-*.bin' -File) {
@@ -378,6 +463,19 @@ function Open-StudentTeacherObservation {
                 $experiment.Outcome=$outcome
                 $experiment.Site=$recipe[1]
                 $experiment.Intention=$recipe[2]
+                $split=$experiment.Site.LastIndexOf('.')
+                $correction='decoder.module.'+$experiment.Site.Substring(0,$split)+'.convs2'+$experiment.Site.Substring($split)
+                foreach ($a in $experiment.Baseline.Activations) {
+                    if ($a.Stage -ceq $correction) { $experiment.BaselineCorrection=$a }
+                    if ($a.Stage -ceq ($experiment.Site+'.residual_sum')) { $experiment.BaselineResidualSum=$a }
+                }
+                foreach ($a in $outcome.Activations) {
+                    if ($a.Stage -ceq $correction) { $experiment.WithheldCorrection=$a; break }
+                }
+                if (!$experiment.BaselineResidualSum -or !$experiment.BaselineCorrection -or !$experiment.WithheldCorrection -or
+                    $experiment.BaselineCorrection.Checksum -cne $experiment.WithheldCorrection.Checksum) {
+                    throw 'The experimental correction must match the stock correction before the addition is suppressed.'
+                }
                 $experiment
             }
         })

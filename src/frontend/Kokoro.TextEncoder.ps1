@@ -80,6 +80,8 @@ class KokoroTextEncoder {
             $x = $y
         }
         $output = [float[]]::new(512 * $tokens)
+        $trace = [float[]]$null
+        if (-not [object]::ReferenceEquals($null,$this.Observation)) { $trace=[float[]]::new(3072*$tokens) }
         for ($direction = 0; $direction -lt 2; $direction++) {
             $hidden = [float[]]::new(256); $cell = [float[]]::new(256); $gates = [float[]]::new(1024)
             for ($step = 0; $step -lt $length; $step++) {
@@ -99,10 +101,22 @@ class KokoroTextEncoder {
                     $cell[$c] = [float]([float]($forgetGate * $cell[$c]) + [float]($inputGate * $proposal))
                     $hidden[$c] = [float]($outputGate * [MathF]::Tanh($cell[$c]))
                     $output[($direction * 256 + $c) * $tokens + $t] = $hidden[$c]
+                    if (-not [object]::ReferenceEquals($null,$trace)) {
+                        $offset=($direction*$tokens+$t)*1536+$c
+                        $trace[$offset]=$inputGate
+                        $trace[$offset+256]=$forgetGate
+                        $trace[$offset+512]=$proposal
+                        $trace[$offset+768]=$outputGate
+                        $trace[$offset+1024]=$cell[$c]
+                        $trace[$offset+1280]=$hidden[$c]
+                    }
                 }
             }
         }
-        if (-not [object]::ReferenceEquals($null,$this.Observation)) { $this.Observation.Invoke('text_encoder.recurrent', 'direction,channel,token', $tokens, $output) }
+        if (-not [object]::ReferenceEquals($null,$this.Observation)) {
+            $this.Observation.Invoke('text_encoder.recurrent', 'direction,channel,token', $tokens, $output)
+            $this.Observation.Invoke('text_encoder.recurrent.state_trace', 'direction,token,gateOrState,channel', $tokens, $trace)
+        }
         return $output
     }
 

@@ -13,6 +13,7 @@ param(
     [ValidateRange(1,100000)][int] $MaxStoreGB=70,
     [switch] $HalfCorpus,
     [switch] $PlanOnly,
+    [switch] $FrontStates,
     [ValidatePattern('^generator\.(resblocks\.[0-5]|noise_res\.[01])\.[0-2]$')]
     [string] $DropResidualPair,
     [string] $Intention
@@ -20,6 +21,7 @@ param(
 $ErrorActionPreference='Stop'
 $experiment=[bool]$DropResidualPair
 if ($experiment -and ($Procedural -or !$Intention)) { throw 'A residual intervention requires a stated intention and stock controls.' }
+if ($FrontStates -and ($experiment -or $Procedural)) { throw 'Front state replay requires a stock baseline.' }
 if ($ClockExperimentPath -and !$Procedural) { throw 'A clock experiment requires procedural capture.' }
 if ($ClockExperimentPath) { $ClockExperimentPath=(Resolve-Path -LiteralPath $ClockExperimentPath).Path }
 $bank=(Resolve-Path -LiteralPath $BankPath).Path
@@ -32,7 +34,7 @@ if ($BufferDirectory) {
 }
 $bufferRoots=@(Get-StudentStockBufferRoots $bank)
 $inventory=Open-StudentSourceInventory (Join-Path $bank 'sources.bin')
-$indexName=if ($experiment) { "intervention-$DropResidualPair.bin" } elseif ($Procedural) { 'procedural-execution.bin' } else { 'stock-execution.bin' }
+$indexName=if ($experiment) { "intervention-$DropResidualPair.bin" } elseif ($Procedural) { 'procedural-execution.bin' } elseif ($FrontStates) { 'front-state-replay.bin' } else { 'stock-execution.bin' }
 $files=@{}
 foreach ($file in Get-ChildItem (Join-Path $bank 'linguistic') -Filter 'pg*.bin') {
     $doc=Open-StudentTextEvidence $file.FullName $inventory
@@ -41,7 +43,7 @@ foreach ($file in Get-ChildItem (Join-Path $bank 'linguistic') -Filter 'pg*.bin'
 $candidates=@(foreach ($dir in Get-ChildItem (Join-Path $bank 'paired-teachers') -Directory) {
     $pair=Join-Path $dir.FullName 'observation.bin'
     if (![IO.File]::Exists($pair)) { continue }
-    if ($experiment -and ![IO.File]::Exists((Join-Path $dir.FullName 'stock-execution.bin'))) { continue }
+    if (($experiment -or $FrontStates) -and ![IO.File]::Exists((Join-Path $dir.FullName 'stock-execution.bin'))) { continue }
     $r=[IO.BinaryReader]::new([IO.File]::OpenRead($pair))
     try {
         if ($r.ReadString() -cne 'StudentTeacherObservation/1') { throw "Invalid teacher pair $dir." }
@@ -90,9 +92,11 @@ foreach ($group in $selection | Group-Object { $_.Source }) {
 }
 if ($PlanOnly) { return }
 if (!$pending) { return }
-$null=. "$PSScriptRoot/Invoke-Student.ps1" -Step VerifyComposition -Threads 4
-& $studentOwner {
-    param($directories,$files,$inventory,$buffers,$bank,$limit,$procedural,$indexName,$drop,$intention,$clockExperiment,$reserveGiB,$bufferRoots,$maxStoreGB)
+$writerLease=[IO.File]::Open((Join-Path $bank 'stock-activation-writer.lock'),[IO.FileMode]::OpenOrCreate,[IO.FileAccess]::ReadWrite,[IO.FileShare]::None)
+try {
+    $null=. "$PSScriptRoot/Invoke-Student.ps1" -Step VerifyComposition -Threads 4
+    & $studentOwner {
+    param($directories,$files,$inventory,$buffers,$bank,$limit,$procedural,$indexName,$drop,$intention,$clockExperiment,$reserveGiB,$bufferRoots,$maxStoreGB,$frontStates)
     $drive=[IO.DriveInfo]::new([IO.Path]::GetPathRoot($buffers))
     $reserve=[long]$reserveGiB*1GB
     $maximumBytes=[long]$maxStoreGB*1000000000L
@@ -101,6 +105,7 @@ $null=. "$PSScriptRoot/Invoke-Student.ps1" -Step VerifyComposition -Threads 4
         if (![IO.Directory]::Exists($root)) { continue }
         foreach ($file in [IO.DirectoryInfo]::new($root).EnumerateFiles('*.gz')) { $store.Bytes+=$file.Length }
     }
+    if ($store.Bytes -ge $maximumBytes) { throw "Stock activation store has reached its $maxStoreGB GB cap." }
     $rules=$null
     $recordings=$null
     if ($procedural -and !$clockExperiment) {
@@ -120,7 +125,7 @@ $null=. "$PSScriptRoot/Invoke-Student.ps1" -Step VerifyComposition -Threads 4
             if ((Get-FileHash -LiteralPath $copy).Hash -cne $hash) { throw 'Implementation pin mismatch.' }
             "$name=$hash"
         }
-        $recipe="procedural=$procedural af_heart speed=1 seed=17 threads=4 PowerShell=$($PSVersionTable.PSVersion) CLR=$([Environment]::Version) $($pins -join ' ')"
+        $recipe="procedural=$procedural frontReplay=$frontStates af_heart speed=1 seed=17 threads=4 PowerShell=$($PSVersionTable.PSVersion) CLR=$([Environment]::Version) $($pins -join ' ')"
         if ($clockExperiment) {
             # Read historical inputs. Only the reconstructed typed observations are published.
             $historical=Import-Clixml -LiteralPath $clockExperiment
@@ -136,7 +141,12 @@ $null=. "$PSScriptRoot/Invoke-Student.ps1" -Step VerifyComposition -Threads 4
                 Directory=[IO.Path]::GetRelativePath($script:StudentRoot,$driver.DirectoryName)
                 SHA256=$historical.Driver
             }
-            $recipe+=" historicalClockInput=$((Get-FileHash -LiteralPath $clockExperiment).Hash) driver=$($historical.Driver)"
+            $historicalHash=(Get-FileHash -LiteralPath $clockExperiment).Hash
+            $historicalDirectory=[IO.Directory]::CreateDirectory((Join-Path $bank "teacher-provenance/$historicalHash")).FullName
+            $historicalPin=Join-Path $historicalDirectory ([IO.Path]::GetFileName($clockExperiment))
+            if (![IO.File]::Exists($historicalPin)) { [IO.File]::Copy($clockExperiment,$historicalPin) }
+            if ((Get-FileHash -LiteralPath $historicalPin).Hash -cne $historicalHash) { throw 'Historical clock input pin mismatch.' }
+            $recipe+=" historicalClockInput=$historicalHash driver=$($historical.Driver)"
             $training=@(foreach ($sentence in $trainingText) {
                 $sample=New-StudentTextPhones $sentence
                 $targetSpeech=& $syllabus { param($p) Invoke-OfflineSpeech -Phonemes $p -Voice af_heart -SkipDecoder } $sample.Phonemes
@@ -165,21 +175,31 @@ $null=. "$PSScriptRoot/Invoke-Student.ps1" -Step VerifyComposition -Threads 4
                 $cache[$id]=Open-StudentTextEvidence $files[$id] $inventory
             }
             $teacher=Open-StudentTeacherObservation $target $cache[$id] -LoadTensors
-            if ($drop -and !$teacher.StockExecution.Recipe.Contains($pins[0],[StringComparison]::Ordinal)) {
-                throw 'Intervention requires stock baseline with the same syllabus pin.'
-            }
             $stage=Join-Path $target ("stock-execution-"+[guid]::NewGuid()+'.partial')
             $w=[IO.BinaryWriter]::new([IO.File]::Open($stage,[IO.FileMode]::CreateNew))
             $failurePath=Join-Path $target ($indexName+'.failure.txt')
             try {
+                $baselineCorrection=$null
+                if ($drop) {
+                    $split=$drop.LastIndexOf('.')
+                    $correctionStage='decoder.module.'+$drop.Substring(0,$split)+'.convs2'+$drop.Substring($split)
+                    $baselineCorrection=@($teacher.StockExecution.Activations | Where-Object Stage -CEQ $correctionStage)[0]
+                    if (!$baselineCorrection) { throw 'The stock baseline lacks the target residual correction.' }
+                    if (!$teacher.StockExecution.Recipe.Contains($pins[0],[StringComparison]::Ordinal)) {
+                        $replayed=& $syllabus { param($phones) Invoke-OfflineSpeech -Phonemes $phones -Voice af_heart -RecomputeText } $teacher.Phones
+                        $waveHash=[Convert]::ToHexString([Security.Cryptography.SHA256]::HashData([byte[]](ConvertTo-StudentWave $replayed.Pcm)))
+                        if ($waveHash -cne (Get-FileHash -LiteralPath $teacher.KokoroWavePath).Hash) { throw 'Current implementation cannot reproduce the stock baseline.' }
+                    }
+                }
                 $w.Write('StudentStockExecution/1')
                 $w.Write((Get-FileHash -LiteralPath $pair).Hash)
                 if ($drop) { $w.Write("$recipe`n$drop`n$intention") } else { $w.Write($recipe) }
                 $at=$w.BaseStream.Position
                 $w.Write([int]0)
-                $state=@{ Count=0; Raw=0L; Compressed=0L }
+                $state=@{ Count=0; Raw=0L; Compressed=0L; CheckedCorrection=$false }
                 $sink=[Action[string,string,int,Array]] {
                     param($name,$axes,$extent,$values)
+                    if ($frontStates -and $name -cnotmatch '\.(state_trace|pre_norm|post_norm)$') { return }
                     $code=switch ($values.GetType()) {
                         ([single[]]) { [byte]1 }
                         ([double[]]) { [byte]2 }
@@ -189,6 +209,10 @@ $null=. "$PSScriptRoot/Invoke-Student.ps1" -Step VerifyComposition -Threads 4
                     $bytes=[byte[]]::new([Buffer]::ByteLength($values))
                     [Buffer]::BlockCopy($values,0,$bytes,0,$bytes.Length)
                     $hash=[Convert]::ToHexString([Security.Cryptography.SHA256]::HashData($bytes))
+                    if ($baselineCorrection -and $name -ceq $baselineCorrection.Stage) {
+                        if ($hash -cne $baselineCorrection.Checksum) { throw 'The residual correction changed before it was withheld.' }
+                        $state.CheckedCorrection=$true
+                    }
                     $path=Join-Path $buffers "$hash.gz"
                     $existing=$false
                     foreach ($root in $bufferRoots) {
@@ -232,8 +256,12 @@ $null=. "$PSScriptRoot/Invoke-Student.ps1" -Step VerifyComposition -Threads 4
                         Invoke-OfflineSpeech -Phonemes $phones -Voice af_heart -RecomputeText -SuppliedDurations $controls.Durations -SuppliedF0 $controls.F0 -SuppliedN $controls.N -TensorObservationSink $sink
                     } $spoken.Phonemes $controls $sink
                 } else {
-                    $speech=& $syllabus { param($phones,$sink,$drop) Invoke-OfflineSpeech -Phonemes $phones -Voice af_heart -RecomputeText -TensorObservationSink $sink -DropResiduals $drop } $teacher.Phones $sink $drop
+                    $speech=& $syllabus {
+                        param($phones,$sink,$drop,$frontStates)
+                        Invoke-OfflineSpeech -Phonemes $phones -Voice af_heart -RecomputeText -TensorObservationSink $sink -DropResiduals $drop -SkipDecoder:$frontStates
+                    } $teacher.Phones $sink $drop $frontStates
                     foreach ($name in $teacher.Names) {
+                        if ($frontStates -and $name -ceq 'Features') { continue }
                         $a=$teacher.Tensors[$name]
                         $b=$speech.$name
                         $ab=[byte[]]::new([Buffer]::ByteLength($a))
@@ -242,16 +270,20 @@ $null=. "$PSScriptRoot/Invoke-Student.ps1" -Step VerifyComposition -Threads 4
                         [Buffer]::BlockCopy($b,0,$bb,0,$bb.Length)
                         if (![Linq.Enumerable]::SequenceEqual[byte]($ab,$bb)) { throw "Retained tensor differs: $name." }
                     }
-                    $wavHash=[Convert]::ToHexString([Security.Cryptography.SHA256]::HashData([byte[]](ConvertTo-StudentWave $speech.Pcm)))
-                    if (!$drop -and $wavHash -cne (Get-FileHash -LiteralPath $teacher.KokoroWavePath).Hash) { throw 'Retained Kokoro WAV differs.' }
+                    if (!$frontStates -and !$drop) {
+                        $wavHash=[Convert]::ToHexString([Security.Cryptography.SHA256]::HashData([byte[]](ConvertTo-StudentWave $speech.Pcm)))
+                        if ($wavHash -cne (Get-FileHash -LiteralPath $teacher.KokoroWavePath).Hash) { throw 'Retained Kokoro WAV differs.' }
+                    }
                 }
+                if ($drop -and !$state.CheckedCorrection) { throw 'The run failed to visit the targeted correction.' }
                 $w.BaseStream.Position=$at
                 $w.Write([int]$state.Count)
                 $w.Dispose()
                 [IO.File]::Move($stage,(Join-Path $target $indexName))
                 [IO.File]::Delete($failurePath)
                 $made++
-                "source=$id start=$($teacher.Start) samples=$($speech.Pcm.Length) tensors=$($state.Count) rawBytes=$($state.Raw) newCompressedBytes=$($state.Compressed) wallSeconds=$($clock.Elapsed.TotalSeconds)"
+                $samples=if ($frontStates) { $teacher.KokoroSamples } else { $speech.Pcm.Length }
+                "source=$id start=$($teacher.Start) samples=$samples tensors=$($state.Count) rawBytes=$($state.Raw) newCompressedBytes=$($state.Compressed) wallSeconds=$($clock.Elapsed.TotalSeconds)"
             } catch {
                 [IO.File]::AppendAllText($failurePath,"$([DateTimeOffset]::UtcNow.ToString('o')) $recipe`n$_`n$($_.ScriptStackTrace)`n")
                 if ($procedural -and $_.Exception.Message -ceq 'The phonemizer could not resolve -Text.') {
@@ -262,4 +294,5 @@ $null=. "$PSScriptRoot/Invoke-Student.ps1" -Step VerifyComposition -Threads 4
             } finally { $w.Dispose(); [IO.File]::Delete($stage) }
         }
     } finally { Remove-Module $syllabus }
-} $pending $files $inventory $buffers $bank $Limit $Procedural.IsPresent $indexName $DropResidualPair $Intention $ClockExperimentPath $ReserveGiB $bufferRoots $MaxStoreGB
+    } $pending $files $inventory $buffers $bank $Limit $Procedural.IsPresent $indexName $DropResidualPair $Intention $ClockExperimentPath $ReserveGiB $bufferRoots $MaxStoreGB $FrontStates.IsPresent
+} finally { $writerLease.Dispose() }
