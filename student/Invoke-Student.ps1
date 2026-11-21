@@ -4578,7 +4578,7 @@ function New-StudentProsodyStream($Rules, [object[]] $PhoneList, $Library = $nul
     foreach ($controllerEvent in $controllerEvents) { $controllerEvent.FirstTick = $first[$controllerEvent.Phones[0]]; $last = $controllerEvent.Phones[-1]; $controllerEvent.Ticks = $first[$last] + 2 * $durations[[Array]::IndexOf($PhoneList, $last)] - $controllerEvent.FirstTick }
     $ticks = 2 * $frames; $f0 = [float[]]::new($ticks); $energy = [float[]]::new($ticks)
     $at = 0; $pitch = [double]::NaN; $level = [double]::NaN
-    if ($ObservationSink) { $state = [double[]]::new(7 * $ticks) }
+    if ($ObservationSink) { $controllerTrace = [double[]]::new(7 * $ticks) }
     for ($o = 0; $o -lt $PhoneList.Count; $o++) {
         $phone = $PhoneList[$o]; $target = $Rules.Targets($phone); $entry = $replay.Phone[$phone]
         $wordFirst = 0; $wordTicks = 0
@@ -4592,13 +4592,13 @@ function New-StudentProsodyStream($Rules, [object[]] $PhoneList, $Library = $nul
             if ($voiced) { $pitch = if ([double]::IsNaN($pitch)) { $pitchTarget } else { $pitch + $script:StudentPitchResponse * ($pitchTarget - $pitch) }; $f0[$at] = [float][Math]::Exp($pitch) }
             else { $pitch = [double]::NaN }
             if ($ObservationSink) {
-                $state[$at] = $target.LogHz
-                $state[$ticks+$at] = $target.Energy
-                $state[2*$ticks+$at] = $pitchTarget
-                $state[3*$ticks+$at] = $energyTarget
-                $state[4*$ticks+$at] = $pitch
-                $state[5*$ticks+$at] = $level
-                $state[6*$ticks+$at] = [int]$voiced
+                $controllerTrace[$at] = $target.LogHz
+                $controllerTrace[$ticks+$at] = $target.Energy
+                $controllerTrace[2*$ticks+$at] = $pitchTarget
+                $controllerTrace[3*$ticks+$at] = $energyTarget
+                $controllerTrace[4*$ticks+$at] = $pitch
+                $controllerTrace[5*$ticks+$at] = $level
+                $controllerTrace[6*$ticks+$at] = [int]$voiced
             }
             $at++
         }
@@ -4607,7 +4607,7 @@ function New-StudentProsodyStream($Rules, [object[]] $PhoneList, $Library = $nul
         $ObservationSink.Invoke('procedural.duration.base','phone occurrence',$baseDurations.Length,$baseDurations)
         $ObservationSink.Invoke('procedural.duration.replay_ratio','phone occurrence',$durationRatios.Length,$durationRatios)
         $ObservationSink.Invoke('procedural.duration.realized','phone occurrence',$durations.Length,$durations)
-        $ObservationSink.Invoke('procedural.controller','baseLogHz,baseEnergy,targetLogHz,targetEnergy,stateLogHz,stateEnergy,voiced; frame@80',$ticks,$state)
+        $ObservationSink.Invoke('procedural.controller','baseLogHz,baseEnergy,targetLogHz,targetEnergy,stateLogHz,stateEnergy,voiced; frame@80',$ticks,$controllerTrace)
         $ObservationSink.Invoke('procedural.f0','frame@80',$ticks,$f0)
         $ObservationSink.Invoke('procedural.n','frame@80',$ticks,$energy)
     }
