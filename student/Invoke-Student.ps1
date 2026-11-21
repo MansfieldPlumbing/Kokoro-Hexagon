@@ -82,7 +82,7 @@ Run from a PowerShell prompt: pwsh -File passes every argument as a string, so a
 #requires -Version 7.7
 [CmdletBinding()]
 param(
-    [ValidateSet('Console', 'Render', 'Corpus', 'Sources', 'VerifySources', 'Votes', 'VerifyVotes', 'Pronunciation', 'Normalize', 'Compose', 'VerifyComposition', 'Morphology', 'VerifyMorphology', 'Syllabus', 'Recordings', 'Listen', 'Stems', 'Alignment', 'Percepts', 'Describe', 'Learn', 'Audit', 'Discriminate', 'Reconsider', 'Inventory', 'Speak', 'Ablate', 'PitchGate', 'Trace', 'Normalization', 'Score', 'Residuals', 'Retune')][string] $Step = 'Console',
+    [ValidateSet('Console', 'Render', 'Corpus', 'Sources', 'VerifySources', 'Votes', 'VerifyVotes', 'Pronunciation', 'Normalize', 'Compose', 'VerifyComposition', 'Morphology', 'VerifyMorphology', 'Syllabus', 'Recordings', 'Listen', 'Stems', 'Alignment', 'SpeechEvidence', 'Percepts', 'Describe', 'Learn', 'Audit', 'Discriminate', 'Reconsider', 'Inventory', 'Speak', 'Ablate', 'PitchGate', 'Trace', 'Normalization', 'Score', 'Residuals', 'Retune')][string] $Step = 'Console',
     [ValidateRange(2, 64)][int] $Threads = [Math]::Max(2, [Environment]::ProcessorCount),
     [string] $Text = '',
     [string] $Voice = 'af_heart',
@@ -3924,6 +3924,13 @@ function Invoke-StudentLearning {
 Update-TypeData -TypeName 'Kokoro.StudentImage' -MemberType ScriptMethod -MemberName Learn -Value {
     & $this.Owner { param($Image); $result = Invoke-StudentRuleLearning $Image; $null = Invoke-StudentReconsideration $Image; $result } $this
 } -Force
+Update-TypeData -TypeName 'Kokoro.StudentImage' -MemberType ScriptMethod -MemberName OpenSpeechEvidence -Value {
+    param([string] $BankPath,[string] $SourceIdentity)
+    & $this.Owner {
+        param($Path,$Identity)
+        Open-StudentSpeechSourceField $Path $Identity
+    } $BankPath $SourceIdentity
+} -Force
 Update-TypeData -TypeName 'Kokoro.StudentImage' -MemberType ScriptMethod -MemberName Classify -Value {
     param([float[]] $Features)
     & $this.Owner { param($Image, $Values); $null = Invoke-StudentReconsideration $Image; Invoke-StudentAcousticProgram $Image $Values } $this $Features
@@ -5558,6 +5565,18 @@ function Invoke-StudentSpeak {
 }
 
 
+function Open-StudentSpeechSourceField([string] $BankPath,[string] $Identity) {
+    $bank = if ($BankPath) { $BankPath } else { Join-Path $script:StudentRoot 'data/source-bank' }
+    if ($Identity -ceq 'LibriSpeech') {
+        & (Join-Path $script:StudentRoot 'student/Open-StudentLibriSpeech.ps1') -InventoryPath (Join-Path $bank 'sources.bin') -AcousticDirectory (Join-Path $bank 'libri-native') -AlignText
+        return
+    }
+    $zira = Import-StudentZira
+    try {
+        & (Join-Path $script:StudentRoot 'student/Open-StudentSpeechInvestigation.ps1') -BankPath $bank -SourceIdentity $Identity -ZiraModule $zira
+    } finally { Remove-Module -ModuleInfo $zira -Force }
+}
+
 $script:StudentSteps = [ordered]@{
     Console = { Show-StudentConsole }
     Render = { Invoke-StudentRender }
@@ -5577,6 +5596,7 @@ $script:StudentSteps = [ordered]@{
     Listen = { Invoke-StudentListen }
     Stems = { Invoke-StudentStems }
     Alignment = { Invoke-StudentAlignment }
+    SpeechEvidence = { Open-StudentSpeechSourceField $Corpus $SourceIdentity }
     Percepts = { Invoke-StudentPercepts }
     Describe = {
         if ($null -ne $State -and $State.PSObject.TypeNames -contains 'Kokoro.StudentCompositionState') { $State.Describe() }

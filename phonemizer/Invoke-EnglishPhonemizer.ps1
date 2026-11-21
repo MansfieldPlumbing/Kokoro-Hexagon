@@ -170,7 +170,7 @@ function Get-EnglishZiraTypes {
 function Get-EnglishTypedLiteral {
     param($Value,[switch]$Long)
     if($null -eq $Value){return '$null'}
-    if($Value -is [string]){return "'"+$Value.Replace("'","''")+"'"}
+    if($Value -is [string]){return "'"+[regex]::Replace($Value,"['\u2018\u2019\u201A\u201B]",'$0$0')+"'"}
     if($Value -is [bool]){if($Value){return '$true'}else{return '$false'}}
     if($Long){return ([long]$Value).ToString([Globalization.CultureInfo]::InvariantCulture)+'L'}
     ([int]$Value).ToString([Globalization.CultureInfo]::InvariantCulture)
@@ -190,6 +190,7 @@ function Save-EnglishZiraObservation {
     $b=[Text.StringBuilder]::new()
     [void]$b.AppendLine('@{v=1;q=1;id='+(Get-EnglishTypedLiteral $Capture.Identity)+';text='+(Get-EnglishTypedLiteral $Capture.Text)+';a='+(Get-EnglishTypedLiteral $Capture.AssemblySha256)+';g='+(Get-EnglishTypedLiteral $Capture.EngineSha256)+';t='+(Get-EnglishTypedLiteral $Capture.CapturedAtTicks -Long)+';d='+(Get-EnglishTypedLiteral $Capture.Partition)+';z='+[int]($Capture.Alignment -ceq 'ExactSourceSpansAndWordOnsets')+';p=@(')
     foreach($phone in $Capture.Phones){
+        if($Capture.Phones.Count -eq 1){[void]$b.Append(',')}
         [void]$b.AppendLine('@('+(Get-EnglishTypedLiteral $phone.Phone)+','+(Get-EnglishTypedLiteral $phone.Next)+','+(Get-EnglishTypedLiteral $phone.Ticks -Long)+','+(Get-EnglishTypedLiteral $phone.DurationTicks -Long)+','+$phone.Emphasis+','+$phone.Event+'),')
     }
     # A trailing comma is not legal data syntax. Keep the schema, not object type metadata.
@@ -197,6 +198,7 @@ function Save-EnglishZiraObservation {
     [void]$b.AppendLine(');w=@(')
     $aligned=[Collections.Generic.List[int]]::new()
     for($j=0;$j -lt $Capture.Words.Count;$j++){
+        if($Capture.Words.Count -eq 1){[void]$b.Append(',')}
         $word=$Capture.Words[$j];$indices=@(foreach($phone in $word.PhoneEvents){for($i=0;$i -lt $Capture.Phones.Count;$i++){if([object]::ReferenceEquals($phone,$Capture.Phones[$i])){$i;break}}})
         if($indices.Count -ne $word.PhoneCount){throw 'Word phone reference count failure.'}
         if($Capture.AlignedWords -contains $word){$aligned.Add($j)}
@@ -217,6 +219,9 @@ function Import-EnglishZiraObservation {
         if($file.Length -gt 4194304){throw 'Observation source size bound exceeded.'}
         $data=Import-PowerShellDataFile -LiteralPath $file.FullName
     }
+    # Older one-row array expressions unwrap their tuple during safe data evaluation.
+    if($data.p -is [array] -and $data.p.Count -eq 6 -and $data.p[0] -is [string]){$data.p=,$data.p}
+    if($data.w -is [array] -and $data.w.Count -eq 12 -and $data.w[0] -is [string]){$data.w=,$data.w}
     if($data.v -ne 1 -or $data.q -ne 1 -or $data.id -cnotmatch '^[A-F0-9]{64}$' -or $data.a -cnotmatch '^[A-F0-9]{64}$' -or $data.g -cnotmatch '^[A-F0-9]{64}$' -or $data.text.Length -gt 8192 -or $data.p.Count -gt 16384 -or $data.w.Count -gt 4096 -or $data.z -notin @(0,1)){throw 'Observation data contract failure.'}
     $u=[EnglishZiraUtterance]::new();$u.Identity=$data.id;$u.Text=$data.text;$u.Voice='Microsoft Zira Desktop';$u.AssemblySha256=$data.a;$u.EngineSha256=$data.g;$u.CapturedAtTicks=$data.t;$u.Partition=$data.d;$u.CapturePath=$Path
     $u.Phones=[EnglishZiraPhone[]]::new($data.p.Count)
