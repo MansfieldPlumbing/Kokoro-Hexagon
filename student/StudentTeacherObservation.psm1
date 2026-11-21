@@ -127,12 +127,23 @@ class StudentStockActivation {
     }
 }
 
+function Get-StudentStockBufferRoots([string] $BankPath) {
+    Join-Path $BankPath 'stock-activation-buffers'
+    $config=Join-Path $BankPath 'stock-activation-roots.txt'
+    if ([IO.File]::Exists($config)) {
+        foreach ($root in [IO.File]::ReadLines($config)) {
+            if (![IO.Path]::IsPathFullyQualified($root)) { throw 'Stock activation roots must be absolute paths.' }
+            $root
+        }
+    }
+}
+
 function Open-StudentStockExecution([StudentTeacherObservation] $Teacher,[string] $Name='stock-execution.bin') {
     $path = Join-Path $Teacher.Directory $Name
     if (![IO.File]::Exists($path)) { return }
     $execution = [StudentStockExecution]::new()
     $execution.Teacher = $Teacher
-    $buffers = Join-Path $Teacher.Directory '../../stock-activation-buffers'
+    $buffers = @(Get-StudentStockBufferRoots ([IO.Path]::GetFullPath((Join-Path $Teacher.Directory '../..'))))
     $r = [IO.BinaryReader]::new([IO.File]::OpenRead($path))
     try {
         if ($r.ReadString() -cne 'StudentStockExecution/1' -or
@@ -154,8 +165,11 @@ function Open-StudentStockExecution([StudentTeacherObservation] $Teacher,[string
             $a.TypeCode = $r.ReadByte()
             $a.Checksum = $r.ReadString()
             if ($a.Checksum -cnotmatch '^[0-9A-F]{64}$' -or $a.Extent -le 0 -or $a.Count -le 0 -or $a.TypeCode -notin 1,2,3) { throw 'Invalid activation descriptor.' }
-            $a.Path = Join-Path $buffers ($a.Checksum + '.gz')
-            if (![IO.File]::Exists($a.Path)) { throw "Missing tensor $($a.Checksum)." }
+            foreach ($root in $buffers) {
+                $candidate=Join-Path $root ($a.Checksum + '.gz')
+                if ([IO.File]::Exists($candidate)) { $a.Path=$candidate; break }
+            }
+            if (!$a.Path) { throw "Missing tensor $($a.Checksum)." }
             $execution.Activations[$i] = $a
             $stages.Add($a.Stage,$a)
         }
@@ -370,4 +384,4 @@ function Open-StudentTeacherObservation {
         $item
     } finally { $r.Dispose() }
 }
-Export-ModuleMember -Function Open-StudentTeacherObservation,Measure-StudentTeacherWave
+Export-ModuleMember -Function Open-StudentTeacherObservation,Measure-StudentTeacherWave,Get-StudentStockBufferRoots

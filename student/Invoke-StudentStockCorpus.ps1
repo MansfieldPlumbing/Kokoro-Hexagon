@@ -8,7 +8,11 @@ param(
     [string] $SourceIdentity,
     [switch] $Procedural,
     [string] $ClockExperimentPath,
+    [string] $BufferDirectory,
     [ValidateRange(1,1024)][int] $ReserveGiB=5,
+    [ValidateRange(1,100000)][int] $MaxStoreGB=70,
+    [switch] $HalfCorpus,
+    [switch] $PlanOnly,
     [ValidatePattern('^generator\.(resblocks\.[0-5]|noise_res\.[01])\.[0-2]$')]
     [string] $DropResidualPair,
     [string] $Intention
@@ -20,6 +24,13 @@ if ($ClockExperimentPath -and !$Procedural) { throw 'A clock experiment requires
 if ($ClockExperimentPath) { $ClockExperimentPath=(Resolve-Path -LiteralPath $ClockExperimentPath).Path }
 $bank=(Resolve-Path -LiteralPath $BankPath).Path
 $buffers=[IO.Directory]::CreateDirectory((Join-Path $bank 'stock-activation-buffers')).FullName
+if ($BufferDirectory) {
+    $buffers=[IO.Directory]::CreateDirectory([IO.Path]::GetFullPath($BufferDirectory)).FullName
+    if ($buffers -notin @(Get-StudentStockBufferRoots $bank)) {
+        [IO.File]::AppendAllLines((Join-Path $bank 'stock-activation-roots.txt'),[string[]]@($buffers))
+    }
+}
+$bufferRoots=@(Get-StudentStockBufferRoots $bank)
 $inventory=Open-StudentSourceInventory (Join-Path $bank 'sources.bin')
 $indexName=if ($experiment) { "intervention-$DropResidualPair.bin" } elseif ($Procedural) { 'procedural-execution.bin' } else { 'stock-execution.bin' }
 $files=@{}
@@ -27,23 +38,69 @@ foreach ($file in Get-ChildItem (Join-Path $bank 'linguistic') -Filter 'pg*.bin'
     $doc=Open-StudentTextEvidence $file.FullName $inventory
     if (!$SourceIdentity -or $doc.Source.EvidenceGroup -ceq $SourceIdentity) { $files[$doc.Source.Id]=$file.FullName }
 }
-$pending=@(foreach ($dir in Get-ChildItem (Join-Path $bank 'paired-teachers') -Directory) {
+$candidates=@(foreach ($dir in Get-ChildItem (Join-Path $bank 'paired-teachers') -Directory) {
     $pair=Join-Path $dir.FullName 'observation.bin'
-    if (![IO.File]::Exists($pair) -or [IO.File]::Exists((Join-Path $dir.FullName $indexName))) { continue }
+    if (![IO.File]::Exists($pair)) { continue }
     if ($experiment -and ![IO.File]::Exists((Join-Path $dir.FullName 'stock-execution.bin'))) { continue }
     $r=[IO.BinaryReader]::new([IO.File]::OpenRead($pair))
     try {
         if ($r.ReadString() -cne 'StudentTeacherObservation/1') { throw "Invalid teacher pair $dir." }
         $id=$r.ReadString()
-        if ($files.ContainsKey($id)) { $dir.FullName }
+        if (!$files.ContainsKey($id)) { continue }
+        $null=$r.ReadString()
+        $offset=$r.ReadInt32()
+        $null=$r.ReadInt32(); $null=$r.ReadString(); $null=$r.ReadString()
+        @{
+            Source=$id
+            Offset=$offset
+            Samples=$r.ReadInt64()
+            Path=$dir.FullName
+            Complete=[IO.File]::Exists((Join-Path $dir.FullName $indexName))
+            HasStock=[IO.File]::Exists((Join-Path $dir.FullName 'stock-execution.bin'))
+        }
     } finally { $r.Dispose() }
 })
+$selection=@(if ($HalfCorpus) {
+    foreach ($group in $candidates | Group-Object { $_.Source }) {
+        $ordered=@($group.Group | Sort-Object @{Expression={$_.Offset}},@{Expression={$_.Path}})
+        $chosen=[Collections.Generic.List[hashtable]]::new()
+        foreach ($candidate in $ordered) { if ($candidate.HasStock) { $chosen.Add($candidate) } }
+        $quota=[int][Math]::Ceiling($ordered.Count/2.0)
+        while ($chosen.Count -lt $quota) {
+            $best=$null
+            $bestDistance=-1L
+            foreach ($candidate in $ordered) {
+                if ($chosen.Contains($candidate)) { continue }
+                $distance=[long]::MaxValue
+                foreach ($previous in $chosen) { $distance=[Math]::Min($distance,[Math]::Abs([long]$candidate.Offset-$previous.Offset)) }
+                if ($distance -gt $bestDistance -or ($distance -eq $bestDistance -and $candidate.Samples -lt $best.Samples)) {
+                    $best=$candidate
+                    $bestDistance=$distance
+                }
+            }
+            $chosen.Add($best)
+        }
+        $chosen
+    }
+} else { $candidates })
+$pending=@(foreach ($candidate in $selection) { if (!$candidate.Complete) { $candidate.Path } })
+foreach ($group in $selection | Group-Object { $_.Source }) {
+    $samples=($group.Group | Measure-Object -Property { $_.Samples } -Sum).Sum
+    "plan source=$($group.Name) passages=$($group.Count) seconds=$($samples/24000.0)"
+}
+if ($PlanOnly) { return }
 if (!$pending) { return }
 $null=. "$PSScriptRoot/Invoke-Student.ps1" -Step VerifyComposition -Threads 4
 & $studentOwner {
-    param($directories,$files,$inventory,$buffers,$bank,$limit,$procedural,$indexName,$drop,$intention,$clockExperiment,$reserveGiB)
+    param($directories,$files,$inventory,$buffers,$bank,$limit,$procedural,$indexName,$drop,$intention,$clockExperiment,$reserveGiB,$bufferRoots,$maxStoreGB)
     $drive=[IO.DriveInfo]::new([IO.Path]::GetPathRoot($buffers))
     $reserve=[long]$reserveGiB*1GB
+    $maximumBytes=[long]$maxStoreGB*1000000000L
+    $store=@{ Bytes=0L }
+    foreach ($root in $bufferRoots | Sort-Object -Unique) {
+        if (![IO.Directory]::Exists($root)) { continue }
+        foreach ($file in [IO.DirectoryInfo]::new($root).EnumerateFiles('*.gz')) { $store.Bytes+=$file.Length }
+    }
     $rules=$null
     $recordings=$null
     if ($procedural -and !$clockExperiment) {
@@ -133,7 +190,11 @@ $null=. "$PSScriptRoot/Invoke-Student.ps1" -Step VerifyComposition -Threads 4
                     [Buffer]::BlockCopy($values,0,$bytes,0,$bytes.Length)
                     $hash=[Convert]::ToHexString([Security.Cryptography.SHA256]::HashData($bytes))
                     $path=Join-Path $buffers "$hash.gz"
-                    if (![IO.File]::Exists($path)) {
+                    $existing=$false
+                    foreach ($root in $bufferRoots) {
+                        if ([IO.File]::Exists((Join-Path $root "$hash.gz"))) { $existing=$true; break }
+                    }
+                    if (!$existing) {
                         if ($drive.AvailableFreeSpace -le $reserve+$bytes.Length) { throw 'Activation store reached the configured free-space reserve.' }
                         $temp="$path.$([guid]::NewGuid()).partial"
                         try {
@@ -142,9 +203,12 @@ $null=. "$PSScriptRoot/Invoke-Student.ps1" -Step VerifyComposition -Threads 4
                                 $gzip=[IO.Compression.GZipStream]::new($stream,[IO.Compression.CompressionLevel]::Fastest)
                                 try { $gzip.Write($bytes,0,$bytes.Length) } finally { $gzip.Dispose() }
                             } finally { $stream.Dispose() }
+                            $size=[IO.FileInfo]::new($temp).Length
+                            if ($store.Bytes+$size -gt $maximumBytes) { throw "Stock activation store reached its $maxStoreGB GB cap." }
                             try {
                                 [IO.File]::Move($temp,$path)
-                                $state.Compressed+=(Get-Item -LiteralPath $path).Length
+                                $state.Compressed+=$size
+                                $store.Bytes+=$size
                             } catch [IO.IOException] {
                                 if (![IO.File]::Exists($path)) { throw }
                             }
@@ -198,4 +262,4 @@ $null=. "$PSScriptRoot/Invoke-Student.ps1" -Step VerifyComposition -Threads 4
             } finally { $w.Dispose(); [IO.File]::Delete($stage) }
         }
     } finally { Remove-Module $syllabus }
-} $pending $files $inventory $buffers $bank $Limit $Procedural.IsPresent $indexName $DropResidualPair $Intention $ClockExperimentPath $ReserveGiB
+} $pending $files $inventory $buffers $bank $Limit $Procedural.IsPresent $indexName $DropResidualPair $Intention $ClockExperimentPath $ReserveGiB $bufferRoots $MaxStoreGB
