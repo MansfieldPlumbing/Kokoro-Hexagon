@@ -23,7 +23,10 @@ foreach ($comparison in $field.Comparisons) {
         foreach ($a in $execution.Activations) {
             if (![object]::ReferenceEquals($a.Execution,$execution)) { throw 'Broken activation owner reference.' }
             $byStage.Add($a.Stage,$a)
-            if ($VerifyBuffers -and $checked.Add("$($a.TypeCode):$($a.Checksum)")) { $null=$a.Read() }
+            if ($VerifyBuffers -and $checked.Add("$($a.TypeCode):$($a.Checksum)")) {
+                $values=$a.Read()
+                if ($values.Length -ne $a.Count -or $values -is [object[]]) { throw 'Buffer did not restore its numeric CLR array.' }
+            }
         }
         $generatorInput=$byStage['decoder.generator_input']
         $wave=$byStage['generator.waveform']

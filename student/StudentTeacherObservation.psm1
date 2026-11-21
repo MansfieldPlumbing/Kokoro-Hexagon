@@ -39,8 +39,31 @@ class StudentStockExecution {
     [string] $Recipe
     [StudentStockActivation[]] $Activations
     [StudentStockNormalization[]] $Normalizations
+    [StudentAlbertApplication[]] $AlbertApplications
     [StudentStockActivation] $GeneratorInput
     [StudentStockActivation] $Waveform
+
+    [int[]] TokenTickStarts() {
+        if ([object]::ReferenceEquals($this,$this.Teacher.StockExecution)) { return $this.Teacher.StockTokenTickStarts }
+        foreach ($candidate in $this.Activations) {
+            if ($candidate.Stage -cin 'procedural.duration.realized','predictor.durations') {
+                $durations=[int[]]$candidate.Read()
+                $starts=[int[]]::new($durations.Length+1)
+                for ($i=0;$i -lt $durations.Length;$i++) { $starts[$i+1]=$starts[$i]+2*$durations[$i] }
+                if ($starts[-1] -ne $this.GeneratorInput.Extent) { throw 'Execution token clock disagrees with the generator clock.' }
+                return $starts
+            }
+        }
+        throw 'Execution has no retained durations.'
+    }
+}
+
+class StudentAlbertApplication {
+    [StudentStockExecution] $Execution
+    [int] $Application
+    [StudentStockActivation] $Attention
+    [StudentStockActivation] $AttentionContext
+    [StudentStockActivation] $Hidden
 }
 
 class StudentStockNormalization {
@@ -100,7 +123,7 @@ class StudentStockActivation {
         } finally { $file.Dispose() }
         if ([Convert]::ToHexString([Security.Cryptography.SHA256]::HashData($bytes)) -cne $this.Checksum) { throw 'Stock tensor hash mismatch.' }
         [Buffer]::BlockCopy($bytes,0,$values,0,$bytes.Length)
-        return , $values
+        return $values
     }
 }
 
@@ -139,6 +162,16 @@ function Open-StudentStockExecution([StudentTeacherObservation] $Teacher,[string
         if ($r.BaseStream.Position -ne $r.BaseStream.Length) { throw 'Unexpected execution index data.' }
         $execution.GeneratorInput=$stages['decoder.generator_input']
         $execution.Waveform=$stages['generator.waveform']
+        $execution.AlbertApplications=@(foreach ($a in $execution.Activations) {
+            if ($a.Stage -cnotmatch '^albert\.([0-9]+)\.attention\.weights$') { continue }
+            $layer=[StudentAlbertApplication]::new()
+            $layer.Execution=$execution
+            $layer.Application=[int]$Matches[1]
+            $layer.Attention=$a
+            $layer.AttentionContext=$stages["albert.$($layer.Application).attention.context"]
+            $layer.Hidden=$stages["albert.$($layer.Application).hidden"]
+            $layer
+        })
         $execution.Normalizations=@(foreach ($a in $execution.Activations) {
             if (!$a.Stage.EndsWith('.parameters',[StringComparison]::Ordinal)) { continue }
             $site=[StudentStockNormalization]::new()

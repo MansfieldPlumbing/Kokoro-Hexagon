@@ -190,6 +190,10 @@ $null=. "$PSScriptRoot/Invoke-Student.ps1" -Step VerifyComposition -Threads 4
                 "source=$id start=$($teacher.Start) samples=$($speech.Pcm.Length) tensors=$($state.Count) rawBytes=$($state.Raw) newCompressedBytes=$($state.Compressed) wallSeconds=$($clock.Elapsed.TotalSeconds)"
             } catch {
                 [IO.File]::AppendAllText($failurePath,"$([DateTimeOffset]::UtcNow.ToString('o')) $recipe`n$_`n$($_.ScriptStackTrace)`n")
+                if ($procedural -and $_.Exception.Message -ceq 'The phonemizer could not resolve -Text.') {
+                    Write-Warning "Unresolved procedural pronunciation at $id offset $($teacher.Start)."
+                    continue
+                }
                 throw
             } finally { $w.Dispose(); [IO.File]::Delete($stage) }
         }
