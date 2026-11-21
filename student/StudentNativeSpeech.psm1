@@ -189,10 +189,25 @@ function Join-StudentDramaticChapters {
     }
 }
 
-function Join-StudentConversationPhones {
-    param([StudentNativeSpeech] $Wave,[StudentSourceUnit] $Dictionary)
+function Get-StudentArpabetAlternatives {
+    param([StudentSourceUnit] $Dictionary,[Collections.Generic.HashSet[string]] $Words)
     if ($Dictionary.Id -cne 'StudentLexicon/cmudict.dict' -or
         (Get-FileHash -LiteralPath $Dictionary.Path).Hash -cne $Dictionary.Checksum) { throw 'Expected the retained pronunciation dictionary.' }
+    $readings=[Collections.Generic.Dictionary[string,Collections.Generic.List[string[]]]]::new([StringComparer]::OrdinalIgnoreCase)
+    foreach ($line in [IO.File]::ReadLines($Dictionary.Path)) {
+        if ($line -cnotmatch '^(\S+?)(?:\(\d+\))? (.+)$') { continue }
+        $key=$Matches[1]
+        if (!$words.Contains($key)) { continue }
+        if (!$readings.ContainsKey($key)) { $readings.Add($key,[Collections.Generic.List[string[]]]::new()) }
+        $readings[$key].Add($Matches[2].Split(' ',[StringSplitOptions]::RemoveEmptyEntries))
+    }
+    $pool=[Collections.Generic.Dictionary[string,string[][]]]::new([StringComparer]::OrdinalIgnoreCase)
+    foreach ($key in $readings.Keys) { $pool.Add($key,$readings[$key].ToArray()) }
+    ,$pool
+}
+
+function Join-StudentConversationPhones {
+    param([StudentNativeSpeech] $Wave,[StudentSourceUnit] $Dictionary)
     if (!$Wave.Source.CorrespondingText -or
         (Get-FileHash -LiteralPath $Wave.Source.CorrespondingText.Path).Hash -cne $Wave.Source.CorrespondingText.Checksum) {
         throw 'Published conversation text no longer matches its original revision.'
@@ -210,16 +225,7 @@ function Join-StudentConversationPhones {
         $keys.Add($unit.Id,$key)
         $null=$words.Add($key)
     }
-    $readings=[Collections.Generic.Dictionary[string,Collections.Generic.List[string[]]]]::new([StringComparer]::OrdinalIgnoreCase)
-    foreach ($line in [IO.File]::ReadLines($Dictionary.Path)) {
-        if ($line -cnotmatch '^(\S+?)(?:\(\d+\))? (.+)$') { continue }
-        $key=$Matches[1]
-        if (!$words.Contains($key)) { continue }
-        if (!$readings.ContainsKey($key)) { $readings.Add($key,[Collections.Generic.List[string[]]]::new()) }
-        $readings[$key].Add($Matches[2].Split(' ',[StringSplitOptions]::RemoveEmptyEntries))
-    }
-    $pool=[Collections.Generic.Dictionary[string,string[][]]]::new([StringComparer]::OrdinalIgnoreCase)
-    foreach ($key in $readings.Keys) { $pool.Add($key,$readings[$key].ToArray()) }
+    $pool=Get-StudentArpabetAlternatives $Dictionary $words
     $onset=$null
     foreach ($boundary in Find-StudentBoundaryHypotheses $Wave) {
         if (!$keys.ContainsKey($boundary.Annotation.Id)) { continue }
@@ -289,4 +295,4 @@ function Find-StudentBoundaryHypotheses {
     }
 }
 
-Export-ModuleMember -Function Open-StudentNativeSpeech,Find-StudentBoundaryHypotheses,Join-StudentDramaticChapters,Join-StudentConversationPhones,Find-StudentHumanWordAnchors,Find-StudentPerformanceIntervals
+Export-ModuleMember -Function Open-StudentNativeSpeech,Find-StudentBoundaryHypotheses,Join-StudentDramaticChapters,Join-StudentConversationPhones,Find-StudentHumanWordAnchors,Find-StudentPerformanceIntervals,Get-StudentArpabetAlternatives

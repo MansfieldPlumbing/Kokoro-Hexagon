@@ -17,6 +17,7 @@ class StudentSpeechInvestigation {
     [StudentSourceInventory] $Inventory
     [StudentNativeSpeech[]] $Recordings
     [StudentHumanChapter[]] $HumanChapters
+    [StudentHumanWordAnchor[]] $HumanWordAnchors
     [StudentLexicalPhoneHypothesis[]] $ConversationReadings
     [StudentPerformanceInterval[]] $ConversationEvents
     [StudentTimingCue[]] $PrivateCues
@@ -80,6 +81,7 @@ foreach ($chapter in $investigation.HumanChapters) {
     if (!(Test-Path -LiteralPath $path)) { $path=Join-Path $BankPath "human-dictation/$base.bin" }
     if (Test-Path -LiteralPath $path) { $wordAnchors.Add($chapter.ChapterNumber,@(Find-StudentHumanWordAnchors $chapter $path)) }
 }
+$investigation.HumanWordAnchors=@(foreach ($anchors in $wordAnchors.Values) { $anchors })
 $teacherRoot=Join-Path $BankPath 'paired-teachers'
 $investigation.Comparisons=@(if (Test-Path -LiteralPath $teacherRoot) {
     foreach ($directory in Get-ChildItem -LiteralPath $teacherRoot -Directory | Where-Object Name -NotLike '*.partial') {

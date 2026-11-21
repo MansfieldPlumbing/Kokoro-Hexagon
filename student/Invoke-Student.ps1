@@ -82,7 +82,7 @@ Run from a PowerShell prompt: pwsh -File passes every argument as a string, so a
 #requires -Version 7.7
 [CmdletBinding()]
 param(
-    [ValidateSet('Console', 'Render', 'Corpus', 'Sources', 'VerifySources', 'Votes', 'VerifyVotes', 'Pronunciation', 'Normalize', 'Compose', 'VerifyComposition', 'Morphology', 'VerifyMorphology', 'Syllabus', 'Recordings', 'Listen', 'Stems', 'Alignment', 'SpeechEvidence', 'Percepts', 'Describe', 'Learn', 'Audit', 'Discriminate', 'Reconsider', 'Inventory', 'Speak', 'Ablate', 'PitchGate', 'Trace', 'Normalization', 'Score', 'Residuals', 'Retune')][string] $Step = 'Console',
+    [ValidateSet('Console', 'Render', 'Corpus', 'Sources', 'VerifySources', 'Votes', 'VerifyVotes', 'Pronunciation', 'Normalize', 'Compose', 'VerifyComposition', 'Morphology', 'VerifyMorphology', 'Syllabus', 'Recordings', 'Listen', 'Stems', 'Alignment', 'SpeechEvidence', 'Percepts', 'Describe', 'Learn', 'Hunt', 'Audit', 'Discriminate', 'Reconsider', 'Inventory', 'Speak', 'Ablate', 'PitchGate', 'Trace', 'Normalization', 'Score', 'Residuals', 'Retune')][string] $Step = 'Console',
     [ValidateRange(2, 64)][int] $Threads = [Math]::Max(2, [Environment]::ProcessorCount),
     [string] $Text = '',
     [string] $Voice = 'af_heart',
@@ -3604,6 +3604,9 @@ function New-StudentAirLayer($Image, [string] $Parent, [string] $Identity, [floa
 }
 
 function Save-StudentImage($Image, [string] $Path = '') {
+    if ($Image.Percepts.ContainsKey('CapturedStockGeneratorWaveformExtent')) {
+        throw 'The live Hunt retains typed source references and compiled delegates. Reopen its bank with Hunt to reacquire these relations.'
+    }
     if (-not $Path) { $Path = $Image.Path }
     if (-not $Path) { throw 'The live image needs a persistence path.' }
     $Path = [IO.Path]::GetFullPath($Path); [void][IO.Directory]::CreateDirectory([IO.Path]::GetDirectoryName($Path))
@@ -3931,6 +3934,99 @@ Update-TypeData -TypeName 'Kokoro.StudentImage' -MemberType ScriptMethod -Member
         Open-StudentSpeechSourceField $Path $Identity
     } $BankPath $SourceIdentity
 } -Force
+
+function Invoke-StudentEvidenceHunt($Image, [string]$BankPath) {
+    if (!$BankPath) { $BankPath=Join-Path $script:StudentRoot 'data/source-bank' }
+    $BankPath=(Resolve-Path -LiteralPath $BankPath).Path
+    $identity='CapturedStockGeneratorWaveformExtent'
+    if ($Image.Percepts.ContainsKey($identity)) {
+        $existing=$Image.Percepts[$identity]
+        if ($existing.BankRoot -ne $BankPath) { throw 'The live Hunt belongs to a different source bank.' }
+        return $existing
+    }
+    if (!(Get-Command Invoke-HuntCapturedClock -CommandType Function -ErrorAction SilentlyContinue)) {
+        $hunt=Join-Path $script:StudentRoot 'student/Invoke-StudentPerceptHunt.ps1'
+        . $hunt -Library
+    }
+    $views=@(foreach ($work in 'Gutenberg/11','Gutenberg/30036') {
+        Open-HuntSpeechView $script:StudentRoot $BankPath $work
+    })
+    $comparisons=@(foreach ($view in $views) { $view.Comparisons })
+    $result=Invoke-HuntCapturedClock $comparisons
+    $node=New-StudentPercept $Image $identity 'QualifiedExecutionRelation' ([float[]]@($result.Pattern.Slope,$result.Pattern.Offset))
+    $node.State='ObservedScope'
+    $node.Rules.Add($result.Pattern)
+    $node.PSObject.Properties.Add([psnoteproperty]::new('BankRoot',$BankPath))
+    $node.PSObject.Properties.Add([psnoteproperty]::new('ConfidenceHistory',$result.Limits))
+    $node.PSObject.Properties.Add([psnoteproperty]::new('DeferredWaveformBytes',$result.AvoidedWaveformBytes))
+    $recipePins=[Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
+    foreach ($check in @($result.Pattern.Constituents[0].Discovery) + $result.Checks) {
+        $null=$recipePins.Add($check.Block.Owner.Recipe)
+    }
+    $node.PSObject.Properties.Add([psnoteproperty]::new('ObservedRecipes',$recipePins))
+    foreach ($check in $result.Checks) {
+        $run=$check.Block.Owner
+        $observation=@{
+            Identity="CapturedStockExtent/$($run.Teacher.Directory)"
+            Occurrence=$run.GeneratorInput
+            Provenance=$run.Teacher.Document.Source
+            Condition=$run
+            Measured=$run.Waveform
+        }
+        $null=Add-StudentImageObservation $Image $node.Identity ([pscustomobject]$observation) Example
+    }
+    Publish-StudentPercept $Image $node.Identity
+    $interventions=@(foreach ($comparison in $comparisons) {
+        foreach ($experiment in $comparison.Teacher.ResidualInterventions) {
+            $prediction=$node.PredictCapturedExtent($experiment.Baseline.GeneratorInput)
+            if ($null -eq $prediction -or $experiment.Baseline.GeneratorInput.Checksum -cne $experiment.Outcome.GeneratorInput.Checksum) {
+                throw 'The controlled comparison could not use the acquired clock relation.'
+            }
+            $measurement=Measure-HuntResidualIntervention $experiment
+            if ($prediction -ne $measurement.Samples) { throw 'Controlled waveform extent disagrees with the acquired relation.' }
+            $measurement
+        }
+    })
+    $node.PSObject.Properties.Add([psnoteproperty]::new('ControlledChecks',$interventions))
+    $documents=@(foreach ($view in $views) { $view.Comparisons[0].Teacher.Document })
+    $focus=Invoke-HuntMorphologicalFocus $documents[1] $documents[0]
+    $humanAnchors=@(foreach ($view in $views) { $view.HumanWordAnchors })
+    Import-Module (Join-Path $script:StudentRoot 'student/StudentNativeSpeech.psm1') -Scope Local
+    $lexemes=[Collections.Generic.HashSet[string]]::new([string[]]@('record','present','conduct'),[StringComparer]::OrdinalIgnoreCase)
+    $dictionary=$views[0].Inventory.Units['StudentLexicon/cmudict.dict']
+    $lexicalAlternatives=Get-StudentArpabetAlternatives $dictionary $lexemes
+    $focus.PronunciationBearings=@(foreach ($document in $documents) {
+        Get-HuntPronunciationBearings $document $comparisons $humanAnchors $lexemes $dictionary $lexicalAlternatives
+    })
+    $focus.HumanWordDurations=@(Get-HuntHumanWordDurations $humanAnchors)
+    $focus.UnresolvedStress=@(Get-HuntUnresolvedStress $focus.PronunciationBearings $focus.HumanWordDurations)
+    $Image.PSObject.Properties.Add([psnoteproperty]::new('MorphologicalInvestigation',$focus))
+    $node
+}
+
+Update-TypeData -TypeName 'Kokoro.StudentImage' -MemberType ScriptMethod -MemberName Hunt -Value {
+    param([string]$BankPath)
+    & $this.Owner { param($Image,$Path) Invoke-StudentEvidenceHunt $Image $Path } $this $BankPath
+} -Force
+
+Update-TypeData -TypeName 'Kokoro.StudentPercept' -MemberType ScriptMethod -MemberName PredictCapturedExtent -Value {
+    param($Activation)
+    if ($this.Kind -cne 'QualifiedExecutionRelation' -or $this.State -cne 'ObservedScope' -or !$Activation) { return }
+    $pattern=$this.Rules[0]
+    if ($Activation.GetType() -ne $pattern.InputAxis.SemanticMember.DeclaringType -or
+        $Activation.Stage -cne 'decoder.generator_input' -or !$Activation.Execution.Teacher.StockExecution -or
+        ![object]::ReferenceEquals($Activation,$Activation.Execution.Teacher.StockExecution.GeneratorInput) -or
+        !$this.ObservedRecipes.Contains($Activation.Execution.Recipe)) { return }
+    if (!$pattern.LoweredReady -or !$pattern.DependenciesCurrent()) { return }
+    foreach ($constituent in $pattern.Constituents) {
+        if (!$constituent.DependenciesCurrent()) { return }
+    }
+    for ($i=0;$i -lt $pattern.Constituents.Count;$i++) {
+        if (![object]::ReferenceEquals($pattern.Constituents[$i].Current,$pattern.ConstituentJudgments[$i])) { return }
+    }
+    [long][Math]::Round($pattern.EvaluateProjected($Activation.Extent))
+} -Force
+
 Update-TypeData -TypeName 'Kokoro.StudentImage' -MemberType ScriptMethod -MemberName Classify -Value {
     param([float[]] $Features)
     & $this.Owner { param($Image, $Values); $null = Invoke-StudentReconsideration $Image; Invoke-StudentAcousticProgram $Image $Values } $this $Features
@@ -5622,6 +5718,7 @@ $script:StudentSteps = [ordered]@{
     Stems = { Invoke-StudentStems }
     Alignment = { Invoke-StudentAlignment }
     SpeechEvidence = { Open-StudentSpeechSourceField $Corpus $SourceIdentity }
+    Hunt = { (Invoke-StudentPercepts).Hunt($Corpus) }
     Percepts = { Invoke-StudentPercepts }
     Describe = {
         if ($null -ne $State -and $State.PSObject.TypeNames -contains 'Kokoro.StudentCompositionState') { $State.Describe() }
